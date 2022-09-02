@@ -1,0 +1,11 @@
+[package]
+edition = "2021"
+name = "mir"
+version = "0.1.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+lazy_static = "1.4.0"
+pest = "2.0"
+pest_derive = "2.0"
