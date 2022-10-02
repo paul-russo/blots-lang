@@ -7,5 +7,5 @@ version = "0.1.0"
 
 [dependencies]
 lazy_static = "1.4.0"
-pest = "2.0"
-pest_derive = "2.0"
+pest = "2.4.0"
+pest_derive = "2.4.0"

@@ -3,29 +3,36 @@ extern crate pest_derive;
 #[macro_use]
 extern crate lazy_static;
 
-mod evaluator;
-mod format;
+mod commands;
 mod parser;
 
-use evaluator::evaluate;
-use format::PrettyFormat;
-use parser::parse_expression;
+use commands::exec_command;
+use parser::{get_pairs, Rule};
 
 fn main() -> ! {
     loop {
         let mut buffer = String::new();
         std::io::stdin().read_line(&mut buffer).unwrap();
 
-        match parse_expression(&buffer) {
-            Ok(pairs) => {
-                println!("{}", pairs);
-
-                let result = evaluate(pairs);
-                println!("result: {}", result);
+        let outer_pair = match get_pairs(&buffer) {
+            Ok(mut pairs) => {
+                println!("pairs: {}", pairs);
+                pairs.next().unwrap()
             }
             Err(error) => {
-                println!("{:?}", error);
+                println!("{}", error);
+                continue;
             }
+        };
+
+        match outer_pair.as_rule() {
+            Rule::command => {
+                let inner_pair = outer_pair.into_inner().next().unwrap();
+                exec_command(inner_pair.as_rule());
+            }
+            Rule::assignment => todo!(),
+            Rule::expression => todo!(),
+            _ => unreachable!(),
         }
     }
 }

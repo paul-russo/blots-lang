@@ -1,16 +1,34 @@
 WHITESPACE = _{ " " | "\t" | "\r\n" | "\n" }
 
 number = @{ integer ~ ("." ~ ASCII_DIGIT+)? ~ (^"e" ~ integer)? }
-  integer = { ("+" | "-")? ~ ASCII_DIGIT+ }
+  integer = _{ ("+" | "-")? ~ ASCII_DIGIT+ }
 
-operation = _{ add | subtract | multiply | divide | power }
-  add      = { "+" }
-  subtract = { "-" }
-  multiply = { "*" }
-  divide   = { "/" }
-  power    = { "^" }
+identifier = @{ !command ~ ASCII_ALPHA+ ~ identifier_rest* }
+  identifier_rest = _{ ASCII_ALPHA+ | ASCII_DIGIT+ | "_"+ }
 
-expression = { term ~ (operation ~ term)* }
-  term = _{ number | "(" ~ expression ~ ")" }
+infix_op = _{ add | subtract | multiply | divide | modulo | power }
+  add        = { "+" }
+  subtract   = { "-" }
+  multiply   = { "*" }
+  divide     = { "/" }
+  modulo     = { "%" }
+  power      = { "^" }
 
-calculation = _{ SOI ~ expression ~ EOI }
+prefix_op = _{ negation }
+  negation = { "-" }
+
+postfix_op = _{ factorial }
+  factorial = { "!" }
+
+expression = { prefix_op* ~ term ~ postfix_op* ~ (infix_op ~ prefix_op* ~ term ~ postfix_op* )* }
+  nested_expression = _{ "(" ~ expression ~ ")" }
+  term = _{ identifier | number | nested_expression }
+
+assignment = { identifier ~ "=" ~ expression }
+
+command = { quit | history | help }
+  quit = { "quit" }
+  history = { "history" }
+  help = { "help" }
+
+calculation = _{ SOI ~ ( command | assignment | expression ) ~ EOI }
