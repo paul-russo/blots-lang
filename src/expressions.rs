@@ -5,7 +5,7 @@ use pest::{
 };
 
 use crate::parser::Rule;
-use std::sync::LazyLock;
+use std::{collections::HashMap, sync::LazyLock};
 
 static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
     PrattParser::new()
@@ -18,12 +18,15 @@ static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
         .op(Op::postfix(Rule::factorial))
 });
 
-pub fn evaluate_expression(pairs: Pairs<Rule>) -> Result<f64> {
+pub fn evaluate_expression(pairs: Pairs<Rule>, variables: &HashMap<String, f64>) -> Result<f64> {
     PRATT
         .map_primary(|primary| match primary.as_rule() {
             Rule::number => primary.as_str().parse::<f64>().map_err(|e| e.into()),
-            Rule::identifier => todo!("variables not implemented yet"),
-            Rule::expression => evaluate_expression(primary.into_inner()),
+            Rule::identifier => variables
+                .get(primary.as_str())
+                .cloned()
+                .ok_or_else(|| anyhow!("unknown variable: {}", primary.as_str())),
+            Rule::expression => evaluate_expression(primary.into_inner(), variables),
             _ => unreachable!(),
         })
         .map_prefix(|op, rhs| {
@@ -40,7 +43,7 @@ pub fn evaluate_expression(pairs: Pairs<Rule>) -> Result<f64> {
             match op.as_rule() {
                 Rule::factorial => {
                     if lhs >= 0.0 && lhs == (lhs as u64) as f64 {
-                        Ok((1..(lhs as u64) + 1).product::<u64>() as f64)
+                        Ok((1..(lhs as u64) + 1).map(|x| x as f64).product::<f64>())
                     } else {
                         Err(anyhow!("factorial only works on non-negative integers"))
                     }
