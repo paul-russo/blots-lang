@@ -1,8 +1,8 @@
-use super::parser::Rule;
+use crate::parser::Rule;
 
 /// Executes the given command.
-pub fn exec_command(command: Rule) {
-    match command {
+pub fn exec_command(cmd: Rule) {
+    match cmd {
         Rule::quit => {
             println!("bye!");
             std::process::exit(0);

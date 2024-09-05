@@ -1,8 +1,4 @@
-use pest::{
-    iterators::Pairs,
-    pratt_parser::{Assoc::*, Op, PrattParser},
-    Parser,
-};
+use pest::{iterators::Pairs, Parser};
 
 #[derive(Parser)]
 #[grammar = "math.pest"]
