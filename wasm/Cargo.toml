@@ -1,0 +1,14 @@
+[package]
+name = "mir-wasm"
+version = "0.1.0"
+edition = "2021"
+authors = [ "Paul Russo <paul@paulrusso.me>" ]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+core = { path = "../core" }
+serde = { version = "1.0.209", features = ["derive"] }
+serde-wasm-bindgen = "0.6.5"
+wasm-bindgen = "0.2.93"
