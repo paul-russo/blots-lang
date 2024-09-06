@@ -1,13 +1,8 @@
-#[macro_use]
-extern crate pest_derive;
-
 mod commands;
-mod expressions;
-mod parser;
 
 use commands::exec_command;
-use expressions::evaluate_expression;
-use parser::{get_pairs, Rule};
+use core::expressions::evaluate_expression;
+use core::parser::{get_pairs, Rule};
 use std::{collections::HashMap, time::Instant};
 
 fn main() -> ! {

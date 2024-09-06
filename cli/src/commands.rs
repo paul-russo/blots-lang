@@ -1,4 +1,4 @@
-use crate::parser::Rule;
+use core::parser::Rule;
 
 /// Executes the given command.
 pub fn exec_command(cmd: Rule) {
