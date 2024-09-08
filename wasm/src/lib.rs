@@ -1,11 +1,21 @@
+mod log;
+
 use core::{
     expressions::evaluate_expression,
-    parser::{get_pairs, Rule},
+    parser::{get_pairs, get_tokens, Rule, Token},
 };
-use std::collections::HashMap;
-
+use log::console_log;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
+
+#[wasm_bindgen]
+extern "C" {
+    // Use `js_namespace` here to bind `console.log(..)` instead of just
+    // `log(..)`
+    #[wasm_bindgen(js_namespace = console)]
+    fn log(s: &str);
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct EvluationResult {
@@ -58,4 +68,32 @@ pub fn evaluate(expr: &str, variables: JsValue) -> Result<JsValue, JsError> {
         }
         _ => unreachable!(),
     }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+enum SerialToken {
+    Start { rule: String, pos: usize },
+    End { rule: String, pos: usize },
+}
+
+#[wasm_bindgen]
+pub fn tokenize(input: &str) -> Result<JsValue, JsError> {
+    let input = input.to_string();
+    let tokens = get_tokens(&input)?;
+
+    // [Start { rule: assignment, pos: Position { pos: 0 } }, Start { rule: identifier, pos: Position { pos: 0 } }, End { rule: identifier, pos: Position { pos: 3 } }, Start { rule: expression, pos: Position { pos: 6 } }, Start { rule: number, pos: Position { pos: 6 } }, End { rule: number, pos: Position { pos: 7 } }, End { rule: expression, pos: Position { pos: 7 } }, End { rule: assignment, pos: Position { pos: 7 } }]
+    let tokens: Vec<SerialToken> = tokens
+        .map(|token| match token {
+            Token::Start { rule, pos } => SerialToken::Start {
+                rule: format!("{:?}", rule),
+                pos: pos.pos(),
+            },
+            Token::End { rule, pos } => SerialToken::End {
+                rule: format!("{:?}", rule),
+                pos: pos.pos(),
+            },
+        })
+        .collect();
+
+    Ok(serde_wasm_bindgen::to_value(&tokens)?)
 }
