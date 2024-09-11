@@ -31,6 +31,6 @@ quit    = { "quit" }
 history = { "history" }
 help    = { "help" }
 
-comment = { "#" ~ (!"\n" ~ ANY)* }
+comment = { ("#" | "//") ~ (!"\n" ~ ANY)* }
 
 input = _{ SOI ~ (command | assignment | expression | comment) ~ comment? ~ EOI }
