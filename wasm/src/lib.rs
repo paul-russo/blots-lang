@@ -66,6 +66,7 @@ pub fn evaluate(expr: &str, variables: JsValue) -> Result<JsValue, JsError> {
                 Err(error) => Err(JsError::new(&format!("Evaluation error: {}", error))),
             }
         }
+        Rule::comment => Ok(JsValue::NULL),
         _ => unreachable!(),
     }
 }

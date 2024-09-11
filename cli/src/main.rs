@@ -55,6 +55,9 @@ fn main() -> ! {
                     Err(error) => println!("Evaluation error: {}", error),
                 }
             }
+            Rule::comment => {
+                // do nothing
+            }
             _ => unreachable!(),
         }
     }
