@@ -4,7 +4,6 @@ use core::{
     expressions::evaluate_expression,
     parser::{get_pairs, get_tokens, Rule, Token},
 };
-use log::console_log;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
@@ -18,8 +17,8 @@ extern "C" {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct EvluationResult {
-    value: f64,
+struct EvaluationResult {
+    value: Option<f64>,
     variables: HashMap<String, f64>,
 }
 
@@ -43,8 +42,8 @@ pub fn evaluate(expr: &str, variables: JsValue) -> Result<JsValue, JsError> {
             match result {
                 Ok(value) => {
                     variables.insert(ident.to_string(), value);
-                    let result = EvluationResult {
-                        value,
+                    let result = EvaluationResult {
+                        value: Some(value),
                         variables: variables.clone(),
                     };
                     Ok(serde_wasm_bindgen::to_value(&result)?)
@@ -57,8 +56,8 @@ pub fn evaluate(expr: &str, variables: JsValue) -> Result<JsValue, JsError> {
 
             match result {
                 Ok(value) => {
-                    let result = EvluationResult {
-                        value,
+                    let result = EvaluationResult {
+                        value: Some(value),
                         variables: variables.clone(),
                     };
                     Ok(serde_wasm_bindgen::to_value(&result)?)
@@ -66,7 +65,13 @@ pub fn evaluate(expr: &str, variables: JsValue) -> Result<JsValue, JsError> {
                 Err(error) => Err(JsError::new(&format!("Evaluation error: {}", error))),
             }
         }
-        Rule::comment => Ok(JsValue::NULL),
+        Rule::comment => {
+            let result = EvaluationResult {
+                value: None,
+                variables: variables.clone(),
+            };
+            Ok(serde_wasm_bindgen::to_value(&result)?)
+        }
         _ => unreachable!(),
     }
 }
