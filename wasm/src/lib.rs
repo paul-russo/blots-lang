@@ -87,8 +87,8 @@ pub fn tokenize(input: &str) -> Result<JsValue, JsError> {
     let input = input.to_string();
     let tokens = get_tokens(&input)?;
 
-    // [Start { rule: assignment, pos: Position { pos: 0 } }, Start { rule: identifier, pos: Position { pos: 0 } }, End { rule: identifier, pos: Position { pos: 3 } }, Start { rule: expression, pos: Position { pos: 6 } }, Start { rule: number, pos: Position { pos: 6 } }, End { rule: number, pos: Position { pos: 7 } }, End { rule: expression, pos: Position { pos: 7 } }, End { rule: assignment, pos: Position { pos: 7 } }]
     let tokens: Vec<SerialToken> = tokens
+        .iter()
         .map(|token| match token {
             Token::Start { rule, pos } => SerialToken::Start {
                 rule: format!("{:?}", rule),
