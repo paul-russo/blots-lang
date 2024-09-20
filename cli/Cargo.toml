@@ -6,3 +6,4 @@ version = "0.1.0"
 [dependencies]
 anyhow = "1.0.86"
 core = { path = "../core" }
+string-interner = "0.17.0"

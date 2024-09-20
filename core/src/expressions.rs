@@ -1,10 +1,12 @@
+use crate::{
+    functions::{get_function_def, UserDefinedFunctionDef},
+    parser::Rule,
+};
 use anyhow::{anyhow, Result};
 use pest::{
     iterators::Pairs,
     pratt_parser::{Assoc, Op, PrattParser},
 };
-
-use crate::parser::Rule;
 use std::{collections::HashMap, sync::LazyLock};
 
 static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
@@ -18,15 +20,43 @@ static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
         .op(Op::postfix(Rule::factorial))
 });
 
-pub fn evaluate_expression(pairs: Pairs<Rule>, variables: &HashMap<String, f64>) -> Result<f64> {
+pub fn evaluate_expression(
+    pairs: Pairs<Rule>,
+    variables: &HashMap<String, f64>,
+    function_defs: &HashMap<String, UserDefinedFunctionDef>,
+) -> Result<f64> {
     PRATT
         .map_primary(|primary| match primary.as_rule() {
             Rule::number => primary.as_str().parse::<f64>().map_err(|e| e.into()),
-            Rule::identifier => variables
-                .get(primary.as_str())
-                .cloned()
-                .ok_or_else(|| anyhow!("unknown variable: {}", primary.as_str())),
-            Rule::expression => evaluate_expression(primary.into_inner(), variables),
+            Rule::identifier => {
+                let ident = primary.as_str();
+
+                match ident {
+                    "pi" => return Ok(std::f64::consts::PI),
+                    "e" => return Ok(std::f64::consts::E),
+                    _ => variables
+                        .get(ident)
+                        .cloned()
+                        .ok_or_else(|| anyhow!("unknown variable: {}", primary.as_str())),
+                }
+            }
+            Rule::expression => evaluate_expression(primary.into_inner(), variables, function_defs),
+            Rule::function_call => {
+                let mut inner_pairs = primary.into_inner();
+                let ident = inner_pairs.next().unwrap().as_str();
+                let call_list = inner_pairs.next().unwrap();
+                let call_list_entries = call_list.into_inner();
+                let args: Vec<f64> = call_list_entries
+                    .into_iter()
+                    .map(|arg| evaluate_expression(arg.into_inner(), variables, function_defs))
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                if let Some(def) = get_function_def(ident, function_defs) {
+                    return def.call(args, variables, function_defs);
+                }
+
+                Err(anyhow!("unknown function: {}", ident))
+            }
             _ => unreachable!(),
         })
         .map_prefix(|op, rhs| {
