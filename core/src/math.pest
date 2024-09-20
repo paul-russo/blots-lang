@@ -20,11 +20,16 @@ negation  =  { "-" }
 postfix_op = _{ factorial }
 factorial  =  { "!" }
 
+call_list     = { "(" ~ expression ~ ("," ~ expression)* ~ ")" }
+function_call = { identifier ~ call_list }
+
 expression        =  { prefix_op* ~ term ~ postfix_op* ~ (infix_op ~ prefix_op* ~ term ~ postfix_op*)* }
 nested_expression = _{ "(" ~ expression ~ ")" }
-term              = _{ identifier | number | nested_expression }
+term              = _{ function_call | identifier | number | nested_expression }
 
-assignment = { identifier ~ "=" ~ expression }
+assignment          = { identifier ~ "=" ~ expression }
+argument_list       = { "(" ~ identifier ~ ("," ~ identifier)* ~ ")" }
+function_definition = { identifier ~ argument_list ~ "=" ~ expression }
 
 command = { quit | history | help }
 quit    = { "quit" }
@@ -33,4 +38,4 @@ help    = { "help" }
 
 comment = { ("#" | "//") ~ (!"\n" ~ ANY)* }
 
-input = _{ SOI ~ (command | assignment | expression | comment) ~ comment? ~ EOI }
+input = _{ SOI ~ (command | assignment | function_definition | expression | comment) ~ comment? ~ EOI }

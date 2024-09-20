@@ -2,6 +2,7 @@ mod log;
 
 use core::{
     expressions::evaluate_expression,
+    functions::{is_built_in_function, UserDefinedFunctionDef},
     parser::{get_pairs, get_tokens, Rule, Token},
 };
 use serde::{Deserialize, Serialize};
@@ -20,13 +21,21 @@ extern "C" {
 struct EvaluationResult {
     value: Option<f64>,
     variables: HashMap<String, f64>,
+    function_defs: HashMap<String, UserDefinedFunctionDef>,
 }
 
 #[wasm_bindgen]
-pub fn evaluate(expr: &str, variables: JsValue) -> Result<JsValue, JsError> {
-    let mut variables = serde_wasm_bindgen::from_value(variables)?;
-    let expr = expr.to_string();
-    let pairs = get_pairs(&expr);
+pub fn evaluate(
+    expr: &str,
+    variables_js: JsValue,
+    function_defs_js: JsValue,
+) -> Result<JsValue, JsError> {
+    let mut variables = serde_wasm_bindgen::from_value(variables_js)?;
+    let mut function_defs: HashMap<String, UserDefinedFunctionDef> =
+        serde_wasm_bindgen::from_value(function_defs_js)?;
+
+    let expr_owned = String::from(expr);
+    let pairs = get_pairs(&expr_owned);
     let outer_pair = pairs
         .map_err(|e| JsError::new(&format!("Parsing error: {}", e)))?
         .next()
@@ -37,7 +46,7 @@ pub fn evaluate(expr: &str, variables: JsValue) -> Result<JsValue, JsError> {
             let mut inner_pairs = outer_pair.into_inner();
             let ident = inner_pairs.next().unwrap().as_str();
             let expression = inner_pairs.next().unwrap();
-            let result = evaluate_expression(expression.into_inner(), &variables);
+            let result = evaluate_expression(expression.into_inner(), &variables, &function_defs);
 
             match result {
                 Ok(value) => {
@@ -45,6 +54,7 @@ pub fn evaluate(expr: &str, variables: JsValue) -> Result<JsValue, JsError> {
                     let result = EvaluationResult {
                         value: Some(value),
                         variables: variables.clone(),
+                        function_defs: function_defs.clone(),
                     };
                     Ok(serde_wasm_bindgen::to_value(&result)?)
                 }
@@ -52,23 +62,56 @@ pub fn evaluate(expr: &str, variables: JsValue) -> Result<JsValue, JsError> {
             }
         }
         Rule::expression => {
-            let result = evaluate_expression(outer_pair.into_inner(), &variables);
+            let result = evaluate_expression(outer_pair.into_inner(), &variables, &function_defs);
 
             match result {
                 Ok(value) => {
                     let result = EvaluationResult {
                         value: Some(value),
                         variables: variables.clone(),
+                        function_defs: function_defs.clone(),
                     };
                     Ok(serde_wasm_bindgen::to_value(&result)?)
                 }
                 Err(error) => Err(JsError::new(&format!("Evaluation error: {}", error))),
             }
         }
+        Rule::function_definition => {
+            let mut inner_pairs = outer_pair.into_inner();
+            let ident = inner_pairs.next().unwrap().as_str();
+            let args = inner_pairs.next().unwrap().into_inner();
+            let body = inner_pairs.next().unwrap().into_inner().as_str();
+            let args = args.map(|arg| arg.as_str().to_string()).collect();
+
+            if is_built_in_function(ident) {
+                return Err(JsError::new(&format!(
+                    "Error: {} is a built-in function and cannot be redefined",
+                    ident
+                )));
+            }
+
+            function_defs.insert(
+                ident.to_string(),
+                UserDefinedFunctionDef {
+                    name: ident.to_string(),
+                    args,
+                    body: body.to_string(),
+                },
+            );
+
+            let result = EvaluationResult {
+                value: None,
+                variables: variables.clone(),
+                function_defs: function_defs.clone(),
+            };
+
+            Ok(serde_wasm_bindgen::to_value(&result)?)
+        }
         Rule::comment => {
             let result = EvaluationResult {
                 value: None,
                 variables: variables.clone(),
+                function_defs: function_defs.clone(),
             };
             Ok(serde_wasm_bindgen::to_value(&result)?)
         }
