@@ -48,7 +48,7 @@ fn main() -> ! {
 
                 match result {
                     Ok(value) => {
-                        variables.insert(ident.to_string(), value);
+                        variables.insert(ident.to_string(), value.clone());
                         println!("{} = {}", ident, value)
                     }
                     Err(error) => println!("Evaluation error: {}", error),
