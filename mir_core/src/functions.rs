@@ -28,6 +28,11 @@ pub enum FunctionDef {
     BuiltIn(BuiltInFunctionDef),
 }
 
+pub static BUILT_IN_FUNCTION_IDENTS: [&str; 21] = [
+    "sqrt", "sin", "cos", "tan", "asin", "acos", "atan", "log", "log10", "exp", "abs", "floor",
+    "ceil", "round", "trunc", "min", "max", "avg", "sum", "prod", "median",
+];
+
 impl FunctionDef {
     pub fn check_arity(&self, arg_count: usize) -> Result<()> {
         match self {

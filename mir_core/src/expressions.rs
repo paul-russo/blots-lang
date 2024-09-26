@@ -32,8 +32,9 @@ pub fn evaluate_expression(
                 let ident = primary.as_str();
 
                 match ident {
-                    "pi" => return Ok(std::f64::consts::PI),
-                    "e" => return Ok(std::f64::consts::E),
+                    "pi" => return Ok(core::f64::consts::PI),
+                    "e" => return Ok(core::f64::consts::E),
+                    "infinity" => return Ok(f64::INFINITY),
                     _ => variables
                         .get(ident)
                         .cloned()

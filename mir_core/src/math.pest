@@ -1,0 +1,37 @@
+WHITESPACE = _{ " " | "\t" | "\r\n" | "\n" }
+
+number  = @{ integer ~ ("." ~ ASCII_DIGIT+)? ~ (^"e" ~ integer)? }
+integer = _{ ("+" | "-")? ~ ASCII_DIGIT+ }
+
+identifier      = @{ ASCII_ALPHA+ ~ identifier_rest* }
+identifier_rest = _{ ASCII_ALPHA+ | ASCII_DIGIT+ | "_"+ }
+
+infix_op = _{ add | subtract | multiply | divide | modulo | power }
+add      =  { "+" }
+subtract =  { "-" }
+multiply =  { "*" }
+divide   =  { "/" }
+modulo   =  { "%" }
+power    =  { "^" }
+
+prefix_op = _{ negation }
+negation  =  { "-" }
+
+postfix_op = _{ factorial }
+factorial  =  { "!" }
+
+call_list     = !{ "(" ~ expression ~ ("," ~ expression)* ~ ")" }
+function_call = ${ identifier ~ call_list }
+
+expression        = !{ prefix_op* ~ term ~ postfix_op* ~ (infix_op ~ prefix_op* ~ term ~ postfix_op*)* }
+nested_expression = _{ "(" ~ expression ~ ")" }
+term              = _{ function_call | identifier | number | nested_expression }
+
+assignment = !{ identifier ~ "=" ~ expression }
+
+argument_list       = !{ "(" ~ identifier ~ ("," ~ identifier)* ~ ")" }
+function_definition = ${ identifier ~ argument_list ~ WHITESPACE* ~ "=" ~ WHITESPACE* ~ expression }
+
+comment = { ("#" | "//") ~ (!"\n" ~ ANY)* }
+
+input = _{ SOI ~ (assignment | function_definition | expression | comment) ~ comment? ~ EOI }
