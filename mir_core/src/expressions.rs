@@ -45,17 +45,22 @@ pub fn evaluate_expression(
             }
             Rule::list_access => {
                 let mut inner_pairs = primary.into_inner();
+
                 let ident = inner_pairs.next().unwrap().as_str();
-                let index = inner_pairs.next().unwrap().as_str().parse::<usize>()?;
+                let index = evaluate_expression(inner_pairs, variables, function_defs)?;
 
                 match variables.get(ident) {
-                    Some(List(list)) => list.get(index).cloned().ok_or_else(|| {
-                        anyhow!(
-                            "index out of bounds: {} is out of range for list {}",
-                            index,
-                            ident
-                        )
-                    }),
+                    Some(List(list)) => {
+                        list.get(index.to_number()? as usize)
+                            .cloned()
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "index out of bounds: {} is out of range for list {}",
+                                    index,
+                                    ident
+                                )
+                            })
+                    }
                     Some(_) => Err(anyhow!("expected a list, but got a number")),
                     None => Err(anyhow!("unknown variable: {}", ident)),
                 }
