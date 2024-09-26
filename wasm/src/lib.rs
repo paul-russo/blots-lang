@@ -4,6 +4,7 @@ use mir_core::{
     expressions::evaluate_expression,
     functions::{is_built_in_function, UserDefinedFunctionDef, BUILT_IN_FUNCTION_IDENTS},
     parser::{get_pairs, get_tokens, Rule, Token},
+    values::Value,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -19,8 +20,8 @@ extern "C" {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct EvaluationResult {
-    value: Option<f64>,
-    variables: HashMap<String, f64>,
+    value: Option<Value>,
+    variables: HashMap<String, Value>,
     function_defs: HashMap<String, UserDefinedFunctionDef>,
 }
 
@@ -50,7 +51,8 @@ pub fn evaluate(
 
             match result {
                 Ok(value) => {
-                    variables.insert(ident.to_string(), value);
+                    variables.insert(ident.to_string(), value.clone());
+
                     let result = EvaluationResult {
                         value: Some(value),
                         variables: variables.clone(),

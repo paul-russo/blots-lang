@@ -28,9 +28,9 @@ pub enum FunctionDef {
     BuiltIn(BuiltInFunctionDef),
 }
 
-pub static BUILT_IN_FUNCTION_IDENTS: [&str; 21] = [
+pub static BUILT_IN_FUNCTION_IDENTS: [&str; 22] = [
     "sqrt", "sin", "cos", "tan", "asin", "acos", "atan", "log", "log10", "exp", "abs", "floor",
-    "ceil", "round", "trunc", "min", "max", "avg", "sum", "prod", "median",
+    "ceil", "round", "trunc", "min", "max", "avg", "sum", "prod", "median", "len",
 ];
 
 impl FunctionDef {
@@ -285,6 +285,11 @@ pub fn get_built_in_function_def(name: &str) -> Option<BuiltInFunctionDef> {
                     Ok(Value::Number(nums[len / 2]))
                 }
             },
+        }),
+        "len" => Some(BuiltInFunctionDef {
+            name: String::from("len"),
+            arity: FunctionArity::Exact(1),
+            body: |args| Ok(Value::Number(args[0].to_list()?.len() as f64)),
         }),
         _ => None,
     }
