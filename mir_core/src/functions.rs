@@ -28,9 +28,10 @@ pub enum FunctionDef {
     BuiltIn(BuiltInFunctionDef),
 }
 
-pub static BUILT_IN_FUNCTION_IDENTS: [&str; 22] = [
+pub static BUILT_IN_FUNCTION_IDENTS: [&str; 26] = [
     "sqrt", "sin", "cos", "tan", "asin", "acos", "atan", "log", "log10", "exp", "abs", "floor",
-    "ceil", "round", "trunc", "min", "max", "avg", "sum", "prod", "median", "len",
+    "ceil", "round", "trunc", "min", "max", "avg", "sum", "prod", "median", "len", "head", "tail",
+    "slice", "concat",
 ];
 
 impl FunctionDef {
@@ -290,6 +291,51 @@ pub fn get_built_in_function_def(name: &str) -> Option<BuiltInFunctionDef> {
             name: String::from("len"),
             arity: FunctionArity::Exact(1),
             body: |args| Ok(Value::Number(args[0].to_list()?.len() as f64)),
+        }),
+        "head" => Some(BuiltInFunctionDef {
+            name: String::from("head"),
+            arity: FunctionArity::Exact(1),
+            body: |args| {
+                Ok(args[0]
+                    .to_list()?
+                    .first()
+                    .cloned()
+                    .unwrap_or(Value::List(vec![])))
+            },
+        }),
+        "tail" => Some(BuiltInFunctionDef {
+            name: String::from("tail"),
+            arity: FunctionArity::Exact(1),
+            body: |args| {
+                let list = args[0].to_list()?;
+                Ok(Value::List(list.iter().skip(1).cloned().collect()))
+            },
+        }),
+        "slice" => Some(BuiltInFunctionDef {
+            name: String::from("slice"),
+            arity: FunctionArity::Exact(3),
+            body: |args| {
+                let list = args[0].to_list()?;
+                let start = args[1].to_number()? as usize;
+                let end = args[2].to_number()? as usize;
+
+                Ok(Value::List(list[start..end].to_vec()))
+            },
+        }),
+        "concat" => Some(BuiltInFunctionDef {
+            name: String::from("concat"),
+            arity: FunctionArity::AtLeast(2),
+            body: |args| {
+                let mut list = vec![];
+                for arg in args {
+                    match arg {
+                        Value::List(l) => list.extend(l),
+                        Value::Number(_) => list.push(arg),
+                    }
+                }
+
+                Ok(Value::List(list))
+            },
         }),
         _ => None,
     }
