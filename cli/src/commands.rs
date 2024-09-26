@@ -1,16 +1,21 @@
-use core::parser::Rule;
+pub fn is_command(input: &str) -> bool {
+    match input {
+        "quit" | "help" | "history" => true,
+        _ => false,
+    }
+}
 
 /// Executes the given command.
-pub fn exec_command(cmd: Rule) {
+pub fn exec_command(cmd: &str) {
     match cmd {
-        Rule::quit => {
+        "quit" => {
             println!("bye!");
             std::process::exit(0);
         }
-        Rule::help => {
+        "help" => {
             println!("Nothing I can do for you pal, sorry.");
         }
-        Rule::history => {
+        "history" => {
             println!("Not implemented yet! Sorry.");
         }
         _ => unreachable!(),

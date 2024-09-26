@@ -46,18 +46,8 @@ name = "cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "core",
+ "mir_core",
  "string-interner",
-]
-
-[[package]]
-name = "core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "pest",
- "pest_derive",
- "serde",
 ]
 
 [[package]]
@@ -139,10 +129,20 @@ checksum = "78ca9ab1a0babb1e7d5695e3530886289c18cf2f87ec19a575a0abdce112e3a3"
 name = "mir-wasm"
 version = "0.1.0"
 dependencies = [
- "core",
+ "mir_core",
  "serde",
  "serde-wasm-bindgen",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "mir_core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "pest",
+ "pest_derive",
+ "serde",
 ]
 
 [[package]]

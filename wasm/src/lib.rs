@@ -1,8 +1,8 @@
 mod log;
 
-use core::{
+use mir_core::{
     expressions::evaluate_expression,
-    functions::{is_built_in_function, UserDefinedFunctionDef},
+    functions::{is_built_in_function, UserDefinedFunctionDef, BUILT_IN_FUNCTION_IDENTS},
     parser::{get_pairs, get_tokens, Rule, Token},
 };
 use serde::{Deserialize, Serialize};
@@ -80,7 +80,7 @@ pub fn evaluate(
             let mut inner_pairs = outer_pair.into_inner();
             let ident = inner_pairs.next().unwrap().as_str();
             let args = inner_pairs.next().unwrap().into_inner();
-            let body = inner_pairs.next().unwrap().into_inner().as_str();
+            let body = inner_pairs.next().unwrap().as_str().trim();
             let args = args.map(|arg| arg.as_str().to_string()).collect();
 
             if is_built_in_function(ident) {
@@ -145,4 +145,19 @@ pub fn tokenize(input: &str) -> Result<JsValue, JsError> {
         .collect();
 
     Ok(serde_wasm_bindgen::to_value(&tokens)?)
+}
+
+#[wasm_bindgen]
+pub fn get_built_in_function_names() -> Result<JsValue, JsError> {
+    Ok(serde_wasm_bindgen::to_value(&BUILT_IN_FUNCTION_IDENTS)?)
+}
+
+#[wasm_bindgen]
+pub fn get_constants() -> Result<JsValue, JsError> {
+    let mut constants = HashMap::new();
+    constants.insert(format!("pi"), core::f64::consts::PI);
+    constants.insert(format!("e"), core::f64::consts::E);
+    constants.insert(format!("infinity"), f64::INFINITY);
+
+    Ok(serde_wasm_bindgen::to_value(&constants)?)
 }

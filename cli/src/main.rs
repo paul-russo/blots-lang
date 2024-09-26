@@ -1,9 +1,9 @@
 mod commands;
 
-use commands::exec_command;
-use core::expressions::evaluate_expression;
-use core::functions::{is_built_in_function, UserDefinedFunctionDef};
-use core::parser::{get_pairs, Rule};
+use commands::{exec_command, is_command};
+use mir_core::expressions::evaluate_expression;
+use mir_core::functions::{is_built_in_function, UserDefinedFunctionDef};
+use mir_core::parser::{get_pairs, Rule};
 use std::{collections::HashMap, time::Instant};
 
 fn main() -> ! {
@@ -17,6 +17,12 @@ fn main() -> ! {
         lines.push(line.clone());
 
         let start = Instant::now();
+
+        if is_command(&line.trim()) {
+            exec_command(&line.trim());
+            continue;
+        }
+
         let pairs = get_pairs(&line);
         let duration = start.elapsed();
         println!("Parsing took: {:?}", duration);
@@ -33,10 +39,6 @@ fn main() -> ! {
         };
 
         match outer_pair.as_rule() {
-            Rule::command => {
-                let cmd = outer_pair.into_inner().next().unwrap().as_rule();
-                exec_command(cmd);
-            }
             Rule::assignment => {
                 let mut inner_pairs = outer_pair.into_inner();
                 let ident = inner_pairs.next().unwrap().as_str();
@@ -65,7 +67,7 @@ fn main() -> ! {
                 let mut inner_pairs = outer_pair.into_inner();
                 let ident = inner_pairs.next().unwrap().as_str();
                 let args = inner_pairs.next().unwrap().into_inner();
-                let body = inner_pairs.next().unwrap().into_inner().as_str();
+                let body = inner_pairs.next().unwrap().as_str().trim();
                 let args = args.map(|arg| arg.as_str().to_string()).collect();
 
                 if is_built_in_function(ident) {
