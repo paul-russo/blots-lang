@@ -23,9 +23,12 @@ factorial  =  { "!" }
 call_list     = !{ "(" ~ expression ~ ("," ~ expression)* ~ ")" }
 function_call = ${ identifier ~ call_list }
 
+list        = !{ "[" ~ expression ~ ("," ~ expression)* ~ "]" }
+list_access = ${ identifier ~ "[" ~ WHITESPACE* ~ expression ~ WHITESPACE* ~ "]" }
+
 expression        = !{ prefix_op* ~ term ~ postfix_op* ~ (infix_op ~ prefix_op* ~ term ~ postfix_op*)* }
 nested_expression = _{ "(" ~ expression ~ ")" }
-term              = _{ function_call | identifier | number | nested_expression }
+term              = _{ function_call | list | list_access | identifier | number | nested_expression }
 
 assignment = !{ identifier ~ "=" ~ expression }
 

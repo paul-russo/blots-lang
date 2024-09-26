@@ -1,6 +1,7 @@
 use crate::{
     functions::{get_function_def, UserDefinedFunctionDef},
     parser::Rule,
+    values::Value::{self, List, Number},
 };
 use anyhow::{anyhow, Result};
 use pest::{
@@ -22,19 +23,50 @@ static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
 
 pub fn evaluate_expression(
     pairs: Pairs<Rule>,
-    variables: &HashMap<String, f64>,
+    variables: &HashMap<String, Value>,
     function_defs: &HashMap<String, UserDefinedFunctionDef>,
-) -> Result<f64> {
+) -> Result<Value> {
     PRATT
         .map_primary(|primary| match primary.as_rule() {
-            Rule::number => primary.as_str().parse::<f64>().map_err(|e| e.into()),
+            Rule::number => Ok(Number(
+                primary
+                    .as_str()
+                    .parse::<f64>()
+                    .map_err(|e| anyhow::Error::from(e))?,
+            )),
+            Rule::list => {
+                let list = primary.into_inner();
+                let values = list
+                    .into_iter()
+                    .map(|value| evaluate_expression(value.into_inner(), variables, function_defs))
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                Ok(List(values))
+            }
+            Rule::list_access => {
+                let mut inner_pairs = primary.into_inner();
+                let ident = inner_pairs.next().unwrap().as_str();
+                let index = inner_pairs.next().unwrap().as_str().parse::<usize>()?;
+
+                match variables.get(ident) {
+                    Some(List(list)) => list.get(index).cloned().ok_or_else(|| {
+                        anyhow!(
+                            "index out of bounds: {} is out of range for list {}",
+                            index,
+                            ident
+                        )
+                    }),
+                    Some(_) => Err(anyhow!("expected a list, but got a number")),
+                    None => Err(anyhow!("unknown variable: {}", ident)),
+                }
+            }
             Rule::identifier => {
                 let ident = primary.as_str();
 
                 match ident {
-                    "pi" => return Ok(core::f64::consts::PI),
-                    "e" => return Ok(core::f64::consts::E),
-                    "infinity" => return Ok(f64::INFINITY),
+                    "pi" => return Ok(Number(core::f64::consts::PI)),
+                    "e" => return Ok(Number(core::f64::consts::E)),
+                    "infinity" => return Ok(Number(f64::INFINITY)),
                     _ => variables
                         .get(ident)
                         .cloned()
@@ -47,7 +79,7 @@ pub fn evaluate_expression(
                 let ident = inner_pairs.next().unwrap().as_str();
                 let call_list = inner_pairs.next().unwrap();
                 let call_list_entries = call_list.into_inner();
-                let args: Vec<f64> = call_list_entries
+                let args: Vec<Value> = call_list_entries
                     .into_iter()
                     .map(|arg| evaluate_expression(arg.into_inner(), variables, function_defs))
                     .collect::<Result<Vec<_>, _>>()?;
@@ -61,20 +93,22 @@ pub fn evaluate_expression(
             _ => unreachable!(),
         })
         .map_prefix(|op, rhs| {
-            let rhs = rhs?;
+            let rhs = rhs?.to_number()?;
 
             match op.as_rule() {
-                Rule::negation => Ok(-rhs),
+                Rule::negation => Ok(Number(-rhs)),
                 _ => unreachable!(),
             }
         })
         .map_postfix(|lhs, op| {
-            let lhs = lhs?;
+            let lhs = lhs?.to_number()?;
 
             match op.as_rule() {
                 Rule::factorial => {
                     if lhs >= 0.0 && lhs == (lhs as u64) as f64 {
-                        Ok((1..(lhs as u64) + 1).map(|x| x as f64).product::<f64>())
+                        Ok(Number(
+                            (1..(lhs as u64) + 1).map(|x| x as f64).product::<f64>(),
+                        ))
                     } else {
                         Err(anyhow!("factorial only works on non-negative integers"))
                     }
@@ -83,16 +117,16 @@ pub fn evaluate_expression(
             }
         })
         .map_infix(|lhs, op, rhs| {
-            let lhs = lhs?;
-            let rhs = rhs?;
+            let lhs = lhs?.to_number()?;
+            let rhs = rhs?.to_number()?;
 
             match op.as_rule() {
-                Rule::add => Ok(lhs + rhs),
-                Rule::subtract => Ok(lhs - rhs),
-                Rule::multiply => Ok(lhs * rhs),
-                Rule::divide => Ok(lhs / rhs),
-                Rule::modulo => Ok(lhs % rhs),
-                Rule::power => Ok(lhs.powf(rhs)),
+                Rule::add => Ok(Number(lhs + rhs)),
+                Rule::subtract => Ok(Number(lhs - rhs)),
+                Rule::multiply => Ok(Number(lhs * rhs)),
+                Rule::divide => Ok(Number(lhs / rhs)),
+                Rule::modulo => Ok(Number(lhs % rhs)),
+                Rule::power => Ok(Number(lhs.powf(rhs))),
                 _ => unreachable!(),
             }
         })

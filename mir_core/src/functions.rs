@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::{expressions::evaluate_expression, parser::get_pairs};
+use crate::{expressions::evaluate_expression, parser::get_pairs, values::Value};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UserDefinedFunctionDef {
@@ -20,7 +20,7 @@ pub enum FunctionArity {
 pub struct BuiltInFunctionDef {
     pub name: String,
     pub arity: FunctionArity,
-    pub body: fn(Vec<f64>) -> f64,
+    pub body: fn(Vec<Value>) -> Result<Value>,
 }
 
 pub enum FunctionDef {
@@ -95,10 +95,10 @@ impl FunctionDef {
 
     pub fn call(
         &self,
-        args: Vec<f64>,
-        variables: &HashMap<String, f64>,
+        args: Vec<Value>,
+        variables: &HashMap<String, Value>,
         function_defs: &HashMap<String, UserDefinedFunctionDef>,
-    ) -> Result<f64> {
+    ) -> Result<Value> {
         self.check_arity(args.len())?;
 
         match self {
@@ -109,7 +109,7 @@ impl FunctionDef {
             }) => {
                 let mut new_variables = variables.clone();
                 for (arg, value) in expected_args.iter().zip(args.iter()) {
-                    new_variables.insert(arg.clone(), *value);
+                    new_variables.insert(arg.clone(), value.clone());
                 }
 
                 evaluate_expression(
@@ -118,7 +118,7 @@ impl FunctionDef {
                     function_defs,
                 )
             }
-            FunctionDef::BuiltIn(BuiltInFunctionDef { body, .. }) => Ok(body(args)),
+            FunctionDef::BuiltIn(BuiltInFunctionDef { body, .. }) => body(args),
         }
     }
 }
@@ -128,113 +128,161 @@ pub fn get_built_in_function_def(name: &str) -> Option<BuiltInFunctionDef> {
         "sqrt" => Some(BuiltInFunctionDef {
             name: String::from("sqrt"),
             arity: FunctionArity::Exact(1),
-            body: |args| args[0].sqrt(),
+            body: |args| Ok(Value::Number(args[0].to_number()?.sqrt())),
         }),
         "sin" => Some(BuiltInFunctionDef {
             name: String::from("sin"),
             arity: FunctionArity::Exact(1),
-            body: |args| args[0].sin(),
+            body: |args| Ok(Value::Number(args[0].to_number()?.sin())),
         }),
         "cos" => Some(BuiltInFunctionDef {
             name: String::from("cos"),
             arity: FunctionArity::Exact(1),
-            body: |args| args[0].cos(),
+            body: |args| Ok(Value::Number(args[0].to_number()?.cos())),
         }),
         "tan" => Some(BuiltInFunctionDef {
             name: String::from("tan"),
             arity: FunctionArity::Exact(1),
-            body: |args| args[0].tan(),
+            body: |args| Ok(Value::Number(args[0].to_number()?.tan())),
         }),
         "asin" => Some(BuiltInFunctionDef {
             name: String::from("asin"),
             arity: FunctionArity::Exact(1),
-            body: |args| args[0].asin(),
+            body: |args| Ok(Value::Number(args[0].to_number()?.asin())),
         }),
         "acos" => Some(BuiltInFunctionDef {
             name: String::from("acos"),
             arity: FunctionArity::Exact(1),
-            body: |args| args[0].acos(),
+            body: |args| Ok(Value::Number(args[0].to_number()?.acos())),
         }),
         "atan" => Some(BuiltInFunctionDef {
             name: String::from("atan"),
             arity: FunctionArity::Exact(1),
-            body: |args| args[0].atan(),
+            body: |args| Ok(Value::Number(args[0].to_number()?.atan())),
         }),
         "log" => Some(BuiltInFunctionDef {
             name: String::from("log"),
             arity: FunctionArity::Exact(1),
-            body: |args| args[0].ln(),
+            body: |args| Ok(Value::Number(args[0].to_number()?.ln())),
         }),
         "log10" => Some(BuiltInFunctionDef {
             name: String::from("log10"),
             arity: FunctionArity::Exact(1),
-            body: |args| args[0].log10(),
+            body: |args| Ok(Value::Number(args[0].to_number()?.log10())),
         }),
         "exp" => Some(BuiltInFunctionDef {
             name: String::from("exp"),
             arity: FunctionArity::Exact(1),
-            body: |args| args[0].exp(),
+            body: |args| Ok(Value::Number(args[0].to_number()?.exp())),
         }),
         "abs" => Some(BuiltInFunctionDef {
             name: String::from("abs"),
             arity: FunctionArity::Exact(1),
-            body: |args| args[0].abs(),
+            body: |args| Ok(Value::Number(args[0].to_number()?.abs())),
         }),
         "floor" => Some(BuiltInFunctionDef {
             name: String::from("floor"),
             arity: FunctionArity::Exact(1),
-            body: |args| args[0].floor(),
+            body: |args| Ok(Value::Number(args[0].to_number()?.floor())),
         }),
         "ceil" => Some(BuiltInFunctionDef {
             name: String::from("ceil"),
             arity: FunctionArity::Exact(1),
-            body: |args| args[0].ceil(),
+            body: |args| Ok(Value::Number(args[0].to_number()?.ceil())),
         }),
         "round" => Some(BuiltInFunctionDef {
             name: String::from("round"),
             arity: FunctionArity::Exact(1),
-            body: |args| args[0].round(),
+            body: |args| Ok(Value::Number(args[0].to_number()?.round())),
         }),
         "trunc" => Some(BuiltInFunctionDef {
             name: String::from("trunc"),
             arity: FunctionArity::Exact(1),
-            body: |args| args[0].trunc(),
+            body: |args| Ok(Value::Number(args[0].to_number()?.trunc())),
         }),
         "min" => Some(BuiltInFunctionDef {
             name: String::from("min"),
             arity: FunctionArity::AtLeast(2),
-            body: |args| args.iter().copied().fold(f64::INFINITY, f64::min),
+            body: |args| {
+                Ok(Value::Number(
+                    args.iter()
+                        .map(|a| a.to_number())
+                        .collect::<Result<Vec<f64>>>()?
+                        .iter()
+                        .copied()
+                        .fold(f64::INFINITY, f64::min),
+                ))
+            },
         }),
         "max" => Some(BuiltInFunctionDef {
             name: String::from("max"),
             arity: FunctionArity::AtLeast(2),
-            body: |args| args.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            body: |args| {
+                Ok(Value::Number(
+                    args.iter()
+                        .map(|a| a.to_number())
+                        .collect::<Result<Vec<f64>>>()?
+                        .iter()
+                        .copied()
+                        .fold(f64::NEG_INFINITY, f64::max),
+                ))
+            },
         }),
         "avg" => Some(BuiltInFunctionDef {
             name: String::from("avg"),
             arity: FunctionArity::AtLeast(2),
-            body: |args| args.iter().sum::<f64>() / args.len() as f64,
+            body: |args| {
+                Ok(Value::Number(
+                    args.iter()
+                        .map(|a| a.to_number())
+                        .collect::<Result<Vec<f64>>>()?
+                        .iter()
+                        .sum::<f64>()
+                        / args.len() as f64,
+                ))
+            },
         }),
         "sum" => Some(BuiltInFunctionDef {
             name: String::from("sum"),
             arity: FunctionArity::AtLeast(2),
-            body: |args| args.iter().sum(),
+            body: |args| {
+                Ok(Value::Number(
+                    args.iter()
+                        .map(|a| a.to_number())
+                        .collect::<Result<Vec<f64>>>()?
+                        .iter()
+                        .sum(),
+                ))
+            },
         }),
         "prod" => Some(BuiltInFunctionDef {
             name: String::from("prod"),
             arity: FunctionArity::AtLeast(2),
-            body: |args| args.iter().product(),
+            body: |args| {
+                Ok(Value::Number(
+                    args.iter()
+                        .map(|a| a.to_number())
+                        .collect::<Result<Vec<f64>>>()?
+                        .iter()
+                        .product(),
+                ))
+            },
         }),
         "median" => Some(BuiltInFunctionDef {
             name: String::from("median"),
             arity: FunctionArity::AtLeast(2),
-            body: |mut args| {
-                args.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                let len = args.len();
+            body: |args| {
+                let mut nums = args
+                    .into_iter()
+                    .map(|a| a.to_number())
+                    .collect::<Result<Vec<f64>>>()?;
+
+                nums.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let len = nums.len();
                 if len % 2 == 0 {
-                    (args[len / 2 - 1] + args[len / 2]) / 2.0
+                    Ok(Value::Number((nums[len / 2 - 1] + nums[len / 2]) / 2.0))
                 } else {
-                    args[len / 2]
+                    Ok(Value::Number(nums[len / 2]))
                 }
             },
         }),
