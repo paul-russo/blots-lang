@@ -8,7 +8,7 @@ pub fn is_command(input: &str) -> bool {
 /// Executes the given command.
 pub fn exec_command(cmd: &str) {
     match cmd {
-        "quit" => {
+        "quit" | "exit" => {
             println!("bye!");
             std::process::exit(0);
         }

@@ -20,10 +20,14 @@ negation  =  { "-" }
 postfix_op = _{ factorial }
 factorial  =  { "!" }
 
-call_list     = !{ "(" ~ expression ~ ("," ~ expression)* ~ ")" }
+spread_operator       =  { "..." }
+spread_expression     = ${ spread_operator ~ expression }
+spreadable_expression = _{ spread_expression | expression }
+
+call_list     = !{ "(" ~ spreadable_expression ~ ("," ~ spreadable_expression)* ~ ")" }
 function_call = ${ identifier ~ call_list }
 
-list        = !{ "[]" | "[" ~ expression ~ ("," ~ expression)* ~ "]" }
+list        = !{ "[]" | "[" ~ spreadable_expression ~ ("," ~ spreadable_expression)* ~ "]" }
 list_access = ${ identifier ~ "[" ~ WHITESPACE* ~ expression ~ WHITESPACE* ~ "]" }
 
 expression        = !{ prefix_op* ~ term ~ postfix_op* ~ (infix_op ~ prefix_op* ~ term ~ postfix_op*)* }

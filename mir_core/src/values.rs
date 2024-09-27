@@ -7,6 +7,19 @@ use serde::{Deserialize, Serialize};
 pub enum Value {
     Number(f64),
     List(Vec<Value>),
+    Spread(Vec<Value>),
+}
+
+impl IntoIterator for Value {
+    type Item = Value;
+    type IntoIter = std::vec::IntoIter<Value>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match self {
+            Value::Spread(l) => l.into_iter(), // Yields an iterator over the values in the spread list.
+            _ => vec![self].into_iter(),       // Yields a single value wrapped in a Vec
+        }
+    }
 }
 
 impl Value {
@@ -16,6 +29,10 @@ impl Value {
 
     pub fn is_list(&self) -> bool {
         matches!(self, Value::List(_))
+    }
+
+    pub fn is_spread(&self) -> bool {
+        matches!(self, Value::Spread(_))
     }
 
     pub fn to_number(&self) -> Result<f64> {
@@ -31,6 +48,13 @@ impl Value {
             _ => Err(anyhow!("expected a list, but got a number")),
         }
     }
+
+    pub fn to_spread(&self) -> Result<&Vec<Value>> {
+        match self {
+            Value::Spread(l) => Ok(l),
+            _ => Err(anyhow!("expected a spread, but got a number")),
+        }
+    }
 }
 
 impl Display for Value {
@@ -39,6 +63,16 @@ impl Display for Value {
             Value::Number(n) => write!(f, "{}", n),
             Value::List(l) => {
                 write!(f, "[")?;
+                for (i, value) in l.iter().enumerate() {
+                    write!(f, "{}", value)?;
+                    if i < l.len() - 1 {
+                        write!(f, ", ")?;
+                    }
+                }
+                write!(f, "]")
+            }
+            Value::Spread(l) => {
+                write!(f, "...[")?;
                 for (i, value) in l.iter().enumerate() {
                     write!(f, "{}", value)?;
                     if i < l.len() - 1 {
