@@ -1,9 +1,9 @@
 use crate::{
     functions::{get_function_def, UserDefinedFunctionDef},
     parser::Rule,
-    values::Value::{self, List, Number},
+    values::Value::{self, List, Number, Spread},
 };
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Ok, Result};
 use pest::{
     iterators::Pairs,
     pratt_parser::{Assoc, Op, PrattParser},
@@ -17,9 +17,25 @@ static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
             | Op::infix(Rule::divide, Assoc::Left)
             | Op::infix(Rule::modulo, Assoc::Left))
         .op(Op::infix(Rule::power, Assoc::Right))
-        .op(Op::prefix(Rule::negation))
+        .op(Op::prefix(Rule::negation) | Op::prefix(Rule::spread_operator))
         .op(Op::postfix(Rule::factorial))
 });
+
+pub fn collect_list(
+    pairs: Pairs<Rule>,
+    variables: &HashMap<String, Value>,
+    function_defs: &HashMap<String, UserDefinedFunctionDef>,
+) -> Result<Vec<Value>> {
+    Ok(pairs
+        .into_iter()
+        // This can't just be flat_map (at least I think) because we don't want to unwrap
+        // each Result as we iterate, which would result in failed values being skipped.
+        .map(|value| evaluate_expression(value.into_inner(), variables, function_defs))
+        .collect::<Result<Vec<Value>>>()?
+        .into_iter()
+        .flatten()
+        .collect())
+}
 
 pub fn evaluate_expression(
     pairs: Pairs<Rule>,
@@ -35,11 +51,8 @@ pub fn evaluate_expression(
                     .map_err(|e| anyhow::Error::from(e))?,
             )),
             Rule::list => {
-                let list = primary.into_inner();
-                let values = list
-                    .into_iter()
-                    .map(|value| evaluate_expression(value.into_inner(), variables, function_defs))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let list_pairs = primary.into_inner();
+                let values = collect_list(list_pairs, variables, function_defs)?;
 
                 Ok(List(values))
             }
@@ -84,10 +97,7 @@ pub fn evaluate_expression(
                 let ident = inner_pairs.next().unwrap().as_str();
                 let call_list = inner_pairs.next().unwrap();
                 let call_list_entries = call_list.into_inner();
-                let args: Vec<Value> = call_list_entries
-                    .into_iter()
-                    .map(|arg| evaluate_expression(arg.into_inner(), variables, function_defs))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let args = collect_list(call_list_entries, variables, function_defs)?;
 
                 if let Some(def) = get_function_def(ident, function_defs) {
                     return def.call(args, variables, function_defs);
@@ -95,15 +105,19 @@ pub fn evaluate_expression(
 
                 Err(anyhow!("unknown function: {}", ident))
             }
-            _ => unreachable!(),
+            _ => unreachable!("{}", primary.as_str()),
         })
-        .map_prefix(|op, rhs| {
-            let rhs = rhs?.to_number()?;
-
-            match op.as_rule() {
-                Rule::negation => Ok(Number(-rhs)),
-                _ => unreachable!(),
+        .map_prefix(|op, rhs| match op.as_rule() {
+            Rule::negation => {
+                let rhs = rhs?.to_number()?;
+                Ok(Number(-rhs))
             }
+            Rule::spread_operator => {
+                let rhs = rhs?;
+                let list = rhs.to_list()?;
+                Ok(Spread(list.clone()))
+            }
+            _ => unreachable!(),
         })
         .map_postfix(|lhs, op| {
             let lhs = lhs?.to_number()?;

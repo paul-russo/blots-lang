@@ -331,6 +331,7 @@ pub fn get_built_in_function_def(name: &str) -> Option<BuiltInFunctionDef> {
                     match arg {
                         Value::List(l) => list.extend(l),
                         Value::Number(_) => list.push(arg),
+                        Value::Spread(l) => list.extend(l),
                     }
                 }
 
