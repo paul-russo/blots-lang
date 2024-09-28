@@ -81,6 +81,22 @@ pub fn evaluate_expression(
                     _ => unreachable!(),
                 }
             }
+            Rule::conditional => {
+                let mut inner_pairs = primary.into_inner();
+                let condition_expr = inner_pairs.next().unwrap();
+                let then_expr = inner_pairs.next().unwrap();
+                let else_expr = inner_pairs.next().unwrap();
+
+                let condition =
+                    evaluate_expression(condition_expr.into_inner(), variables, function_defs)?
+                        .to_bool()?;
+
+                if condition {
+                    evaluate_expression(then_expr.into_inner(), variables, function_defs)
+                } else {
+                    evaluate_expression(else_expr.into_inner(), variables, function_defs)
+                }
+            }
             Rule::list_access => {
                 let mut inner_pairs = primary.into_inner();
 
