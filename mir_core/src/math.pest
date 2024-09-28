@@ -47,9 +47,11 @@ function_call = ${ identifier ~ call_list }
 list        = !{ "[]" | "[" ~ spreadable_expression ~ ("," ~ spreadable_expression)* ~ "]" }
 list_access = ${ identifier ~ "[" ~ WHITESPACE* ~ expression ~ WHITESPACE* ~ "]" }
 
+conditional = ${ "if" ~ WHITESPACE+ ~ expression ~ WHITESPACE+ ~ "then" ~ WHITESPACE+ ~ expression ~ WHITESPACE+ ~ "else" ~ WHITESPACE+ ~ expression }
+
 expression        = ${ prefix_op* ~ term ~ postfix_op* ~ (WHITESPACE* ~ infix_op ~ WHITESPACE* ~ prefix_op* ~ term ~ postfix_op*)* }
 nested_expression = _{ "(" ~ WHITESPACE* ~ expression ~ WHITESPACE* ~ ")" }
-term              = _{ function_call | list | list_access | bool | identifier | number | nested_expression }
+term              = _{ conditional | function_call | list | list_access | bool | identifier | number | nested_expression }
 
 assignment = !{ identifier ~ "=" ~ expression }
 
