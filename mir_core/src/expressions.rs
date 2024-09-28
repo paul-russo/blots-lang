@@ -176,9 +176,12 @@ pub fn evaluate_expression(
                 Rule::greater => Ok(Bool(lhs > rhs)),
                 Rule::greater_eq => Ok(Bool(lhs >= rhs)),
                 Rule::each_equal => match (lhs, rhs) {
-                    (List(lhs), List(rhs)) => Ok(Bool(
-                        lhs.len() == rhs.len() && lhs.iter().zip(rhs.iter()).all(|(l, r)| l == r),
-                    )),
+                    (List(lhs), List(rhs)) => {
+                        if lhs.len() != rhs.len() {
+                            return Err(anyhow!("lists must be the same length"));
+                        }
+                        Ok(Bool(lhs.iter().zip(rhs.iter()).all(|(l, r)| l == r)))
+                    }
                     (List(lhs), Number(rhs)) => Ok(Bool(lhs.iter().all(|l| l == &Number(rhs)))),
                     (List(lhs), Bool(rhs)) => Ok(Bool(lhs.iter().all(|l| l == &Bool(rhs)))),
                     _ => Err(anyhow!(
@@ -186,9 +189,12 @@ pub fn evaluate_expression(
                     )),
                 },
                 Rule::each_not_equal => match (lhs, rhs) {
-                    (List(lhs), List(rhs)) => Ok(Bool(
-                        lhs.len() == rhs.len() && lhs.iter().zip(rhs.iter()).all(|(l, r)| l != r),
-                    )),
+                    (List(lhs), List(rhs)) => {
+                        if lhs.len() != rhs.len() {
+                            return Err(anyhow!("lists must be the same length"));
+                        }
+                        Ok(Bool(lhs.iter().zip(rhs.iter()).all(|(l, r)| l != r)))
+                    }
                     (List(lhs), Number(rhs)) => Ok(Bool(lhs.iter().all(|l| l != &Number(rhs)))),
                     (List(lhs), Bool(rhs)) => Ok(Bool(lhs.iter().all(|l| l != &Bool(rhs)))),
                     _ => Err(anyhow!(
@@ -196,30 +202,42 @@ pub fn evaluate_expression(
                     )),
                 },
                 Rule::each_less => match (lhs, rhs) {
-                    (List(lhs), List(rhs)) => Ok(Bool(
-                        lhs.len() == rhs.len() && lhs.iter().zip(rhs.iter()).all(|(l, r)| l < r),
-                    )),
+                    (List(lhs), List(rhs)) => {
+                        if lhs.len() != rhs.len() {
+                            return Err(anyhow!("lists must be the same length"));
+                        }
+                        Ok(Bool(lhs.iter().zip(rhs.iter()).all(|(l, r)| l < r)))
+                    }
                     (List(lhs), Number(rhs)) => Ok(Bool(lhs.iter().all(|l| l < &Number(rhs)))),
                     _ => Err(anyhow!("expected two lists or a list and a number")),
                 },
                 Rule::each_less_eq => match (lhs, rhs) {
-                    (List(lhs), List(rhs)) => Ok(Bool(
-                        lhs.len() == rhs.len() && lhs.iter().zip(rhs.iter()).all(|(l, r)| l <= r),
-                    )),
+                    (List(lhs), List(rhs)) => {
+                        if lhs.len() != rhs.len() {
+                            return Err(anyhow!("lists must be the same length"));
+                        }
+                        Ok(Bool(lhs.iter().zip(rhs.iter()).all(|(l, r)| l <= r)))
+                    }
                     (List(lhs), Number(rhs)) => Ok(Bool(lhs.iter().all(|l| l <= &Number(rhs)))),
                     _ => Err(anyhow!("expected two lists or a list and a number")),
                 },
                 Rule::each_greater => match (lhs, rhs) {
-                    (List(lhs), List(rhs)) => Ok(Bool(
-                        lhs.len() == rhs.len() && lhs.iter().zip(rhs.iter()).all(|(l, r)| l > r),
-                    )),
+                    (List(lhs), List(rhs)) => {
+                        if lhs.len() != rhs.len() {
+                            return Err(anyhow!("lists must be the same length"));
+                        }
+                        Ok(Bool(lhs.iter().zip(rhs.iter()).all(|(l, r)| l > r)))
+                    }
                     (List(lhs), Number(rhs)) => Ok(Bool(lhs.iter().all(|l| l > &Number(rhs)))),
                     _ => Err(anyhow!("expected two lists or a list and a number")),
                 },
                 Rule::each_greater_eq => match (lhs, rhs) {
-                    (List(lhs), List(rhs)) => Ok(Bool(
-                        lhs.len() == rhs.len() && lhs.iter().zip(rhs.iter()).all(|(l, r)| l >= r),
-                    )),
+                    (List(lhs), List(rhs)) => {
+                        if lhs.len() != rhs.len() {
+                            return Err(anyhow!("lists must be the same length"));
+                        }
+                        Ok(Bool(lhs.iter().zip(rhs.iter()).all(|(l, r)| l >= r)))
+                    }
                     (List(lhs), Number(rhs)) => Ok(Bool(lhs.iter().all(|l| l >= &Number(rhs)))),
                     _ => Err(anyhow!("expected two lists or a list and a number")),
                 },
