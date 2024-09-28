@@ -41,7 +41,7 @@ spread_operator       =  { "..." }
 spread_expression     = ${ spread_operator ~ expression }
 spreadable_expression = _{ spread_expression | expression }
 
-call_list     = !{ "(" ~ spreadable_expression ~ ("," ~ spreadable_expression)* ~ ")" }
+call_list     = !{ "(" ~ (spreadable_expression ~ ("," ~ spreadable_expression)*)? ~ ")" }
 function_call = ${ identifier ~ call_list }
 
 list        = !{ "[]" | "[" ~ spreadable_expression ~ ("," ~ spreadable_expression)* ~ "]" }
@@ -53,7 +53,7 @@ term              = _{ function_call | list | list_access | bool | identifier | 
 
 assignment = !{ identifier ~ "=" ~ expression }
 
-argument_list       = !{ "(" ~ identifier ~ ("," ~ identifier)* ~ ")" }
+argument_list       = !{ "(" ~ (identifier ~ ("," ~ identifier)*)? ~ ")" }
 function_definition = ${ identifier ~ argument_list ~ WHITESPACE* ~ "=" ~ WHITESPACE* ~ expression }
 
 comment = { ("#" | "//") ~ (!"\n" ~ ANY)* }
