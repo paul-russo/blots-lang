@@ -3,19 +3,36 @@ WHITESPACE = _{ " " | "\t" | "\r\n" | "\n" }
 number  = @{ integer ~ ("." ~ ASCII_DIGIT+)? ~ (^"e" ~ integer)? }
 integer = _{ ("+" | "-")? ~ ASCII_DIGIT+ }
 
+bool = { "true" | "false" }
+
 identifier      = @{ ASCII_ALPHA+ ~ identifier_rest* }
 identifier_rest = _{ ASCII_ALPHA+ | ASCII_DIGIT+ | "_"+ }
 
-infix_op = _{ add | subtract | multiply | divide | modulo | power }
-add      =  { "+" }
-subtract =  { "-" }
-multiply =  { "*" }
-divide   =  { "/" }
-modulo   =  { "%" }
-power    =  { "^" }
+infix_op        = _{ add | subtract | multiply | divide | modulo | power | equal | not_equal | less_eq | less | greater_eq | greater | each_equal | each_not_equal | each_less_eq | each_less | each_greater_eq | each_greater | and | or }
+add             =  { "+" }
+subtract        =  { "-" }
+multiply        =  { "*" }
+divide          =  { "/" }
+modulo          =  { "%" }
+power           =  { "^" }
+equal           =  { "==" }
+not_equal       =  { "!=" }
+less_eq         =  { "<=" }
+less            =  { "<" }
+greater_eq      =  { ">=" }
+greater         =  { ">" }
+each_equal      =  { "[==]" }
+each_not_equal  =  { "[!=]" }
+each_less_eq    =  { "[<=]" }
+each_less       =  { "[<]" }
+each_greater_eq =  { "[>=]" }
+each_greater    =  { "[>]" }
+and             =  { "&&" }
+or              =  { "||" }
 
-prefix_op = _{ negation }
+prefix_op = _{ negation | invert }
 negation  =  { "-" }
+invert    =  { "!" }
 
 postfix_op = _{ factorial }
 factorial  =  { "!" }
@@ -30,9 +47,9 @@ function_call = ${ identifier ~ call_list }
 list        = !{ "[]" | "[" ~ spreadable_expression ~ ("," ~ spreadable_expression)* ~ "]" }
 list_access = ${ identifier ~ "[" ~ WHITESPACE* ~ expression ~ WHITESPACE* ~ "]" }
 
-expression        = !{ prefix_op* ~ term ~ postfix_op* ~ (infix_op ~ prefix_op* ~ term ~ postfix_op*)* }
-nested_expression = _{ "(" ~ expression ~ ")" }
-term              = _{ function_call | list | list_access | identifier | number | nested_expression }
+expression        = ${ prefix_op* ~ term ~ postfix_op* ~ (WHITESPACE* ~ infix_op ~ WHITESPACE* ~ prefix_op* ~ term ~ postfix_op*)* }
+nested_expression = _{ "(" ~ WHITESPACE* ~ expression ~ WHITESPACE* ~ ")" }
+term              = _{ function_call | list | list_access | bool | identifier | number | nested_expression }
 
 assignment = !{ identifier ~ "=" ~ expression }
 

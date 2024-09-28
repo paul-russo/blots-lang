@@ -28,10 +28,10 @@ pub enum FunctionDef {
     BuiltIn(BuiltInFunctionDef),
 }
 
-pub static BUILT_IN_FUNCTION_IDENTS: [&str; 26] = [
+pub static BUILT_IN_FUNCTION_IDENTS: [&str; 27] = [
     "sqrt", "sin", "cos", "tan", "asin", "acos", "atan", "log", "log10", "exp", "abs", "floor",
     "ceil", "round", "trunc", "min", "max", "avg", "sum", "prod", "median", "len", "head", "tail",
-    "slice", "concat",
+    "slice", "concat", "dot",
 ];
 
 impl FunctionDef {
@@ -332,10 +332,38 @@ pub fn get_built_in_function_def(name: &str) -> Option<BuiltInFunctionDef> {
                         Value::List(l) => list.extend(l),
                         Value::Number(_) => list.push(arg),
                         Value::Spread(l) => list.extend(l),
+                        Value::Bool(_) => list.push(arg),
                     }
                 }
 
                 Ok(Value::List(list))
+            },
+        }),
+        "dot" => Some(BuiltInFunctionDef {
+            name: String::from("dot"),
+            arity: FunctionArity::Exact(2),
+            body: |args| {
+                let a = args[0].to_list()?;
+                let b = args[1].to_list()?;
+
+                if a.len() != b.len() {
+                    return Err(anyhow!(
+                        "cannot calculate dot product of lists with different lengths"
+                    ));
+                }
+
+                Ok(Value::Number(
+                    a.iter()
+                        .zip(b.iter())
+                        .map(|(a, b)| {
+                            let a_num = a.to_number()?;
+                            let b_num = b.to_number()?;
+                            Ok(a_num * b_num)
+                        })
+                        .collect::<Result<Vec<f64>>>()?
+                        .iter()
+                        .sum(),
+                ))
             },
         }),
         _ => None,

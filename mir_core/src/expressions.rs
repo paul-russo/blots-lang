@@ -1,7 +1,7 @@
 use crate::{
     functions::{get_function_def, UserDefinedFunctionDef},
     parser::Rule,
-    values::Value::{self, List, Number, Spread},
+    values::Value::{self, Bool, List, Number, Spread},
 };
 use anyhow::{anyhow, Ok, Result};
 use pest::{
@@ -12,12 +12,28 @@ use std::{collections::HashMap, sync::LazyLock};
 
 static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
     PrattParser::new()
+        .op(Op::infix(Rule::equal, Assoc::Left)
+            | Op::infix(Rule::not_equal, Assoc::Left)
+            | Op::infix(Rule::less, Assoc::Left)
+            | Op::infix(Rule::less_eq, Assoc::Left)
+            | Op::infix(Rule::greater, Assoc::Left)
+            | Op::infix(Rule::greater_eq, Assoc::Left)
+            | Op::infix(Rule::each_equal, Assoc::Left)
+            | Op::infix(Rule::each_not_equal, Assoc::Left)
+            | Op::infix(Rule::each_less_eq, Assoc::Left)
+            | Op::infix(Rule::each_less, Assoc::Left)
+            | Op::infix(Rule::each_greater_eq, Assoc::Left)
+            | Op::infix(Rule::each_greater, Assoc::Left)
+            | Op::infix(Rule::and, Assoc::Left)
+            | Op::infix(Rule::or, Assoc::Left))
         .op(Op::infix(Rule::add, Assoc::Left) | Op::infix(Rule::subtract, Assoc::Left))
         .op(Op::infix(Rule::multiply, Assoc::Left)
             | Op::infix(Rule::divide, Assoc::Left)
             | Op::infix(Rule::modulo, Assoc::Left))
         .op(Op::infix(Rule::power, Assoc::Right))
-        .op(Op::prefix(Rule::negation) | Op::prefix(Rule::spread_operator))
+        .op(Op::prefix(Rule::negation)
+            | Op::prefix(Rule::spread_operator)
+            | Op::prefix(Rule::invert))
         .op(Op::postfix(Rule::factorial))
 });
 
@@ -55,6 +71,15 @@ pub fn evaluate_expression(
                 let values = collect_list(list_pairs, variables, function_defs)?;
 
                 Ok(List(values))
+            }
+            Rule::bool => {
+                let bool_str = primary.as_str();
+
+                match bool_str {
+                    "true" => Ok(Bool(true)),
+                    "false" => Ok(Bool(false)),
+                    _ => unreachable!(),
+                }
             }
             Rule::list_access => {
                 let mut inner_pairs = primary.into_inner();
@@ -117,6 +142,10 @@ pub fn evaluate_expression(
                 let list = rhs.to_list()?;
                 Ok(Spread(list.clone()))
             }
+            Rule::invert => {
+                let rhs = rhs?.to_bool()?;
+                Ok(Bool(!rhs))
+            }
             _ => unreachable!(),
         })
         .map_postfix(|lhs, op| {
@@ -136,16 +165,72 @@ pub fn evaluate_expression(
             }
         })
         .map_infix(|lhs, op, rhs| {
-            let lhs = lhs?.to_number()?;
-            let rhs = rhs?.to_number()?;
+            let lhs = lhs?;
+            let rhs = rhs?;
 
             match op.as_rule() {
-                Rule::add => Ok(Number(lhs + rhs)),
-                Rule::subtract => Ok(Number(lhs - rhs)),
-                Rule::multiply => Ok(Number(lhs * rhs)),
-                Rule::divide => Ok(Number(lhs / rhs)),
-                Rule::modulo => Ok(Number(lhs % rhs)),
-                Rule::power => Ok(Number(lhs.powf(rhs))),
+                Rule::equal => Ok(Bool(lhs == rhs)),
+                Rule::not_equal => Ok(Bool(lhs != rhs)),
+                Rule::less => Ok(Bool(lhs < rhs)),
+                Rule::less_eq => Ok(Bool(lhs <= rhs)),
+                Rule::greater => Ok(Bool(lhs > rhs)),
+                Rule::greater_eq => Ok(Bool(lhs >= rhs)),
+                Rule::each_equal => match (lhs, rhs) {
+                    (List(lhs), List(rhs)) => Ok(Bool(
+                        lhs.len() == rhs.len() && lhs.iter().zip(rhs.iter()).all(|(l, r)| l == r),
+                    )),
+                    (List(lhs), Number(rhs)) => Ok(Bool(lhs.iter().all(|l| l == &Number(rhs)))),
+                    (List(lhs), Bool(rhs)) => Ok(Bool(lhs.iter().all(|l| l == &Bool(rhs)))),
+                    _ => Err(anyhow!(
+                        "expected two lists, a list and a number, or a list and a bool"
+                    )),
+                },
+                Rule::each_not_equal => match (lhs, rhs) {
+                    (List(lhs), List(rhs)) => Ok(Bool(
+                        lhs.len() == rhs.len() && lhs.iter().zip(rhs.iter()).all(|(l, r)| l != r),
+                    )),
+                    (List(lhs), Number(rhs)) => Ok(Bool(lhs.iter().all(|l| l != &Number(rhs)))),
+                    (List(lhs), Bool(rhs)) => Ok(Bool(lhs.iter().all(|l| l != &Bool(rhs)))),
+                    _ => Err(anyhow!(
+                        "expected two lists, a list and a number, or a list and a bool"
+                    )),
+                },
+                Rule::each_less => match (lhs, rhs) {
+                    (List(lhs), List(rhs)) => Ok(Bool(
+                        lhs.len() == rhs.len() && lhs.iter().zip(rhs.iter()).all(|(l, r)| l < r),
+                    )),
+                    (List(lhs), Number(rhs)) => Ok(Bool(lhs.iter().all(|l| l < &Number(rhs)))),
+                    _ => Err(anyhow!("expected two lists or a list and a number")),
+                },
+                Rule::each_less_eq => match (lhs, rhs) {
+                    (List(lhs), List(rhs)) => Ok(Bool(
+                        lhs.len() == rhs.len() && lhs.iter().zip(rhs.iter()).all(|(l, r)| l <= r),
+                    )),
+                    (List(lhs), Number(rhs)) => Ok(Bool(lhs.iter().all(|l| l <= &Number(rhs)))),
+                    _ => Err(anyhow!("expected two lists or a list and a number")),
+                },
+                Rule::each_greater => match (lhs, rhs) {
+                    (List(lhs), List(rhs)) => Ok(Bool(
+                        lhs.len() == rhs.len() && lhs.iter().zip(rhs.iter()).all(|(l, r)| l > r),
+                    )),
+                    (List(lhs), Number(rhs)) => Ok(Bool(lhs.iter().all(|l| l > &Number(rhs)))),
+                    _ => Err(anyhow!("expected two lists or a list and a number")),
+                },
+                Rule::each_greater_eq => match (lhs, rhs) {
+                    (List(lhs), List(rhs)) => Ok(Bool(
+                        lhs.len() == rhs.len() && lhs.iter().zip(rhs.iter()).all(|(l, r)| l >= r),
+                    )),
+                    (List(lhs), Number(rhs)) => Ok(Bool(lhs.iter().all(|l| l >= &Number(rhs)))),
+                    _ => Err(anyhow!("expected two lists or a list and a number")),
+                },
+                Rule::and => Ok(Bool(lhs.to_bool()? && rhs.to_bool()?)),
+                Rule::or => Ok(Bool(lhs.to_bool()? || rhs.to_bool()?)),
+                Rule::add => Ok(Number(lhs.to_number()? + rhs.to_number()?)),
+                Rule::subtract => Ok(Number(lhs.to_number()? - rhs.to_number()?)),
+                Rule::multiply => Ok(Number(lhs.to_number()? * rhs.to_number()?)),
+                Rule::divide => Ok(Number(lhs.to_number()? / rhs.to_number()?)),
+                Rule::modulo => Ok(Number(lhs.to_number()? % rhs.to_number()?)),
+                Rule::power => Ok(Number(lhs.to_number()?.powf(rhs.to_number()?))),
                 _ => unreachable!(),
             }
         })

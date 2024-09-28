@@ -8,6 +8,7 @@ pub enum Value {
     Number(f64),
     List(Vec<Value>),
     Spread(Vec<Value>),
+    Bool(bool),
 }
 
 impl IntoIterator for Value {
@@ -23,6 +24,15 @@ impl IntoIterator for Value {
 }
 
 impl Value {
+    pub fn get_type(&self) -> &str {
+        match self {
+            Value::Number(_) => "number",
+            Value::List(_) => "list",
+            Value::Spread(_) => "spread",
+            Value::Bool(_) => "bool",
+        }
+    }
+
     pub fn is_number(&self) -> bool {
         matches!(self, Value::Number(_))
     }
@@ -35,24 +45,59 @@ impl Value {
         matches!(self, Value::Spread(_))
     }
 
+    pub fn is_bool(&self) -> bool {
+        matches!(self, Value::Bool(_))
+    }
+
     pub fn to_number(&self) -> Result<f64> {
         match self {
             Value::Number(n) => Ok(*n),
-            _ => Err(anyhow!("expected a number, but got a list")),
+            _ => Err(anyhow!("expected a number, but got a {}", self.get_type())),
         }
     }
 
     pub fn to_list(&self) -> Result<&Vec<Value>> {
         match self {
             Value::List(l) => Ok(l),
-            _ => Err(anyhow!("expected a list, but got a number")),
+            _ => Err(anyhow!("expected a list, but got a {}", self.get_type())),
         }
     }
 
     pub fn to_spread(&self) -> Result<&Vec<Value>> {
         match self {
             Value::Spread(l) => Ok(l),
-            _ => Err(anyhow!("expected a spread, but got a number")),
+            _ => Err(anyhow!("expected a spread, but got a {}", self.get_type())),
+        }
+    }
+
+    pub fn to_bool(&self) -> Result<bool> {
+        match self {
+            Value::Bool(b) => Ok(*b),
+            _ => Err(anyhow!("expected a boolean, but got a {}", self.get_type())),
+        }
+    }
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Number(a), Value::Number(b)) => a == b,
+            (Value::List(a), Value::List(b)) => a == b,
+            (Value::Spread(a), Value::Spread(b)) => a == b,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        match (self, other) {
+            (Value::Number(a), Value::Number(b)) => a.partial_cmp(b),
+            (Value::List(a), Value::List(b)) => a.partial_cmp(b),
+            (Value::Spread(a), Value::Spread(b)) => a.partial_cmp(b),
+            (Value::Bool(a), Value::Bool(b)) => a.partial_cmp(b),
+            _ => None,
         }
     }
 }
@@ -81,6 +126,7 @@ impl Display for Value {
                 }
                 write!(f, "]")
             }
+            Value::Bool(b) => write!(f, "{}", b),
         }
     }
 }

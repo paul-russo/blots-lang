@@ -4,7 +4,7 @@ use commands::{exec_command, is_command};
 use mir_core::expressions::evaluate_expression;
 use mir_core::functions::{is_built_in_function, UserDefinedFunctionDef};
 use mir_core::parser::{get_pairs, Rule};
-use std::{collections::HashMap, time::Instant};
+use std::collections::HashMap;
 
 fn main() -> ! {
     let mut lines: Vec<String> = Vec::new();
@@ -16,16 +16,12 @@ fn main() -> ! {
         std::io::stdin().read_line(&mut line).unwrap();
         lines.push(line.clone());
 
-        let start = Instant::now();
-
         if is_command(&line.trim()) {
             exec_command(&line.trim());
             continue;
         }
 
         let pairs = get_pairs(&line);
-        let duration = start.elapsed();
-        println!("Parsing took: {:?}", duration);
 
         let outer_pair = match pairs {
             Ok(mut pairs) => {
