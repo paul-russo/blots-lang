@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -28,10 +28,10 @@ pub enum FunctionDef {
     BuiltIn(BuiltInFunctionDef),
 }
 
-pub static BUILT_IN_FUNCTION_IDENTS: [&str; 27] = [
+pub static BUILT_IN_FUNCTION_IDENTS: [&str; 28] = [
     "sqrt", "sin", "cos", "tan", "asin", "acos", "atan", "log", "log10", "exp", "abs", "floor",
     "ceil", "round", "trunc", "min", "max", "avg", "sum", "prod", "median", "len", "head", "tail",
-    "slice", "concat", "dot",
+    "slice", "concat", "dot", "unique",
 ];
 
 impl FunctionDef {
@@ -364,6 +364,22 @@ pub fn get_built_in_function_def(name: &str) -> Option<BuiltInFunctionDef> {
                         .iter()
                         .sum(),
                 ))
+            },
+        }),
+        "unique" => Some(BuiltInFunctionDef {
+            name: String::from("unique"),
+            arity: FunctionArity::Exact(1),
+            body: |args| {
+                let list = args[0].to_list()?.clone();
+                let mut unique_list = vec![];
+
+                for item in list {
+                    if !unique_list.contains(&item) {
+                        unique_list.push(item);
+                    }
+                }
+
+                Ok(Value::List(unique_list))
             },
         }),
         _ => None,
