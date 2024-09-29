@@ -143,7 +143,6 @@ dependencies = [
  "pest",
  "pest_derive",
  "serde",
- "string-interner",
 ]
 
 [[package]]
