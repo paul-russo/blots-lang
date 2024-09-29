@@ -1,12 +1,24 @@
-use std::fmt::Display;
-
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, fmt::Display};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LambdaDef {
     pub args: Vec<String>,
     pub body: String,
+    pub scope: HashMap<String, Value>,
+}
+
+impl PartialOrd for LambdaDef {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        if self.args > other.args {
+            Some(std::cmp::Ordering::Greater)
+        } else if self.args < other.args {
+            Some(std::cmp::Ordering::Less)
+        } else {
+            Some(std::cmp::Ordering::Equal)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]

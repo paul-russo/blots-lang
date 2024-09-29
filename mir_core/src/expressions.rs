@@ -92,6 +92,7 @@ pub fn evaluate_expression(
                 Ok(Value::Lambda(LambdaDef {
                     args: args.map(|arg| arg.as_str().to_string()).collect(),
                     body: body.as_str().to_string(),
+                    scope: variables.clone(),
                 }))
             }
             Rule::conditional => {
