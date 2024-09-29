@@ -40,9 +40,9 @@ pub enum FunctionDef<'a> {
 
 pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
     LazyLock::new(|| {
-        let mut map = HashMap::new();
+        let mut built_ins_map = HashMap::new();
 
-        map.insert(
+        built_ins_map.insert(
             "sqrt",
             BuiltInFunctionDef {
                 name: String::from("sqrt"),
@@ -50,7 +50,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 body: |args, _, _| Ok(Value::Number(args[0].to_number()?.sqrt())),
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "sin",
             BuiltInFunctionDef {
                 name: String::from("sin"),
@@ -58,7 +58,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 body: |args, _, _| Ok(Value::Number(args[0].to_number()?.sin())),
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "cos",
             BuiltInFunctionDef {
                 name: String::from("cos"),
@@ -66,7 +66,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 body: |args, _, _| Ok(Value::Number(args[0].to_number()?.cos())),
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "tan",
             BuiltInFunctionDef {
                 name: String::from("tan"),
@@ -74,7 +74,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 body: |args, _, _| Ok(Value::Number(args[0].to_number()?.tan())),
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "asin",
             BuiltInFunctionDef {
                 name: String::from("asin"),
@@ -82,7 +82,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 body: |args, _, _| Ok(Value::Number(args[0].to_number()?.asin())),
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "acos",
             BuiltInFunctionDef {
                 name: String::from("acos"),
@@ -90,7 +90,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 body: |args, _, _| Ok(Value::Number(args[0].to_number()?.acos())),
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "atan",
             BuiltInFunctionDef {
                 name: String::from("atan"),
@@ -98,7 +98,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 body: |args, _, _| Ok(Value::Number(args[0].to_number()?.atan())),
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "log",
             BuiltInFunctionDef {
                 name: String::from("log"),
@@ -106,7 +106,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 body: |args, _, _| Ok(Value::Number(args[0].to_number()?.ln())),
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "log10",
             BuiltInFunctionDef {
                 name: String::from("log10"),
@@ -114,7 +114,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 body: |args, _, _| Ok(Value::Number(args[0].to_number()?.log10())),
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "exp",
             BuiltInFunctionDef {
                 name: String::from("exp"),
@@ -122,7 +122,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 body: |args, _, _| Ok(Value::Number(args[0].to_number()?.exp())),
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "abs",
             BuiltInFunctionDef {
                 name: String::from("abs"),
@@ -130,7 +130,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 body: |args, _, _| Ok(Value::Number(args[0].to_number()?.abs())),
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "floor",
             BuiltInFunctionDef {
                 name: String::from("floor"),
@@ -138,7 +138,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 body: |args, _, _| Ok(Value::Number(args[0].to_number()?.floor())),
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "ceil",
             BuiltInFunctionDef {
                 name: String::from("ceil"),
@@ -146,7 +146,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 body: |args, _, _| Ok(Value::Number(args[0].to_number()?.ceil())),
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "round",
             BuiltInFunctionDef {
                 name: String::from("round"),
@@ -154,7 +154,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 body: |args, _, _| Ok(Value::Number(args[0].to_number()?.round())),
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "trunc",
             BuiltInFunctionDef {
                 name: String::from("trunc"),
@@ -162,7 +162,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 body: |args, _, _| Ok(Value::Number(args[0].to_number()?.trunc())),
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "min",
             BuiltInFunctionDef {
                 name: String::from("min"),
@@ -179,7 +179,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 },
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "max",
             BuiltInFunctionDef {
                 name: String::from("max"),
@@ -196,7 +196,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 },
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "avg",
             BuiltInFunctionDef {
                 name: String::from("avg"),
@@ -213,7 +213,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 },
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "sum",
             BuiltInFunctionDef {
                 name: String::from("sum"),
@@ -229,7 +229,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 },
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "prod",
             BuiltInFunctionDef {
                 name: String::from("prod"),
@@ -245,7 +245,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 },
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "median",
             BuiltInFunctionDef {
                 name: String::from("median"),
@@ -266,7 +266,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 },
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "range",
             BuiltInFunctionDef {
                 name: String::from("range"),
@@ -279,7 +279,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 },
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "len",
             BuiltInFunctionDef {
                 name: String::from("len"),
@@ -287,7 +287,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 body: |args, _, _| Ok(Value::Number(args[0].to_list()?.len() as f64)),
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "head",
             BuiltInFunctionDef {
                 name: String::from("head"),
@@ -301,7 +301,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 },
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "tail",
             BuiltInFunctionDef {
                 name: String::from("tail"),
@@ -312,7 +312,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 },
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "slice",
             BuiltInFunctionDef {
                 name: String::from("slice"),
@@ -326,7 +326,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 },
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "concat",
             BuiltInFunctionDef {
                 name: String::from("concat"),
@@ -347,7 +347,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 },
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "dot",
             BuiltInFunctionDef {
                 name: String::from("dot"),
@@ -377,7 +377,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 },
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "unique",
             BuiltInFunctionDef {
                 name: String::from("unique"),
@@ -396,7 +396,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 },
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "map",
             BuiltInFunctionDef {
                 name: String::from("map"),
@@ -421,7 +421,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 },
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "reduce",
             BuiltInFunctionDef {
                 name: String::from("reduce"),
@@ -447,7 +447,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 },
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "filter",
             BuiltInFunctionDef {
                 name: String::from("filter"),
@@ -477,7 +477,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 },
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "every",
             BuiltInFunctionDef {
                 name: String::from("every"),
@@ -506,7 +506,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 },
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "some",
             BuiltInFunctionDef {
                 name: String::from("some"),
@@ -535,7 +535,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 },
             },
         );
-        map.insert(
+        built_ins_map.insert(
             "none",
             BuiltInFunctionDef {
                 name: String::from("none"),
@@ -565,7 +565,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             },
         );
 
-        map
+        built_ins_map
     });
 
 pub static BUILT_IN_FUNCTION_IDENTS: LazyLock<Vec<&str>> =
@@ -676,12 +676,33 @@ impl<'a> FunctionDef<'a> {
                 args: expected_args,
                 body,
                 ..
-            })
-            | FunctionDef::Lambda(LambdaDef {
-                args: expected_args,
-                body,
             }) => {
                 let mut new_variables = variables.clone();
+                for (arg, value) in expected_args.iter().zip(args.iter()) {
+                    new_variables.insert(arg.clone(), value.clone());
+                }
+
+                evaluate_expression(
+                    parsed_body
+                        .unwrap_or_else(|| get_pairs(body))?
+                        .next()
+                        .unwrap()
+                        .into_inner(),
+                    &new_variables,
+                    function_defs,
+                )
+            }
+            FunctionDef::Lambda(LambdaDef {
+                args: expected_args,
+                body,
+                scope,
+            }) => {
+                let mut new_variables = variables.clone();
+
+                for (var, val) in scope.iter() {
+                    new_variables.insert(var.clone(), val.clone());
+                }
+
                 for (arg, value) in expected_args.iter().zip(args.iter()) {
                     new_variables.insert(arg.clone(), value.clone());
                 }
