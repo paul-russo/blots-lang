@@ -1,7 +1,10 @@
 use crate::{
     functions::{get_function_def, UserDefinedFunctionDef},
     parser::Rule,
-    values::Value::{self, Bool, List, Number, Spread},
+    values::{
+        LambdaDef,
+        Value::{self, Bool, List, Number, Spread},
+    },
 };
 use anyhow::{anyhow, Ok, Result};
 use pest::{
@@ -81,6 +84,16 @@ pub fn evaluate_expression(
                     _ => unreachable!(),
                 }
             }
+            Rule::lambda => {
+                let mut inner_pairs = primary.into_inner();
+                let args = inner_pairs.next().unwrap().into_inner();
+                let body = inner_pairs.next().unwrap().into_inner();
+
+                Ok(Value::Lambda(LambdaDef {
+                    args: args.map(|arg| arg.as_str().to_string()).collect(),
+                    body: body.as_str().to_string(),
+                }))
+            }
             Rule::conditional => {
                 let mut inner_pairs = primary.into_inner();
                 let condition_expr = inner_pairs.next().unwrap();
@@ -140,8 +153,8 @@ pub fn evaluate_expression(
                 let call_list_entries = call_list.into_inner();
                 let args = collect_list(call_list_entries, variables, function_defs)?;
 
-                if let Some(def) = get_function_def(ident, function_defs) {
-                    return def.call(args, variables, function_defs);
+                if let Some(def) = get_function_def(ident, variables, function_defs) {
+                    return def.call(args, variables, function_defs, None);
                 }
 
                 Err(anyhow!("unknown function: {}", ident))

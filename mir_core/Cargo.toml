@@ -8,3 +8,4 @@ anyhow = "1.0.86"
 pest = "2.4.0"
 pest_derive = "2.4.0"
 serde = { version = "1.0.209", features = ["derive"] }
+string-interner = "0.17.0"

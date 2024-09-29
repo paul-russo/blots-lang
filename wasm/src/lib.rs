@@ -1,5 +1,3 @@
-mod log;
-
 use mir_core::{
     expressions::evaluate_expression,
     functions::{is_built_in_function, UserDefinedFunctionDef, BUILT_IN_FUNCTION_IDENTS},
@@ -9,14 +7,6 @@ use mir_core::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
-
-#[wasm_bindgen]
-extern "C" {
-    // Use `js_namespace` here to bind `console.log(..)` instead of just
-    // `log(..)`
-    #[wasm_bindgen(js_namespace = console)]
-    fn log(s: &str);
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct EvaluationResult {
@@ -151,7 +141,12 @@ pub fn tokenize(input: &str) -> Result<JsValue, JsError> {
 
 #[wasm_bindgen]
 pub fn get_built_in_function_names() -> Result<JsValue, JsError> {
-    Ok(serde_wasm_bindgen::to_value(&BUILT_IN_FUNCTION_IDENTS)?)
+    Ok(serde_wasm_bindgen::to_value(
+        &(BUILT_IN_FUNCTION_IDENTS
+            .iter()
+            .cloned()
+            .collect::<Vec<&str>>()),
+    )?)
 }
 
 #[wasm_bindgen]

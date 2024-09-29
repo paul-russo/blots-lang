@@ -3,12 +3,19 @@ use std::fmt::Display;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
+pub struct LambdaDef {
+    pub args: Vec<String>,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
 pub enum Value {
     Number(f64),
     List(Vec<Value>),
     Spread(Vec<Value>),
     Bool(bool),
+    Lambda(LambdaDef),
 }
 
 impl IntoIterator for Value {
@@ -30,6 +37,7 @@ impl Value {
             Value::List(_) => "list",
             Value::Spread(_) => "spread",
             Value::Bool(_) => "bool",
+            Value::Lambda(_) => "lambda",
         }
     }
 
@@ -47,6 +55,10 @@ impl Value {
 
     pub fn is_bool(&self) -> bool {
         matches!(self, Value::Bool(_))
+    }
+
+    pub fn is_lambda(&self) -> bool {
+        matches!(self, Value::Lambda(_))
     }
 
     pub fn to_number(&self) -> Result<f64> {
@@ -76,28 +88,11 @@ impl Value {
             _ => Err(anyhow!("expected a boolean, but got a {}", self.get_type())),
         }
     }
-}
 
-impl PartialEq for Value {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Value::Number(a), Value::Number(b)) => a == b,
-            (Value::List(a), Value::List(b)) => a == b,
-            (Value::Spread(a), Value::Spread(b)) => a == b,
-            (Value::Bool(a), Value::Bool(b)) => a == b,
-            _ => false,
-        }
-    }
-}
-
-impl PartialOrd for Value {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        match (self, other) {
-            (Value::Number(a), Value::Number(b)) => a.partial_cmp(b),
-            (Value::List(a), Value::List(b)) => a.partial_cmp(b),
-            (Value::Spread(a), Value::Spread(b)) => a.partial_cmp(b),
-            (Value::Bool(a), Value::Bool(b)) => a.partial_cmp(b),
-            _ => None,
+    pub fn to_lambda(&self) -> Result<&LambdaDef> {
+        match self {
+            Value::Lambda(def) => Ok(def),
+            _ => Err(anyhow!("expected a lambda, but got a {}", self.get_type())),
         }
     }
 }
@@ -127,6 +122,16 @@ impl Display for Value {
                 write!(f, "]")
             }
             Value::Bool(b) => write!(f, "{}", b),
+            Value::Lambda(def) => {
+                write!(f, "(")?;
+                for (i, arg) in def.args.iter().enumerate() {
+                    write!(f, "{}", arg)?;
+                    if i < def.args.len() - 1 {
+                        write!(f, ", ")?;
+                    }
+                }
+                write!(f, ") => {}", def.body)
+            }
         }
     }
 }
