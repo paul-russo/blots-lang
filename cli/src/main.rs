@@ -5,6 +5,7 @@ use mir_core::expressions::evaluate_expression;
 use mir_core::functions::{is_built_in_function, UserDefinedFunctionDef};
 use mir_core::parser::{get_pairs, Rule};
 use std::collections::HashMap;
+use std::time::Instant;
 
 fn main() -> ! {
     let mut lines: Vec<String> = Vec::new();
@@ -39,6 +40,7 @@ fn main() -> ! {
                 let mut inner_pairs = outer_pair.into_inner();
                 let ident = inner_pairs.next().unwrap().as_str();
                 let expression = inner_pairs.next().unwrap();
+                let now = Instant::now();
                 let result =
                     evaluate_expression(expression.into_inner(), &variables, &function_defs);
 
@@ -49,8 +51,14 @@ fn main() -> ! {
                     }
                     Err(error) => println!("Evaluation error: {}", error),
                 }
+
+                println!(
+                    "evaluation took: {}ms",
+                    (now.elapsed().as_micros() as f64) / 1000.0
+                );
             }
             Rule::expression => {
+                let now = Instant::now();
                 let result =
                     evaluate_expression(outer_pair.into_inner(), &variables, &function_defs);
 
@@ -58,6 +66,11 @@ fn main() -> ! {
                     Ok(value) => println!("= {}", value),
                     Err(error) => println!("Evaluation error: {}", error),
                 }
+
+                println!(
+                    "evaluation took: {}ms",
+                    (now.elapsed().as_micros() as f64) / 1000.0
+                );
             }
             Rule::function_definition => {
                 let mut inner_pairs = outer_pair.into_inner();

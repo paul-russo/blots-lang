@@ -5,6 +5,10 @@ integer = _{ ("+" | "-")? ~ ASCII_DIGIT+ }
 
 bool = { "true" | "false" }
 
+lambda              = ${ argument_list ~ WHITESPACE* ~ "=>" ~ WHITESPACE* ~ expression }
+argument_list       = !{ "(" ~ (identifier ~ ("," ~ identifier)*)? ~ ")" }
+function_definition = ${ identifier ~ argument_list ~ WHITESPACE* ~ "=" ~ WHITESPACE* ~ expression }
+
 identifier      = @{ ASCII_ALPHA+ ~ identifier_rest* }
 identifier_rest = _{ ASCII_ALPHA+ | ASCII_DIGIT+ | "_"+ }
 
@@ -27,8 +31,8 @@ each_less_eq    =  { "[<=]" }
 each_less       =  { "[<]" }
 each_greater_eq =  { "[>=]" }
 each_greater    =  { "[>]" }
-and             =  { "&&" }
-or              =  { "||" }
+and             =  { "and" | "&&" }
+or              =  { "or" | "||" }
 
 prefix_op = _{ negation | invert }
 negation  =  { "-" }
@@ -51,12 +55,9 @@ conditional = ${ "if" ~ WHITESPACE+ ~ expression ~ WHITESPACE+ ~ "then" ~ WHITES
 
 expression        = ${ prefix_op* ~ term ~ postfix_op* ~ (WHITESPACE* ~ infix_op ~ WHITESPACE* ~ prefix_op* ~ term ~ postfix_op*)* }
 nested_expression = _{ "(" ~ WHITESPACE* ~ expression ~ WHITESPACE* ~ ")" }
-term              = _{ conditional | function_call | list | list_access | bool | identifier | number | nested_expression }
+term              = _{ conditional | function_call | lambda | list | list_access | bool | identifier | number | nested_expression }
 
 assignment = !{ identifier ~ "=" ~ expression }
-
-argument_list       = !{ "(" ~ (identifier ~ ("," ~ identifier)*)? ~ ")" }
-function_definition = ${ identifier ~ argument_list ~ WHITESPACE* ~ "=" ~ WHITESPACE* ~ expression }
 
 comment = { ("#" | "//") ~ (!"\n" ~ ANY)* }
 

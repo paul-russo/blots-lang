@@ -1,9 +1,14 @@
-use std::collections::{HashMap, HashSet};
+use std::{collections::HashMap, sync::LazyLock};
 
 use anyhow::{anyhow, Result};
+use pest::iterators::Pairs;
 use serde::{Deserialize, Serialize};
 
-use crate::{expressions::evaluate_expression, parser::get_pairs, values::Value};
+use crate::{
+    expressions::evaluate_expression,
+    parser::{get_pairs, Rule},
+    values::{LambdaDef, Value},
+};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UserDefinedFunctionDef {
@@ -20,21 +25,553 @@ pub enum FunctionArity {
 pub struct BuiltInFunctionDef {
     pub name: String,
     pub arity: FunctionArity,
-    pub body: fn(Vec<Value>) -> Result<Value>,
+    pub body: fn(
+        args: Vec<Value>,
+        variables: &HashMap<String, Value>,
+        function_defs: &HashMap<String, UserDefinedFunctionDef>,
+    ) -> Result<Value>,
 }
 
-pub enum FunctionDef {
-    UserDefined(UserDefinedFunctionDef),
-    BuiltIn(BuiltInFunctionDef),
+pub enum FunctionDef<'a> {
+    UserDefined(&'a UserDefinedFunctionDef),
+    BuiltIn(&'a BuiltInFunctionDef),
+    Lambda(&'a LambdaDef),
 }
 
-pub static BUILT_IN_FUNCTION_IDENTS: [&str; 28] = [
-    "sqrt", "sin", "cos", "tan", "asin", "acos", "atan", "log", "log10", "exp", "abs", "floor",
-    "ceil", "round", "trunc", "min", "max", "avg", "sum", "prod", "median", "len", "head", "tail",
-    "slice", "concat", "dot", "unique",
-];
+pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
+    LazyLock::new(|| {
+        let mut map = HashMap::new();
 
-impl FunctionDef {
+        map.insert(
+            "sqrt",
+            BuiltInFunctionDef {
+                name: String::from("sqrt"),
+                arity: FunctionArity::Exact(1),
+                body: |args, _, _| Ok(Value::Number(args[0].to_number()?.sqrt())),
+            },
+        );
+        map.insert(
+            "sin",
+            BuiltInFunctionDef {
+                name: String::from("sin"),
+                arity: FunctionArity::Exact(1),
+                body: |args, _, _| Ok(Value::Number(args[0].to_number()?.sin())),
+            },
+        );
+        map.insert(
+            "cos",
+            BuiltInFunctionDef {
+                name: String::from("cos"),
+                arity: FunctionArity::Exact(1),
+                body: |args, _, _| Ok(Value::Number(args[0].to_number()?.cos())),
+            },
+        );
+        map.insert(
+            "tan",
+            BuiltInFunctionDef {
+                name: String::from("tan"),
+                arity: FunctionArity::Exact(1),
+                body: |args, _, _| Ok(Value::Number(args[0].to_number()?.tan())),
+            },
+        );
+        map.insert(
+            "asin",
+            BuiltInFunctionDef {
+                name: String::from("asin"),
+                arity: FunctionArity::Exact(1),
+                body: |args, _, _| Ok(Value::Number(args[0].to_number()?.asin())),
+            },
+        );
+        map.insert(
+            "acos",
+            BuiltInFunctionDef {
+                name: String::from("acos"),
+                arity: FunctionArity::Exact(1),
+                body: |args, _, _| Ok(Value::Number(args[0].to_number()?.acos())),
+            },
+        );
+        map.insert(
+            "atan",
+            BuiltInFunctionDef {
+                name: String::from("atan"),
+                arity: FunctionArity::Exact(1),
+                body: |args, _, _| Ok(Value::Number(args[0].to_number()?.atan())),
+            },
+        );
+        map.insert(
+            "log",
+            BuiltInFunctionDef {
+                name: String::from("log"),
+                arity: FunctionArity::Exact(1),
+                body: |args, _, _| Ok(Value::Number(args[0].to_number()?.ln())),
+            },
+        );
+        map.insert(
+            "log10",
+            BuiltInFunctionDef {
+                name: String::from("log10"),
+                arity: FunctionArity::Exact(1),
+                body: |args, _, _| Ok(Value::Number(args[0].to_number()?.log10())),
+            },
+        );
+        map.insert(
+            "exp",
+            BuiltInFunctionDef {
+                name: String::from("exp"),
+                arity: FunctionArity::Exact(1),
+                body: |args, _, _| Ok(Value::Number(args[0].to_number()?.exp())),
+            },
+        );
+        map.insert(
+            "abs",
+            BuiltInFunctionDef {
+                name: String::from("abs"),
+                arity: FunctionArity::Exact(1),
+                body: |args, _, _| Ok(Value::Number(args[0].to_number()?.abs())),
+            },
+        );
+        map.insert(
+            "floor",
+            BuiltInFunctionDef {
+                name: String::from("floor"),
+                arity: FunctionArity::Exact(1),
+                body: |args, _, _| Ok(Value::Number(args[0].to_number()?.floor())),
+            },
+        );
+        map.insert(
+            "ceil",
+            BuiltInFunctionDef {
+                name: String::from("ceil"),
+                arity: FunctionArity::Exact(1),
+                body: |args, _, _| Ok(Value::Number(args[0].to_number()?.ceil())),
+            },
+        );
+        map.insert(
+            "round",
+            BuiltInFunctionDef {
+                name: String::from("round"),
+                arity: FunctionArity::Exact(1),
+                body: |args, _, _| Ok(Value::Number(args[0].to_number()?.round())),
+            },
+        );
+        map.insert(
+            "trunc",
+            BuiltInFunctionDef {
+                name: String::from("trunc"),
+                arity: FunctionArity::Exact(1),
+                body: |args, _, _| Ok(Value::Number(args[0].to_number()?.trunc())),
+            },
+        );
+        map.insert(
+            "min",
+            BuiltInFunctionDef {
+                name: String::from("min"),
+                arity: FunctionArity::AtLeast(2),
+                body: |args, _, _| {
+                    Ok(Value::Number(
+                        args.iter()
+                            .map(|a| a.to_number())
+                            .collect::<Result<Vec<f64>>>()?
+                            .iter()
+                            .copied()
+                            .fold(f64::INFINITY, f64::min),
+                    ))
+                },
+            },
+        );
+        map.insert(
+            "max",
+            BuiltInFunctionDef {
+                name: String::from("max"),
+                arity: FunctionArity::AtLeast(2),
+                body: |args, _, _| {
+                    Ok(Value::Number(
+                        args.iter()
+                            .map(|a| a.to_number())
+                            .collect::<Result<Vec<f64>>>()?
+                            .iter()
+                            .copied()
+                            .fold(f64::NEG_INFINITY, f64::max),
+                    ))
+                },
+            },
+        );
+        map.insert(
+            "avg",
+            BuiltInFunctionDef {
+                name: String::from("avg"),
+                arity: FunctionArity::AtLeast(2),
+                body: |args, _, _| {
+                    Ok(Value::Number(
+                        args.iter()
+                            .map(|a| a.to_number())
+                            .collect::<Result<Vec<f64>>>()?
+                            .iter()
+                            .sum::<f64>()
+                            / args.len() as f64,
+                    ))
+                },
+            },
+        );
+        map.insert(
+            "sum",
+            BuiltInFunctionDef {
+                name: String::from("sum"),
+                arity: FunctionArity::AtLeast(2),
+                body: |args, _, _| {
+                    Ok(Value::Number(
+                        args.iter()
+                            .map(|a| a.to_number())
+                            .collect::<Result<Vec<f64>>>()?
+                            .iter()
+                            .sum(),
+                    ))
+                },
+            },
+        );
+        map.insert(
+            "prod",
+            BuiltInFunctionDef {
+                name: String::from("prod"),
+                arity: FunctionArity::AtLeast(2),
+                body: |args, _, _| {
+                    Ok(Value::Number(
+                        args.iter()
+                            .map(|a| a.to_number())
+                            .collect::<Result<Vec<f64>>>()?
+                            .iter()
+                            .product(),
+                    ))
+                },
+            },
+        );
+        map.insert(
+            "median",
+            BuiltInFunctionDef {
+                name: String::from("median"),
+                arity: FunctionArity::AtLeast(2),
+                body: |args, _, _| {
+                    let mut nums = args
+                        .into_iter()
+                        .map(|a| a.to_number())
+                        .collect::<Result<Vec<f64>>>()?;
+
+                    nums.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    let len = nums.len();
+                    if len % 2 == 0 {
+                        Ok(Value::Number((nums[len / 2 - 1] + nums[len / 2]) / 2.0))
+                    } else {
+                        Ok(Value::Number(nums[len / 2]))
+                    }
+                },
+            },
+        );
+        map.insert(
+            "range",
+            BuiltInFunctionDef {
+                name: String::from("range"),
+                arity: FunctionArity::Exact(1),
+                body: |args, _, _| {
+                    let n = args[0].to_number()? as i64;
+                    Ok(Value::List(
+                        (0..n).map(|e| Value::Number(e as f64)).collect(),
+                    ))
+                },
+            },
+        );
+        map.insert(
+            "len",
+            BuiltInFunctionDef {
+                name: String::from("len"),
+                arity: FunctionArity::Exact(1),
+                body: |args, _, _| Ok(Value::Number(args[0].to_list()?.len() as f64)),
+            },
+        );
+        map.insert(
+            "head",
+            BuiltInFunctionDef {
+                name: String::from("head"),
+                arity: FunctionArity::Exact(1),
+                body: |args, _, _| {
+                    Ok(args[0]
+                        .to_list()?
+                        .first()
+                        .cloned()
+                        .unwrap_or(Value::List(vec![])))
+                },
+            },
+        );
+        map.insert(
+            "tail",
+            BuiltInFunctionDef {
+                name: String::from("tail"),
+                arity: FunctionArity::Exact(1),
+                body: |args, _, _| {
+                    let list = args[0].to_list()?;
+                    Ok(Value::List(list.iter().skip(1).cloned().collect()))
+                },
+            },
+        );
+        map.insert(
+            "slice",
+            BuiltInFunctionDef {
+                name: String::from("slice"),
+                arity: FunctionArity::Exact(3),
+                body: |args, _, _| {
+                    let list = args[0].to_list()?;
+                    let start = args[1].to_number()? as usize;
+                    let end = args[2].to_number()? as usize;
+
+                    Ok(Value::List(list[start..end].to_vec()))
+                },
+            },
+        );
+        map.insert(
+            "concat",
+            BuiltInFunctionDef {
+                name: String::from("concat"),
+                arity: FunctionArity::AtLeast(2),
+                body: |args, _, _| {
+                    let mut list = vec![];
+                    for arg in args {
+                        match arg {
+                            Value::List(l) => list.extend(l),
+                            Value::Number(_) => list.push(arg),
+                            Value::Spread(l) => list.extend(l),
+                            Value::Bool(_) => list.push(arg),
+                            Value::Lambda(_) => list.push(arg),
+                        }
+                    }
+
+                    Ok(Value::List(list))
+                },
+            },
+        );
+        map.insert(
+            "dot",
+            BuiltInFunctionDef {
+                name: String::from("dot"),
+                arity: FunctionArity::Exact(2),
+                body: |args, _, _| {
+                    let a = args[0].to_list()?;
+                    let b = args[1].to_list()?;
+
+                    if a.len() != b.len() {
+                        return Err(anyhow!(
+                            "cannot calculate dot product of lists with different lengths"
+                        ));
+                    }
+
+                    Ok(Value::Number(
+                        a.iter()
+                            .zip(b.iter())
+                            .map(|(a, b)| {
+                                let a_num = a.to_number()?;
+                                let b_num = b.to_number()?;
+                                Ok(a_num * b_num)
+                            })
+                            .collect::<Result<Vec<f64>>>()?
+                            .iter()
+                            .sum(),
+                    ))
+                },
+            },
+        );
+        map.insert(
+            "unique",
+            BuiltInFunctionDef {
+                name: String::from("unique"),
+                arity: FunctionArity::Exact(1),
+                body: |args, _, _| {
+                    let list = args[0].to_list()?.clone();
+                    let mut unique_list = vec![];
+
+                    for item in list {
+                        if !unique_list.contains(&item) {
+                            unique_list.push(item);
+                        }
+                    }
+
+                    Ok(Value::List(unique_list))
+                },
+            },
+        );
+        map.insert(
+            "map",
+            BuiltInFunctionDef {
+                name: String::from("map"),
+                arity: FunctionArity::Exact(2),
+                body: |args, variables, function_defs| {
+                    let lambda = FunctionDef::Lambda(args[0].to_lambda()?);
+                    let parsed_body = lambda.get_parsed_body();
+
+                    let list = args[1].to_list()?;
+                    let mut new_list = vec![];
+
+                    for item in list {
+                        new_list.push(lambda.call(
+                            vec![item.clone()],
+                            variables,
+                            function_defs,
+                            parsed_body.clone(),
+                        )?);
+                    }
+
+                    Ok(Value::List(new_list))
+                },
+            },
+        );
+        map.insert(
+            "reduce",
+            BuiltInFunctionDef {
+                name: String::from("reduce"),
+                arity: FunctionArity::Exact(3),
+                body: |args, variables, function_defs| {
+                    let lambda = FunctionDef::Lambda(args[0].to_lambda()?);
+                    let parsed_body = lambda.get_parsed_body();
+
+                    let list = args[1].to_list()?;
+                    let initial = args[2].clone();
+
+                    let mut acc = initial;
+                    for item in list {
+                        acc = lambda.call(
+                            vec![acc, item.clone()],
+                            variables,
+                            function_defs,
+                            parsed_body.clone(),
+                        )?;
+                    }
+
+                    Ok(acc)
+                },
+            },
+        );
+        map.insert(
+            "filter",
+            BuiltInFunctionDef {
+                name: String::from("filter"),
+                arity: FunctionArity::Exact(2),
+                body: |args, variables, function_defs| {
+                    let lambda = FunctionDef::Lambda(args[0].to_lambda()?);
+                    let parsed_body = lambda.get_parsed_body();
+
+                    let list = args[1].to_list()?;
+                    let mut new_list = vec![];
+
+                    for item in list {
+                        if lambda
+                            .call(
+                                vec![item.clone()],
+                                variables,
+                                function_defs,
+                                parsed_body.clone(),
+                            )?
+                            .to_bool()?
+                        {
+                            new_list.push(item.clone());
+                        }
+                    }
+
+                    Ok(Value::List(new_list))
+                },
+            },
+        );
+        map.insert(
+            "every",
+            BuiltInFunctionDef {
+                name: String::from("every"),
+                arity: FunctionArity::Exact(2),
+                body: |args, variables, function_defs| {
+                    let lambda = FunctionDef::Lambda(args[0].to_lambda()?);
+                    let parsed_body = lambda.get_parsed_body();
+
+                    let list = args[1].to_list()?;
+
+                    for item in list {
+                        if !lambda
+                            .call(
+                                vec![item.clone()],
+                                variables,
+                                function_defs,
+                                parsed_body.clone(),
+                            )?
+                            .to_bool()?
+                        {
+                            return Ok(Value::Bool(false));
+                        }
+                    }
+
+                    Ok(Value::Bool(true))
+                },
+            },
+        );
+        map.insert(
+            "some",
+            BuiltInFunctionDef {
+                name: String::from("some"),
+                arity: FunctionArity::Exact(2),
+                body: |args, variables, function_defs| {
+                    let lambda = FunctionDef::Lambda(args[0].to_lambda()?);
+                    let parsed_body = lambda.get_parsed_body();
+
+                    let list = args[1].to_list()?;
+
+                    for item in list {
+                        if lambda
+                            .call(
+                                vec![item.clone()],
+                                variables,
+                                function_defs,
+                                parsed_body.clone(),
+                            )?
+                            .to_bool()?
+                        {
+                            return Ok(Value::Bool(true));
+                        }
+                    }
+
+                    Ok(Value::Bool(false))
+                },
+            },
+        );
+        map.insert(
+            "none",
+            BuiltInFunctionDef {
+                name: String::from("none"),
+                arity: FunctionArity::Exact(2),
+                body: |args, variables, function_defs| {
+                    let lambda = FunctionDef::Lambda(args[0].to_lambda()?);
+                    let parsed_body = lambda.get_parsed_body();
+
+                    let list = args[1].to_list()?;
+
+                    for item in list {
+                        if lambda
+                            .call(
+                                vec![item.clone()],
+                                variables,
+                                function_defs,
+                                parsed_body.clone(),
+                            )?
+                            .to_bool()?
+                        {
+                            return Ok(Value::Bool(false));
+                        }
+                    }
+
+                    Ok(Value::Bool(true))
+                },
+            },
+        );
+
+        map
+    });
+
+pub static BUILT_IN_FUNCTION_IDENTS: LazyLock<Vec<&str>> =
+    LazyLock::new(|| BUILT_IN_FUNCTION_DEFS.keys().copied().collect());
+
+impl<'a> FunctionDef<'a> {
     pub fn check_arity(&self, arg_count: usize) -> Result<()> {
         match self {
             FunctionDef::UserDefined(UserDefinedFunctionDef {
@@ -91,6 +628,37 @@ impl FunctionDef {
                     }
                 }
             },
+            FunctionDef::Lambda(LambdaDef { args, .. }) => {
+                if arg_count == args.len() {
+                    Ok(())
+                } else {
+                    let expected_args = if args.len() == 1 {
+                        "1 argument".to_string()
+                    } else {
+                        format!("{} arguments", args.len())
+                    };
+
+                    let given_args = if arg_count == 1 {
+                        "1 was given".to_string()
+                    } else {
+                        format!("{} were given", arg_count)
+                    };
+
+                    Err(anyhow!(
+                        "lambda takes {}, but {}",
+                        expected_args,
+                        given_args
+                    ))
+                }
+            }
+        }
+    }
+
+    pub fn get_parsed_body(&self) -> Option<Result<Pairs<Rule>, pest::error::Error<Rule>>> {
+        match self {
+            FunctionDef::UserDefined(UserDefinedFunctionDef { body, .. }) => Some(get_pairs(body)),
+            FunctionDef::BuiltIn(_) => None,
+            FunctionDef::Lambda(LambdaDef { body, .. }) => Some(get_pairs(body)),
         }
     }
 
@@ -99,6 +667,7 @@ impl FunctionDef {
         args: Vec<Value>,
         variables: &HashMap<String, Value>,
         function_defs: &HashMap<String, UserDefinedFunctionDef>,
+        parsed_body: Option<Result<Pairs<Rule>, pest::error::Error<Rule>>>,
     ) -> Result<Value> {
         self.check_arity(args.len())?;
 
@@ -107,6 +676,10 @@ impl FunctionDef {
                 args: expected_args,
                 body,
                 ..
+            })
+            | FunctionDef::Lambda(LambdaDef {
+                args: expected_args,
+                body,
             }) => {
                 let mut new_variables = variables.clone();
                 for (arg, value) in expected_args.iter().zip(args.iter()) {
@@ -114,288 +687,42 @@ impl FunctionDef {
                 }
 
                 evaluate_expression(
-                    get_pairs(body)?.next().unwrap().into_inner(),
+                    parsed_body
+                        .unwrap_or_else(|| get_pairs(body))?
+                        .next()
+                        .unwrap()
+                        .into_inner(),
                     &new_variables,
                     function_defs,
                 )
             }
-            FunctionDef::BuiltIn(BuiltInFunctionDef { body, .. }) => body(args),
+            FunctionDef::BuiltIn(BuiltInFunctionDef { body, .. }) => {
+                body(args, variables, function_defs)
+            }
         }
     }
 }
 
-pub fn get_built_in_function_def(name: &str) -> Option<BuiltInFunctionDef> {
-    match name {
-        "sqrt" => Some(BuiltInFunctionDef {
-            name: String::from("sqrt"),
-            arity: FunctionArity::Exact(1),
-            body: |args| Ok(Value::Number(args[0].to_number()?.sqrt())),
-        }),
-        "sin" => Some(BuiltInFunctionDef {
-            name: String::from("sin"),
-            arity: FunctionArity::Exact(1),
-            body: |args| Ok(Value::Number(args[0].to_number()?.sin())),
-        }),
-        "cos" => Some(BuiltInFunctionDef {
-            name: String::from("cos"),
-            arity: FunctionArity::Exact(1),
-            body: |args| Ok(Value::Number(args[0].to_number()?.cos())),
-        }),
-        "tan" => Some(BuiltInFunctionDef {
-            name: String::from("tan"),
-            arity: FunctionArity::Exact(1),
-            body: |args| Ok(Value::Number(args[0].to_number()?.tan())),
-        }),
-        "asin" => Some(BuiltInFunctionDef {
-            name: String::from("asin"),
-            arity: FunctionArity::Exact(1),
-            body: |args| Ok(Value::Number(args[0].to_number()?.asin())),
-        }),
-        "acos" => Some(BuiltInFunctionDef {
-            name: String::from("acos"),
-            arity: FunctionArity::Exact(1),
-            body: |args| Ok(Value::Number(args[0].to_number()?.acos())),
-        }),
-        "atan" => Some(BuiltInFunctionDef {
-            name: String::from("atan"),
-            arity: FunctionArity::Exact(1),
-            body: |args| Ok(Value::Number(args[0].to_number()?.atan())),
-        }),
-        "log" => Some(BuiltInFunctionDef {
-            name: String::from("log"),
-            arity: FunctionArity::Exact(1),
-            body: |args| Ok(Value::Number(args[0].to_number()?.ln())),
-        }),
-        "log10" => Some(BuiltInFunctionDef {
-            name: String::from("log10"),
-            arity: FunctionArity::Exact(1),
-            body: |args| Ok(Value::Number(args[0].to_number()?.log10())),
-        }),
-        "exp" => Some(BuiltInFunctionDef {
-            name: String::from("exp"),
-            arity: FunctionArity::Exact(1),
-            body: |args| Ok(Value::Number(args[0].to_number()?.exp())),
-        }),
-        "abs" => Some(BuiltInFunctionDef {
-            name: String::from("abs"),
-            arity: FunctionArity::Exact(1),
-            body: |args| Ok(Value::Number(args[0].to_number()?.abs())),
-        }),
-        "floor" => Some(BuiltInFunctionDef {
-            name: String::from("floor"),
-            arity: FunctionArity::Exact(1),
-            body: |args| Ok(Value::Number(args[0].to_number()?.floor())),
-        }),
-        "ceil" => Some(BuiltInFunctionDef {
-            name: String::from("ceil"),
-            arity: FunctionArity::Exact(1),
-            body: |args| Ok(Value::Number(args[0].to_number()?.ceil())),
-        }),
-        "round" => Some(BuiltInFunctionDef {
-            name: String::from("round"),
-            arity: FunctionArity::Exact(1),
-            body: |args| Ok(Value::Number(args[0].to_number()?.round())),
-        }),
-        "trunc" => Some(BuiltInFunctionDef {
-            name: String::from("trunc"),
-            arity: FunctionArity::Exact(1),
-            body: |args| Ok(Value::Number(args[0].to_number()?.trunc())),
-        }),
-        "min" => Some(BuiltInFunctionDef {
-            name: String::from("min"),
-            arity: FunctionArity::AtLeast(2),
-            body: |args| {
-                Ok(Value::Number(
-                    args.iter()
-                        .map(|a| a.to_number())
-                        .collect::<Result<Vec<f64>>>()?
-                        .iter()
-                        .copied()
-                        .fold(f64::INFINITY, f64::min),
-                ))
-            },
-        }),
-        "max" => Some(BuiltInFunctionDef {
-            name: String::from("max"),
-            arity: FunctionArity::AtLeast(2),
-            body: |args| {
-                Ok(Value::Number(
-                    args.iter()
-                        .map(|a| a.to_number())
-                        .collect::<Result<Vec<f64>>>()?
-                        .iter()
-                        .copied()
-                        .fold(f64::NEG_INFINITY, f64::max),
-                ))
-            },
-        }),
-        "avg" => Some(BuiltInFunctionDef {
-            name: String::from("avg"),
-            arity: FunctionArity::AtLeast(2),
-            body: |args| {
-                Ok(Value::Number(
-                    args.iter()
-                        .map(|a| a.to_number())
-                        .collect::<Result<Vec<f64>>>()?
-                        .iter()
-                        .sum::<f64>()
-                        / args.len() as f64,
-                ))
-            },
-        }),
-        "sum" => Some(BuiltInFunctionDef {
-            name: String::from("sum"),
-            arity: FunctionArity::AtLeast(2),
-            body: |args| {
-                Ok(Value::Number(
-                    args.iter()
-                        .map(|a| a.to_number())
-                        .collect::<Result<Vec<f64>>>()?
-                        .iter()
-                        .sum(),
-                ))
-            },
-        }),
-        "prod" => Some(BuiltInFunctionDef {
-            name: String::from("prod"),
-            arity: FunctionArity::AtLeast(2),
-            body: |args| {
-                Ok(Value::Number(
-                    args.iter()
-                        .map(|a| a.to_number())
-                        .collect::<Result<Vec<f64>>>()?
-                        .iter()
-                        .product(),
-                ))
-            },
-        }),
-        "median" => Some(BuiltInFunctionDef {
-            name: String::from("median"),
-            arity: FunctionArity::AtLeast(2),
-            body: |args| {
-                let mut nums = args
-                    .into_iter()
-                    .map(|a| a.to_number())
-                    .collect::<Result<Vec<f64>>>()?;
-
-                nums.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                let len = nums.len();
-                if len % 2 == 0 {
-                    Ok(Value::Number((nums[len / 2 - 1] + nums[len / 2]) / 2.0))
-                } else {
-                    Ok(Value::Number(nums[len / 2]))
-                }
-            },
-        }),
-        "len" => Some(BuiltInFunctionDef {
-            name: String::from("len"),
-            arity: FunctionArity::Exact(1),
-            body: |args| Ok(Value::Number(args[0].to_list()?.len() as f64)),
-        }),
-        "head" => Some(BuiltInFunctionDef {
-            name: String::from("head"),
-            arity: FunctionArity::Exact(1),
-            body: |args| {
-                Ok(args[0]
-                    .to_list()?
-                    .first()
-                    .cloned()
-                    .unwrap_or(Value::List(vec![])))
-            },
-        }),
-        "tail" => Some(BuiltInFunctionDef {
-            name: String::from("tail"),
-            arity: FunctionArity::Exact(1),
-            body: |args| {
-                let list = args[0].to_list()?;
-                Ok(Value::List(list.iter().skip(1).cloned().collect()))
-            },
-        }),
-        "slice" => Some(BuiltInFunctionDef {
-            name: String::from("slice"),
-            arity: FunctionArity::Exact(3),
-            body: |args| {
-                let list = args[0].to_list()?;
-                let start = args[1].to_number()? as usize;
-                let end = args[2].to_number()? as usize;
-
-                Ok(Value::List(list[start..end].to_vec()))
-            },
-        }),
-        "concat" => Some(BuiltInFunctionDef {
-            name: String::from("concat"),
-            arity: FunctionArity::AtLeast(2),
-            body: |args| {
-                let mut list = vec![];
-                for arg in args {
-                    match arg {
-                        Value::List(l) => list.extend(l),
-                        Value::Number(_) => list.push(arg),
-                        Value::Spread(l) => list.extend(l),
-                        Value::Bool(_) => list.push(arg),
-                    }
-                }
-
-                Ok(Value::List(list))
-            },
-        }),
-        "dot" => Some(BuiltInFunctionDef {
-            name: String::from("dot"),
-            arity: FunctionArity::Exact(2),
-            body: |args| {
-                let a = args[0].to_list()?;
-                let b = args[1].to_list()?;
-
-                if a.len() != b.len() {
-                    return Err(anyhow!(
-                        "cannot calculate dot product of lists with different lengths"
-                    ));
-                }
-
-                Ok(Value::Number(
-                    a.iter()
-                        .zip(b.iter())
-                        .map(|(a, b)| {
-                            let a_num = a.to_number()?;
-                            let b_num = b.to_number()?;
-                            Ok(a_num * b_num)
-                        })
-                        .collect::<Result<Vec<f64>>>()?
-                        .iter()
-                        .sum(),
-                ))
-            },
-        }),
-        "unique" => Some(BuiltInFunctionDef {
-            name: String::from("unique"),
-            arity: FunctionArity::Exact(1),
-            body: |args| {
-                let list = args[0].to_list()?.clone();
-                let mut unique_list = vec![];
-
-                for item in list {
-                    if !unique_list.contains(&item) {
-                        unique_list.push(item);
-                    }
-                }
-
-                Ok(Value::List(unique_list))
-            },
-        }),
-        _ => None,
-    }
-}
-
 pub fn is_built_in_function(name: &str) -> bool {
-    get_built_in_function_def(name).is_some()
+    BUILT_IN_FUNCTION_DEFS.contains_key(name)
 }
 
-pub fn get_function_def(
-    name: &str,
-    function_defs: &HashMap<String, UserDefinedFunctionDef>,
-) -> Option<FunctionDef> {
+pub fn get_built_in_function_def(name: &str) -> Option<&BuiltInFunctionDef> {
+    BUILT_IN_FUNCTION_DEFS.get(name)
+}
+
+pub fn get_function_def<'a>(
+    name: &'a str,
+    variables: &'a HashMap<String, Value>,
+    function_defs: &'a HashMap<String, UserDefinedFunctionDef>,
+) -> Option<FunctionDef<'a>> {
     function_defs
         .get(name)
-        .map(|def| FunctionDef::UserDefined(def.clone()))
-        .or_else(|| get_built_in_function_def(name).map(FunctionDef::BuiltIn))
+        .map(|def| FunctionDef::UserDefined(def))
+        .or_else(|| {
+            variables
+                .get(name)
+                .and_then(|v| v.to_lambda().ok().map(|v| FunctionDef::Lambda(v)))
+        })
+        .or_else(|| get_built_in_function_def(name).map(|def| FunctionDef::BuiltIn(def)))
 }
