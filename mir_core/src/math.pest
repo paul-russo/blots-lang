@@ -1,6 +1,6 @@
 WHITESPACE = _{ " " | "\t" | "\r\n" | "\n" }
 
-number  = @{ integer ~ ("." ~ ASCII_DIGIT+)? ~ (^"e" ~ integer)? }
+number  = @{ (integer ~ ("." ~ ASCII_DIGIT+)? | !integer ~ "." ~ ASCII_DIGIT+) ~ (^"e" ~ integer)? }
 integer = _{ ("+" | "-")? ~ ASCII_DIGIT+ }
 
 bool = { "true" | "false" }
