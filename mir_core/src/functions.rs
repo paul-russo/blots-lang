@@ -647,10 +647,16 @@ impl<'a> FunctionDef<'a> {
                     }
                 }
             },
-            FunctionDef::Lambda(LambdaDef { args, .. }) => {
+            FunctionDef::Lambda(LambdaDef { args, name, .. }) => {
                 if arg_count == args.len() {
                     Ok(())
                 } else {
+                    let ident = name
+                        .clone()
+                        .map_or(String::from("anonymous function"), |n| {
+                            format!("function {}", n)
+                        });
+
                     let expected_args = if args.len() == 1 {
                         "1 argument".to_string()
                     } else {
@@ -664,7 +670,8 @@ impl<'a> FunctionDef<'a> {
                     };
 
                     Err(anyhow!(
-                        "lambda takes {}, but {}",
+                        "{} takes {}, but {}",
+                        ident,
                         expected_args,
                         given_args
                     ))

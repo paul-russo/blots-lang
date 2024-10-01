@@ -4,9 +4,16 @@ use std::{collections::HashMap, fmt::Display};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LambdaDef {
+    pub name: Option<String>,
     pub args: Vec<String>,
     pub body: String,
     pub scope: HashMap<String, Value>,
+}
+
+impl LambdaDef {
+    pub fn set_name(&mut self, name: String) {
+        self.name = Some(name);
+    }
 }
 
 impl PartialOrd for LambdaDef {
