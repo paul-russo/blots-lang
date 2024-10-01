@@ -61,7 +61,7 @@ impl Value {
             Value::List(_) => "list",
             Value::Spread(_) => "spread",
             Value::Bool(_) => "bool",
-            Value::Lambda(_) => "lambda",
+            Value::Lambda(_) => "function",
             Value::String(_) => "string",
         }
     }

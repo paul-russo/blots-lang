@@ -1,5 +1,5 @@
 use crate::{
-    functions::{get_function_def, UserDefinedFunctionDef},
+    functions::{get_function_def, BUILT_IN_FUNCTION_IDENTS},
     parser::Rule,
     values::{
         LambdaDef, SpreadValue,
@@ -42,14 +42,13 @@ static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
 
 pub fn collect_list(
     pairs: Pairs<Rule>,
-    variables: &HashMap<String, Value>,
-    function_defs: &HashMap<String, UserDefinedFunctionDef>,
+    variables: &mut HashMap<String, Value>,
 ) -> Result<Vec<Value>> {
     Ok(pairs
         .into_iter()
         // This can't just be flat_map (at least I think) because we don't want to unwrap
         // each Result as we iterate, which would result in failed values being skipped.
-        .map(|value| evaluate_expression(value.into_inner(), variables, function_defs))
+        .map(|value| evaluate_expression(value.into_inner(), variables))
         .collect::<Result<Vec<Value>>>()?
         .into_iter()
         .flatten()
@@ -58,8 +57,7 @@ pub fn collect_list(
 
 pub fn evaluate_expression(
     pairs: Pairs<Rule>,
-    variables: &HashMap<String, Value>,
-    function_defs: &HashMap<String, UserDefinedFunctionDef>,
+    variables: &mut HashMap<String, Value>,
 ) -> Result<Value> {
     PRATT
         .map_primary(|primary| match primary.as_rule() {
@@ -71,7 +69,7 @@ pub fn evaluate_expression(
             )),
             Rule::list => {
                 let list_pairs = primary.into_inner();
-                let values = collect_list(list_pairs, variables, function_defs)?;
+                let values = collect_list(list_pairs, variables)?;
 
                 Ok(List(values))
             }
@@ -85,10 +83,28 @@ pub fn evaluate_expression(
                 }
             }
             Rule::string => Ok(Value::String(primary.into_inner().as_str().to_string())),
+            Rule::assignment => {
+                let mut inner_pairs = primary.into_inner();
+                let ident = inner_pairs.next().unwrap().as_str();
+
+                if BUILT_IN_FUNCTION_IDENTS.contains(&ident) {
+                    return Err(anyhow!("cannot assign to built-in function: {}", ident));
+                }
+
+                if ident == "pi" || ident == "e" || ident == "infinity" {
+                    return Err(anyhow!("cannot assign to constant: {}", ident));
+                }
+
+                let expression = inner_pairs.next().unwrap();
+                let value = evaluate_expression(expression.into_inner(), variables)?;
+
+                variables.insert(ident.to_string(), value.clone());
+                Ok(value)
+            }
             Rule::lambda => {
                 let mut inner_pairs = primary.into_inner();
                 let args = inner_pairs.next().unwrap().into_inner();
-                let body = inner_pairs.next().unwrap().into_inner();
+                let body = inner_pairs.next().unwrap();
 
                 Ok(Value::Lambda(LambdaDef {
                     args: args.map(|arg| arg.as_str().to_string()).collect(),
@@ -103,20 +119,19 @@ pub fn evaluate_expression(
                 let else_expr = inner_pairs.next().unwrap();
 
                 let condition =
-                    evaluate_expression(condition_expr.into_inner(), variables, function_defs)?
-                        .as_bool()?;
+                    evaluate_expression(condition_expr.into_inner(), variables)?.as_bool()?;
 
                 if condition {
-                    evaluate_expression(then_expr.into_inner(), variables, function_defs)
+                    evaluate_expression(then_expr.into_inner(), variables)
                 } else {
-                    evaluate_expression(else_expr.into_inner(), variables, function_defs)
+                    evaluate_expression(else_expr.into_inner(), variables)
                 }
             }
             Rule::list_access => {
                 let mut inner_pairs = primary.into_inner();
 
                 let ident = inner_pairs.next().unwrap().as_str();
-                let index = evaluate_expression(inner_pairs, variables, function_defs)?;
+                let index = evaluate_expression(inner_pairs, variables)?;
 
                 match variables.get(ident) {
                     Some(List(list)) => {
@@ -147,16 +162,16 @@ pub fn evaluate_expression(
                         .ok_or_else(|| anyhow!("unknown variable: {}", primary.as_str())),
                 }
             }
-            Rule::expression => evaluate_expression(primary.into_inner(), variables, function_defs),
+            Rule::expression => evaluate_expression(primary.into_inner(), variables),
             Rule::function_call => {
                 let mut inner_pairs = primary.into_inner();
                 let ident = inner_pairs.next().unwrap().as_str();
                 let call_list = inner_pairs.next().unwrap();
                 let call_list_entries = call_list.into_inner();
-                let args = collect_list(call_list_entries, variables, function_defs)?;
+                let args = collect_list(call_list_entries, variables)?;
 
-                if let Some(def) = get_function_def(ident, variables, function_defs) {
-                    return def.call(args, variables, function_defs, None);
+                if let Some(def) = get_function_def(ident, variables) {
+                    return def.call(args, variables, None);
                 }
 
                 Err(anyhow!("unknown function: {}", ident))
