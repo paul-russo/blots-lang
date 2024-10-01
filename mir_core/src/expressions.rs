@@ -96,7 +96,14 @@ pub fn evaluate_expression(
                 }
 
                 let expression = inner_pairs.next().unwrap();
-                let value = evaluate_expression(expression.into_inner(), variables)?;
+                let mut value = evaluate_expression(expression.into_inner(), variables)?;
+
+                match value {
+                    Value::Lambda(ref mut lambda) => {
+                        lambda.set_name(ident.to_string());
+                    }
+                    _ => {}
+                }
 
                 variables.insert(ident.to_string(), value.clone());
                 Ok(value)
@@ -107,6 +114,7 @@ pub fn evaluate_expression(
                 let body = inner_pairs.next().unwrap();
 
                 Ok(Value::Lambda(LambdaDef {
+                    name: None,
                     args: args.map(|arg| arg.as_str().to_string()).collect(),
                     body: body.as_str().to_string(),
                     scope: variables.clone(),
@@ -231,10 +239,9 @@ pub fn evaluate_expression(
                         }
                         Ok(Bool(lhs.iter().zip(rhs.iter()).all(|(l, r)| l == r)))
                     }
-                    (List(lhs), Number(rhs)) => Ok(Bool(lhs.iter().all(|l| l == &Number(rhs)))),
-                    (List(lhs), Bool(rhs)) => Ok(Bool(lhs.iter().all(|l| l == &Bool(rhs)))),
+                    (List(lhs), rhs_value) => Ok(Bool(lhs.iter().all(|v| v == &rhs_value))),
                     _ => Err(anyhow!(
-                        "expected two lists, a list and a number, or a list and a bool"
+                        "expected two lists or a list and a number, bool, function, or string"
                     )),
                 },
                 Rule::each_not_equal => match (lhs, rhs) {
@@ -244,10 +251,9 @@ pub fn evaluate_expression(
                         }
                         Ok(Bool(lhs.iter().zip(rhs.iter()).all(|(l, r)| l != r)))
                     }
-                    (List(lhs), Number(rhs)) => Ok(Bool(lhs.iter().all(|l| l != &Number(rhs)))),
-                    (List(lhs), Bool(rhs)) => Ok(Bool(lhs.iter().all(|l| l != &Bool(rhs)))),
+                    (List(lhs), rhs_value) => Ok(Bool(lhs.iter().all(|v| v != &rhs_value))),
                     _ => Err(anyhow!(
-                        "expected two lists, a list and a number, or a list and a bool"
+                        "expected two lists or a list and a number, bool, function, or string"
                     )),
                 },
                 Rule::each_less => match (lhs, rhs) {
@@ -257,8 +263,10 @@ pub fn evaluate_expression(
                         }
                         Ok(Bool(lhs.iter().zip(rhs.iter()).all(|(l, r)| l < r)))
                     }
-                    (List(lhs), Number(rhs)) => Ok(Bool(lhs.iter().all(|l| l < &Number(rhs)))),
-                    _ => Err(anyhow!("expected two lists or a list and a number")),
+                    (List(lhs), rhs_value) => Ok(Bool(lhs.iter().all(|l| l < &rhs_value))),
+                    _ => Err(anyhow!(
+                        "expected two lists or a list and a number, bool, function, or string"
+                    )),
                 },
                 Rule::each_less_eq => match (lhs, rhs) {
                     (List(lhs), List(rhs)) => {
@@ -267,8 +275,10 @@ pub fn evaluate_expression(
                         }
                         Ok(Bool(lhs.iter().zip(rhs.iter()).all(|(l, r)| l <= r)))
                     }
-                    (List(lhs), Number(rhs)) => Ok(Bool(lhs.iter().all(|l| l <= &Number(rhs)))),
-                    _ => Err(anyhow!("expected two lists or a list and a number")),
+                    (List(lhs), rhs_value) => Ok(Bool(lhs.iter().all(|l| l <= &rhs_value))),
+                    _ => Err(anyhow!(
+                        "expected two lists or a list and a number, bool, function, or string"
+                    )),
                 },
                 Rule::each_greater => match (lhs, rhs) {
                     (List(lhs), List(rhs)) => {
@@ -277,8 +287,10 @@ pub fn evaluate_expression(
                         }
                         Ok(Bool(lhs.iter().zip(rhs.iter()).all(|(l, r)| l > r)))
                     }
-                    (List(lhs), Number(rhs)) => Ok(Bool(lhs.iter().all(|l| l > &Number(rhs)))),
-                    _ => Err(anyhow!("expected two lists or a list and a number")),
+                    (List(lhs), rhs_value) => Ok(Bool(lhs.iter().all(|l| l > &rhs_value))),
+                    _ => Err(anyhow!(
+                        "expected two lists or a list and a number, bool, function, or string"
+                    )),
                 },
                 Rule::each_greater_eq => match (lhs, rhs) {
                     (List(lhs), List(rhs)) => {
@@ -287,8 +299,10 @@ pub fn evaluate_expression(
                         }
                         Ok(Bool(lhs.iter().zip(rhs.iter()).all(|(l, r)| l >= r)))
                     }
-                    (List(lhs), Number(rhs)) => Ok(Bool(lhs.iter().all(|l| l >= &Number(rhs)))),
-                    _ => Err(anyhow!("expected two lists or a list and a number")),
+                    (List(lhs), rhs_value) => Ok(Bool(lhs.iter().all(|l| l >= &rhs_value))),
+                    _ => Err(anyhow!(
+                        "expected two lists or a list and a number, bool, function, or string"
+                    )),
                 },
                 Rule::and => Ok(Bool(lhs.as_bool()? && rhs.as_bool()?)),
                 Rule::or => Ok(Bool(lhs.as_bool()? || rhs.as_bool()?)),
