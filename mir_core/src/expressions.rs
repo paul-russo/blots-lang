@@ -2,7 +2,7 @@ use crate::{
     functions::{get_function_def, UserDefinedFunctionDef},
     parser::Rule,
     values::{
-        LambdaDef,
+        LambdaDef, SpreadValue,
         Value::{self, Bool, List, Number, Spread},
     },
 };
@@ -84,6 +84,7 @@ pub fn evaluate_expression(
                     _ => unreachable!(),
                 }
             }
+            Rule::string => Ok(Value::String(primary.into_inner().as_str().to_string())),
             Rule::lambda => {
                 let mut inner_pairs = primary.into_inner();
                 let args = inner_pairs.next().unwrap().into_inner();
@@ -103,7 +104,7 @@ pub fn evaluate_expression(
 
                 let condition =
                     evaluate_expression(condition_expr.into_inner(), variables, function_defs)?
-                        .to_bool()?;
+                        .as_bool()?;
 
                 if condition {
                     evaluate_expression(then_expr.into_inner(), variables, function_defs)
@@ -119,7 +120,7 @@ pub fn evaluate_expression(
 
                 match variables.get(ident) {
                     Some(List(list)) => {
-                        list.get(index.to_number()? as usize)
+                        list.get(index.as_number()? as usize)
                             .cloned()
                             .ok_or_else(|| {
                                 anyhow!(
@@ -164,22 +165,25 @@ pub fn evaluate_expression(
         })
         .map_prefix(|op, rhs| match op.as_rule() {
             Rule::negation => {
-                let rhs = rhs?.to_number()?;
+                let rhs = rhs?.as_number()?;
                 Ok(Number(-rhs))
             }
             Rule::spread_operator => {
                 let rhs = rhs?;
-                let list = rhs.to_list()?;
-                Ok(Spread(list.clone()))
+                match rhs {
+                    List(list) => return Ok(Spread(SpreadValue::List(list.clone()))),
+                    Value::String(s) => return Ok(Spread(SpreadValue::String(s))),
+                    _ => return Err(anyhow!("expected a list or string")),
+                }
             }
             Rule::invert => {
-                let rhs = rhs?.to_bool()?;
+                let rhs = rhs?.as_bool()?;
                 Ok(Bool(!rhs))
             }
             _ => unreachable!(),
         })
         .map_postfix(|lhs, op| {
-            let lhs = lhs?.to_number()?;
+            let lhs = lhs?.as_number()?;
 
             match op.as_rule() {
                 Rule::factorial => {
@@ -271,14 +275,14 @@ pub fn evaluate_expression(
                     (List(lhs), Number(rhs)) => Ok(Bool(lhs.iter().all(|l| l >= &Number(rhs)))),
                     _ => Err(anyhow!("expected two lists or a list and a number")),
                 },
-                Rule::and => Ok(Bool(lhs.to_bool()? && rhs.to_bool()?)),
-                Rule::or => Ok(Bool(lhs.to_bool()? || rhs.to_bool()?)),
-                Rule::add => Ok(Number(lhs.to_number()? + rhs.to_number()?)),
-                Rule::subtract => Ok(Number(lhs.to_number()? - rhs.to_number()?)),
-                Rule::multiply => Ok(Number(lhs.to_number()? * rhs.to_number()?)),
-                Rule::divide => Ok(Number(lhs.to_number()? / rhs.to_number()?)),
-                Rule::modulo => Ok(Number(lhs.to_number()? % rhs.to_number()?)),
-                Rule::power => Ok(Number(lhs.to_number()?.powf(rhs.to_number()?))),
+                Rule::and => Ok(Bool(lhs.as_bool()? && rhs.as_bool()?)),
+                Rule::or => Ok(Bool(lhs.as_bool()? || rhs.as_bool()?)),
+                Rule::add => Ok(Number(lhs.as_number()? + rhs.as_number()?)),
+                Rule::subtract => Ok(Number(lhs.as_number()? - rhs.as_number()?)),
+                Rule::multiply => Ok(Number(lhs.as_number()? * rhs.as_number()?)),
+                Rule::divide => Ok(Number(lhs.as_number()? / rhs.as_number()?)),
+                Rule::modulo => Ok(Number(lhs.as_number()? % rhs.as_number()?)),
+                Rule::power => Ok(Number(lhs.as_number()?.powf(rhs.as_number()?))),
                 _ => unreachable!(),
             }
         })
