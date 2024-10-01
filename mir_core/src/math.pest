@@ -8,9 +8,8 @@ bool = { "true" | "false" }
 string_value = @{ (!"\"" ~ ANY)* }
 string       = ${ "\"" ~ string_value ~ "\"" }
 
-lambda              = ${ argument_list ~ WHITESPACE* ~ "=>" ~ WHITESPACE* ~ expression }
-argument_list       = !{ "(" ~ (identifier ~ ("," ~ identifier)*)? ~ ")" }
-function_definition = ${ identifier ~ argument_list ~ WHITESPACE* ~ "=" ~ WHITESPACE* ~ expression }
+lambda        = ${ argument_list ~ WHITESPACE* ~ "=>" ~ WHITESPACE* ~ expression }
+argument_list = !{ identifier | "(" ~ (identifier ~ ("," ~ identifier)*)? ~ ")" }
 
 identifier      = @{ ASCII_ALPHA+ ~ identifier_rest* }
 identifier_rest = _{ ASCII_ALPHA+ | ASCII_DIGIT+ | "_"+ }
@@ -58,10 +57,10 @@ conditional = ${ "if" ~ WHITESPACE+ ~ expression ~ WHITESPACE+ ~ "then" ~ WHITES
 
 expression        = ${ prefix_op* ~ term ~ postfix_op* ~ (WHITESPACE* ~ infix_op ~ WHITESPACE* ~ prefix_op* ~ term ~ postfix_op*)* }
 nested_expression = _{ "(" ~ WHITESPACE* ~ expression ~ WHITESPACE* ~ ")" }
-term              = _{ conditional | function_call | lambda | list | list_access | bool | string | identifier | number | nested_expression }
+term              = _{ conditional | function_call | lambda | assignment | list | list_access | bool | string | identifier | number | nested_expression }
 
 assignment = !{ identifier ~ "=" ~ expression }
 
 comment = { ("#" | "//") ~ (!"\n" ~ ANY)* }
 
-input = _{ SOI ~ (assignment | function_definition | expression | comment) ~ comment? ~ EOI }
+input = _{ SOI ~ (expression | comment) ~ comment? ~ EOI }

@@ -2,20 +2,12 @@ use std::{collections::HashMap, sync::LazyLock};
 
 use anyhow::{anyhow, Result};
 use pest::iterators::Pairs;
-use serde::{Deserialize, Serialize};
 
 use crate::{
     expressions::evaluate_expression,
     parser::{get_pairs, Rule},
     values::{LambdaDef, SpreadValue, Value},
 };
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct UserDefinedFunctionDef {
-    pub name: String,
-    pub args: Vec<String>,
-    pub body: String,
-}
 
 pub enum FunctionArity {
     Exact(usize),
@@ -25,15 +17,10 @@ pub enum FunctionArity {
 pub struct BuiltInFunctionDef {
     pub name: String,
     pub arity: FunctionArity,
-    pub body: fn(
-        args: Vec<Value>,
-        variables: &HashMap<String, Value>,
-        function_defs: &HashMap<String, UserDefinedFunctionDef>,
-    ) -> Result<Value>,
+    pub body: fn(args: Vec<Value>, variables: &HashMap<String, Value>) -> Result<Value>,
 }
 
 pub enum FunctionDef<'a> {
-    UserDefined(&'a UserDefinedFunctionDef),
     BuiltIn(&'a BuiltInFunctionDef),
     Lambda(&'a LambdaDef),
 }
@@ -47,7 +34,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("sqrt"),
                 arity: FunctionArity::Exact(1),
-                body: |args, _, _| Ok(Value::Number(args[0].as_number()?.sqrt())),
+                body: |args, _| Ok(Value::Number(args[0].as_number()?.sqrt())),
             },
         );
         built_ins_map.insert(
@@ -55,7 +42,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("sin"),
                 arity: FunctionArity::Exact(1),
-                body: |args, _, _| Ok(Value::Number(args[0].as_number()?.sin())),
+                body: |args, _| Ok(Value::Number(args[0].as_number()?.sin())),
             },
         );
         built_ins_map.insert(
@@ -63,7 +50,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("cos"),
                 arity: FunctionArity::Exact(1),
-                body: |args, _, _| Ok(Value::Number(args[0].as_number()?.cos())),
+                body: |args, _| Ok(Value::Number(args[0].as_number()?.cos())),
             },
         );
         built_ins_map.insert(
@@ -71,7 +58,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("tan"),
                 arity: FunctionArity::Exact(1),
-                body: |args, _, _| Ok(Value::Number(args[0].as_number()?.tan())),
+                body: |args, _| Ok(Value::Number(args[0].as_number()?.tan())),
             },
         );
         built_ins_map.insert(
@@ -79,7 +66,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("asin"),
                 arity: FunctionArity::Exact(1),
-                body: |args, _, _| Ok(Value::Number(args[0].as_number()?.asin())),
+                body: |args, _| Ok(Value::Number(args[0].as_number()?.asin())),
             },
         );
         built_ins_map.insert(
@@ -87,7 +74,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("acos"),
                 arity: FunctionArity::Exact(1),
-                body: |args, _, _| Ok(Value::Number(args[0].as_number()?.acos())),
+                body: |args, _| Ok(Value::Number(args[0].as_number()?.acos())),
             },
         );
         built_ins_map.insert(
@@ -95,7 +82,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("atan"),
                 arity: FunctionArity::Exact(1),
-                body: |args, _, _| Ok(Value::Number(args[0].as_number()?.atan())),
+                body: |args, _| Ok(Value::Number(args[0].as_number()?.atan())),
             },
         );
         built_ins_map.insert(
@@ -103,7 +90,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("log"),
                 arity: FunctionArity::Exact(1),
-                body: |args, _, _| Ok(Value::Number(args[0].as_number()?.ln())),
+                body: |args, _| Ok(Value::Number(args[0].as_number()?.ln())),
             },
         );
         built_ins_map.insert(
@@ -111,7 +98,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("log10"),
                 arity: FunctionArity::Exact(1),
-                body: |args, _, _| Ok(Value::Number(args[0].as_number()?.log10())),
+                body: |args, _| Ok(Value::Number(args[0].as_number()?.log10())),
             },
         );
         built_ins_map.insert(
@@ -119,7 +106,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("exp"),
                 arity: FunctionArity::Exact(1),
-                body: |args, _, _| Ok(Value::Number(args[0].as_number()?.exp())),
+                body: |args, _| Ok(Value::Number(args[0].as_number()?.exp())),
             },
         );
         built_ins_map.insert(
@@ -127,7 +114,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("abs"),
                 arity: FunctionArity::Exact(1),
-                body: |args, _, _| Ok(Value::Number(args[0].as_number()?.abs())),
+                body: |args, _| Ok(Value::Number(args[0].as_number()?.abs())),
             },
         );
         built_ins_map.insert(
@@ -135,7 +122,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("floor"),
                 arity: FunctionArity::Exact(1),
-                body: |args, _, _| Ok(Value::Number(args[0].as_number()?.floor())),
+                body: |args, _| Ok(Value::Number(args[0].as_number()?.floor())),
             },
         );
         built_ins_map.insert(
@@ -143,7 +130,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("ceil"),
                 arity: FunctionArity::Exact(1),
-                body: |args, _, _| Ok(Value::Number(args[0].as_number()?.ceil())),
+                body: |args, _| Ok(Value::Number(args[0].as_number()?.ceil())),
             },
         );
         built_ins_map.insert(
@@ -151,7 +138,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("round"),
                 arity: FunctionArity::Exact(1),
-                body: |args, _, _| Ok(Value::Number(args[0].as_number()?.round())),
+                body: |args, _| Ok(Value::Number(args[0].as_number()?.round())),
             },
         );
         built_ins_map.insert(
@@ -159,7 +146,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("trunc"),
                 arity: FunctionArity::Exact(1),
-                body: |args, _, _| Ok(Value::Number(args[0].as_number()?.trunc())),
+                body: |args, _| Ok(Value::Number(args[0].as_number()?.trunc())),
             },
         );
         built_ins_map.insert(
@@ -167,7 +154,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("min"),
                 arity: FunctionArity::AtLeast(2),
-                body: |args, _, _| {
+                body: |args, _| {
                     Ok(Value::Number(
                         args.iter()
                             .map(|a| a.as_number())
@@ -184,7 +171,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("max"),
                 arity: FunctionArity::AtLeast(2),
-                body: |args, _, _| {
+                body: |args, _| {
                     Ok(Value::Number(
                         args.iter()
                             .map(|a| a.as_number())
@@ -201,7 +188,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("avg"),
                 arity: FunctionArity::AtLeast(2),
-                body: |args, _, _| {
+                body: |args, _| {
                     Ok(Value::Number(
                         args.iter()
                             .map(|a| a.as_number())
@@ -218,7 +205,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("sum"),
                 arity: FunctionArity::AtLeast(2),
-                body: |args, _, _| {
+                body: |args, _| {
                     Ok(Value::Number(
                         args.iter()
                             .map(|a| a.as_number())
@@ -234,7 +221,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("prod"),
                 arity: FunctionArity::AtLeast(2),
-                body: |args, _, _| {
+                body: |args, _| {
                     Ok(Value::Number(
                         args.iter()
                             .map(|a| a.as_number())
@@ -250,7 +237,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("median"),
                 arity: FunctionArity::AtLeast(2),
-                body: |args, _, _| {
+                body: |args, _| {
                     let mut nums = args
                         .into_iter()
                         .map(|a| a.as_number())
@@ -271,7 +258,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("range"),
                 arity: FunctionArity::Exact(1),
-                body: |args, _, _| {
+                body: |args, _| {
                     let n = args[0].as_number()? as i64;
                     Ok(Value::List(
                         (0..n).map(|e| Value::Number(e as f64)).collect(),
@@ -284,7 +271,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("len"),
                 arity: FunctionArity::Exact(1),
-                body: |args, _, _| Ok(Value::Number(args[0].as_list()?.len() as f64)),
+                body: |args, _| Ok(Value::Number(args[0].as_list()?.len() as f64)),
             },
         );
         built_ins_map.insert(
@@ -292,7 +279,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("head"),
                 arity: FunctionArity::Exact(1),
-                body: |args, _, _| {
+                body: |args, _| {
                     Ok(args[0]
                         .as_list()?
                         .first()
@@ -306,7 +293,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("tail"),
                 arity: FunctionArity::Exact(1),
-                body: |args, _, _| {
+                body: |args, _| {
                     let list = args[0].as_list()?;
                     Ok(Value::List(list.iter().skip(1).cloned().collect()))
                 },
@@ -317,7 +304,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("slice"),
                 arity: FunctionArity::Exact(3),
-                body: |args, _, _| {
+                body: |args, _| {
                     let list = args[0].as_list()?;
                     let start = args[1].as_number()? as usize;
                     let end = args[2].as_number()? as usize;
@@ -331,7 +318,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("concat"),
                 arity: FunctionArity::AtLeast(2),
-                body: |args, _, _| {
+                body: |args, _| {
                     let mut list = vec![];
                     for arg in args {
                         match arg {
@@ -356,7 +343,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("dot"),
                 arity: FunctionArity::Exact(2),
-                body: |args, _, _| {
+                body: |args, _| {
                     let a = args[0].as_list()?;
                     let b = args[1].as_list()?;
 
@@ -386,7 +373,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("unique"),
                 arity: FunctionArity::Exact(1),
-                body: |args, _, _| {
+                body: |args, _| {
                     let list = args[0].as_list()?.clone();
                     let mut unique_list = vec![];
 
@@ -405,7 +392,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("map"),
                 arity: FunctionArity::Exact(2),
-                body: |args, variables, function_defs| {
+                body: |args, variables| {
                     let lambda = FunctionDef::Lambda(args[0].as_lambda()?);
                     let parsed_body = lambda.get_parsed_body();
 
@@ -416,7 +403,6 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                         new_list.push(lambda.call(
                             vec![item.clone()],
                             variables,
-                            function_defs,
                             parsed_body.clone(),
                         )?);
                     }
@@ -430,7 +416,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("reduce"),
                 arity: FunctionArity::Exact(3),
-                body: |args, variables, function_defs| {
+                body: |args, variables| {
                     let lambda = FunctionDef::Lambda(args[0].as_lambda()?);
                     let parsed_body = lambda.get_parsed_body();
 
@@ -439,12 +425,8 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
 
                     let mut acc = initial;
                     for item in list {
-                        acc = lambda.call(
-                            vec![acc, item.clone()],
-                            variables,
-                            function_defs,
-                            parsed_body.clone(),
-                        )?;
+                        acc =
+                            lambda.call(vec![acc, item.clone()], variables, parsed_body.clone())?;
                     }
 
                     Ok(acc)
@@ -456,7 +438,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("filter"),
                 arity: FunctionArity::Exact(2),
-                body: |args, variables, function_defs| {
+                body: |args, variables| {
                     let lambda = FunctionDef::Lambda(args[0].as_lambda()?);
                     let parsed_body = lambda.get_parsed_body();
 
@@ -465,12 +447,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
 
                     for item in list {
                         if lambda
-                            .call(
-                                vec![item.clone()],
-                                variables,
-                                function_defs,
-                                parsed_body.clone(),
-                            )?
+                            .call(vec![item.clone()], variables, parsed_body.clone())?
                             .as_bool()?
                         {
                             new_list.push(item.clone());
@@ -486,7 +463,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("every"),
                 arity: FunctionArity::Exact(2),
-                body: |args, variables, function_defs| {
+                body: |args, variables| {
                     let lambda = FunctionDef::Lambda(args[0].as_lambda()?);
                     let parsed_body = lambda.get_parsed_body();
 
@@ -494,12 +471,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
 
                     for item in list {
                         if !lambda
-                            .call(
-                                vec![item.clone()],
-                                variables,
-                                function_defs,
-                                parsed_body.clone(),
-                            )?
+                            .call(vec![item.clone()], variables, parsed_body.clone())?
                             .as_bool()?
                         {
                             return Ok(Value::Bool(false));
@@ -515,7 +487,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("some"),
                 arity: FunctionArity::Exact(2),
-                body: |args, variables, function_defs| {
+                body: |args, variables| {
                     let lambda = FunctionDef::Lambda(args[0].as_lambda()?);
                     let parsed_body = lambda.get_parsed_body();
 
@@ -523,12 +495,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
 
                     for item in list {
                         if lambda
-                            .call(
-                                vec![item.clone()],
-                                variables,
-                                function_defs,
-                                parsed_body.clone(),
-                            )?
+                            .call(vec![item.clone()], variables, parsed_body.clone())?
                             .as_bool()?
                         {
                             return Ok(Value::Bool(true));
@@ -544,7 +511,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("none"),
                 arity: FunctionArity::Exact(2),
-                body: |args, variables, function_defs| {
+                body: |args, variables| {
                     let lambda = FunctionDef::Lambda(args[0].as_lambda()?);
                     let parsed_body = lambda.get_parsed_body();
 
@@ -552,12 +519,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
 
                     for item in list {
                         if lambda
-                            .call(
-                                vec![item.clone()],
-                                variables,
-                                function_defs,
-                                parsed_body.clone(),
-                            )?
+                            .call(vec![item.clone()], variables, parsed_body.clone())?
                             .as_bool()?
                         {
                             return Ok(Value::Bool(false));
@@ -573,7 +535,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("sort"),
                 arity: FunctionArity::Exact(1),
-                body: |args, _, _| {
+                body: |args, _| {
                     let mut list = args[0].as_list()?.clone();
                     list.sort_by(|a, b| a.partial_cmp(b).unwrap());
                     Ok(Value::List(list))
@@ -585,7 +547,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("reverse"),
                 arity: FunctionArity::Exact(1),
-                body: |args, _, _| {
+                body: |args, _| {
                     let mut list = args[0].as_list()?.clone();
                     list.reverse();
                     Ok(Value::List(list))
@@ -597,7 +559,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("split"),
                 arity: FunctionArity::Exact(2),
-                body: |args, _, _| {
+                body: |args, _| {
                     let delimeter = args[0].as_string()?;
                     let s = args[1].as_string()?;
 
@@ -614,7 +576,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("join"),
                 arity: FunctionArity::Exact(2),
-                body: |args, _, _| {
+                body: |args, _| {
                     let delimeter = args[0].as_string()?;
                     let list = args[1].as_list()?;
 
@@ -627,6 +589,28 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 },
             },
         );
+        built_ins_map.insert(
+            "replace",
+            BuiltInFunctionDef {
+                name: String::from("replace"),
+                arity: FunctionArity::Exact(3),
+                body: |args, _| {
+                    let old = args[0].as_string()?;
+                    let new = args[1].as_string()?;
+                    let s = args[2].as_string()?;
+
+                    Ok(Value::String(s.replace(old, new)))
+                },
+            },
+        );
+        built_ins_map.insert(
+            "typeof",
+            BuiltInFunctionDef {
+                name: String::from("typeof"),
+                arity: FunctionArity::Exact(1),
+                body: |args, _| Ok(Value::String(String::from(args[0].get_type()))),
+            },
+        );
 
         built_ins_map
     });
@@ -637,34 +621,6 @@ pub static BUILT_IN_FUNCTION_IDENTS: LazyLock<Vec<&str>> =
 impl<'a> FunctionDef<'a> {
     pub fn check_arity(&self, arg_count: usize) -> Result<()> {
         match self {
-            FunctionDef::UserDefined(UserDefinedFunctionDef {
-                args: expected_args,
-                name,
-                ..
-            }) => {
-                if arg_count == expected_args.len() {
-                    Ok(())
-                } else {
-                    let expected_args = if expected_args.len() == 1 {
-                        "1 argument".to_string()
-                    } else {
-                        format!("{} arguments", expected_args.len())
-                    };
-
-                    let given_args = if arg_count == 1 {
-                        "1 was given".to_string()
-                    } else {
-                        format!("{} were given", arg_count)
-                    };
-
-                    Err(anyhow!(
-                        "function {} takes {}, but {}",
-                        name,
-                        expected_args,
-                        given_args
-                    ))
-                }
-            }
             FunctionDef::BuiltIn(BuiltInFunctionDef { arity, name, .. }) => match arity {
                 FunctionArity::Exact(expected) => {
                     if arg_count == *expected {
@@ -719,7 +675,6 @@ impl<'a> FunctionDef<'a> {
 
     pub fn get_parsed_body(&self) -> Option<Result<Pairs<Rule>, pest::error::Error<Rule>>> {
         match self {
-            FunctionDef::UserDefined(UserDefinedFunctionDef { body, .. }) => Some(get_pairs(body)),
             FunctionDef::BuiltIn(_) => None,
             FunctionDef::Lambda(LambdaDef { body, .. }) => Some(get_pairs(body)),
         }
@@ -729,36 +684,16 @@ impl<'a> FunctionDef<'a> {
         &self,
         args: Vec<Value>,
         variables: &HashMap<String, Value>,
-        function_defs: &HashMap<String, UserDefinedFunctionDef>,
         parsed_body: Option<Result<Pairs<Rule>, pest::error::Error<Rule>>>,
     ) -> Result<Value> {
         self.check_arity(args.len())?;
 
         match self {
-            FunctionDef::UserDefined(UserDefinedFunctionDef {
-                args: expected_args,
-                body,
-                ..
-            }) => {
-                let mut new_variables = variables.clone();
-                for (arg, value) in expected_args.iter().zip(args.iter()) {
-                    new_variables.insert(arg.clone(), value.clone());
-                }
-
-                evaluate_expression(
-                    parsed_body
-                        .unwrap_or_else(|| get_pairs(body))?
-                        .next()
-                        .unwrap()
-                        .into_inner(),
-                    &new_variables,
-                    function_defs,
-                )
-            }
             FunctionDef::Lambda(LambdaDef {
                 args: expected_args,
                 body,
                 scope,
+                ..
             }) => {
                 let mut new_variables = variables.clone();
 
@@ -776,13 +711,10 @@ impl<'a> FunctionDef<'a> {
                         .next()
                         .unwrap()
                         .into_inner(),
-                    &new_variables,
-                    function_defs,
+                    &mut new_variables,
                 )
             }
-            FunctionDef::BuiltIn(BuiltInFunctionDef { body, .. }) => {
-                body(args, variables, function_defs)
-            }
+            FunctionDef::BuiltIn(BuiltInFunctionDef { body, .. }) => body(args, variables),
         }
     }
 }
@@ -798,15 +730,9 @@ pub fn get_built_in_function_def(name: &str) -> Option<&BuiltInFunctionDef> {
 pub fn get_function_def<'a>(
     name: &'a str,
     variables: &'a HashMap<String, Value>,
-    function_defs: &'a HashMap<String, UserDefinedFunctionDef>,
 ) -> Option<FunctionDef<'a>> {
-    function_defs
+    variables
         .get(name)
-        .map(|def| FunctionDef::UserDefined(def))
-        .or_else(|| {
-            variables
-                .get(name)
-                .and_then(|v| v.as_lambda().ok().map(|v| FunctionDef::Lambda(v)))
-        })
+        .and_then(|v| v.as_lambda().ok().map(|v| FunctionDef::Lambda(v)))
         .or_else(|| get_built_in_function_def(name).map(|def| FunctionDef::BuiltIn(def)))
 }
