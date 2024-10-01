@@ -22,12 +22,19 @@ impl PartialOrd for LambdaDef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
+pub enum SpreadValue {
+    List(Vec<Value>),
+    String(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
 pub enum Value {
     Number(f64),
     List(Vec<Value>),
-    Spread(Vec<Value>),
+    Spread(SpreadValue),
     Bool(bool),
     Lambda(LambdaDef),
+    String(String),
 }
 
 impl IntoIterator for Value {
@@ -36,8 +43,13 @@ impl IntoIterator for Value {
 
     fn into_iter(self) -> Self::IntoIter {
         match self {
-            Value::Spread(l) => l.into_iter(), // Yields an iterator over the values in the spread list.
-            _ => vec![self].into_iter(),       // Yields a single value wrapped in a Vec
+            Value::Spread(SpreadValue::List(l)) => l.into_iter(), // Yields an iterator over the values in the spread list.
+            Value::Spread(SpreadValue::String(s)) => s
+                .chars()
+                .map(|c| Value::String(c.to_string()))
+                .collect::<Vec<Value>>()
+                .into_iter(), // Yields an iterator over the characters in the string.
+            _ => vec![self].into_iter(), // Yields a single value wrapped in a Vec
         }
     }
 }
@@ -50,6 +62,7 @@ impl Value {
             Value::Spread(_) => "spread",
             Value::Bool(_) => "bool",
             Value::Lambda(_) => "lambda",
+            Value::String(_) => "string",
         }
     }
 
@@ -73,38 +86,56 @@ impl Value {
         matches!(self, Value::Lambda(_))
     }
 
-    pub fn to_number(&self) -> Result<f64> {
+    pub fn is_string(&self) -> bool {
+        matches!(self, Value::String(_))
+    }
+
+    pub fn as_number(&self) -> Result<f64> {
         match self {
             Value::Number(n) => Ok(*n),
             _ => Err(anyhow!("expected a number, but got a {}", self.get_type())),
         }
     }
 
-    pub fn to_list(&self) -> Result<&Vec<Value>> {
+    pub fn as_list(&self) -> Result<&Vec<Value>> {
         match self {
             Value::List(l) => Ok(l),
             _ => Err(anyhow!("expected a list, but got a {}", self.get_type())),
         }
     }
 
-    pub fn to_spread(&self) -> Result<&Vec<Value>> {
+    pub fn as_spread(&self) -> Result<&SpreadValue> {
         match self {
-            Value::Spread(l) => Ok(l),
+            Value::Spread(v) => Ok(v),
             _ => Err(anyhow!("expected a spread, but got a {}", self.get_type())),
         }
     }
 
-    pub fn to_bool(&self) -> Result<bool> {
+    pub fn as_bool(&self) -> Result<bool> {
         match self {
             Value::Bool(b) => Ok(*b),
             _ => Err(anyhow!("expected a boolean, but got a {}", self.get_type())),
         }
     }
 
-    pub fn to_lambda(&self) -> Result<&LambdaDef> {
+    pub fn as_lambda(&self) -> Result<&LambdaDef> {
         match self {
             Value::Lambda(def) => Ok(def),
             _ => Err(anyhow!("expected a lambda, but got a {}", self.get_type())),
+        }
+    }
+
+    pub fn as_string(&self) -> Result<&str> {
+        match self {
+            Value::String(s) => Ok(s),
+            _ => Err(anyhow!("expected a string, but got a {}", self.get_type())),
+        }
+    }
+
+    pub fn stringify(&self) -> String {
+        match self {
+            Value::String(s) => format!("{}", s),
+            _ => format!("{}", self),
         }
     }
 }
@@ -123,16 +154,19 @@ impl Display for Value {
                 }
                 write!(f, "]")
             }
-            Value::Spread(l) => {
-                write!(f, "...[")?;
-                for (i, value) in l.iter().enumerate() {
-                    write!(f, "{}", value)?;
-                    if i < l.len() - 1 {
-                        write!(f, ", ")?;
+            Value::Spread(v) => match v {
+                SpreadValue::List(l) => {
+                    write!(f, "...[")?;
+                    for (i, value) in l.iter().enumerate() {
+                        write!(f, "{}", value)?;
+                        if i < l.len() - 1 {
+                            write!(f, ", ")?;
+                        }
                     }
+                    write!(f, "]")
                 }
-                write!(f, "]")
-            }
+                SpreadValue::String(s) => write!(f, "...\"{}\"", s),
+            },
             Value::Bool(b) => write!(f, "{}", b),
             Value::Lambda(def) => {
                 write!(f, "(")?;
@@ -144,6 +178,7 @@ impl Display for Value {
                 }
                 write!(f, ") => {}", def.body)
             }
+            Value::String(s) => write!(f, "\"{}\"", s),
         }
     }
 }
