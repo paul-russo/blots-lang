@@ -1,9 +1,11 @@
 WHITESPACE = _{ " " | "\t" | "\r\n" | "\n" }
 
-number  = @{ (integer ~ ("." ~ ASCII_DIGIT+)? | !integer ~ "." ~ ASCII_DIGIT+) ~ (^"e" ~ integer)? }
+number  = @{ (integer ~ ("_"+ ~ integer)* ~ ("." ~ ASCII_DIGIT+)? | !integer ~ "." ~ ASCII_DIGIT+) ~ (^"e" ~ integer)? }
 integer = _{ ("+" | "-")? ~ ASCII_DIGIT+ }
 
 bool = { "true" | "false" }
+
+null = { "null" }
 
 string_value = @{ (!"\"" ~ ANY)* }
 string       = ${ "\"" ~ string_value ~ "\"" }
@@ -57,10 +59,10 @@ conditional = ${ "if" ~ WHITESPACE+ ~ expression ~ WHITESPACE+ ~ "then" ~ WHITES
 
 expression        = ${ prefix_op* ~ term ~ postfix_op* ~ (WHITESPACE* ~ infix_op ~ WHITESPACE* ~ prefix_op* ~ term ~ postfix_op*)* }
 nested_expression = _{ "(" ~ WHITESPACE* ~ expression ~ WHITESPACE* ~ ")" }
-term              = _{ conditional | function_call | lambda | assignment | list | list_access | bool | string | identifier | number | nested_expression }
+term              = _{ conditional | function_call | lambda | assignment | list | list_access | bool | string | null | identifier | number | nested_expression }
 
 assignment = !{ identifier ~ "=" ~ expression }
 
-comment = { ("#" | "//") ~ (!"\n" ~ ANY)* }
+comment = { "//" ~ (!"\n" ~ ANY)* }
 
 input = _{ SOI ~ (expression | comment) ~ comment? ~ EOI }

@@ -42,6 +42,7 @@ pub enum Value {
     Bool(bool),
     Lambda(LambdaDef),
     String(String),
+    Null,
 }
 
 impl IntoIterator for Value {
@@ -70,6 +71,7 @@ impl Value {
             Value::Bool(_) => "bool",
             Value::Lambda(_) => "function",
             Value::String(_) => "string",
+            Value::Null => "null",
         }
     }
 
@@ -95,6 +97,10 @@ impl Value {
 
     pub fn is_string(&self) -> bool {
         matches!(self, Value::String(_))
+    }
+
+    pub fn is_null(&self) -> bool {
+        matches!(self, Value::Null)
     }
 
     pub fn as_number(&self) -> Result<f64> {
@@ -136,6 +142,13 @@ impl Value {
         match self {
             Value::String(s) => Ok(s),
             _ => Err(anyhow!("expected a string, but got a {}", self.get_type())),
+        }
+    }
+
+    pub fn as_null(&self) -> Result<()> {
+        match self {
+            Value::Null => Ok(()),
+            _ => Err(anyhow!("expected a null, but got a {}", self.get_type())),
         }
     }
 
@@ -186,6 +199,7 @@ impl Display for Value {
                 write!(f, ") => {}", def.body)
             }
             Value::String(s) => write!(f, "\"{}\"", s),
+            Value::Null => write!(f, "null"),
         }
     }
 }

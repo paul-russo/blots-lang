@@ -15,6 +15,7 @@ use std::{collections::HashMap, sync::LazyLock};
 
 static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
     PrattParser::new()
+        .op(Op::infix(Rule::and, Assoc::Left) | Op::infix(Rule::or, Assoc::Left))
         .op(Op::infix(Rule::equal, Assoc::Left)
             | Op::infix(Rule::not_equal, Assoc::Left)
             | Op::infix(Rule::less, Assoc::Left)
@@ -26,9 +27,7 @@ static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
             | Op::infix(Rule::each_less_eq, Assoc::Left)
             | Op::infix(Rule::each_less, Assoc::Left)
             | Op::infix(Rule::each_greater_eq, Assoc::Left)
-            | Op::infix(Rule::each_greater, Assoc::Left)
-            | Op::infix(Rule::and, Assoc::Left)
-            | Op::infix(Rule::or, Assoc::Left))
+            | Op::infix(Rule::each_greater, Assoc::Left))
         .op(Op::infix(Rule::add, Assoc::Left) | Op::infix(Rule::subtract, Assoc::Left))
         .op(Op::infix(Rule::multiply, Assoc::Left)
             | Op::infix(Rule::divide, Assoc::Left)
@@ -64,6 +63,7 @@ pub fn evaluate_expression(
             Rule::number => Ok(Number(
                 primary
                     .as_str()
+                    .replace("_", "")
                     .parse::<f64>()
                     .map_err(|e| anyhow::Error::from(e))?,
             )),
@@ -82,6 +82,7 @@ pub fn evaluate_expression(
                     _ => unreachable!(),
                 }
             }
+            Rule::null => Ok(Value::Null),
             Rule::string => Ok(Value::String(primary.into_inner().as_str().to_string())),
             Rule::assignment => {
                 let mut inner_pairs = primary.into_inner();
@@ -93,6 +94,16 @@ pub fn evaluate_expression(
 
                 if ident == "pi" || ident == "e" || ident == "infinity" {
                     return Err(anyhow!("cannot assign to constant: {}", ident));
+                }
+
+                if ident == "if"
+                    || ident == "then"
+                    || ident == "else"
+                    || ident == "true"
+                    || ident == "false"
+                    || ident == "null"
+                {
+                    return Err(anyhow!("cannot assign to keyword: {}", ident));
                 }
 
                 let expression = inner_pairs.next().unwrap();
