@@ -331,6 +331,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                             Value::Bool(_) => list.push(arg),
                             Value::Lambda(_) => list.push(arg),
                             Value::String(_) => list.push(arg),
+                            Value::Null => list.push(arg),
                         }
                     }
 
@@ -609,6 +610,31 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 name: String::from("typeof"),
                 arity: FunctionArity::Exact(1),
                 body: |args, _| Ok(Value::String(String::from(args[0].get_type()))),
+            },
+        );
+        built_ins_map.insert(
+            "percentile",
+            BuiltInFunctionDef {
+                name: String::from("percentile"),
+                arity: FunctionArity::Exact(2),
+                body: |args, _| {
+                    let p = args[0].as_number()?;
+                    let list = args[1].as_list()?;
+
+                    if p < 0.0 || p > 100.0 {
+                        return Err(anyhow!("percentile must be between 0 and 100"));
+                    }
+
+                    let mut nums = list
+                        .iter()
+                        .map(|a| a.as_number())
+                        .collect::<Result<Vec<f64>>>()?;
+
+                    nums.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    let index = (p / 100.0 * (nums.len() - 1) as f64).round() as usize;
+
+                    Ok(Value::Number(nums[index]))
+                },
             },
         );
 
