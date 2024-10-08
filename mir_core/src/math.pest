@@ -1,4 +1,5 @@
-WHITESPACE = _{ " " | "\t" | "\r\n" | "\n" }
+WHITESPACE = _{ " " | "\t" }
+NEWLINE    = _{ "\r\n" | "\n" }
 
 number  = @{ (integer ~ ("_"+ ~ integer)* ~ ("." ~ ASCII_DIGIT+)? | !integer ~ "." ~ ASCII_DIGIT+) ~ (^"e" ~ integer)? }
 integer = _{ ("+" | "-")? ~ ASCII_DIGIT+ }
@@ -7,13 +8,13 @@ bool = { "true" | "false" }
 
 null = { "null" }
 
-string_value = @{ (!"\"" ~ ANY)* }
-string       = ${ "\"" ~ string_value ~ "\"" }
+string_value = @{ (!PEEK ~ ANY)* }
+string       = ${ PUSH("\"" | "'") ~ string_value ~ POP }
 
 lambda        = ${ argument_list ~ WHITESPACE* ~ "=>" ~ WHITESPACE* ~ expression }
-argument_list = !{ identifier | "(" ~ (identifier ~ ("," ~ identifier)*)? ~ ")" }
+argument_list = !{ identifier | "(" ~ NEWLINE* ~ (identifier ~ ("," ~ NEWLINE* ~ identifier)*)? ~ ("," ~ NEWLINE)? ~ NEWLINE* ~ ")" }
 
-identifier      = @{ ASCII_ALPHA+ ~ identifier_rest* }
+identifier      = @{ (ASCII_ALPHA | "_")+ ~ identifier_rest* }
 identifier_rest = _{ ASCII_ALPHA+ | ASCII_DIGIT+ | "_"+ }
 
 infix_op        = _{ add | subtract | multiply | divide | modulo | power | equal | not_equal | less_eq | less | greater_eq | greater | each_equal | each_not_equal | each_less_eq | each_less | each_greater_eq | each_greater | and | or }
@@ -42,27 +43,28 @@ prefix_op = _{ negation | invert }
 negation  =  { "-" }
 invert    =  { "!" }
 
-postfix_op = _{ factorial }
-factorial  =  { "!" }
+postfix_op  = _{ factorial | list_access }
+factorial   =  { "!" }
+list_access =  { "[" ~ NEWLINE* ~ expression ~ NEWLINE* ~ "]" }
 
 spread_operator       =  { "..." }
 spread_expression     = ${ spread_operator ~ expression }
 spreadable_expression = _{ spread_expression | expression }
 
-call_list     = !{ "(" ~ (spreadable_expression ~ ("," ~ spreadable_expression)*)? ~ ")" }
+call_list     = !{ "(" ~ NEWLINE* ~ (spreadable_expression ~ ("," ~ NEWLINE* ~ spreadable_expression)*)? ~ ("," ~ NEWLINE)? ~ NEWLINE* ~ ")" }
 function_call = ${ identifier ~ call_list }
 
-list        = !{ "[]" | "[" ~ spreadable_expression ~ ("," ~ spreadable_expression)* ~ "]" }
-list_access = ${ identifier ~ "[" ~ WHITESPACE* ~ expression ~ WHITESPACE* ~ "]" }
+list = !{ "[]" | "[" ~ NEWLINE* ~ spreadable_expression ~ ("," ~ NEWLINE* ~ spreadable_expression)* ~ ("," ~ NEWLINE)? ~ NEWLINE* ~ "]" }
 
-conditional = ${ "if" ~ WHITESPACE+ ~ expression ~ WHITESPACE+ ~ "then" ~ WHITESPACE+ ~ expression ~ WHITESPACE+ ~ "else" ~ WHITESPACE+ ~ expression }
+conditional = ${ "if" ~ WHITESPACE+ ~ expression ~ WHITESPACE+ ~ "then" ~ (WHITESPACE | NEWLINE)+ ~ expression ~ (WHITESPACE | NEWLINE)+ ~ "else" ~ (WHITESPACE | NEWLINE)+ ~ expression }
 
 expression        = ${ prefix_op* ~ term ~ postfix_op* ~ (WHITESPACE* ~ infix_op ~ WHITESPACE* ~ prefix_op* ~ term ~ postfix_op*)* }
-nested_expression = _{ "(" ~ WHITESPACE* ~ expression ~ WHITESPACE* ~ ")" }
-term              = _{ conditional | function_call | lambda | assignment | list | list_access | bool | string | null | identifier | number | nested_expression }
+nested_expression = _{ "(" ~ (WHITESPACE | NEWLINE)* ~ expression ~ (WHITESPACE | NEWLINE)* ~ ")" }
+term              = _{ conditional | function_call | lambda | assignment | list | bool | string | null | identifier | number | nested_expression }
 
 assignment = !{ identifier ~ "=" ~ expression }
 
 comment = { "//" ~ (!"\n" ~ ANY)* }
 
-input = _{ SOI ~ (expression | comment) ~ comment? ~ EOI }
+statement =  { (expression | comment) ~ comment? }
+input     = _{ SOI ~ statement? ~ (NEWLINE ~ statement?)* ~ EOI }

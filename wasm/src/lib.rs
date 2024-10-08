@@ -1,3 +1,4 @@
+use anyhow::Result;
 use mir_core::{
     expressions::evaluate_expression,
     functions::BUILT_IN_FUNCTION_IDENTS,
@@ -10,7 +11,7 @@ use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct EvaluationResult {
-    value: Option<Value>,
+    values: HashMap<String, Value>,
     variables: HashMap<String, Value>,
 }
 
@@ -19,36 +20,46 @@ pub fn evaluate(expr: &str, variables_js: JsValue) -> Result<JsValue, JsError> {
     let mut variables = serde_wasm_bindgen::from_value(variables_js)?;
 
     let expr_owned = String::from(expr);
-    let pairs = get_pairs(&expr_owned);
-    let outer_pair = pairs
-        .map_err(|e| JsError::new(&format!("Parsing error: {}", e)))?
-        .next()
-        .unwrap();
+    let pairs =
+        get_pairs(&expr_owned).map_err(|e| JsError::new(&format!("Parsing error: {}", e)))?;
 
-    match outer_pair.as_rule() {
-        Rule::expression => {
-            let result = evaluate_expression(outer_pair.into_inner(), &mut variables);
+    let mut values = HashMap::new();
 
-            match result {
-                Ok(value) => {
-                    let result = EvaluationResult {
-                        value: Some(value),
-                        variables: variables.clone(),
-                    };
-                    Ok(serde_wasm_bindgen::to_value(&result)?)
+    for pair in pairs {
+        match pair.as_rule() {
+            Rule::statement => {
+                let inner_pair = pair.into_inner().next().unwrap();
+
+                match inner_pair.as_rule() {
+                    Rule::expression => {
+                        let start_line_col = inner_pair.as_span().start_pos().line_col();
+                        let end_line_col = inner_pair.as_span().end_pos().line_col();
+
+                        let col_id = format!(
+                            "{}-{}__{}-{}",
+                            start_line_col.0, start_line_col.1, end_line_col.0, end_line_col.1
+                        );
+
+                        let value = evaluate_expression(inner_pair.into_inner(), &mut variables, 0)
+                            .map_err(|error| {
+                                JsError::new(&format!("Evaluation error: {}", error))
+                            })?;
+
+                        values.insert(col_id, value);
+                    }
+                    Rule::comment => {}
+                    _ => unreachable!(),
                 }
-                Err(error) => Err(JsError::new(&format!("Evaluation error: {}", error))),
             }
+            Rule::EOI => {}
+            _ => unreachable!(),
         }
-        Rule::comment => {
-            let result = EvaluationResult {
-                value: None,
-                variables: variables.clone(),
-            };
-            Ok(serde_wasm_bindgen::to_value(&result)?)
-        }
-        _ => unreachable!(),
     }
+
+    Ok(serde_wasm_bindgen::to_value(&EvaluationResult {
+        values,
+        variables,
+    })?)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
