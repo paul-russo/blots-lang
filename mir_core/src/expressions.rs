@@ -37,17 +37,19 @@ static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
             | Op::prefix(Rule::spread_operator)
             | Op::prefix(Rule::invert))
         .op(Op::postfix(Rule::factorial))
+        .op(Op::postfix(Rule::list_access))
 });
 
 pub fn collect_list(
     pairs: Pairs<Rule>,
     variables: &mut HashMap<String, Value>,
+    call_depth: usize,
 ) -> Result<Vec<Value>> {
     Ok(pairs
         .into_iter()
         // This can't just be flat_map (at least I think) because we don't want to unwrap
-        // each Result as we iterate, which would result in failed values being skipped.
-        .map(|value| evaluate_expression(value.into_inner(), variables))
+        // each Result as we iterate, since that would result in failed values being skipped.
+        .map(|value| evaluate_expression(value.into_inner(), variables, call_depth))
         .collect::<Result<Vec<Value>>>()?
         .into_iter()
         .flatten()
@@ -57,6 +59,7 @@ pub fn collect_list(
 pub fn evaluate_expression(
     pairs: Pairs<Rule>,
     variables: &mut HashMap<String, Value>,
+    call_depth: usize,
 ) -> Result<Value> {
     PRATT
         .map_primary(|primary| match primary.as_rule() {
@@ -69,7 +72,7 @@ pub fn evaluate_expression(
             )),
             Rule::list => {
                 let list_pairs = primary.into_inner();
-                let values = collect_list(list_pairs, variables)?;
+                let values = collect_list(list_pairs, variables, call_depth)?;
 
                 Ok(List(values))
             }
@@ -107,7 +110,8 @@ pub fn evaluate_expression(
                 }
 
                 let expression = inner_pairs.next().unwrap();
-                let mut value = evaluate_expression(expression.into_inner(), variables)?;
+                let mut value =
+                    evaluate_expression(expression.into_inner(), variables, call_depth)?;
 
                 match value {
                     Value::Lambda(ref mut lambda) => {
@@ -138,34 +142,13 @@ pub fn evaluate_expression(
                 let else_expr = inner_pairs.next().unwrap();
 
                 let condition =
-                    evaluate_expression(condition_expr.into_inner(), variables)?.as_bool()?;
+                    evaluate_expression(condition_expr.into_inner(), variables, call_depth)?
+                        .as_bool()?;
 
                 if condition {
-                    evaluate_expression(then_expr.into_inner(), variables)
+                    evaluate_expression(then_expr.into_inner(), variables, call_depth)
                 } else {
-                    evaluate_expression(else_expr.into_inner(), variables)
-                }
-            }
-            Rule::list_access => {
-                let mut inner_pairs = primary.into_inner();
-
-                let ident = inner_pairs.next().unwrap().as_str();
-                let index = evaluate_expression(inner_pairs, variables)?;
-
-                match variables.get(ident) {
-                    Some(List(list)) => {
-                        list.get(index.as_number()? as usize)
-                            .cloned()
-                            .ok_or_else(|| {
-                                anyhow!(
-                                    "index out of bounds: {} is out of range for list {}",
-                                    index,
-                                    ident
-                                )
-                            })
-                    }
-                    Some(_) => Err(anyhow!("expected a list, but got a number")),
-                    None => Err(anyhow!("unknown variable: {}", ident)),
+                    evaluate_expression(else_expr.into_inner(), variables, call_depth)
                 }
             }
             Rule::identifier => {
@@ -181,16 +164,16 @@ pub fn evaluate_expression(
                         .ok_or_else(|| anyhow!("unknown variable: {}", primary.as_str())),
                 }
             }
-            Rule::expression => evaluate_expression(primary.into_inner(), variables),
+            Rule::expression => evaluate_expression(primary.into_inner(), variables, call_depth),
             Rule::function_call => {
                 let mut inner_pairs = primary.into_inner();
                 let ident = inner_pairs.next().unwrap().as_str();
                 let call_list = inner_pairs.next().unwrap();
                 let call_list_entries = call_list.into_inner();
-                let args = collect_list(call_list_entries, variables)?;
+                let args = collect_list(call_list_entries, variables, call_depth)?;
 
                 if let Some(def) = get_function_def(ident, variables) {
-                    return def.call(args, variables, None);
+                    return def.call(args, variables, None, call_depth);
                 }
 
                 Err(anyhow!("unknown function: {}", ident))
@@ -216,21 +199,26 @@ pub fn evaluate_expression(
             }
             _ => unreachable!(),
         })
-        .map_postfix(|lhs, op| {
-            let lhs = lhs?.as_number()?;
+        .map_postfix(|lhs, op| match op.as_rule() {
+            Rule::factorial => {
+                let lhs = lhs?.as_number()?;
 
-            match op.as_rule() {
-                Rule::factorial => {
-                    if lhs >= 0.0 && lhs == (lhs as u64) as f64 {
-                        Ok(Number(
-                            (1..(lhs as u64) + 1).map(|x| x as f64).product::<f64>(),
-                        ))
-                    } else {
-                        Err(anyhow!("factorial only works on non-negative integers"))
-                    }
+                if lhs >= 0.0 && lhs == (lhs as u64) as f64 {
+                    Ok(Number(
+                        (1..(lhs as u64) + 1).map(|x| x as f64).product::<f64>(),
+                    ))
+                } else {
+                    Err(anyhow!("factorial only works on non-negative integers"))
                 }
-                _ => unreachable!(),
             }
+            Rule::list_access => {
+                let lhs = lhs?;
+                let index = op.into_inner().next().unwrap().as_str().parse::<usize>()?;
+                let list = lhs.as_list()?;
+
+                Ok(list.get(index).cloned().unwrap_or(Value::Null))
+            }
+            _ => unreachable!(),
         })
         .map_infix(|lhs, op, rhs| {
             let lhs = lhs?;
@@ -317,7 +305,17 @@ pub fn evaluate_expression(
                 },
                 Rule::and => Ok(Bool(lhs.as_bool()? && rhs.as_bool()?)),
                 Rule::or => Ok(Bool(lhs.as_bool()? || rhs.as_bool()?)),
-                Rule::add => Ok(Number(lhs.as_number()? + rhs.as_number()?)),
+                Rule::add => {
+                    if lhs.is_string() && rhs.is_string() {
+                        return Ok(Value::String(format!(
+                            "{}{}",
+                            lhs.as_string()?,
+                            rhs.as_string()?
+                        )));
+                    }
+
+                    Ok(Number(lhs.as_number()? + rhs.as_number()?))
+                }
                 Rule::subtract => Ok(Number(lhs.as_number()? - rhs.as_number()?)),
                 Rule::multiply => Ok(Number(lhs.as_number()? * rhs.as_number()?)),
                 Rule::divide => Ok(Number(lhs.as_number()? / rhs.as_number()?)),

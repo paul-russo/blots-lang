@@ -4,7 +4,6 @@ use commands::{exec_command, is_command};
 use mir_core::expressions::evaluate_expression;
 use mir_core::parser::{get_pairs, Rule};
 use std::collections::HashMap;
-use std::time::Instant;
 
 fn main() -> ! {
     let mut lines: Vec<String> = Vec::new();
@@ -20,38 +19,40 @@ fn main() -> ! {
             continue;
         }
 
-        let pairs = get_pairs(&line);
-
-        let outer_pair = match pairs {
-            Ok(mut pairs) => {
-                // println!("pairs: {}", pairs);
-                pairs.next().unwrap()
-            }
+        let pairs = match get_pairs(&line) {
+            Ok(pairs) => pairs,
             Err(error) => {
                 println!("Error: {}", error);
                 continue;
             }
         };
 
-        match outer_pair.as_rule() {
-            Rule::expression => {
-                let now = Instant::now();
-                let result = evaluate_expression(outer_pair.into_inner(), &mut variables);
+        pairs.for_each(|pair| {
+            match pair.as_rule() {
+                Rule::statement => {
+                    let inner_pair = pair.into_inner().next().unwrap();
 
-                match result {
-                    Ok(value) => println!("= {}", value),
-                    Err(error) => println!("Evaluation error: {}", error),
+                    match inner_pair.as_rule() {
+                        Rule::expression => {
+                            let result =
+                                evaluate_expression(inner_pair.into_inner(), &mut variables, 0);
+
+                            match result {
+                                Ok(value) => println!("= {}", value),
+                                Err(error) => println!("Evaluation error: {}", error),
+                            }
+                        }
+                        Rule::comment => {
+                            // do nothing
+                        }
+                        _ => unreachable!(),
+                    }
                 }
-
-                println!(
-                    "evaluation took: {}ms",
-                    (now.elapsed().as_micros() as f64) / 1000.0
-                );
+                Rule::EOI => {
+                    // do nothing
+                }
+                _ => unreachable!(),
             }
-            Rule::comment => {
-                // do nothing
-            }
-            _ => unreachable!(),
-        }
+        });
     }
 }
