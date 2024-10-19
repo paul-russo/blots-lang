@@ -418,15 +418,16 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 name: String::from("map"),
                 arity: FunctionArity::Exact(2),
                 body: |args, variables, call_depth| {
-                    let lambda = FunctionDef::Lambda(args[0].as_lambda()?);
-                    let parsed_body = lambda.get_parsed_body();
+                    let def = get_function_def(&args[0])
+                        .ok_or(anyhow!("expected the first argument to be a function"))?;
+                    let parsed_body = def.get_parsed_body();
 
                     let list = args[1].as_list()?;
                     let mut new_list = vec![];
 
                     for (i, item) in list.iter().enumerate() {
-                        new_list.push(lambda.call(
-                            if !lambda.check_arity(2).is_err() {
+                        new_list.push(def.call(
+                            if !def.check_arity(2).is_err() {
                                 vec![item.clone(), Value::Number(i as f64)]
                             } else {
                                 vec![item.clone()]
@@ -447,16 +448,17 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 name: String::from("reduce"),
                 arity: FunctionArity::Exact(3),
                 body: |args, variables, call_depth| {
-                    let lambda = FunctionDef::Lambda(args[0].as_lambda()?);
-                    let parsed_body = lambda.get_parsed_body();
+                    let def = get_function_def(&args[0])
+                        .ok_or(anyhow!("expected the first argument to be a function"))?;
+                    let parsed_body = def.get_parsed_body();
 
                     let list = args[1].as_list()?;
                     let initial = args[2].clone();
 
                     let mut acc = initial;
                     for (i, item) in list.iter().enumerate() {
-                        acc = lambda.call(
-                            if !lambda.check_arity(3).is_err() {
+                        acc = def.call(
+                            if !def.check_arity(3).is_err() {
                                 vec![acc, item.clone(), Value::Number(i as f64)]
                             } else {
                                 vec![acc, item.clone()]
@@ -477,16 +479,17 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 name: String::from("filter"),
                 arity: FunctionArity::Exact(2),
                 body: |args, variables, call_depth| {
-                    let lambda = FunctionDef::Lambda(args[0].as_lambda()?);
-                    let parsed_body = lambda.get_parsed_body();
+                    let def = get_function_def(&args[0])
+                        .ok_or(anyhow!("expected the first argument to be a function"))?;
+                    let parsed_body = def.get_parsed_body();
 
                     let list = args[1].as_list()?;
                     let mut new_list = vec![];
 
                     for (i, item) in list.iter().enumerate() {
-                        if lambda
+                        if def
                             .call(
-                                if !lambda.check_arity(2).is_err() {
+                                if !def.check_arity(2).is_err() {
                                     vec![item.clone(), Value::Number(i as f64)]
                                 } else {
                                     vec![item.clone()]
@@ -511,15 +514,16 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 name: String::from("every"),
                 arity: FunctionArity::Exact(2),
                 body: |args, variables, call_depth| {
-                    let lambda = FunctionDef::Lambda(args[0].as_lambda()?);
-                    let parsed_body = lambda.get_parsed_body();
+                    let def = get_function_def(&args[0])
+                        .ok_or(anyhow!("expected the first argument to be a function"))?;
+                    let parsed_body = def.get_parsed_body();
 
                     let list = args[1].as_list()?;
 
                     for (i, item) in list.iter().enumerate() {
-                        if !lambda
+                        if !def
                             .call(
-                                if !lambda.check_arity(2).is_err() {
+                                if !def.check_arity(2).is_err() {
                                     vec![item.clone(), Value::Number(i as f64)]
                                 } else {
                                     vec![item.clone()]
@@ -544,15 +548,16 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 name: String::from("some"),
                 arity: FunctionArity::Exact(2),
                 body: |args, variables, call_depth| {
-                    let lambda = FunctionDef::Lambda(args[0].as_lambda()?);
-                    let parsed_body = lambda.get_parsed_body();
+                    let def = get_function_def(&args[0])
+                        .ok_or(anyhow!("expected the first argument to be a function"))?;
+                    let parsed_body = def.get_parsed_body();
 
                     let list = args[1].as_list()?;
 
                     for (i, item) in list.iter().enumerate() {
-                        if lambda
+                        if def
                             .call(
-                                if !lambda.check_arity(2).is_err() {
+                                if !def.check_arity(2).is_err() {
                                     vec![item.clone(), Value::Number(i as f64)]
                                 } else {
                                     vec![item.clone()]
@@ -577,15 +582,16 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 name: String::from("none"),
                 arity: FunctionArity::Exact(2),
                 body: |args, variables, call_depth| {
-                    let lambda = FunctionDef::Lambda(args[0].as_lambda()?);
-                    let parsed_body = lambda.get_parsed_body();
+                    let def = get_function_def(&args[0])
+                        .ok_or(anyhow!("expected the first argument to be a function"))?;
+                    let parsed_body = def.get_parsed_body();
 
                     let list = args[1].as_list()?;
 
                     for (i, item) in list.iter().enumerate() {
-                        if lambda
+                        if def
                             .call(
-                                if !lambda.check_arity(2).is_err() {
+                                if !def.check_arity(2).is_err() {
                                     vec![item.clone(), Value::Number(i as f64)]
                                 } else {
                                     vec![item.clone()]
