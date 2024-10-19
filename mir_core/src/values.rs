@@ -41,6 +41,7 @@ pub enum Value {
     Spread(SpreadValue),
     Bool(bool),
     Lambda(LambdaDef),
+    BuiltIn(String),
     String(String),
     Null,
 }
@@ -72,6 +73,7 @@ impl Value {
             Value::Lambda(_) => "function",
             Value::String(_) => "string",
             Value::Null => "null",
+            Value::BuiltIn(_) => "built-in function",
         }
     }
 
@@ -101,6 +103,10 @@ impl Value {
 
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
+    }
+
+    pub fn is_built_in(&self) -> bool {
+        matches!(self, Value::BuiltIn(_))
     }
 
     pub fn as_number(&self) -> Result<f64> {
@@ -152,6 +158,16 @@ impl Value {
         }
     }
 
+    pub fn as_built_in(&self) -> Result<&str> {
+        match self {
+            Value::BuiltIn(s) => Ok(s),
+            _ => Err(anyhow!(
+                "expected a built-in function, but got a {}",
+                self.get_type()
+            )),
+        }
+    }
+
     pub fn stringify(&self) -> String {
         match self {
             Value::String(s) => format!("{}", s),
@@ -200,6 +216,7 @@ impl Display for Value {
             }
             Value::String(s) => write!(f, "\"{}\"", s),
             Value::Null => write!(f, "null"),
+            Value::BuiltIn(s) => write!(f, "{} (built-in)", s),
         }
     }
 }

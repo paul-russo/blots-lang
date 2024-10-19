@@ -3,11 +3,13 @@ mod commands;
 use commands::{exec_command, is_command};
 use mir_core::expressions::evaluate_expression;
 use mir_core::parser::{get_pairs, Rule};
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 fn main() -> ! {
     let mut lines: Vec<String> = Vec::new();
-    let mut variables = HashMap::new();
+    let variables = Rc::new(RefCell::new(HashMap::new()));
 
     loop {
         let mut line = String::new();
@@ -34,8 +36,11 @@ fn main() -> ! {
 
                     match inner_pair.as_rule() {
                         Rule::expression => {
-                            let result =
-                                evaluate_expression(inner_pair.into_inner(), &mut variables, 0);
+                            let result = evaluate_expression(
+                                inner_pair.into_inner(),
+                                Rc::clone(&variables),
+                                0,
+                            );
 
                             match result {
                                 Ok(value) => println!("= {}", value),

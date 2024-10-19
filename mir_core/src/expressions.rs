@@ -1,5 +1,5 @@
 use crate::{
-    functions::{get_function_def, BUILT_IN_FUNCTION_IDENTS},
+    functions::{get_function_def, is_built_in_function, BUILT_IN_FUNCTION_IDENTS},
     parser::Rule,
     values::{
         LambdaDef, SpreadValue,
@@ -11,7 +11,7 @@ use pest::{
     iterators::Pairs,
     pratt_parser::{Assoc, Op, PrattParser},
 };
-use std::{collections::HashMap, sync::LazyLock};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::LazyLock};
 
 static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
     PrattParser::new()
@@ -37,19 +37,19 @@ static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
             | Op::prefix(Rule::spread_operator)
             | Op::prefix(Rule::invert))
         .op(Op::postfix(Rule::factorial))
-        .op(Op::postfix(Rule::list_access))
+        .op(Op::postfix(Rule::list_access) | Op::postfix(Rule::call_list))
 });
 
 pub fn collect_list(
     pairs: Pairs<Rule>,
-    variables: &mut HashMap<String, Value>,
+    variables: Rc<RefCell<HashMap<String, Value>>>,
     call_depth: usize,
 ) -> Result<Vec<Value>> {
     Ok(pairs
         .into_iter()
         // This can't just be flat_map (at least I think) because we don't want to unwrap
         // each Result as we iterate, since that would result in failed values being skipped.
-        .map(|value| evaluate_expression(value.into_inner(), variables, call_depth))
+        .map(|value| evaluate_expression(value.into_inner(), Rc::clone(&variables), call_depth))
         .collect::<Result<Vec<Value>>>()?
         .into_iter()
         .flatten()
@@ -58,7 +58,7 @@ pub fn collect_list(
 
 pub fn evaluate_expression(
     pairs: Pairs<Rule>,
-    variables: &mut HashMap<String, Value>,
+    variables: Rc<RefCell<HashMap<String, Value>>>,
     call_depth: usize,
 ) -> Result<Value> {
     PRATT
@@ -72,7 +72,7 @@ pub fn evaluate_expression(
             )),
             Rule::list => {
                 let list_pairs = primary.into_inner();
-                let values = collect_list(list_pairs, variables, call_depth)?;
+                let values = collect_list(list_pairs, Rc::clone(&variables), call_depth)?;
 
                 Ok(List(values))
             }
@@ -110,8 +110,11 @@ pub fn evaluate_expression(
                 }
 
                 let expression = inner_pairs.next().unwrap();
-                let mut value =
-                    evaluate_expression(expression.into_inner(), variables, call_depth)?;
+                let mut value = evaluate_expression(
+                    expression.into_inner(),
+                    Rc::clone(&variables),
+                    call_depth,
+                )?;
 
                 match value {
                     Value::Lambda(ref mut lambda) => {
@@ -120,7 +123,9 @@ pub fn evaluate_expression(
                     _ => {}
                 }
 
-                variables.insert(ident.to_string(), value.clone());
+                variables
+                    .borrow_mut()
+                    .insert(ident.to_string(), value.clone());
                 Ok(value)
             }
             Rule::lambda => {
@@ -132,7 +137,7 @@ pub fn evaluate_expression(
                     name: None,
                     args: args.map(|arg| arg.as_str().to_string()).collect(),
                     body: body.as_str().to_string(),
-                    scope: variables.clone(),
+                    scope: variables.borrow_mut().clone(),
                 }))
             }
             Rule::conditional => {
@@ -141,14 +146,17 @@ pub fn evaluate_expression(
                 let then_expr = inner_pairs.next().unwrap();
                 let else_expr = inner_pairs.next().unwrap();
 
-                let condition =
-                    evaluate_expression(condition_expr.into_inner(), variables, call_depth)?
-                        .as_bool()?;
+                let condition = evaluate_expression(
+                    condition_expr.into_inner(),
+                    Rc::clone(&variables),
+                    call_depth,
+                )?
+                .as_bool()?;
 
                 if condition {
-                    evaluate_expression(then_expr.into_inner(), variables, call_depth)
+                    evaluate_expression(then_expr.into_inner(), Rc::clone(&variables), call_depth)
                 } else {
-                    evaluate_expression(else_expr.into_inner(), variables, call_depth)
+                    evaluate_expression(else_expr.into_inner(), Rc::clone(&variables), call_depth)
                 }
             }
             Rule::identifier => {
@@ -158,25 +166,21 @@ pub fn evaluate_expression(
                     "pi" => return Ok(Number(core::f64::consts::PI)),
                     "e" => return Ok(Number(core::f64::consts::E)),
                     "infinity" => return Ok(Number(f64::INFINITY)),
-                    _ => variables
-                        .get(ident)
-                        .cloned()
-                        .ok_or_else(|| anyhow!("unknown variable: {}", primary.as_str())),
+                    _ => {
+                        if is_built_in_function(ident) {
+                            return Ok(Value::BuiltIn(ident.to_string()));
+                        }
+
+                        variables
+                            .borrow_mut()
+                            .get(ident)
+                            .cloned()
+                            .ok_or_else(|| anyhow!("unknown identifier: {}", primary.as_str()))
+                    }
                 }
             }
-            Rule::expression => evaluate_expression(primary.into_inner(), variables, call_depth),
-            Rule::function_call => {
-                let mut inner_pairs = primary.into_inner();
-                let ident = inner_pairs.next().unwrap().as_str();
-                let call_list = inner_pairs.next().unwrap();
-                let call_list_entries = call_list.into_inner();
-                let args = collect_list(call_list_entries, variables, call_depth)?;
-
-                if let Some(def) = get_function_def(ident, variables) {
-                    return def.call(args, variables, None, call_depth);
-                }
-
-                Err(anyhow!("unknown function: {}", ident))
+            Rule::expression => {
+                evaluate_expression(primary.into_inner(), Rc::clone(&variables), call_depth)
             }
             _ => unreachable!("{}", primary.as_str()),
         })
@@ -217,6 +221,17 @@ pub fn evaluate_expression(
                 let list = lhs.as_list()?;
 
                 Ok(list.get(index).cloned().unwrap_or(Value::Null))
+            }
+            Rule::call_list => {
+                let lhs = lhs?;
+                let call_list = op.into_inner();
+                let args = collect_list(call_list, Rc::clone(&variables), call_depth)?;
+
+                if let Some(def) = get_function_def(&lhs) {
+                    return def.call(args, Rc::clone(&variables), None, call_depth);
+                }
+
+                Err(anyhow!("unknown function: {}", lhs))
             }
             _ => unreachable!(),
         })

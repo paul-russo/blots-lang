@@ -43,16 +43,14 @@ prefix_op = _{ negation | invert }
 negation  =  { "-" }
 invert    =  { "!" }
 
-postfix_op  = _{ factorial | list_access }
+postfix_op  = _{ factorial | list_access | call_list }
 factorial   =  { "!" }
 list_access =  { "[" ~ NEWLINE* ~ expression ~ NEWLINE* ~ "]" }
+call_list   = !{ "(" ~ NEWLINE* ~ (spreadable_expression ~ ("," ~ NEWLINE* ~ spreadable_expression)*)? ~ ("," ~ NEWLINE)? ~ NEWLINE* ~ ")" }
 
 spread_operator       =  { "..." }
 spread_expression     = ${ spread_operator ~ expression }
 spreadable_expression = _{ spread_expression | expression }
-
-call_list     = !{ "(" ~ NEWLINE* ~ (spreadable_expression ~ ("," ~ NEWLINE* ~ spreadable_expression)*)? ~ ("," ~ NEWLINE)? ~ NEWLINE* ~ ")" }
-function_call = ${ identifier ~ call_list }
 
 list = !{ "[]" | "[" ~ NEWLINE* ~ spreadable_expression ~ ("," ~ NEWLINE* ~ spreadable_expression)* ~ ("," ~ NEWLINE)? ~ NEWLINE* ~ "]" }
 
@@ -60,7 +58,7 @@ conditional = ${ "if" ~ WHITESPACE+ ~ expression ~ WHITESPACE+ ~ "then" ~ (WHITE
 
 expression        = ${ prefix_op* ~ term ~ postfix_op* ~ (WHITESPACE* ~ infix_op ~ WHITESPACE* ~ prefix_op* ~ term ~ postfix_op*)* }
 nested_expression = _{ "(" ~ (WHITESPACE | NEWLINE)* ~ expression ~ (WHITESPACE | NEWLINE)* ~ ")" }
-term              = _{ conditional | function_call | lambda | assignment | list | bool | string | null | identifier | number | nested_expression }
+term              = _{ conditional | lambda | assignment | list | bool | string | null | identifier | number | nested_expression }
 
 assignment = !{ identifier ~ "=" ~ expression }
 
