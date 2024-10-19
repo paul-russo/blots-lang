@@ -6,7 +6,7 @@ use mir_core::{
     values::Value,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -17,7 +17,7 @@ struct EvaluationResult {
 
 #[wasm_bindgen]
 pub fn evaluate(expr: &str, variables_js: JsValue) -> Result<JsValue, JsError> {
-    let mut variables = serde_wasm_bindgen::from_value(variables_js)?;
+    let variables = Rc::new(RefCell::new(serde_wasm_bindgen::from_value(variables_js)?));
 
     let expr_owned = String::from(expr);
     let pairs =
@@ -40,10 +40,11 @@ pub fn evaluate(expr: &str, variables_js: JsValue) -> Result<JsValue, JsError> {
                             start_line_col.0, start_line_col.1, end_line_col.0, end_line_col.1
                         );
 
-                        let value = evaluate_expression(inner_pair.into_inner(), &mut variables, 0)
-                            .map_err(|error| {
-                                JsError::new(&format!("Evaluation error: {}", error))
-                            })?;
+                        let value =
+                            evaluate_expression(inner_pair.into_inner(), Rc::clone(&variables), 0)
+                                .map_err(|error| {
+                                    JsError::new(&format!("Evaluation error: {}", error))
+                                })?;
 
                         values.insert(col_id, value);
                     }
@@ -56,9 +57,10 @@ pub fn evaluate(expr: &str, variables_js: JsValue) -> Result<JsValue, JsError> {
         }
     }
 
+    let cloned_variables = variables.borrow_mut().clone();
     Ok(serde_wasm_bindgen::to_value(&EvaluationResult {
         values,
-        variables,
+        variables: cloned_variables,
     })?)
 }
 
