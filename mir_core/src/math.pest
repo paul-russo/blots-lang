@@ -1,5 +1,6 @@
 WHITESPACE = _{ " " | "\t" }
-NEWLINE    = _{ "\r\n" | "\n" }
+NEWLINE    = _{ comment? ~ ("\r\n" | "\n") }
+comment    = _{ "//" ~ (!NEWLINE ~ ANY)* }
 
 number  = @{ (integer ~ ("_"+ ~ integer)* ~ ("." ~ ASCII_DIGIT+)? | !integer ~ "." ~ ASCII_DIGIT+) ~ (^"e" ~ integer)? }
 integer = _{ ("+" | "-")? ~ ASCII_DIGIT+ }
@@ -61,8 +62,6 @@ nested_expression = _{ "(" ~ (WHITESPACE | NEWLINE)* ~ expression ~ (WHITESPACE 
 term              = _{ conditional | lambda | assignment | list | bool | string | null | identifier | number | nested_expression }
 
 assignment = !{ identifier ~ "=" ~ expression }
-
-comment = { "//" ~ (!"\n" ~ ANY)* }
 
 statement =  { (expression | comment) ~ comment? }
 input     = _{ SOI ~ statement? ~ (NEWLINE ~ statement?)* ~ EOI }

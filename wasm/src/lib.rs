@@ -28,32 +28,34 @@ pub fn evaluate(expr: &str, variables_js: JsValue) -> Result<JsValue, JsError> {
     for pair in pairs {
         match pair.as_rule() {
             Rule::statement => {
-                let inner_pair = pair.into_inner().next().unwrap();
+                if let Some(inner_pair) = pair.into_inner().next() {
+                    match inner_pair.as_rule() {
+                        Rule::expression => {
+                            let start_line_col = inner_pair.as_span().start_pos().line_col();
+                            let end_line_col = inner_pair.as_span().end_pos().line_col();
 
-                match inner_pair.as_rule() {
-                    Rule::expression => {
-                        let start_line_col = inner_pair.as_span().start_pos().line_col();
-                        let end_line_col = inner_pair.as_span().end_pos().line_col();
+                            let col_id = format!(
+                                "{}-{}__{}-{}",
+                                start_line_col.0, start_line_col.1, end_line_col.0, end_line_col.1
+                            );
 
-                        let col_id = format!(
-                            "{}-{}__{}-{}",
-                            start_line_col.0, start_line_col.1, end_line_col.0, end_line_col.1
-                        );
+                            let value = evaluate_expression(
+                                inner_pair.into_inner(),
+                                Rc::clone(&variables),
+                                0,
+                            )
+                            .map_err(|error| {
+                                JsError::new(&format!("Evaluation error: {}", error))
+                            })?;
 
-                        let value =
-                            evaluate_expression(inner_pair.into_inner(), Rc::clone(&variables), 0)
-                                .map_err(|error| {
-                                    JsError::new(&format!("Evaluation error: {}", error))
-                                })?;
-
-                        values.insert(col_id, value);
+                            values.insert(col_id, value);
+                        }
+                        _ => unreachable!("unexpected rule: {:?}", inner_pair.as_rule()),
                     }
-                    Rule::comment => {}
-                    _ => unreachable!(),
                 }
             }
             Rule::EOI => {}
-            _ => unreachable!(),
+            rule => unreachable!("unexpected rule: {:?}", rule),
         }
     }
 

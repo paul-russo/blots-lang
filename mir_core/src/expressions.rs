@@ -227,6 +227,10 @@ pub fn evaluate_expression(
                 let call_list = op.into_inner();
                 let args = collect_list(call_list, Rc::clone(&variables), call_depth)?;
 
+                if !lhs.is_lambda() && !lhs.is_built_in() {
+                    return Err(anyhow!("can't call a non-function: {}", lhs));
+                }
+
                 if let Some(def) = get_function_def(&lhs) {
                     return def.call(args, Rc::clone(&variables), None, call_depth);
                 }
