@@ -29,11 +29,9 @@ fn main() -> ! {
             }
         };
 
-        pairs.for_each(|pair| {
-            match pair.as_rule() {
-                Rule::statement => {
-                    let inner_pair = pair.into_inner().next().unwrap();
-
+        pairs.for_each(|pair| match pair.as_rule() {
+            Rule::statement => {
+                if let Some(inner_pair) = pair.into_inner().next() {
                     match inner_pair.as_rule() {
                         Rule::expression => {
                             let result = evaluate_expression(
@@ -47,17 +45,12 @@ fn main() -> ! {
                                 Err(error) => println!("Evaluation error: {}", error),
                             }
                         }
-                        Rule::comment => {
-                            // do nothing
-                        }
-                        _ => unreachable!(),
+                        _ => unreachable!("unexpected rule: {:?}", inner_pair.as_rule()),
                     }
                 }
-                Rule::EOI => {
-                    // do nothing
-                }
-                _ => unreachable!(),
             }
+            Rule::EOI => {}
+            rule => unreachable!("unexpected rule: {:?}", rule),
         });
     }
 }
