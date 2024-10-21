@@ -2,10 +2,66 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt::Display};
 
+pub enum FunctionArity {
+    Exact(usize),
+    AtLeast(usize),
+    Between(usize, usize),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
+pub enum LambdaArg {
+    Required(String),
+    Optional(String),
+}
+
+impl LambdaArg {
+    pub fn get_name(&self) -> &str {
+        match self {
+            LambdaArg::Required(name) => name,
+            LambdaArg::Optional(name) => name,
+        }
+    }
+
+    pub fn is_required(&self) -> bool {
+        matches!(self, LambdaArg::Required(_))
+    }
+
+    pub fn is_optional(&self) -> bool {
+        matches!(self, LambdaArg::Optional(_))
+    }
+
+    pub fn as_required(&self) -> Result<&str> {
+        match self {
+            LambdaArg::Required(name) => Ok(name),
+            _ => Err(anyhow!(
+                "expected a required argument, but got an optional one"
+            )),
+        }
+    }
+
+    pub fn as_optional(&self) -> Result<&str> {
+        match self {
+            LambdaArg::Optional(name) => Ok(name),
+            _ => Err(anyhow!(
+                "expected an optional argument, but got a required one"
+            )),
+        }
+    }
+}
+
+impl Display for LambdaArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LambdaArg::Required(name) => write!(f, "{}", name),
+            LambdaArg::Optional(name) => write!(f, "{}?", name),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LambdaDef {
     pub name: Option<String>,
-    pub args: Vec<String>,
+    pub args: Vec<LambdaArg>,
     pub body: String,
     pub scope: HashMap<String, Value>,
 }
@@ -13,6 +69,17 @@ pub struct LambdaDef {
 impl LambdaDef {
     pub fn set_name(&mut self, name: String) {
         self.name = Some(name);
+    }
+
+    pub fn get_arity(&self) -> FunctionArity {
+        let min = self.args.iter().filter(|arg| arg.is_required()).count();
+        let max = self.args.len();
+
+        if min == max {
+            FunctionArity::Exact(min)
+        } else {
+            FunctionArity::Between(min, max)
+        }
     }
 }
 

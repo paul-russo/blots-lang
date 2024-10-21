@@ -6,13 +6,8 @@ use pest::iterators::Pairs;
 use crate::{
     expressions::evaluate_expression,
     parser::{get_pairs, Rule},
-    values::{LambdaDef, SpreadValue, Value},
+    values::{FunctionArity, LambdaArg, LambdaDef, SpreadValue, Value},
 };
-
-pub enum FunctionArity {
-    Exact(usize),
-    AtLeast(usize),
-}
 
 pub struct BuiltInFunctionDef {
     pub name: String,
@@ -791,35 +786,68 @@ impl<'a> FunctionDef<'a> {
                         ))
                     }
                 }
+                FunctionArity::Between(min, max) => {
+                    if arg_count >= *min && arg_count <= *max {
+                        Ok(())
+                    } else {
+                        Err(anyhow!(
+                            "function {} takes between {} and {} arguments, but {} were given",
+                            name,
+                            min,
+                            max,
+                            arg_count
+                        ))
+                    }
+                }
             },
-            FunctionDef::Lambda(LambdaDef { args, name, .. }) => {
-                if arg_count == args.len() {
-                    Ok(())
-                } else {
-                    let ident = name
-                        .clone()
-                        .map_or(String::from("anonymous function"), |n| {
-                            format!("function {}", n)
-                        });
+            FunctionDef::Lambda(def) => {
+                let arity = def.get_arity();
 
-                    let expected_args = if args.len() == 1 {
-                        "1 argument".to_string()
-                    } else {
-                        format!("{} arguments", args.len())
-                    };
+                let ident = def
+                    .name
+                    .clone()
+                    .map_or(String::from("anonymous function"), |n| {
+                        format!("function {}", n)
+                    });
 
-                    let given_args = if arg_count == 1 {
-                        "1 was given".to_string()
-                    } else {
-                        format!("{} were given", arg_count)
-                    };
-
-                    Err(anyhow!(
-                        "{} takes {}, but {}",
-                        ident,
-                        expected_args,
-                        given_args
-                    ))
+                match arity {
+                    FunctionArity::Exact(expected) => {
+                        if arg_count == expected {
+                            Ok(())
+                        } else {
+                            Err(anyhow!(
+                                "{} takes exactly {} arguments, but {} were given",
+                                ident,
+                                expected,
+                                arg_count
+                            ))
+                        }
+                    }
+                    FunctionArity::AtLeast(expected) => {
+                        if arg_count >= expected {
+                            Ok(())
+                        } else {
+                            Err(anyhow!(
+                                "{} takes at least {} arguments, but {} were given",
+                                ident,
+                                expected,
+                                arg_count
+                            ))
+                        }
+                    }
+                    FunctionArity::Between(min, max) => {
+                        if arg_count >= min && arg_count <= max {
+                            Ok(())
+                        } else {
+                            Err(anyhow!(
+                                "{} takes between {} and {} arguments, but {} were given",
+                                ident,
+                                min,
+                                max,
+                                arg_count
+                            ))
+                        }
+                    }
                 }
             }
         }
@@ -858,8 +886,18 @@ impl<'a> FunctionDef<'a> {
                     new_variables.insert(var.clone(), val.clone());
                 }
 
-                for (arg, value) in expected_args.iter().zip(args.iter()) {
-                    new_variables.insert(arg.clone(), value.clone());
+                for (idx, expected_arg) in expected_args.iter().enumerate() {
+                    match expected_arg {
+                        LambdaArg::Required(name) => {
+                            new_variables.insert(name.clone(), args[idx].clone());
+                        }
+                        LambdaArg::Optional(name) => {
+                            new_variables.insert(
+                                name.clone(),
+                                args.get(idx).cloned().unwrap_or(Value::Null),
+                            );
+                        }
+                    }
                 }
 
                 evaluate_expression(
