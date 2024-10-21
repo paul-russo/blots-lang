@@ -18,7 +18,7 @@ argument_list = !{ identifier | "(" ~ NEWLINE* ~ (identifier ~ ("," ~ NEWLINE* ~
 identifier      = @{ (ASCII_ALPHA | "_")+ ~ identifier_rest* }
 identifier_rest = _{ ASCII_ALPHA+ | ASCII_DIGIT+ | "_"+ }
 
-infix_op        = _{ add | subtract | multiply | divide | modulo | power | equal | not_equal | less_eq | less | greater_eq | greater | each_equal | each_not_equal | each_less_eq | each_less | each_greater_eq | each_greater | and | or }
+infix_op        = _{ add | subtract | multiply | divide | modulo | power | equal | not_equal | less_eq | less | greater_eq | greater | each_equal | each_not_equal | each_less_eq | each_less | each_greater_eq | each_greater | and | or | coalesce }
 add             =  { "+" }
 subtract        =  { "-" }
 multiply        =  { "*" }
@@ -39,6 +39,7 @@ each_greater_eq =  { "[>=]" }
 each_greater    =  { "[>]" }
 and             =  { "and" | "&&" }
 or              =  { "or" | "||" }
+coalesce        =  { "??" }
 
 prefix_op = _{ negation | invert }
 negation  =  { "-" }

@@ -15,7 +15,9 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::LazyLock};
 
 static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
     PrattParser::new()
-        .op(Op::infix(Rule::and, Assoc::Left) | Op::infix(Rule::or, Assoc::Left))
+        .op(Op::infix(Rule::and, Assoc::Left)
+            | Op::infix(Rule::or, Assoc::Left)
+            | Op::infix(Rule::coalesce, Assoc::Left))
         .op(Op::infix(Rule::equal, Assoc::Left)
             | Op::infix(Rule::not_equal, Assoc::Left)
             | Op::infix(Rule::less, Assoc::Left)
@@ -340,6 +342,13 @@ pub fn evaluate_expression(
                 Rule::divide => Ok(Number(lhs.as_number()? / rhs.as_number()?)),
                 Rule::modulo => Ok(Number(lhs.as_number()? % rhs.as_number()?)),
                 Rule::power => Ok(Number(lhs.as_number()?.powf(rhs.as_number()?))),
+                Rule::coalesce => {
+                    if lhs == Value::Null {
+                        Ok(rhs)
+                    } else {
+                        Ok(lhs)
+                    }
+                }
                 _ => unreachable!(),
             }
         })
@@ -659,5 +668,17 @@ mod tests {
         let result = parse_and_evaluate("f(5, 2) + 3", Some(Rc::clone(&vars))).unwrap();
 
         assert_eq!(result, Value::Number(10.0));
+    }
+
+    #[test]
+    fn coalesce_operator_with_null() {
+        let result = parse_and_evaluate("null ?? 5", None).unwrap();
+        assert_eq!(result, Value::Number(5.0));
+    }
+
+    #[test]
+    fn coalesce_operator_with_non_null() {
+        let result = parse_and_evaluate("3 ?? 10", None).unwrap();
+        assert_eq!(result, Value::Number(3.0));
     }
 }
