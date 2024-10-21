@@ -13,7 +13,10 @@ string_value = @{ (!PEEK ~ ANY)* }
 string       = ${ PUSH("\"" | "'") ~ string_value ~ POP }
 
 lambda        = ${ argument_list ~ WHITESPACE* ~ "=>" ~ WHITESPACE* ~ expression }
-argument_list = !{ identifier | "(" ~ NEWLINE* ~ (identifier ~ ("," ~ NEWLINE* ~ identifier)*)? ~ ("," ~ NEWLINE)? ~ NEWLINE* ~ ")" }
+argument_list = !{ argument | "(" ~ NEWLINE* ~ (argument ~ ("," ~ NEWLINE* ~ argument)*)? ~ ("," ~ NEWLINE)? ~ NEWLINE* ~ ")" }
+argument      = _{ optional_arg | required_arg }
+required_arg  =  { identifier }
+optional_arg  =  { identifier ~ "?" }
 
 identifier      = @{ (ASCII_ALPHA | "_")+ ~ identifier_rest* }
 identifier_rest = _{ ASCII_ALPHA+ | ASCII_DIGIT+ | "_"+ }

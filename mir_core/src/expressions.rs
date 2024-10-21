@@ -2,7 +2,7 @@ use crate::{
     functions::{get_function_def, is_built_in_function, BUILT_IN_FUNCTION_IDENTS},
     parser::Rule,
     values::{
-        LambdaDef, SpreadValue,
+        LambdaArg, LambdaDef, SpreadValue,
         Value::{self, Bool, List, Number, Spread},
     },
 };
@@ -15,9 +15,7 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::LazyLock};
 
 static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
     PrattParser::new()
-        .op(Op::infix(Rule::and, Assoc::Left)
-            | Op::infix(Rule::or, Assoc::Left)
-            | Op::infix(Rule::coalesce, Assoc::Left))
+        .op(Op::infix(Rule::and, Assoc::Left) | Op::infix(Rule::or, Assoc::Left))
         .op(Op::infix(Rule::equal, Assoc::Left)
             | Op::infix(Rule::not_equal, Assoc::Left)
             | Op::infix(Rule::less, Assoc::Left)
@@ -34,7 +32,7 @@ static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
         .op(Op::infix(Rule::multiply, Assoc::Left)
             | Op::infix(Rule::divide, Assoc::Left)
             | Op::infix(Rule::modulo, Assoc::Left))
-        .op(Op::infix(Rule::power, Assoc::Right))
+        .op(Op::infix(Rule::power, Assoc::Right) | Op::infix(Rule::coalesce, Assoc::Left))
         .op(Op::prefix(Rule::negation)
             | Op::prefix(Rule::spread_operator)
             | Op::prefix(Rule::invert))
@@ -132,12 +130,26 @@ pub fn evaluate_expression(
             }
             Rule::lambda => {
                 let mut inner_pairs = primary.into_inner();
-                let args = inner_pairs.next().unwrap().into_inner();
+                let args = inner_pairs
+                    .next()
+                    .unwrap()
+                    .into_inner()
+                    .map(|arg| match arg.as_rule() {
+                        Rule::required_arg => {
+                            LambdaArg::Required(arg.into_inner().as_str().to_string())
+                        }
+                        Rule::optional_arg => {
+                            LambdaArg::Optional(arg.into_inner().as_str().to_string())
+                        }
+                        _ => unreachable!(),
+                    })
+                    .collect();
+
                 let body = inner_pairs.next().unwrap();
 
                 Ok(Value::Lambda(LambdaDef {
                     name: None,
-                    args: args.map(|arg| arg.as_str().to_string()).collect(),
+                    args,
                     body: body.as_str().to_string(),
                     scope: variables.borrow_mut().clone(),
                 }))
@@ -627,7 +639,7 @@ mod tests {
             result,
             Value::Lambda(LambdaDef {
                 name: Some("f".to_string()),
-                args: vec!["x".to_string()],
+                args: vec![LambdaArg::Required("x".to_string())],
                 body: "x + 1".to_string(),
                 scope: HashMap::new()
             })
@@ -636,7 +648,7 @@ mod tests {
             vars.borrow().get("f").unwrap(),
             &Value::Lambda(LambdaDef {
                 name: Some("f".to_string()),
-                args: vec!["x".to_string()],
+                args: vec![LambdaArg::Required("x".to_string())],
                 body: "x + 1".to_string(),
                 scope: HashMap::new()
             })
