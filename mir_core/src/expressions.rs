@@ -345,3 +345,88 @@ pub fn evaluate_expression(
         })
         .parse(pairs)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::get_pairs;
+
+    fn parse_and_evaluate(input: &str) -> Result<Value> {
+        let binding = String::from(input);
+        let mut pairs = get_pairs(&binding).unwrap();
+        let expr = pairs.next().unwrap().into_inner();
+        evaluate_expression(expr, Rc::new(RefCell::new(HashMap::new())), 0)
+    }
+
+    #[test]
+    fn addition_of_integers() {
+        let result = parse_and_evaluate("5 + 2").unwrap();
+        assert_eq!(result, Value::Number(7.0));
+    }
+
+    #[test]
+    fn exponentiation_of_two_integers() {
+        let result = parse_and_evaluate("2 ^ 3").unwrap();
+        assert_eq!(result, Value::Number(8.0));
+    }
+
+    #[test]
+    fn multiplication_of_integers() {
+        let result = parse_and_evaluate("8 * 4").unwrap();
+        assert_eq!(result, Value::Number(32.0));
+    }
+
+    #[test]
+    fn division_with_integer_resulting_in_decimal() {
+        let result = parse_and_evaluate("9 / 2").unwrap();
+        assert_eq!(result, Value::Number(4.5));
+    }
+
+    #[test]
+    fn addition_with_nested_expression() {
+        let result = parse_and_evaluate("5 + (2 * 4)").unwrap();
+        assert_eq!(result, Value::Number(13.0));
+    }
+
+    #[test]
+    fn grouping_and_multiplication_in_expression() {
+        let result = parse_and_evaluate("(3 + 2) * 2").unwrap();
+        assert_eq!(result, Value::Number(10.0));
+    }
+
+    #[test]
+    fn mixed_operations_with_decimal_and_precedence() {
+        let result = parse_and_evaluate("6.5 / 2 + 4 * 2").unwrap();
+        assert_eq!(result, Value::Number(11.25));
+    }
+
+    #[test]
+    fn exponentiation_with_nested_expression() {
+        let result = parse_and_evaluate("2 ^ (1 + 2)").unwrap();
+        assert_eq!(result, Value::Number(8.0));
+    }
+
+    #[test]
+    fn complex_expression_with_decimals() {
+        let result = parse_and_evaluate("7.5 - 3.25 + 2 * (8 / 4)").unwrap();
+        assert_eq!(result, Value::Number(8.25));
+    }
+
+    #[test]
+    fn subtraction_with_decimal_result() {
+        let result = parse_and_evaluate("10.75 - 3.5").unwrap();
+        assert_eq!(result, Value::Number(7.25));
+    }
+
+    #[test]
+    fn multiplication_of_two_decimals() {
+        let result = parse_and_evaluate("3.5 * 2.0").unwrap();
+        assert_eq!(result, Value::Number(7.0));
+    }
+
+    #[test]
+    fn division_of_two_decimals() {
+        let result = parse_and_evaluate("7.5 / 2.5").unwrap();
+        assert_eq!(result, Value::Number(3.0));
+    }
+}
