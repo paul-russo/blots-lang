@@ -325,7 +325,7 @@ pub fn evaluate_expression(
                 Rule::and => Ok(Bool(lhs.as_bool()? && rhs.as_bool()?)),
                 Rule::or => Ok(Bool(lhs.as_bool()? || rhs.as_bool()?)),
                 Rule::add => {
-                    if lhs.is_string() && rhs.is_string() {
+                    if lhs.is_string() {
                         return Ok(Value::String(format!(
                             "{}{}",
                             lhs.as_string()?,
@@ -351,82 +351,313 @@ mod tests {
     use super::*;
     use crate::parser::get_pairs;
 
-    fn parse_and_evaluate(input: &str) -> Result<Value> {
-        let binding = String::from(input);
+    fn parse_and_evaluate(
+        input: &str,
+        vars: Option<Rc<RefCell<HashMap<String, Value>>>>,
+    ) -> Result<Value> {
+        let binding = input.to_string();
         let mut pairs = get_pairs(&binding).unwrap();
         let expr = pairs.next().unwrap().into_inner();
-        evaluate_expression(expr, Rc::new(RefCell::new(HashMap::new())), 0)
+        evaluate_expression(
+            expr,
+            vars.unwrap_or(Rc::new(RefCell::new(HashMap::new()))),
+            0,
+        )
     }
 
     #[test]
     fn addition_of_integers() {
-        let result = parse_and_evaluate("5 + 2").unwrap();
+        let result = parse_and_evaluate("5 + 2", None).unwrap();
         assert_eq!(result, Value::Number(7.0));
     }
 
     #[test]
     fn exponentiation_of_two_integers() {
-        let result = parse_and_evaluate("2 ^ 3").unwrap();
+        let result = parse_and_evaluate("2 ^ 3", None).unwrap();
         assert_eq!(result, Value::Number(8.0));
     }
 
     #[test]
     fn multiplication_of_integers() {
-        let result = parse_and_evaluate("8 * 4").unwrap();
+        let result = parse_and_evaluate("8 * 4", None).unwrap();
         assert_eq!(result, Value::Number(32.0));
     }
 
     #[test]
     fn division_with_integer_resulting_in_decimal() {
-        let result = parse_and_evaluate("9 / 2").unwrap();
+        let result = parse_and_evaluate("9 / 2", None).unwrap();
         assert_eq!(result, Value::Number(4.5));
     }
 
     #[test]
     fn addition_with_nested_expression() {
-        let result = parse_and_evaluate("5 + (2 * 4)").unwrap();
+        let result = parse_and_evaluate("5 + (2 * 4)", None).unwrap();
         assert_eq!(result, Value::Number(13.0));
     }
 
     #[test]
     fn grouping_and_multiplication_in_expression() {
-        let result = parse_and_evaluate("(3 + 2) * 2").unwrap();
+        let result = parse_and_evaluate("(3 + 2) * 2", None).unwrap();
         assert_eq!(result, Value::Number(10.0));
     }
 
     #[test]
     fn mixed_operations_with_decimal_and_precedence() {
-        let result = parse_and_evaluate("6.5 / 2 + 4 * 2").unwrap();
+        let result = parse_and_evaluate("6.5 / 2 + 4 * 2", None).unwrap();
         assert_eq!(result, Value::Number(11.25));
     }
 
     #[test]
     fn exponentiation_with_nested_expression() {
-        let result = parse_and_evaluate("2 ^ (1 + 2)").unwrap();
+        let result = parse_and_evaluate("2 ^ (1 + 2)", None).unwrap();
         assert_eq!(result, Value::Number(8.0));
     }
 
     #[test]
     fn complex_expression_with_decimals() {
-        let result = parse_and_evaluate("7.5 - 3.25 + 2 * (8 / 4)").unwrap();
+        let result = parse_and_evaluate("7.5 - 3.25 + 2 * (8 / 4)", None).unwrap();
         assert_eq!(result, Value::Number(8.25));
     }
 
     #[test]
     fn subtraction_with_decimal_result() {
-        let result = parse_and_evaluate("10.75 - 3.5").unwrap();
+        let result = parse_and_evaluate("10.75 - 3.5", None).unwrap();
         assert_eq!(result, Value::Number(7.25));
     }
 
     #[test]
     fn multiplication_of_two_decimals() {
-        let result = parse_and_evaluate("3.5 * 2.0").unwrap();
+        let result = parse_and_evaluate("3.5 * 2.0", None).unwrap();
         assert_eq!(result, Value::Number(7.0));
     }
 
     #[test]
     fn division_of_two_decimals() {
-        let result = parse_and_evaluate("7.5 / 2.5").unwrap();
+        let result = parse_and_evaluate("7.5 / 2.5", None).unwrap();
         assert_eq!(result, Value::Number(3.0));
+    }
+
+    #[test]
+    fn boolean_and() {
+        let result = parse_and_evaluate("true and false", None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    #[test]
+    fn boolean_and_alt() {
+        let result = parse_and_evaluate("true && false", None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    #[test]
+    fn boolean_or() {
+        let result = parse_and_evaluate("true or false", None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn boolean_or_alt() {
+        let result = parse_and_evaluate("true || false", None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn boolean_and_with_nested_expression() {
+        let result = parse_and_evaluate("true and (false or true)", None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn boolean_and_with_nested_expression_alt() {
+        let result = parse_and_evaluate("true && (false || true)", None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn boolean_or_with_nested_expression() {
+        let result = parse_and_evaluate("true or (false and true)", None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn boolean_or_with_nested_expression_alt() {
+        let result = parse_and_evaluate("true || (false && true)", None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn logical_not() {
+        let result = parse_and_evaluate("!true", None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    #[test]
+    fn logical_not_with_nested_expression() {
+        let result = parse_and_evaluate("!(true and false)", None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn equality_of_two_integers() {
+        let result = parse_and_evaluate("5 == 5", None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn inequality_of_two_integers() {
+        let result = parse_and_evaluate("5 != 5", None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    #[test]
+    fn less_than_comparison() {
+        let result = parse_and_evaluate("5 < 10", None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn less_than_or_equal_comparison() {
+        let result = parse_and_evaluate("5 <= 5", None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn greater_than_comparison() {
+        let result = parse_and_evaluate("10 > 5", None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn greater_than_or_equal_comparison() {
+        let result = parse_and_evaluate("5 >= 5", None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn equality_of_two_lists() {
+        let result = parse_and_evaluate("[1, 2, 3] == [1, 2, 3]", None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn inequality_of_two_lists() {
+        let result = parse_and_evaluate("[1, 2, 3] != [2, 3, 4]", None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn conditional_expression_with_true_condition() {
+        let result = parse_and_evaluate("if true then 5 else 10", None).unwrap();
+        assert_eq!(result, Value::Number(5.0));
+    }
+
+    #[test]
+    fn conditional_expression_with_false_condition() {
+        let result = parse_and_evaluate("if false then 5 else 10", None).unwrap();
+        assert_eq!(result, Value::Number(10.0));
+    }
+
+    #[test]
+    fn factorial_of_integer() {
+        let result = parse_and_evaluate("5!", None).unwrap();
+        assert_eq!(result, Value::Number(120.0));
+    }
+
+    #[test]
+    fn factorial_of_zero() {
+        let result = parse_and_evaluate("0!", None).unwrap();
+        assert_eq!(result, Value::Number(1.0));
+    }
+
+    #[test]
+    fn factorial_of_negative_integer() {
+        let result = parse_and_evaluate("(-5)!", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn factorial_of_decimal() {
+        let result = parse_and_evaluate("5.5!", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn string_concatenation() {
+        let result = parse_and_evaluate("\"hello\" + \"world\"", None).unwrap();
+        assert_eq!(result, Value::String("helloworld".to_string()));
+    }
+
+    #[test]
+    fn string_concatenation_with_integer() {
+        let result = parse_and_evaluate("\"hello\" + 5", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn variable_assignment() {
+        let vars = Rc::new(RefCell::new(HashMap::new()));
+        let result = parse_and_evaluate("x = 5", Some(Rc::clone(&vars))).unwrap();
+        assert_eq!(result, Value::Number(5.0));
+        assert_eq!(vars.borrow().get("x").unwrap(), &Value::Number(5.0));
+    }
+
+    #[test]
+    fn variable_assignment_with_expression() {
+        let vars = Rc::new(RefCell::new(HashMap::new()));
+        let result = parse_and_evaluate("x = 5 + 2", Some(Rc::clone(&vars))).unwrap();
+        assert_eq!(result, Value::Number(7.0));
+        assert_eq!(vars.borrow().get("x").unwrap(), &Value::Number(7.0));
+    }
+
+    #[test]
+    fn variable_assignment_with_lambda() {
+        let vars = Rc::new(RefCell::new(HashMap::new()));
+        let result = parse_and_evaluate("f = x => x + 1", Some(Rc::clone(&vars))).unwrap();
+
+        assert_eq!(
+            result,
+            Value::Lambda(LambdaDef {
+                name: Some("f".to_string()),
+                args: vec!["x".to_string()],
+                body: "x + 1".to_string(),
+                scope: HashMap::new()
+            })
+        );
+        assert_eq!(
+            vars.borrow().get("f").unwrap(),
+            &Value::Lambda(LambdaDef {
+                name: Some("f".to_string()),
+                args: vec!["x".to_string()],
+                body: "x + 1".to_string(),
+                scope: HashMap::new()
+            })
+        );
+    }
+
+    #[test]
+    fn variable_assignment_with_lambda_and_call() {
+        let vars = Rc::new(RefCell::new(HashMap::new()));
+        let _ = parse_and_evaluate("f = x => x + 1", Some(Rc::clone(&vars))).unwrap();
+        let result = parse_and_evaluate("f(5)", Some(Rc::clone(&vars))).unwrap();
+
+        assert_eq!(result, Value::Number(6.0));
+    }
+
+    #[test]
+    fn variable_assignment_with_lambda_and_call_with_multiple_args() {
+        let vars = Rc::new(RefCell::new(HashMap::new()));
+        let _ = parse_and_evaluate("f = (x, y) => x + y", Some(Rc::clone(&vars))).unwrap();
+        let result = parse_and_evaluate("f(5, 2)", Some(Rc::clone(&vars))).unwrap();
+
+        assert_eq!(result, Value::Number(7.0));
+    }
+
+    #[test]
+    fn variable_assignment_with_lambda_and_call_with_multiple_args_and_expression() {
+        let vars = Rc::new(RefCell::new(HashMap::new()));
+        let _ = parse_and_evaluate("f = (x, y) => x + y", Some(Rc::clone(&vars))).unwrap();
+        let result = parse_and_evaluate("f(5, 2) + 3", Some(Rc::clone(&vars))).unwrap();
+
+        assert_eq!(result, Value::Number(10.0));
     }
 }
