@@ -12,7 +12,7 @@ null = { "null" }
 string_value = @{ (!PEEK ~ ANY)* }
 string       = ${ PUSH("\"" | "'") ~ string_value ~ POP }
 
-lambda        = ${ argument_list ~ WHITESPACE* ~ "=>" ~ WHITESPACE* ~ expression }
+lambda        = ${ argument_list ~ WHITESPACE* ~ "=>" ~ (WHITESPACE | NEWLINE)* ~ expression }
 argument_list = !{ argument | "(" ~ NEWLINE* ~ (argument ~ ("," ~ NEWLINE* ~ argument)*)? ~ ("," ~ NEWLINE)? ~ NEWLINE* ~ ")" }
 argument      = _{ optional_arg | required_arg }
 required_arg  =  { identifier }
