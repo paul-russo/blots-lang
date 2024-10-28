@@ -48,9 +48,10 @@ prefix_op = _{ negation | invert }
 negation  =  { "-" }
 invert    =  { "!" }
 
-postfix_op = _{ factorial | access | call_list }
+postfix_op = _{ factorial | access | call_list | dot_access }
 factorial  =  { "!" }
 access     =  { "[" ~ NEWLINE* ~ expression ~ NEWLINE* ~ "]" }
+dot_access =  { "." ~ identifier }
 call_list  = !{ "(" ~ NEWLINE* ~ (spreadable_expression ~ ("," ~ NEWLINE* ~ spreadable_expression)*)? ~ ("," ~ NEWLINE)? ~ NEWLINE* ~ ")" }
 
 spread_operator       =  { "..." }
