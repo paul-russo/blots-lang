@@ -42,7 +42,9 @@ static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
             | Op::prefix(Rule::spread_operator)
             | Op::prefix(Rule::invert))
         .op(Op::postfix(Rule::factorial))
-        .op(Op::postfix(Rule::access) | Op::postfix(Rule::call_list))
+        .op(Op::postfix(Rule::access)
+            | Op::postfix(Rule::dot_access)
+            | Op::postfix(Rule::call_list))
 });
 
 pub fn collect_list(
@@ -333,6 +335,15 @@ pub fn evaluate_expression(
                         "expected a record or list, but got a {}",
                         lhs.get_type()
                     )),
+                }
+            }
+            Rule::dot_access => {
+                let lhs = lhs?;
+                let key = op.into_inner().as_str();
+
+                match lhs {
+                    Value::Record(record) => Ok(record.get(key).cloned().unwrap_or(Value::Null)),
+                    _ => Err(anyhow!("expected a record, but got a {}", lhs.get_type())),
                 }
             }
             Rule::call_list => {
