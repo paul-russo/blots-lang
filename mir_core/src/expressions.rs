@@ -11,7 +11,12 @@ use pest::{
     iterators::Pairs,
     pratt_parser::{Assoc, Op, PrattParser},
 };
-use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::LazyLock};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, HashMap},
+    rc::Rc,
+    sync::LazyLock,
+};
 
 static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
     PrattParser::new()
@@ -37,7 +42,7 @@ static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
             | Op::prefix(Rule::spread_operator)
             | Op::prefix(Rule::invert))
         .op(Op::postfix(Rule::factorial))
-        .op(Op::postfix(Rule::list_access) | Op::postfix(Rule::call_list))
+        .op(Op::postfix(Rule::access) | Op::postfix(Rule::call_list))
 });
 
 pub fn collect_list(
@@ -75,6 +80,61 @@ pub fn evaluate_expression(
                 let values = collect_list(list_pairs, Rc::clone(&variables), call_depth)?;
 
                 Ok(List(values))
+            }
+            Rule::record => {
+                let record_pairs = primary.into_inner();
+                let mut record = BTreeMap::new();
+
+                for pair in record_pairs {
+                    println!("{:?}", pair.as_rule());
+
+                    match pair.as_rule() {
+                        Rule::record_pair => {
+                            let mut inner_pairs = pair.into_inner();
+                            let key = inner_pairs.next().unwrap().as_str().to_string();
+                            let value = evaluate_expression(
+                                inner_pairs.next().unwrap().into_inner(),
+                                Rc::clone(&variables),
+                                call_depth,
+                            )?;
+                            record.insert(key, value);
+                        }
+                        Rule::spread_expression => {
+                            let spread_value = evaluate_expression(
+                                pair.into_inner(),
+                                Rc::clone(&variables),
+                                call_depth,
+                            )?;
+
+                            match spread_value {
+                                Spread(spread_value) => match spread_value {
+                                    SpreadValue::List(list) => {
+                                        for (i, value) in list.into_iter().enumerate() {
+                                            record.insert(i.to_string(), value);
+                                        }
+                                    }
+                                    SpreadValue::String(s) => {
+                                        for (i, c) in s.chars().enumerate() {
+                                            record.insert(
+                                                i.to_string(),
+                                                Value::String(c.to_string()),
+                                            );
+                                        }
+                                    }
+                                    SpreadValue::Record(spread_record) => {
+                                        for (k, v) in spread_record {
+                                            record.insert(k, v);
+                                        }
+                                    }
+                                },
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                Ok(Value::Record(record))
             }
             Rule::bool => {
                 let bool_str = primary.as_str();
@@ -208,6 +268,9 @@ pub fn evaluate_expression(
                 match rhs {
                     List(list) => return Ok(Spread(SpreadValue::List(list.clone()))),
                     Value::String(s) => return Ok(Spread(SpreadValue::String(s))),
+                    Value::Record(record) => {
+                        return Ok(Spread(SpreadValue::Record(record.clone())))
+                    }
                     _ => return Err(anyhow!("expected a list or string")),
                 }
             }
@@ -229,12 +292,36 @@ pub fn evaluate_expression(
                     Err(anyhow!("factorial only works on non-negative integers"))
                 }
             }
-            Rule::list_access => {
+            Rule::access => {
                 let lhs = lhs?;
-                let index = op.into_inner().next().unwrap().as_str().parse::<usize>()?;
-                let list = lhs.as_list()?;
+                match lhs {
+                    Value::Record(record) => {
+                        let key_value = evaluate_expression(
+                            op.into_inner(),
+                            Rc::clone(&variables),
+                            call_depth,
+                        )?;
 
-                Ok(list.get(index).cloned().unwrap_or(Value::Null))
+                        let key = key_value.as_string()?;
+
+                        Ok(record.get(key).cloned().unwrap_or(Value::Null))
+                    }
+                    Value::List(list) => {
+                        let index_value = evaluate_expression(
+                            op.into_inner(),
+                            Rc::clone(&variables),
+                            call_depth,
+                        )?;
+
+                        let index = usize::try_from(index_value.as_number()? as u64)?;
+
+                        Ok(list.get(index).cloned().unwrap_or(Value::Null))
+                    }
+                    _ => Err(anyhow!(
+                        "expected a record or list, but got a {}",
+                        lhs.get_type()
+                    )),
+                }
             }
             Rule::call_list => {
                 let lhs = lhs?;
