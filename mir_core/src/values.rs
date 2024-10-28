@@ -1,6 +1,9 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fmt::Display};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt::Display,
+};
 
 pub enum FunctionArity {
     Exact(usize),
@@ -99,6 +102,7 @@ impl PartialOrd for LambdaDef {
 pub enum SpreadValue {
     List(Vec<Value>),
     String(String),
+    Record(BTreeMap<String, Value>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
@@ -110,6 +114,7 @@ pub enum Value {
     Lambda(LambdaDef),
     BuiltIn(String),
     String(String),
+    Record(BTreeMap<String, Value>),
     Null,
 }
 
@@ -125,6 +130,11 @@ impl IntoIterator for Value {
                 .map(|c| Value::String(c.to_string()))
                 .collect::<Vec<Value>>()
                 .into_iter(), // Yields an iterator over the characters in the string.
+            Value::Spread(SpreadValue::Record(r)) => r
+                .into_iter()
+                .map(|(k, v)| Value::List(vec![Value::String(k), v]))
+                .collect::<Vec<Value>>()
+                .into_iter(), // Yields an iterator over the [key, value] pairs of the spread record.
             _ => vec![self].into_iter(), // Yields a single value wrapped in a Vec
         }
     }
@@ -141,6 +151,7 @@ impl Value {
             Value::String(_) => "string",
             Value::Null => "null",
             Value::BuiltIn(_) => "built-in function",
+            Value::Record(_) => "record",
         }
     }
 
@@ -269,6 +280,16 @@ impl Display for Value {
                     write!(f, "]")
                 }
                 SpreadValue::String(s) => write!(f, "...\"{}\"", s),
+                SpreadValue::Record(r) => {
+                    write!(f, "...{{")?;
+                    for (i, (key, value)) in r.iter().enumerate() {
+                        write!(f, "{}: {}", key, value)?;
+                        if i < r.len() - 1 {
+                            write!(f, ", ")?;
+                        }
+                    }
+                    write!(f, "}}")
+                }
             },
             Value::Bool(b) => write!(f, "{}", b),
             Value::Lambda(def) => {
@@ -284,6 +305,16 @@ impl Display for Value {
             Value::String(s) => write!(f, "\"{}\"", s),
             Value::Null => write!(f, "null"),
             Value::BuiltIn(s) => write!(f, "{} (built-in)", s),
+            Value::Record(r) => {
+                write!(f, "{{")?;
+                for (i, (key, value)) in r.iter().enumerate() {
+                    write!(f, "{}: {}", key, value)?;
+                    if i < r.len() - 1 {
+                        write!(f, ", ")?;
+                    }
+                }
+                write!(f, "}}")
+            }
         }
     }
 }

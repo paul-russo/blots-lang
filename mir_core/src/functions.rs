@@ -341,16 +341,11 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                     for arg in args {
                         match arg {
                             Value::List(l) => list.extend(l),
-                            Value::Number(_) => list.push(arg),
                             Value::Spread(SpreadValue::List(l)) => list.extend(l),
                             Value::Spread(SpreadValue::String(s)) => {
                                 list.extend(s.chars().map(|c| Value::String(c.to_string())))
                             }
-                            Value::Bool(_) => list.push(arg),
-                            Value::Lambda(_) => list.push(arg),
-                            Value::String(_) => list.push(arg),
-                            Value::Null => list.push(arg),
-                            Value::BuiltIn(_) => list.push(arg),
+                            _ => list.push(arg),
                         }
                     }
 
