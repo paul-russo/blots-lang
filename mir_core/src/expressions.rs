@@ -91,7 +91,19 @@ pub fn evaluate_expression(
                     match pair.as_rule() {
                         Rule::record_pair => {
                             let mut inner_pairs = pair.into_inner();
-                            let key = inner_pairs.next().unwrap().as_str().to_string();
+                            let key_pair = inner_pairs.next().unwrap();
+                            let key = match key_pair.as_rule() {
+                                Rule::record_key_static => key_pair.as_str().to_string(),
+                                Rule::record_key_dynamic => evaluate_expression(
+                                    key_pair.into_inner(),
+                                    Rc::clone(&variables),
+                                    call_depth,
+                                )?
+                                .as_string()?
+                                .to_string(),
+                                _ => unreachable!(),
+                            };
+
                             let value = evaluate_expression(
                                 inner_pairs.next().unwrap().into_inner(),
                                 Rc::clone(&variables),
