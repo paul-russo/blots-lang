@@ -6,52 +6,83 @@ use mir_core::{
     values::Value,
 };
 use serde::{Deserialize, Serialize};
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, HashMap, HashSet},
+    rc::Rc,
+};
 use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct EvaluationResult {
     values: HashMap<String, Value>,
     variables: HashMap<String, Value>,
+    outputs: HashSet<String>,
 }
 
 #[wasm_bindgen]
-pub fn evaluate(expr: &str, variables_js: JsValue) -> Result<JsValue, JsError> {
-    let variables = Rc::new(RefCell::new(serde_wasm_bindgen::from_value(variables_js)?));
+pub fn evaluate(expr: &str, variables_js: JsValue, inputs_js: JsValue) -> Result<JsValue, JsError> {
+    let variables = Rc::new(RefCell::new(serde_wasm_bindgen::from_value::<
+        HashMap<String, Value>,
+    >(variables_js)?));
+
+    let inputs: BTreeMap<String, Value> = serde_wasm_bindgen::from_value(inputs_js)?;
+
+    // Insert the inputs as a record into the variables map.
+    let _ = &variables
+        .borrow_mut()
+        .insert(String::from("inputs"), Value::Record(inputs));
 
     let expr_owned = String::from(expr);
     let pairs =
         get_pairs(&expr_owned).map_err(|e| JsError::new(&format!("Parsing error: {}", e)))?;
 
+    let mut outputs = HashSet::new();
     let mut values = HashMap::new();
 
     for pair in pairs {
         match pair.as_rule() {
             Rule::statement => {
                 if let Some(inner_pair) = pair.into_inner().next() {
-                    match inner_pair.as_rule() {
-                        Rule::expression => {
-                            let start_line_col = inner_pair.as_span().start_pos().line_col();
-                            let end_line_col = inner_pair.as_span().end_pos().line_col();
+                    let rule = inner_pair.as_rule();
+                    let start_line_col = inner_pair.as_span().start_pos().line_col();
+                    let end_line_col = inner_pair.as_span().end_pos().line_col();
 
-                            let col_id = format!(
-                                "{}-{}__{}-{}",
-                                start_line_col.0, start_line_col.1, end_line_col.0, end_line_col.1
-                            );
+                    let inner_pairs = inner_pair.into_inner();
 
-                            let value = evaluate_expression(
-                                inner_pair.into_inner(),
-                                Rc::clone(&variables),
-                                0,
-                            )
-                            .map_err(|error| {
-                                JsError::new(&format!("Evaluation error: {}", error))
-                            })?;
+                    if rule == Rule::output_declaration {
+                        let mut inner_pairs_clone = inner_pairs.clone();
 
-                            values.insert(col_id, value);
-                        }
-                        _ => unreachable!("unexpected rule: {:?}", inner_pair.as_rule()),
+                        let next_token = inner_pairs_clone.next().unwrap(); // Skip the output keyword.
+                        let output_name = match next_token.as_rule() {
+                            Rule::identifier => next_token.as_str().to_string(),
+                            Rule::assignment => {
+                                let next_inner_token = next_token.into_inner().next().unwrap();
+                                match next_inner_token.as_rule() {
+                                    Rule::identifier => next_inner_token.as_str().to_string(),
+                                    _ => {
+                                        unreachable!(
+                                            "unexpected rule: {:?}",
+                                            next_inner_token.as_rule()
+                                        )
+                                    }
+                                }
+                            }
+                            _ => unreachable!("unexpected rule: {:?}", next_token.as_rule()),
+                        };
+
+                        outputs.insert(output_name);
                     }
+
+                    let col_id = format!(
+                        "{}-{}__{}-{}",
+                        start_line_col.0, start_line_col.1, end_line_col.0, end_line_col.1
+                    );
+
+                    let value = evaluate_expression(inner_pairs, Rc::clone(&variables), 0)
+                        .map_err(|error| JsError::new(&format!("Evaluation error: {}", error)))?;
+
+                    values.insert(col_id, value);
                 }
             }
             Rule::EOI => {}
@@ -60,9 +91,11 @@ pub fn evaluate(expr: &str, variables_js: JsValue) -> Result<JsValue, JsError> {
     }
 
     let cloned_variables = variables.borrow_mut().clone();
+
     Ok(serde_wasm_bindgen::to_value(&EvaluationResult {
         values,
         variables: cloned_variables,
+        outputs,
     })?)
 }
 

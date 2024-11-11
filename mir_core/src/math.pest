@@ -60,11 +60,12 @@ spreadable_expression = _{ spread_expression | expression }
 
 list = !{ "[]" | "[" ~ NEWLINE* ~ spreadable_expression ~ ("," ~ NEWLINE* ~ spreadable_expression)* ~ ("," ~ NEWLINE)? ~ NEWLINE* ~ "]" }
 
-record_key_static  =  { identifier }
+record_key_static  =  { identifier | string }
 record_key_dynamic =  { "[" ~ expression ~ "]" }
 record_key         = _{ record_key_static | record_key_dynamic }
 record_pair        = !{ record_key ~ ":" ~ NEWLINE* ~ expression }
-record             = !{ "{}" | "{" ~ NEWLINE* ~ ((record_pair | spread_expression) ~ ("," ~ NEWLINE* ~ (record_pair | spread_expression))*)? ~ ("," ~ NEWLINE)? ~ NEWLINE* ~ "}" }
+record_shorthand   = !{ identifier ~ ("," ~ NEWLINE)? }
+record             = !{ "{}" | "{" ~ NEWLINE* ~ ((record_pair | record_shorthand | spread_expression) ~ ("," ~ NEWLINE* ~ (record_pair | record_shorthand | spread_expression))*)? ~ ("," ~ NEWLINE)? ~ NEWLINE* ~ "}" }
 
 conditional = ${ "if" ~ WHITESPACE+ ~ expression ~ WHITESPACE+ ~ "then" ~ (WHITESPACE | NEWLINE)+ ~ expression ~ (WHITESPACE | NEWLINE)+ ~ "else" ~ (WHITESPACE | NEWLINE)+ ~ expression }
 
@@ -74,5 +75,7 @@ term              = _{ conditional | lambda | assignment | list | record | bool 
 
 assignment = !{ identifier ~ "=" ~ expression }
 
-statement =  { (expression | comment) ~ comment? }
+output_declaration = ${ "output" ~ WHITESPACE+ ~ (assignment | identifier) }
+
+statement =  { (output_declaration | expression | comment) ~ comment? }
 input     = _{ SOI ~ statement? ~ (NEWLINE ~ statement?)* ~ EOI }
