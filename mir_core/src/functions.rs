@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::LazyLock};
+use std::{cell::RefCell, cmp::Ordering, collections::HashMap, rc::Rc, sync::LazyLock};
 
 use anyhow::{anyhow, Result};
 use pest::iterators::Pairs;
@@ -567,40 +567,6 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             },
         );
         built_ins_map.insert(
-            "none",
-            BuiltInFunctionDef {
-                name: String::from("none"),
-                arity: FunctionArity::Exact(2),
-                body: |args, variables, call_depth| {
-                    let def = get_function_def(&args[0])
-                        .ok_or(anyhow!("expected the first argument to be a function"))?;
-                    let parsed_body = def.get_parsed_body();
-
-                    let list = args[1].as_list()?;
-
-                    for (i, item) in list.iter().enumerate() {
-                        if def
-                            .call(
-                                if !def.check_arity(2).is_err() {
-                                    vec![item.clone(), Value::Number(i as f64)]
-                                } else {
-                                    vec![item.clone()]
-                                },
-                                Rc::clone(&variables),
-                                parsed_body.clone(),
-                                call_depth,
-                            )?
-                            .as_bool()?
-                        {
-                            return Ok(Value::Bool(false));
-                        }
-                    }
-
-                    Ok(Value::Bool(true))
-                },
-            },
-        );
-        built_ins_map.insert(
             "sort",
             BuiltInFunctionDef {
                 name: String::from("sort"),
@@ -609,6 +575,55 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                     let mut list = args[0].as_list()?.clone();
                     list.sort_by(|a, b| a.partial_cmp(b).unwrap());
                     Ok(Value::List(list))
+                },
+            },
+        );
+        built_ins_map.insert(
+            "sort_by",
+            BuiltInFunctionDef {
+                name: String::from("sort_by"),
+                arity: FunctionArity::Exact(2),
+                body: |args, variables, call_depth| {
+                    let def = get_function_def(&args[0])
+                        .ok_or(anyhow!("expected the first argument to be a function"))?;
+                    let parsed_body = def.get_parsed_body();
+
+                    let mut list = args[1].as_list()?.clone();
+                    let mut err: Option<Result<Value, anyhow::Error>> = None;
+
+                    list.sort_by(|a, b| {
+                        let call_result = def.call(
+                            vec![a.clone(), b.clone()],
+                            Rc::clone(&variables),
+                            parsed_body.clone(),
+                            call_depth,
+                        );
+
+                        if let Err(e) = call_result {
+                            if err.is_none() {
+                                err = Some(Err(e));
+                            }
+
+                            return Ordering::Equal;
+                        }
+
+                        let number_result = call_result.unwrap().as_number();
+                        if let Err(e) = number_result {
+                            if err.is_none() {
+                                err = Some(Err(e));
+                            }
+
+                            return Ordering::Equal;
+                        }
+
+                        match number_result.unwrap() {
+                            n if n.is_sign_positive() => Ordering::Greater,
+                            n if n.is_sign_negative() => Ordering::Less,
+                            _ => Ordering::Equal,
+                        }
+                    });
+
+                    err.unwrap_or(Ok(Value::List(list)))
                 },
             },
         );
@@ -678,7 +693,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("typeof"),
                 arity: FunctionArity::Exact(1),
-                body: |args, _, _| Ok(Value::String(String::from(args[0].get_type()))),
+                body: |args, _, _| Ok(Value::String(args[0].get_type().to_string())),
             },
         );
         built_ins_map.insert(

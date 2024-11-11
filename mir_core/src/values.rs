@@ -106,6 +106,35 @@ pub enum SpreadValue {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
+pub enum ValueType {
+    Number,
+    List,
+    Spread,
+    Bool,
+    Lambda,
+    BuiltIn,
+    String,
+    Record,
+    Null,
+}
+
+impl Display for ValueType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ValueType::Number => write!(f, "number"),
+            ValueType::List => write!(f, "list"),
+            ValueType::Spread => write!(f, "spread"),
+            ValueType::Bool => write!(f, "boolean"),
+            ValueType::Lambda => write!(f, "lambda"),
+            ValueType::BuiltIn => write!(f, "built-in function"),
+            ValueType::String => write!(f, "string"),
+            ValueType::Record => write!(f, "record"),
+            ValueType::Null => write!(f, "null"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
 pub enum Value {
     Number(f64),
     List(Vec<Value>),
@@ -141,17 +170,17 @@ impl IntoIterator for Value {
 }
 
 impl Value {
-    pub fn get_type(&self) -> &str {
+    pub fn get_type(&self) -> ValueType {
         match self {
-            Value::Number(_) => "number",
-            Value::List(_) => "list",
-            Value::Spread(_) => "spread",
-            Value::Bool(_) => "bool",
-            Value::Lambda(_) => "function",
-            Value::String(_) => "string",
-            Value::Null => "null",
-            Value::BuiltIn(_) => "built-in function",
-            Value::Record(_) => "record",
+            Value::Number(_) => ValueType::Number,
+            Value::List(_) => ValueType::List,
+            Value::Spread(_) => ValueType::Spread,
+            Value::Bool(_) => ValueType::Bool,
+            Value::Lambda(_) => ValueType::Lambda,
+            Value::String(_) => ValueType::String,
+            Value::Null => ValueType::Null,
+            Value::BuiltIn(_) => ValueType::BuiltIn,
+            Value::Record(_) => ValueType::Record,
         }
     }
 

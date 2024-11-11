@@ -95,7 +95,16 @@ pub fn evaluate_expression(
                             let mut inner_pairs = pair.into_inner();
                             let key_pair = inner_pairs.next().unwrap();
                             let key = match key_pair.as_rule() {
-                                Rule::record_key_static => key_pair.as_str().to_string(),
+                                Rule::record_key_static => {
+                                    let inner_key_pair = key_pair.into_inner().next().unwrap();
+                                    match inner_key_pair.as_rule() {
+                                        Rule::identifier => inner_key_pair.as_str().to_string(),
+                                        Rule::string => {
+                                            inner_key_pair.into_inner().as_str().to_string()
+                                        }
+                                        _ => unreachable!(),
+                                    }
+                                }
                                 Rule::record_key_dynamic => evaluate_expression(
                                     key_pair.into_inner(),
                                     Rc::clone(&variables),
@@ -112,6 +121,16 @@ pub fn evaluate_expression(
                                 call_depth,
                             )?;
                             record.insert(key, value);
+                        }
+                        Rule::record_shorthand => {
+                            let ident = pair.into_inner().next().unwrap().as_str().to_string();
+                            let value = variables
+                                .borrow()
+                                .get(&ident)
+                                .cloned()
+                                .ok_or(anyhow!("unknown identifier: {}", ident))?;
+
+                            record.insert(ident, value);
                         }
                         Rule::spread_expression => {
                             let spread_value = evaluate_expression(
@@ -179,6 +198,7 @@ pub fn evaluate_expression(
                     || ident == "true"
                     || ident == "false"
                     || ident == "null"
+                    || ident == "inputs"
                 {
                     return Err(anyhow!("cannot assign to keyword: {}", ident));
                 }
@@ -263,7 +283,7 @@ pub fn evaluate_expression(
                             .borrow_mut()
                             .get(ident)
                             .cloned()
-                            .ok_or_else(|| anyhow!("unknown identifier: {}", primary.as_str()))
+                            .ok_or(anyhow!("unknown identifier: {}", primary.as_str()))
                     }
                 }
             }
