@@ -99,10 +99,48 @@ impl PartialOrd for LambdaDef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
-pub enum SpreadValue {
+pub enum IterableValue {
     List(Vec<Value>),
     String(String),
     Record(BTreeMap<String, Value>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
+pub enum IterableValueType {
+    List,
+    String,
+    Record,
+}
+
+impl IterableValue {
+    pub fn get_type(&self) -> IterableValueType {
+        match self {
+            IterableValue::List(_) => IterableValueType::List,
+            IterableValue::String(_) => IterableValueType::String,
+            IterableValue::Record(_) => IterableValueType::Record,
+        }
+    }
+}
+
+impl IntoIterator for IterableValue {
+    type Item = Value;
+    type IntoIter = std::vec::IntoIter<Value>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match self {
+            IterableValue::List(l) => l.into_iter(), // Yields an iterator over the values in the list.
+            IterableValue::String(s) => s
+                .chars()
+                .map(|c| Value::String(c.to_string()))
+                .collect::<Vec<Value>>()
+                .into_iter(), // Yields an iterator over the characters in the string.
+            IterableValue::Record(r) => r
+                .into_iter()
+                .map(|(k, v)| Value::List(vec![Value::String(k), v]))
+                .collect::<Vec<Value>>()
+                .into_iter(), // Yields an iterator over the [key, value] pairs of the record.
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
@@ -110,6 +148,7 @@ pub enum ValueType {
     Number,
     List,
     Spread,
+    Each,
     Bool,
     Lambda,
     BuiltIn,
@@ -124,6 +163,7 @@ impl Display for ValueType {
             ValueType::Number => write!(f, "number"),
             ValueType::List => write!(f, "list"),
             ValueType::Spread => write!(f, "spread"),
+            ValueType::Each => write!(f, "each"),
             ValueType::Bool => write!(f, "boolean"),
             ValueType::Lambda => write!(f, "lambda"),
             ValueType::BuiltIn => write!(f, "built-in function"),
@@ -136,14 +176,25 @@ impl Display for ValueType {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
 pub enum Value {
+    /// A number is a floating-point value.
     Number(f64),
+    /// A list is a sequence of values.
     List(Vec<Value>),
-    Spread(SpreadValue),
+    /// A spread value is "spread" into its container when it is used in a list, record, or function call. (internal only)
+    Spread(IterableValue),
+    /// Like a spread, but the value is never unwrapped. This is used for the "each" keyword. (internal only)
+    Each(IterableValue),
+    /// A boolean value is either true or false.
     Bool(bool),
+    /// A lambda is a function definition.
     Lambda(LambdaDef),
+    /// A built-in function is a function that is implemented in Rust.
     BuiltIn(String),
+    /// A string is a sequence of characters.
     String(String),
+    /// A record is a collection of key-value pairs.
     Record(BTreeMap<String, Value>),
+    /// A null value represents the absence of a value.
     Null,
 }
 
@@ -153,18 +204,8 @@ impl IntoIterator for Value {
 
     fn into_iter(self) -> Self::IntoIter {
         match self {
-            Value::Spread(SpreadValue::List(l)) => l.into_iter(), // Yields an iterator over the values in the spread list.
-            Value::Spread(SpreadValue::String(s)) => s
-                .chars()
-                .map(|c| Value::String(c.to_string()))
-                .collect::<Vec<Value>>()
-                .into_iter(), // Yields an iterator over the characters in the string.
-            Value::Spread(SpreadValue::Record(r)) => r
-                .into_iter()
-                .map(|(k, v)| Value::List(vec![Value::String(k), v]))
-                .collect::<Vec<Value>>()
-                .into_iter(), // Yields an iterator over the [key, value] pairs of the spread record.
-            _ => vec![self].into_iter(), // Yields a single value wrapped in a Vec
+            Value::Spread(iterable) => iterable.into_iter(), // Yields an iterator over the values in the spread.
+            _ => vec![self].into_iter(), // Yields a single value wrapped in a Vec. Note that this will include "Each" values.
         }
     }
 }
@@ -175,6 +216,7 @@ impl Value {
             Value::Number(_) => ValueType::Number,
             Value::List(_) => ValueType::List,
             Value::Spread(_) => ValueType::Spread,
+            Value::Each(_) => ValueType::Each,
             Value::Bool(_) => ValueType::Bool,
             Value::Lambda(_) => ValueType::Lambda,
             Value::String(_) => ValueType::String,
@@ -193,6 +235,10 @@ impl Value {
     }
 
     pub fn is_spread(&self) -> bool {
+        matches!(self, Value::Spread(_))
+    }
+
+    pub fn is_each(&self) -> bool {
         matches!(self, Value::Spread(_))
     }
 
@@ -230,10 +276,17 @@ impl Value {
         }
     }
 
-    pub fn as_spread(&self) -> Result<&SpreadValue> {
+    pub fn as_spread(&self) -> Result<&IterableValue> {
         match self {
             Value::Spread(v) => Ok(v),
             _ => Err(anyhow!("expected a spread, but got a {}", self.get_type())),
+        }
+    }
+
+    pub fn as_each(&self) -> Result<&IterableValue> {
+        match self {
+            Value::Each(v) => Ok(v),
+            _ => Err(anyhow!("expected an each, but got a {}", self.get_type())),
         }
     }
 
@@ -298,7 +351,7 @@ impl Display for Value {
                 write!(f, "]")
             }
             Value::Spread(v) => match v {
-                SpreadValue::List(l) => {
+                IterableValue::List(l) => {
                     write!(f, "...[")?;
                     for (i, value) in l.iter().enumerate() {
                         write!(f, "{}", value)?;
@@ -308,9 +361,32 @@ impl Display for Value {
                     }
                     write!(f, "]")
                 }
-                SpreadValue::String(s) => write!(f, "...\"{}\"", s),
-                SpreadValue::Record(r) => {
+                IterableValue::String(s) => write!(f, "...\"{}\"", s),
+                IterableValue::Record(r) => {
                     write!(f, "...{{")?;
+                    for (i, (key, value)) in r.iter().enumerate() {
+                        write!(f, "{}: {}", key, value)?;
+                        if i < r.len() - 1 {
+                            write!(f, ", ")?;
+                        }
+                    }
+                    write!(f, "}}")
+                }
+            },
+            Value::Each(v) => match v {
+                IterableValue::List(l) => {
+                    write!(f, "each [")?;
+                    for (i, value) in l.iter().enumerate() {
+                        write!(f, "{}", value)?;
+                        if i < l.len() - 1 {
+                            write!(f, ", ")?;
+                        }
+                    }
+                    write!(f, "]")
+                }
+                IterableValue::String(s) => write!(f, "each \"{}\"", s),
+                IterableValue::Record(r) => {
+                    write!(f, "each {{")?;
                     for (i, (key, value)) in r.iter().enumerate() {
                         write!(f, "{}: {}", key, value)?;
                         if i < r.len() - 1 {
