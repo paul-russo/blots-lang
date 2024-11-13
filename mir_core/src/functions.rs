@@ -6,7 +6,7 @@ use pest::iterators::Pairs;
 use crate::{
     expressions::evaluate_expression,
     parser::{get_pairs, Rule},
-    values::{FunctionArity, LambdaArg, LambdaDef, SpreadValue, Value},
+    values::{FunctionArity, IterableValue, LambdaArg, LambdaDef, Value},
 };
 
 pub struct BuiltInFunctionDef {
@@ -341,8 +341,8 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                     for arg in args {
                         match arg {
                             Value::List(l) => list.extend(l),
-                            Value::Spread(SpreadValue::List(l)) => list.extend(l),
-                            Value::Spread(SpreadValue::String(s)) => {
+                            Value::Spread(IterableValue::List(l)) => list.extend(l),
+                            Value::Spread(IterableValue::String(s)) => {
                                 list.extend(s.chars().map(|c| Value::String(c.to_string())))
                             }
                             _ => list.push(arg),
@@ -931,14 +931,16 @@ pub fn is_built_in_function(name: &str) -> bool {
     BUILT_IN_FUNCTION_DEFS.contains_key(name)
 }
 
-pub fn get_built_in_function_def(name: &str) -> Option<&BuiltInFunctionDef> {
-    BUILT_IN_FUNCTION_DEFS.get(name)
+pub fn get_built_in_function_def(name: &str) -> Option<FunctionDef> {
+    BUILT_IN_FUNCTION_DEFS
+        .get(name)
+        .map(|def| FunctionDef::BuiltIn(def))
 }
 
 pub fn get_function_def<'a>(value: &'a Value) -> Option<FunctionDef<'a>> {
     match value {
         Value::Lambda(lambda) => Some(FunctionDef::Lambda(lambda)),
-        Value::BuiltIn(ident) => Some(FunctionDef::BuiltIn(get_built_in_function_def(ident)?)),
+        Value::BuiltIn(ident) => Some(get_built_in_function_def(ident)?),
         _ => None,
     }
 }

@@ -1,8 +1,10 @@
 use crate::{
-    functions::{get_function_def, is_built_in_function, BUILT_IN_FUNCTION_IDENTS},
+    functions::{
+        get_built_in_function_def, get_function_def, is_built_in_function, BUILT_IN_FUNCTION_IDENTS,
+    },
     parser::Rule,
     values::{
-        LambdaArg, LambdaDef, SpreadValue,
+        IterableValue, LambdaArg, LambdaDef,
         Value::{self, Bool, List, Number, Spread},
     },
 };
@@ -20,19 +22,17 @@ use std::{
 
 static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
     PrattParser::new()
-        .op(Op::infix(Rule::and, Assoc::Left) | Op::infix(Rule::or, Assoc::Left))
+        .op(Op::infix(Rule::and, Assoc::Left)
+            | Op::infix(Rule::natural_and, Assoc::Left)
+            | Op::infix(Rule::or, Assoc::Left)
+            | Op::infix(Rule::natural_or, Assoc::Left)
+            | Op::infix(Rule::with, Assoc::Left))
         .op(Op::infix(Rule::equal, Assoc::Left)
             | Op::infix(Rule::not_equal, Assoc::Left)
             | Op::infix(Rule::less, Assoc::Left)
             | Op::infix(Rule::less_eq, Assoc::Left)
             | Op::infix(Rule::greater, Assoc::Left)
-            | Op::infix(Rule::greater_eq, Assoc::Left)
-            | Op::infix(Rule::each_equal, Assoc::Left)
-            | Op::infix(Rule::each_not_equal, Assoc::Left)
-            | Op::infix(Rule::each_less_eq, Assoc::Left)
-            | Op::infix(Rule::each_less, Assoc::Left)
-            | Op::infix(Rule::each_greater_eq, Assoc::Left)
-            | Op::infix(Rule::each_greater, Assoc::Left))
+            | Op::infix(Rule::greater_eq, Assoc::Left))
         .op(Op::infix(Rule::add, Assoc::Left) | Op::infix(Rule::subtract, Assoc::Left))
         .op(Op::infix(Rule::multiply, Assoc::Left)
             | Op::infix(Rule::divide, Assoc::Left)
@@ -40,7 +40,8 @@ static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
         .op(Op::infix(Rule::power, Assoc::Right) | Op::infix(Rule::coalesce, Assoc::Left))
         .op(Op::prefix(Rule::negation)
             | Op::prefix(Rule::spread_operator)
-            | Op::prefix(Rule::invert))
+            | Op::prefix(Rule::invert)
+            | Op::prefix(Rule::each))
         .op(Op::postfix(Rule::factorial))
         .op(Op::postfix(Rule::access)
             | Op::postfix(Rule::dot_access)
@@ -88,8 +89,6 @@ pub fn evaluate_expression(
                 let mut record = BTreeMap::new();
 
                 for pair in record_pairs {
-                    println!("{:?}", pair.as_rule());
-
                     match pair.as_rule() {
                         Rule::record_pair => {
                             let mut inner_pairs = pair.into_inner();
@@ -141,12 +140,12 @@ pub fn evaluate_expression(
 
                             match spread_value {
                                 Spread(spread_value) => match spread_value {
-                                    SpreadValue::List(list) => {
+                                    IterableValue::List(list) => {
                                         for (i, value) in list.into_iter().enumerate() {
                                             record.insert(i.to_string(), value);
                                         }
                                     }
-                                    SpreadValue::String(s) => {
+                                    IterableValue::String(s) => {
                                         for (i, c) in s.chars().enumerate() {
                                             record.insert(
                                                 i.to_string(),
@@ -154,7 +153,7 @@ pub fn evaluate_expression(
                                             );
                                         }
                                     }
-                                    SpreadValue::Record(spread_record) => {
+                                    IterableValue::Record(spread_record) => {
                                         for (k, v) in spread_record {
                                             record.insert(k, v);
                                         }
@@ -199,6 +198,9 @@ pub fn evaluate_expression(
                     || ident == "false"
                     || ident == "null"
                     || ident == "inputs"
+                    || ident == "and"
+                    || ident == "or"
+                    || ident == "each"
                 {
                     return Err(anyhow!("cannot assign to keyword: {}", ident));
                 }
@@ -300,17 +302,28 @@ pub fn evaluate_expression(
             Rule::spread_operator => {
                 let rhs = rhs?;
                 match rhs {
-                    List(list) => return Ok(Spread(SpreadValue::List(list.clone()))),
-                    Value::String(s) => return Ok(Spread(SpreadValue::String(s))),
+                    List(list) => return Ok(Spread(IterableValue::List(list.clone()))),
+                    Value::String(s) => return Ok(Spread(IterableValue::String(s))),
                     Value::Record(record) => {
-                        return Ok(Spread(SpreadValue::Record(record.clone())))
+                        return Ok(Spread(IterableValue::Record(record.clone())))
                     }
-                    _ => return Err(anyhow!("expected a list or string")),
+                    _ => return Err(anyhow!("expected a list, record, or string")),
                 }
             }
             Rule::invert => {
                 let rhs = rhs?.as_bool()?;
                 Ok(Bool(!rhs))
+            }
+            Rule::each => {
+                let rhs = rhs?;
+                match rhs {
+                    List(list) => return Ok(Value::Each(IterableValue::List(list.clone()))),
+                    Value::String(s) => return Ok(Value::Each(IterableValue::String(s))),
+                    Value::Record(record) => {
+                        return Ok(Value::Each(IterableValue::Record(record.clone())))
+                    }
+                    _ => return Err(anyhow!("expected a list, record, or string")),
+                }
             }
             _ => unreachable!(),
         })
@@ -386,112 +399,97 @@ pub fn evaluate_expression(
         .map_infix(|lhs, op, rhs| {
             let lhs = lhs?;
             let rhs = rhs?;
+            let rule = op.as_rule();
 
-            match op.as_rule() {
-                Rule::equal => Ok(Bool(lhs == rhs)),
-                Rule::not_equal => Ok(Bool(lhs != rhs)),
-                Rule::less => Ok(Bool(lhs < rhs)),
-                Rule::less_eq => Ok(Bool(lhs <= rhs)),
-                Rule::greater => Ok(Bool(lhs > rhs)),
-                Rule::greater_eq => Ok(Bool(lhs >= rhs)),
-                Rule::each_equal => match (lhs, rhs) {
-                    (List(lhs), List(rhs)) => {
-                        if lhs.len() != rhs.len() {
-                            return Err(anyhow!("lists must be the same length"));
-                        }
-                        Ok(Bool(lhs.iter().zip(rhs.iter()).all(|(l, r)| l == r)))
-                    }
-                    (List(lhs), rhs_value) => Ok(Bool(lhs.iter().all(|v| v == &rhs_value))),
-                    _ => Err(anyhow!(
-                        "expected two lists or a list and a number, bool, function, or string"
-                    )),
-                },
-                Rule::each_not_equal => match (lhs, rhs) {
-                    (List(lhs), List(rhs)) => {
-                        if lhs.len() != rhs.len() {
-                            return Err(anyhow!("lists must be the same length"));
-                        }
-                        Ok(Bool(lhs.iter().zip(rhs.iter()).all(|(l, r)| l != r)))
-                    }
-                    (List(lhs), rhs_value) => Ok(Bool(lhs.iter().all(|v| v != &rhs_value))),
-                    _ => Err(anyhow!(
-                        "expected two lists or a list and a number, bool, function, or string"
-                    )),
-                },
-                Rule::each_less => match (lhs, rhs) {
-                    (List(lhs), List(rhs)) => {
-                        if lhs.len() != rhs.len() {
-                            return Err(anyhow!("lists must be the same length"));
-                        }
-                        Ok(Bool(lhs.iter().zip(rhs.iter()).all(|(l, r)| l < r)))
-                    }
-                    (List(lhs), rhs_value) => Ok(Bool(lhs.iter().all(|l| l < &rhs_value))),
-                    _ => Err(anyhow!(
-                        "expected two lists or a list and a number, bool, function, or string"
-                    )),
-                },
-                Rule::each_less_eq => match (lhs, rhs) {
-                    (List(lhs), List(rhs)) => {
-                        if lhs.len() != rhs.len() {
-                            return Err(anyhow!("lists must be the same length"));
-                        }
-                        Ok(Bool(lhs.iter().zip(rhs.iter()).all(|(l, r)| l <= r)))
-                    }
-                    (List(lhs), rhs_value) => Ok(Bool(lhs.iter().all(|l| l <= &rhs_value))),
-                    _ => Err(anyhow!(
-                        "expected two lists or a list and a number, bool, function, or string"
-                    )),
-                },
-                Rule::each_greater => match (lhs, rhs) {
-                    (List(lhs), List(rhs)) => {
-                        if lhs.len() != rhs.len() {
-                            return Err(anyhow!("lists must be the same length"));
-                        }
-                        Ok(Bool(lhs.iter().zip(rhs.iter()).all(|(l, r)| l > r)))
-                    }
-                    (List(lhs), rhs_value) => Ok(Bool(lhs.iter().all(|l| l > &rhs_value))),
-                    _ => Err(anyhow!(
-                        "expected two lists or a list and a number, bool, function, or string"
-                    )),
-                },
-                Rule::each_greater_eq => match (lhs, rhs) {
-                    (List(lhs), List(rhs)) => {
-                        if lhs.len() != rhs.len() {
-                            return Err(anyhow!("lists must be the same length"));
-                        }
-                        Ok(Bool(lhs.iter().zip(rhs.iter()).all(|(l, r)| l >= r)))
-                    }
-                    (List(lhs), rhs_value) => Ok(Bool(lhs.iter().all(|l| l >= &rhs_value))),
-                    _ => Err(anyhow!(
-                        "expected two lists or a list and a number, bool, function, or string"
-                    )),
-                },
-                Rule::and => Ok(Bool(lhs.as_bool()? && rhs.as_bool()?)),
-                Rule::or => Ok(Bool(lhs.as_bool()? || rhs.as_bool()?)),
-                Rule::add => {
-                    if lhs.is_string() {
-                        return Ok(Value::String(format!(
-                            "{}{}",
-                            lhs.as_string()?,
-                            rhs.as_string()?
-                        )));
+            match (lhs, rhs) {
+                (Value::Each(iterable_l), Value::Each(iterable_r)) => {
+                    let iter_l = iterable_l.into_iter();
+                    let iter_r = iterable_r.into_iter();
+
+                    if iter_l.len() != iter_r.len() {
+                        return Err(anyhow!(
+                            "left- and right-hand-side iterables must be the same length"
+                        ));
                     }
 
-                    Ok(Number(lhs.as_number()? + rhs.as_number()?))
-                }
-                Rule::subtract => Ok(Number(lhs.as_number()? - rhs.as_number()?)),
-                Rule::multiply => Ok(Number(lhs.as_number()? * rhs.as_number()?)),
-                Rule::divide => Ok(Number(lhs.as_number()? / rhs.as_number()?)),
-                Rule::modulo => Ok(Number(lhs.as_number()? % rhs.as_number()?)),
-                Rule::power => Ok(Number(lhs.as_number()?.powf(rhs.as_number()?))),
-                Rule::coalesce => {
-                    if lhs == Value::Null {
-                        Ok(rhs)
-                    } else {
-                        Ok(lhs)
+                    match rule {
+                        Rule::equal => Ok(Bool(iter_l.zip(iter_r).all(|(l, r)| l == r))),
+                        Rule::not_equal => Ok(Bool(iter_l.zip(iter_r).all(|(l, r)| l != r))),
+                        Rule::less => Ok(Bool(iter_l.zip(iter_r).all(|(l, r)| l < r))),
+                        Rule::less_eq => Ok(Bool(iter_l.zip(iter_r).all(|(l, r)| l <= r))),
+                        Rule::greater => Ok(Bool(iter_l.zip(iter_r).all(|(l, r)| l > r))),
+                        Rule::greater_eq => Ok(Bool(iter_l.zip(iter_r).all(|(l, r)| l >= r))),
+                        _ => todo!(),
                     }
                 }
-                _ => unreachable!(),
+                (Value::Each(iterable), rhs) => match rule {
+                    Rule::equal => Ok(Bool(iterable.into_iter().all(|v| v == rhs))),
+                    Rule::not_equal => Ok(Bool(iterable.into_iter().all(|v| v != rhs))),
+                    Rule::less => Ok(Bool(iterable.into_iter().all(|v| v < rhs))),
+                    Rule::less_eq => Ok(Bool(iterable.into_iter().all(|v| v <= rhs))),
+                    Rule::greater => Ok(Bool(iterable.into_iter().all(|v| v > rhs))),
+                    Rule::greater_eq => Ok(Bool(iterable.into_iter().all(|v| v >= rhs))),
+                    Rule::with => {
+                        if !rhs.is_lambda() && !rhs.is_built_in() {
+                            return Err(anyhow!("can't call a non-function: {}", rhs));
+                        }
+
+                        let values: Vec<Value> = iterable.into_iter().collect();
+
+                        get_built_in_function_def("map").unwrap().call(
+                            vec![rhs, Value::List(values)],
+                            Rc::clone(&variables),
+                            None,
+                            call_depth,
+                        )
+                    }
+                    _ => todo!(),
+                },
+                (lhs, rhs) => match rule {
+                    Rule::equal => Ok(Bool(lhs == rhs)),
+                    Rule::not_equal => Ok(Bool(lhs != rhs)),
+                    Rule::less => Ok(Bool(lhs < rhs)),
+                    Rule::less_eq => Ok(Bool(lhs <= rhs)),
+                    Rule::greater => Ok(Bool(lhs > rhs)),
+                    Rule::greater_eq => Ok(Bool(lhs >= rhs)),
+                    Rule::and | Rule::natural_and => Ok(Bool(lhs.as_bool()? && rhs.as_bool()?)),
+                    Rule::or | Rule::natural_or => Ok(Bool(lhs.as_bool()? || rhs.as_bool()?)),
+                    Rule::add => {
+                        if lhs.is_string() {
+                            return Ok(Value::String(format!(
+                                "{}{}",
+                                lhs.as_string()?,
+                                rhs.as_string()?
+                            )));
+                        }
+
+                        Ok(Number(lhs.as_number()? + rhs.as_number()?))
+                    }
+                    Rule::subtract => Ok(Number(lhs.as_number()? - rhs.as_number()?)),
+                    Rule::multiply => Ok(Number(lhs.as_number()? * rhs.as_number()?)),
+                    Rule::divide => Ok(Number(lhs.as_number()? / rhs.as_number()?)),
+                    Rule::modulo => Ok(Number(lhs.as_number()? % rhs.as_number()?)),
+                    Rule::power => Ok(Number(lhs.as_number()?.powf(rhs.as_number()?))),
+                    Rule::coalesce => {
+                        if lhs == Value::Null {
+                            Ok(rhs)
+                        } else {
+                            Ok(lhs)
+                        }
+                    }
+                    Rule::with => {
+                        if !rhs.is_lambda() && !rhs.is_built_in() {
+                            return Err(anyhow!("can't call a non-function: {}", lhs));
+                        }
+
+                        if let Some(def) = get_function_def(&rhs) {
+                            return def.call(vec![lhs], Rc::clone(&variables), None, call_depth);
+                        }
+
+                        Err(anyhow!("unknown function: {}", rhs))
+                    }
+                    _ => unreachable!(),
+                },
             }
         })
         .parse(pairs)
