@@ -758,7 +758,41 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             BuiltInFunctionDef {
                 name: String::from("arity"),
                 arity: FunctionArity::Exact(1),
-                body: |args, _, _| Ok(Value::Number(args[0].as_lambda()?.args.len() as f64)),
+                body: |args, _, _| {
+                    Ok(Value::Number(match args[0].as_lambda()?.get_arity() {
+                        FunctionArity::Exact(n) => n as f64,
+                        FunctionArity::AtLeast(n) => n as f64,
+                        FunctionArity::Between(min, _max) => min as f64,
+                    }))
+                },
+            },
+        );
+        built_ins_map.insert(
+            "includes",
+            BuiltInFunctionDef {
+                name: String::from("includes"),
+                arity: FunctionArity::Exact(2),
+                body: |args, _, _| {
+                    let needle = &args[0];
+
+                    match &args[1] {
+                        Value::List(l) => Ok(Value::Bool(l.contains(needle))),
+                        Value::String(s) => Ok(Value::Bool(s.contains(needle.as_string()?))),
+                        _ => Err(anyhow!("second argument must be a list or string")),
+                    }
+                },
+            },
+        );
+        built_ins_map.insert(
+            "collect",
+            BuiltInFunctionDef {
+                name: String::from("collect"),
+                arity: FunctionArity::Exact(1),
+                body: |args, _, _| {
+                    let iterable = args[0].as_each()?.to_owned();
+                    let values: Vec<Value> = iterable.into_iter().collect();
+                    Ok(Value::List(values))
+                },
             },
         );
 
@@ -905,6 +939,12 @@ impl<'a> FunctionDef<'a> {
                             new_variables.insert(
                                 name.clone(),
                                 args.get(idx).cloned().unwrap_or(Value::Null),
+                            );
+                        }
+                        LambdaArg::Rest(name) => {
+                            new_variables.insert(
+                                name.clone(),
+                                Value::List(args.iter().skip(idx).cloned().collect()),
                             );
                         }
                     }

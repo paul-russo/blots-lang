@@ -15,6 +15,7 @@ pub enum FunctionArity {
 pub enum LambdaArg {
     Required(String),
     Optional(String),
+    Rest(String),
 }
 
 impl LambdaArg {
@@ -22,6 +23,7 @@ impl LambdaArg {
         match self {
             LambdaArg::Required(name) => name,
             LambdaArg::Optional(name) => name,
+            LambdaArg::Rest(name) => name,
         }
     }
 
@@ -33,11 +35,16 @@ impl LambdaArg {
         matches!(self, LambdaArg::Optional(_))
     }
 
+    pub fn is_rest(&self) -> bool {
+        matches!(self, LambdaArg::Rest(_))
+    }
+
     pub fn as_required(&self) -> Result<&str> {
         match self {
             LambdaArg::Required(name) => Ok(name),
             _ => Err(anyhow!(
-                "expected a required argument, but got an optional one"
+                "expected a required argument, but got a {} one",
+                self.get_name()
             )),
         }
     }
@@ -46,7 +53,18 @@ impl LambdaArg {
         match self {
             LambdaArg::Optional(name) => Ok(name),
             _ => Err(anyhow!(
-                "expected an optional argument, but got a required one"
+                "expected an optional argument, but got a {} one",
+                self.get_name()
+            )),
+        }
+    }
+
+    pub fn as_rest(&self) -> Result<&str> {
+        match self {
+            LambdaArg::Rest(name) => Ok(name),
+            _ => Err(anyhow!(
+                "expected a rest argument, but got a {} one",
+                self.get_name()
             )),
         }
     }
@@ -57,6 +75,7 @@ impl Display for LambdaArg {
         match self {
             LambdaArg::Required(name) => write!(f, "{}", name),
             LambdaArg::Optional(name) => write!(f, "{}?", name),
+            LambdaArg::Rest(name) => write!(f, "...{}", name),
         }
     }
 }
@@ -75,10 +94,13 @@ impl LambdaDef {
     }
 
     pub fn get_arity(&self) -> FunctionArity {
+        let has_rest = self.args.iter().any(|arg| arg.is_rest());
         let min = self.args.iter().filter(|arg| arg.is_required()).count();
         let max = self.args.len();
 
-        if min == max {
+        if has_rest {
+            FunctionArity::AtLeast(min)
+        } else if min == max {
             FunctionArity::Exact(min)
         } else {
             FunctionArity::Between(min, max)

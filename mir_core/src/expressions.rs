@@ -201,6 +201,7 @@ pub fn evaluate_expression(
                     || ident == "and"
                     || ident == "or"
                     || ident == "each"
+                    || ident == "with"
                 {
                     return Err(anyhow!("cannot assign to keyword: {}", ident));
                 }
@@ -226,20 +227,51 @@ pub fn evaluate_expression(
             }
             Rule::lambda => {
                 let mut inner_pairs = primary.into_inner();
-                let args = inner_pairs
-                    .next()
-                    .unwrap()
-                    .into_inner()
+                let arg_pairs = inner_pairs.next().unwrap().into_inner();
+                let mut has_rest = false;
+                let mut has_optional = false;
+
+                let args = arg_pairs
                     .map(|arg| match arg.as_rule() {
                         Rule::required_arg => {
-                            LambdaArg::Required(arg.into_inner().as_str().to_string())
+                            if has_optional {
+                                return Err(anyhow!(
+                                    "required argument '{}' must come before optional arguments",
+                                    arg.into_inner().as_str()
+                                ));
+                            }
+
+                            if has_rest {
+                                return Err(anyhow!(
+                                    "required argument '{}' must come before rest arguments",
+                                    arg.into_inner().as_str()
+                                ));
+                            }
+
+                            Ok(LambdaArg::Required(arg.into_inner().as_str().to_string()))
                         }
                         Rule::optional_arg => {
-                            LambdaArg::Optional(arg.into_inner().as_str().to_string())
+                            if has_rest {
+                                return Err(anyhow!(
+                                    "optional argument '{}' must come before a rest argument",
+                                    arg.into_inner().as_str()
+                                ));
+                            }
+
+                            has_optional = true;
+                            Ok(LambdaArg::Optional(arg.into_inner().as_str().to_string()))
+                        }
+                        Rule::rest_arg => {
+                            if has_rest {
+                                return Err(anyhow!("a function can only have one rest argument"));
+                            }
+
+                            has_rest = true;
+                            Ok(LambdaArg::Rest(arg.into_inner().as_str().to_string()))
                         }
                         _ => unreachable!(),
                     })
-                    .collect();
+                    .collect::<Result<Vec<LambdaArg>>>()?;
 
                 let body = inner_pairs.next().unwrap();
 
@@ -419,32 +451,238 @@ pub fn evaluate_expression(
                         Rule::less_eq => Ok(Bool(iter_l.zip(iter_r).all(|(l, r)| l <= r))),
                         Rule::greater => Ok(Bool(iter_l.zip(iter_r).all(|(l, r)| l > r))),
                         Rule::greater_eq => Ok(Bool(iter_l.zip(iter_r).all(|(l, r)| l >= r))),
-                        _ => todo!(),
+                        Rule::and | Rule::natural_and => {
+                            let mapped_list = iter_l
+                                .zip(iter_r)
+                                .map(|(l, r)| Ok(Bool(l.as_bool()? && r.as_bool()?)))
+                                .collect::<Result<Vec<Value>>>()?;
+
+                            Ok(Value::Each(IterableValue::List(mapped_list)))
+                        }
+                        Rule::or | Rule::natural_or => {
+                            let mapped_list = iter_l
+                                .zip(iter_r)
+                                .map(|(l, r)| Ok(Bool(l.as_bool()? || r.as_bool()?)))
+                                .collect::<Result<Vec<Value>>>()?;
+
+                            Ok(Value::Each(IterableValue::List(mapped_list)))
+                        }
+                        Rule::add => {
+                            if iter_r.clone().all(|v| v.is_string()) {
+                                let mapped_list = iter_l
+                                    .zip(iter_r)
+                                    .map(|(l, r)| {
+                                        Ok(Value::String(format!(
+                                            "{}{}",
+                                            l.as_string()?,
+                                            r.as_string()?
+                                        )))
+                                    })
+                                    .collect::<Result<Vec<Value>>>()?;
+
+                                return Ok(Value::Each(IterableValue::List(mapped_list)));
+                            }
+
+                            let mapped_list = iter_l
+                                .zip(iter_r)
+                                .map(|(l, r)| Ok(Number(l.as_number()? + r.as_number()?)))
+                                .collect::<Result<Vec<Value>>>()?;
+
+                            Ok(Value::Each(IterableValue::List(mapped_list)))
+                        }
+                        Rule::subtract => {
+                            let mapped_list = iter_l
+                                .zip(iter_r)
+                                .map(|(l, r)| Ok(Number(l.as_number()? - r.as_number()?)))
+                                .collect::<Result<Vec<Value>>>()?;
+
+                            Ok(Value::Each(IterableValue::List(mapped_list)))
+                        }
+                        Rule::multiply => {
+                            let mapped_list = iter_l
+                                .zip(iter_r)
+                                .map(|(l, r)| Ok(Number(l.as_number()? * r.as_number()?)))
+                                .collect::<Result<Vec<Value>>>()?;
+
+                            Ok(Value::Each(IterableValue::List(mapped_list)))
+                        }
+                        Rule::divide => {
+                            let mapped_list = iter_l
+                                .zip(iter_r)
+                                .map(|(l, r)| Ok(Number(l.as_number()? / r.as_number()?)))
+                                .collect::<Result<Vec<Value>>>()?;
+
+                            Ok(Value::Each(IterableValue::List(mapped_list)))
+                        }
+                        Rule::modulo => {
+                            let mapped_list = iter_l
+                                .zip(iter_r)
+                                .map(|(l, r)| Ok(Number(l.as_number()? % r.as_number()?)))
+                                .collect::<Result<Vec<Value>>>()?;
+
+                            Ok(Value::Each(IterableValue::List(mapped_list)))
+                        }
+                        Rule::power => {
+                            let mapped_list = iter_l
+                                .zip(iter_r)
+                                .map(|(l, r)| Ok(Number(l.as_number()?.powf(r.as_number()?))))
+                                .collect::<Result<Vec<Value>>>()?;
+
+                            Ok(Value::Each(IterableValue::List(mapped_list)))
+                        }
+                        Rule::coalesce => {
+                            let mapped_list = iter_l
+                                .zip(iter_r)
+                                .map(|(l, r)| {
+                                    if l == Value::Null {
+                                        Ok(r.clone())
+                                    } else {
+                                        Ok(l)
+                                    }
+                                })
+                                .collect::<Result<Vec<Value>>>()?;
+
+                            Ok(Value::Each(IterableValue::List(mapped_list)))
+                        }
+                        Rule::with => {
+                            let mapped_list = iter_l
+                                .zip(iter_r)
+                                .map(|(l, r)| {
+                                    if !r.is_lambda() && !r.is_built_in() {
+                                        return Err(anyhow!(
+                                            "right-hand iterable contains non-function {}",
+                                            r
+                                        ));
+                                    }
+
+                                    get_function_def(&r)
+                                        .ok_or(anyhow!("can't call unknown function {}", r))?
+                                        .call(vec![l], Rc::clone(&variables), None, call_depth)
+                                })
+                                .collect::<Result<Vec<Value>>>()?;
+
+                            Ok(Value::Each(IterableValue::List(mapped_list)))
+                        }
+                        _ => unreachable!(),
                     }
                 }
-                (Value::Each(iterable), rhs) => match rule {
-                    Rule::equal => Ok(Bool(iterable.into_iter().all(|v| v == rhs))),
-                    Rule::not_equal => Ok(Bool(iterable.into_iter().all(|v| v != rhs))),
-                    Rule::less => Ok(Bool(iterable.into_iter().all(|v| v < rhs))),
-                    Rule::less_eq => Ok(Bool(iterable.into_iter().all(|v| v <= rhs))),
-                    Rule::greater => Ok(Bool(iterable.into_iter().all(|v| v > rhs))),
-                    Rule::greater_eq => Ok(Bool(iterable.into_iter().all(|v| v >= rhs))),
-                    Rule::with => {
-                        if !rhs.is_lambda() && !rhs.is_built_in() {
-                            return Err(anyhow!("can't call a non-function: {}", rhs));
+                (Value::Each(iterable), rhs) => {
+                    let mut iter_l = iterable.into_iter();
+
+                    match rule {
+                        Rule::equal => Ok(Bool(iter_l.all(|v| v == rhs))),
+                        Rule::not_equal => Ok(Bool(iter_l.all(|v| v != rhs))),
+                        Rule::less => Ok(Bool(iter_l.all(|v| v < rhs))),
+                        Rule::less_eq => Ok(Bool(iter_l.all(|v| v <= rhs))),
+                        Rule::greater => Ok(Bool(iter_l.all(|v| v > rhs))),
+                        Rule::greater_eq => Ok(Bool(iter_l.all(|v| v >= rhs))),
+                        Rule::and | Rule::natural_and => {
+                            let mapped_list = iter_l
+                                .map(|v| Ok(Bool(v.as_bool()? && rhs.as_bool()?)))
+                                .collect::<Result<Vec<Value>>>()?;
+
+                            Ok(Value::Each(IterableValue::List(mapped_list)))
                         }
+                        Rule::or | Rule::natural_or => {
+                            let mapped_list = iter_l
+                                .map(|v| Ok(Bool(v.as_bool()? || rhs.as_bool()?)))
+                                .collect::<Result<Vec<Value>>>()?;
 
-                        let values: Vec<Value> = iterable.into_iter().collect();
+                            Ok(Value::Each(IterableValue::List(mapped_list)))
+                        }
+                        Rule::add => {
+                            if rhs.is_string() {
+                                let rhs_string = rhs.as_string()?;
+                                let mapped_list = iter_l
+                                    .map(|v| {
+                                        Ok(Value::String(format!(
+                                            "{}{}",
+                                            v.as_string()?,
+                                            rhs_string
+                                        )))
+                                    })
+                                    .collect::<Result<Vec<Value>>>()?;
 
-                        get_built_in_function_def("map").unwrap().call(
-                            vec![rhs, Value::List(values)],
-                            Rc::clone(&variables),
-                            None,
-                            call_depth,
-                        )
+                                return Ok(Value::Each(IterableValue::List(mapped_list)));
+                            }
+
+                            let mapped_list = iter_l
+                                .map(|v| Ok(Number(v.as_number()? + rhs.as_number()?)))
+                                .collect::<Result<Vec<Value>>>()?;
+
+                            return Ok(Value::Each(IterableValue::List(mapped_list)));
+                        }
+                        Rule::subtract => {
+                            let mapped_list = iter_l
+                                .map(|v| Ok(Number(v.as_number()? - rhs.as_number()?)))
+                                .collect::<Result<Vec<Value>>>()?;
+
+                            Ok(Value::Each(IterableValue::List(mapped_list)))
+                        }
+                        Rule::multiply => {
+                            let mapped_list = iter_l
+                                .map(|v| Ok(Number(v.as_number()? * rhs.as_number()?)))
+                                .collect::<Result<Vec<Value>>>()?;
+
+                            Ok(Value::Each(IterableValue::List(mapped_list)))
+                        }
+                        Rule::divide => {
+                            let mapped_list = iter_l
+                                .map(|v| Ok(Number(v.as_number()? / rhs.as_number()?)))
+                                .collect::<Result<Vec<Value>>>()?;
+
+                            Ok(Value::Each(IterableValue::List(mapped_list)))
+                        }
+                        Rule::modulo => {
+                            let mapped_list = iter_l
+                                .map(|v| Ok(Number(v.as_number()? % rhs.as_number()?)))
+                                .collect::<Result<Vec<Value>>>()?;
+
+                            Ok(Value::Each(IterableValue::List(mapped_list)))
+                        }
+                        Rule::power => {
+                            let mapped_list = iter_l
+                                .map(|v| Ok(Number(v.as_number()?.powf(rhs.as_number()?))))
+                                .collect::<Result<Vec<Value>>>()?;
+
+                            Ok(Value::Each(IterableValue::List(mapped_list)))
+                        }
+                        Rule::coalesce => {
+                            let mapped_list = iter_l
+                                .map(|v| {
+                                    if v == Value::Null {
+                                        Ok(rhs.clone())
+                                    } else {
+                                        Ok(v)
+                                    }
+                                })
+                                .collect::<Result<Vec<Value>>>()?;
+
+                            Ok(Value::Each(IterableValue::List(mapped_list)))
+                        }
+                        Rule::with => {
+                            if !rhs.is_lambda() && !rhs.is_built_in() {
+                                return Err(anyhow!("can't call a non-function: {}", rhs));
+                            }
+
+                            let values: Vec<Value> = iter_l.collect();
+
+                            let mapped_list = get_built_in_function_def("map")
+                                .unwrap()
+                                .call(
+                                    vec![rhs, Value::List(values)],
+                                    Rc::clone(&variables),
+                                    None,
+                                    call_depth,
+                                )?
+                                .as_list()?
+                                .to_owned();
+
+                            Ok(Value::Each(IterableValue::List(mapped_list)))
+                        }
+                        _ => unreachable!(),
                     }
-                    _ => todo!(),
-                },
+                }
                 (lhs, rhs) => match rule {
                     Rule::equal => Ok(Bool(lhs == rhs)),
                     Rule::not_equal => Ok(Bool(lhs != rhs)),
@@ -479,7 +717,11 @@ pub fn evaluate_expression(
                     }
                     Rule::with => {
                         if !rhs.is_lambda() && !rhs.is_built_in() {
-                            return Err(anyhow!("can't call a non-function: {}", lhs));
+                            return Err(anyhow!(
+                                "can't call a non-function ({} is of type {})",
+                                rhs,
+                                rhs.get_type()
+                            ));
                         }
 
                         if let Some(def) = get_function_def(&rhs) {

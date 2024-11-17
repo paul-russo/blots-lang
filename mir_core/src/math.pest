@@ -14,9 +14,10 @@ string       = ${ PUSH("\"" | "'") ~ string_value ~ POP }
 
 lambda        = ${ argument_list ~ WHITESPACE* ~ "=>" ~ (WHITESPACE | NEWLINE)* ~ expression }
 argument_list = !{ argument | "(" ~ NEWLINE* ~ (argument ~ ("," ~ NEWLINE* ~ argument)*)? ~ ("," ~ NEWLINE)? ~ NEWLINE* ~ ")" }
-argument      = _{ optional_arg | required_arg }
+argument      = _{ optional_arg | required_arg | rest_arg }
 required_arg  =  { identifier }
 optional_arg  =  { identifier ~ "?" }
+rest_arg      =  { "..." ~ identifier }
 
 identifier      = @{ (ASCII_ALPHA | "_")+ ~ identifier_rest* }
 identifier_rest = _{ ASCII_ALPHA+ | ASCII_DIGIT+ | "_"+ }
@@ -43,7 +44,7 @@ natural_and      =  { "and" }
 natural_or       =  { "or" }
 with             =  { "with" }
 
-infix_usage = _{ WHITESPACE+ ~ natural_infix_op ~ WHITESPACE+ | WHITESPACE* ~ infix_op ~ WHITESPACE* }
+infix_usage = _{ (WHITESPACE | NEWLINE)+ ~ natural_infix_op ~ WHITESPACE+ | (WHITESPACE | NEWLINE)* ~ infix_op ~ WHITESPACE* }
 
 prefix_op = _{ negation | invert | each }
 negation  =  { "-" }
@@ -66,7 +67,7 @@ record_key_static  =  { identifier | string }
 record_key_dynamic =  { "[" ~ expression ~ "]" }
 record_key         = _{ record_key_static | record_key_dynamic }
 record_pair        = !{ record_key ~ ":" ~ NEWLINE* ~ expression }
-record_shorthand   = !{ identifier ~ ("," ~ NEWLINE)? }
+record_shorthand   =  { identifier }
 record             = !{ "{}" | "{" ~ NEWLINE* ~ ((record_pair | record_shorthand | spread_expression) ~ ("," ~ NEWLINE* ~ (record_pair | record_shorthand | spread_expression))*)? ~ ("," ~ NEWLINE)? ~ NEWLINE* ~ "}" }
 
 conditional = ${ "if" ~ WHITESPACE+ ~ expression ~ WHITESPACE+ ~ "then" ~ (WHITESPACE | NEWLINE)+ ~ expression ~ (WHITESPACE | NEWLINE)+ ~ "else" ~ (WHITESPACE | NEWLINE)+ ~ expression }
