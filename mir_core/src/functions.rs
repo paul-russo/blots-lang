@@ -805,7 +805,11 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                     let format_str = args[0]
                         .as_string()
                         .map_err(|_| anyhow!("first argument must be a string"))?;
-                    let format_args = &args[1..];
+
+                    let format_args = &args[1..]
+                        .into_iter()
+                        .map(|v| v.stringify())
+                        .collect::<Vec<String>>();
 
                     Ok(Value::String(format_str.format(format_args)))
                 },
@@ -825,7 +829,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                         let format_str = args[0].as_string().map_err(|_| {
                             anyhow!("first argument must be a formatting string if multiple arguments are given")
                         })?;
-                        let format_args = &args[1..];
+                        let format_args = &args[1..].into_iter().map(|v| v.stringify()).collect::<Vec<String>>();
                         format_str.format(format_args)
                     };
 
