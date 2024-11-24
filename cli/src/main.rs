@@ -24,7 +24,7 @@ fn main() -> ! {
         let pairs = match get_pairs(&line) {
             Ok(pairs) => pairs,
             Err(error) => {
-                println!("Error: {}", error);
+                println!("[parse error] {}", error);
                 continue;
             }
         };
@@ -42,7 +42,7 @@ fn main() -> ! {
 
                             match result {
                                 Ok(value) => println!("= {}", value),
-                                Err(error) => println!("Evaluation error: {}", error),
+                                Err(error) => println!("[evaluation error] {}", error),
                             }
                         }
                         _ => unreachable!("unexpected rule: {:?}", inner_pair.as_rule()),
