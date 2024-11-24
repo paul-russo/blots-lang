@@ -840,6 +840,23 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             },
         );
 
+        #[cfg(not(target_arch = "wasm32"))]
+        built_ins_map.insert(
+            "time_now",
+            BuiltInFunctionDef {
+                name: String::from("time_now"),
+                arity: FunctionArity::Exact(0),
+                body: |_, _, _| {
+                    Ok(Value::Number(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs_f64(),
+                    ))
+                },
+            },
+        );
+
         built_ins_map
     },
 );

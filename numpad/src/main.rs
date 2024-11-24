@@ -1,13 +1,49 @@
 mod commands;
 
 use commands::{exec_command, is_command};
-use mir_core::expressions::evaluate_expression;
-use mir_core::parser::{get_pairs, Rule};
+use numpad_core::expressions::evaluate_expression;
+use numpad_core::parser::{get_pairs, Rule};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
 fn main() -> ! {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    println!("args: {:?}", args);
+
+    if let Some(path) = args.get(0) {
+        println!("Reading from file: {}", path);
+        let content = std::fs::read_to_string(path).unwrap();
+        let pairs = get_pairs(&content).unwrap();
+        let variables = Rc::new(RefCell::new(HashMap::new()));
+
+        pairs.for_each(|pair| match pair.as_rule() {
+            Rule::statement => {
+                if let Some(inner_pair) = pair.into_inner().next() {
+                    match inner_pair.as_rule() {
+                        Rule::expression => {
+                            let result = evaluate_expression(
+                                inner_pair.into_inner(),
+                                Rc::clone(&variables),
+                                0,
+                            );
+
+                            match result {
+                                Err(error) => println!("[evaluation error] {}", error),
+                                _ => {}
+                            }
+                        }
+                        _ => unreachable!("unexpected rule: {:?}", inner_pair.as_rule()),
+                    }
+                }
+            }
+            Rule::EOI => {}
+            rule => unreachable!("unexpected rule: {:?}", rule),
+        });
+
+        std::process::exit(0);
+    }
+
     let mut lines: Vec<String> = Vec::new();
     let variables = Rc::new(RefCell::new(HashMap::new()));
 
