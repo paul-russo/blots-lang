@@ -350,6 +350,9 @@ impl Value {
         }
     }
 
+    /// Stringify the value. Returns the same thing as the Display trait impl, except for
+    /// Value::String, which is returned without wrapping quotes. Use this for string
+    /// concatenation, formatting, etc.
     pub fn stringify(&self) -> String {
         match self {
             Value::String(s) => format!("{}", s),
