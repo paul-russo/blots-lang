@@ -1,5 +1,5 @@
 use anyhow::Result;
-use mir_core::{
+use numpad_core::{
     expressions::evaluate_expression,
     functions::BUILT_IN_FUNCTION_IDENTS,
     parser::{get_pairs, get_tokens, Rule, Token},

@@ -1,7 +1,7 @@
 [workspace]
 members = [
-  "mir_core",
-  "cli",
-  "wasm",
+  "numpad_core",
+  "numpad",
+  "numpad_wasm",
 ]
 resolver = "2"
