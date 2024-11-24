@@ -1,7 +1,7 @@
-use std::{cell::RefCell, cmp::Ordering, collections::HashMap, rc::Rc, sync::LazyLock};
-
 use anyhow::{anyhow, Result};
+use dyn_fmt::AsStrFormatExt;
 use pest::iterators::Pairs;
+use std::{cell::RefCell, cmp::Ordering, collections::HashMap, rc::Rc, sync::LazyLock};
 
 use crate::{
     expressions::evaluate_expression,
@@ -24,8 +24,8 @@ pub enum FunctionDef<'a> {
     Lambda(&'a LambdaDef),
 }
 
-pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
-    LazyLock::new(|| {
+pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> = LazyLock::new(
+    || {
         let mut built_ins_map = HashMap::new();
 
         built_ins_map.insert(
@@ -796,23 +796,77 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
             },
         );
 
+        built_ins_map.insert(
+            "format",
+            BuiltInFunctionDef {
+                name: String::from("format"),
+                arity: FunctionArity::AtLeast(1),
+                body: |args, _, _| {
+                    let format_str = args[0]
+                        .as_string()
+                        .map_err(|_| anyhow!("first argument must be a string"))?;
+                    let format_args = &args[1..];
+
+                    Ok(Value::String(format_str.format(format_args)))
+                },
+            },
+        );
+
+        #[cfg(not(target_arch = "wasm32"))]
+        built_ins_map.insert(
+            "print",
+            BuiltInFunctionDef {
+                name: String::from("print"),
+                arity: FunctionArity::AtLeast(1),
+                body: |args, _, _| {
+                    let output = if args.len() == 1 {
+                        args[0].stringify()
+                    } else {
+                        let format_str = args[0].as_string().map_err(|_| {
+                            anyhow!("first argument must be a formatting string if multiple arguments are given")
+                        })?;
+                        let format_args = &args[1..];
+                        format_str.format(format_args)
+                    };
+
+                    println!("{}", output);
+
+                    Ok(Value::Null)
+                },
+            },
+        );
+
         built_ins_map
-    });
+    },
+);
 
 pub static BUILT_IN_FUNCTION_IDENTS: LazyLock<Vec<&str>> =
     LazyLock::new(|| BUILT_IN_FUNCTION_DEFS.keys().copied().collect());
 
 impl<'a> FunctionDef<'a> {
+    pub fn get_name(&self) -> String {
+        match self {
+            FunctionDef::BuiltIn(BuiltInFunctionDef { name, .. }) => {
+                format!("built-in function \"{}\"", name)
+            }
+            FunctionDef::Lambda(LambdaDef { name, .. }) => name
+                .clone()
+                .map_or(String::from("anonymous function"), |n| {
+                    format!("function \"{}\"", n)
+                }),
+        }
+    }
+
     pub fn check_arity(&self, arg_count: usize) -> Result<()> {
         match self {
-            FunctionDef::BuiltIn(BuiltInFunctionDef { arity, name, .. }) => match arity {
+            FunctionDef::BuiltIn(BuiltInFunctionDef { arity, .. }) => match arity {
                 FunctionArity::Exact(expected) => {
                     if arg_count == *expected {
                         Ok(())
                     } else {
                         Err(anyhow!(
-                            "function {} takes exactly {} arguments, but {} were given",
-                            name,
+                            "{} takes exactly {} arguments, but {} were given",
+                            self.get_name(),
                             expected,
                             arg_count
                         ))
@@ -823,8 +877,8 @@ impl<'a> FunctionDef<'a> {
                         Ok(())
                     } else {
                         Err(anyhow!(
-                            "function {} takes at least {} arguments, but {} were given",
-                            name,
+                            "{} takes at least {} arguments, but {} were given",
+                            self.get_name(),
                             expected,
                             arg_count
                         ))
@@ -835,8 +889,8 @@ impl<'a> FunctionDef<'a> {
                         Ok(())
                     } else {
                         Err(anyhow!(
-                            "function {} takes between {} and {} arguments, but {} were given",
-                            name,
+                            "{} takes between {} and {} arguments, but {} were given",
+                            self.get_name(),
                             min,
                             max,
                             arg_count
@@ -847,13 +901,6 @@ impl<'a> FunctionDef<'a> {
             FunctionDef::Lambda(def) => {
                 let arity = def.get_arity();
 
-                let ident = def
-                    .name
-                    .clone()
-                    .map_or(String::from("anonymous function"), |n| {
-                        format!("function {}", n)
-                    });
-
                 match arity {
                     FunctionArity::Exact(expected) => {
                         if arg_count == expected {
@@ -861,7 +908,7 @@ impl<'a> FunctionDef<'a> {
                         } else {
                             Err(anyhow!(
                                 "{} takes exactly {} arguments, but {} were given",
-                                ident,
+                                self.get_name(),
                                 expected,
                                 arg_count
                             ))
@@ -873,7 +920,7 @@ impl<'a> FunctionDef<'a> {
                         } else {
                             Err(anyhow!(
                                 "{} takes at least {} arguments, but {} were given",
-                                ident,
+                                self.get_name(),
                                 expected,
                                 arg_count
                             ))
@@ -885,7 +932,7 @@ impl<'a> FunctionDef<'a> {
                         } else {
                             Err(anyhow!(
                                 "{} takes between {} and {} arguments, but {} were given",
-                                ident,
+                                self.get_name(),
                                 min,
                                 max,
                                 arg_count
@@ -914,7 +961,10 @@ impl<'a> FunctionDef<'a> {
         self.check_arity(args.len())?;
 
         if call_depth > 100 {
-            return Err(anyhow!("maximum call depth of 100 exceeded"));
+            return Err(anyhow!(
+                "in {}: maximum call depth of 100 exceeded",
+                self.get_name()
+            ));
         }
 
         match self {
@@ -959,9 +1009,11 @@ impl<'a> FunctionDef<'a> {
                     Rc::new(RefCell::new(new_variables)),
                     call_depth + 1,
                 )
+                .map_err(|error| anyhow!("in {}: {}", self.get_name(), error))
             }
             FunctionDef::BuiltIn(BuiltInFunctionDef { body, .. }) => {
                 body(args, variables, call_depth + 1)
+                    .map_err(|error| anyhow!("in {}: {}", self.get_name(), error))
             }
         }
     }
