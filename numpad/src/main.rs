@@ -1,5 +1,8 @@
+mod cli;
 mod commands;
 
+use clap::Parser;
+use cli::Args;
 use commands::{exec_command, is_command};
 use numpad_core::expressions::evaluate_expression;
 use numpad_core::parser::{get_pairs, Rule};
@@ -8,10 +11,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 fn main() -> ! {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    println!("args: {:?}", args);
+    let args = Args::parse();
 
-    if let Some(path) = args.get(0) {
+    if let Some(path) = args.path {
         println!("Reading from file: {}", path);
         let content = std::fs::read_to_string(path).unwrap();
         let pairs = get_pairs(&content).unwrap();
