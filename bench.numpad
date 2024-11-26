@@ -5,39 +5,39 @@ fibonacci = n => if n <= 1 then n else fibonacci(n - 1) + fibonacci(n - 2)
 
 factorial = n => if n <= 1 then 1 else n * factorial(n - 1)
 
-isDivisibleByAny = (n, factors) =>
+is_divisible_by_any = (n, factors) =>
     if len(factors) == 0 then false
     else if n % factors[0] == 0 then true
-    else isDivisibleByAny(n, tail(factors))
+    else is_divisible_by_any(n, tail(factors))
 
-isPrime = n => 
+is_prime = n => 
     if n <= 1 then false
     else if n <= 3 then true
     else if n % 2 == 0 then false
-    else !isDivisibleByAny(n, collect(each range(floor(sqrt(n)) - 2) + 3))
+    else !is_divisible_by_any(n, collect(each range(floor(sqrt(n)) - 2) + 3))
 
 // Complex number operations using records
-complexAdd = (a, b) => [a[0] + b[0], a[1] + b[1]]
+complex_add = (a, b) => [a[0] + b[0], a[1] + b[1]]
 
-complexMul = (a, b) => [
+complex_mul = (a, b) => [
     a[0] * b[0] - a[1] * b[1],
     a[0] * b[1] + a[1] * b[0]
 ]
 
-complexMag = z => z[0] * z[0] + z[1] * z[1]
+complex_mag = z => z[0] * z[0] + z[1] * z[1]
 
-mandelbrot = (x, y, maxIter, iter, z) =>
-    if iter >= maxIter then iter
-    else if complexMag(z) > 4 then iter
+mandelbrot = (x, y, max_iter, iter, z) =>
+    if iter >= max_iter then iter
+    else if complex_mag(z) > 4 then iter
     else mandelbrot(
-        x, y, maxIter, 
+        x, y, max_iter, 
         iter + 1, 
-        complexAdd(complexMul(z, z), [x, y])
+        complex_add(complex_mul(z, z), [x, y])
     )
 
 // Main computation that exercises different language features
 benchmark = n => {
-    primes: filter(isPrime, range(n)),
+    primes: filter(is_prime, range(n)),
     fibs: collect(each range(15) with i => fibonacci(i)),
     factorials: collect(each range(7) with i => factorial(i)),
     reverse_test: reverse(range(n)),
@@ -48,6 +48,7 @@ benchmark = n => {
 }
 
 // Run benchmark
-output = benchmark(20)
+results = benchmark(20)
 
 print("that took {} seconds", time_now() - start)
+print("results: {}", results)
