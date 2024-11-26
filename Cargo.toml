@@ -1,7 +1,7 @@
 [workspace]
 members = [
-  "numpad_core",
+  "numpad-core",
   "numpad",
-  "numpad_wasm",
+  "numpad-wasm",
 ]
 resolver = "2"
