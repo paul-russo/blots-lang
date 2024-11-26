@@ -31,7 +31,10 @@ fn main() -> ! {
                             );
 
                             match result {
-                                Err(error) => println!("[evaluation error] {}", error),
+                                Err(error) => {
+                                    println!("[evaluation error] {}", error);
+                                    std::process::exit(1);
+                                }
                                 _ => {}
                             }
                         }
