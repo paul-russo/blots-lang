@@ -206,6 +206,10 @@ pub fn evaluate_expression(
                     return Err(anyhow!("cannot assign to keyword: {}", ident));
                 }
 
+                if variables.borrow().contains_key(ident) {
+                    return Err(anyhow!("identifier already defined: {}", ident));
+                }
+
                 let expression = inner_pairs.next().unwrap();
                 let mut value = evaluate_expression(
                     expression.into_inner(),
@@ -274,13 +278,13 @@ pub fn evaluate_expression(
                     .collect::<Result<Vec<LambdaArg>>>()?;
 
                 let body = inner_pairs.next().unwrap();
-
-                Ok(Value::Lambda(LambdaDef {
+                let lambda = Value::Lambda(LambdaDef {
                     name: None,
                     args,
                     body: body.as_str().to_string(),
-                    scope: variables.borrow_mut().clone(),
-                }))
+                });
+
+                Ok(lambda)
             }
             Rule::conditional => {
                 let mut inner_pairs = primary.into_inner();
@@ -313,11 +317,13 @@ pub fn evaluate_expression(
                             return Ok(Value::BuiltIn(ident.to_string()));
                         }
 
-                        variables
+                        let v = variables
                             .borrow_mut()
                             .get(ident)
                             .cloned()
-                            .ok_or(anyhow!("unknown identifier: {}", primary.as_str()))
+                            .ok_or(anyhow!("unknown identifier: {}", primary.as_str()));
+
+                        v
                     }
                 }
             }
@@ -334,11 +340,9 @@ pub fn evaluate_expression(
             Rule::spread_operator => {
                 let rhs = rhs?;
                 match rhs {
-                    List(list) => return Ok(Spread(IterableValue::List(list.clone()))),
+                    List(list) => return Ok(Spread(IterableValue::List(list))),
                     Value::String(s) => return Ok(Spread(IterableValue::String(s))),
-                    Value::Record(record) => {
-                        return Ok(Spread(IterableValue::Record(record.clone())))
-                    }
+                    Value::Record(record) => return Ok(Spread(IterableValue::Record(record))),
                     _ => return Err(anyhow!("expected a list, record, or string")),
                 }
             }
@@ -349,11 +353,9 @@ pub fn evaluate_expression(
             Rule::each => {
                 let rhs = rhs?;
                 match rhs {
-                    List(list) => return Ok(Value::Each(IterableValue::List(list.clone()))),
+                    List(list) => return Ok(Value::Each(IterableValue::List(list))),
                     Value::String(s) => return Ok(Value::Each(IterableValue::String(s))),
-                    Value::Record(record) => {
-                        return Ok(Value::Each(IterableValue::Record(record.clone())))
-                    }
+                    Value::Record(record) => return Ok(Value::Each(IterableValue::Record(record))),
                     _ => return Err(anyhow!("expected a list, record, or string")),
                 }
             }
@@ -436,7 +438,7 @@ pub fn evaluate_expression(
             match (lhs, rhs) {
                 (Value::Each(iterable_l), Value::Each(iterable_r)) => {
                     let iter_l = iterable_l.into_iter();
-                    let iter_r = iterable_r.into_iter();
+                    let mut iter_r = iterable_r.into_iter();
 
                     if iter_l.len() != iter_r.len() {
                         return Err(anyhow!(
@@ -468,7 +470,7 @@ pub fn evaluate_expression(
                             Ok(Value::Each(IterableValue::List(mapped_list)))
                         }
                         Rule::add => {
-                            if iter_r.clone().all(|v| v.is_string()) {
+                            if iter_r.all(|v| v.is_string()) {
                                 let mapped_list = iter_l
                                     .zip(iter_r)
                                     .map(|(l, r)| {
@@ -533,13 +535,7 @@ pub fn evaluate_expression(
                         Rule::coalesce => {
                             let mapped_list = iter_l
                                 .zip(iter_r)
-                                .map(|(l, r)| {
-                                    if l == Value::Null {
-                                        Ok(r.clone())
-                                    } else {
-                                        Ok(l)
-                                    }
-                                })
+                                .map(|(l, r)| if l == Value::Null { Ok(r) } else { Ok(l) })
                                 .collect::<Result<Vec<Value>>>()?;
 
                             Ok(Value::Each(IterableValue::List(mapped_list)))
@@ -1011,7 +1007,6 @@ mod tests {
                 name: Some("f".to_string()),
                 args: vec![LambdaArg::Required("x".to_string())],
                 body: "x + 1".to_string(),
-                scope: HashMap::new()
             })
         );
         assert_eq!(
@@ -1020,7 +1015,6 @@ mod tests {
                 name: Some("f".to_string()),
                 args: vec![LambdaArg::Required("x".to_string())],
                 body: "x + 1".to_string(),
-                scope: HashMap::new()
             })
         );
     }

@@ -35,16 +35,21 @@ mandelbrot = (x, y, max_iter, iter, z) =>
         complex_add(complex_mul(z, z), [x, y])
     )
 
+fib_inner = i => fibonacci(i)
+factorial_inner = i => factorial(i)
+mandel_inner = point => mandelbrot(point[0], point[1], 50, 0, [0, 0])
+sum_squares_inner = i => i * i
+trig_inner = i => [sin(i), cos(i), tan(i)]
+
 // Main computation that exercises different language features
 benchmark = n => {
     primes: filter(is_prime, range(n)),
-    fibs: collect(each range(15) with i => fibonacci(i)),
-    factorials: collect(each range(7) with i => factorial(i)),
+    fibs: collect(each range(15) with fib_inner),
+    factorials: collect(each range(7) with factorial_inner),
     reverse_test: reverse(range(n)),
-    mandel_test: each [[-2, -1], [-1, 0], [0, 0], [0.25, 0]] with point =>
-        mandelbrot(point[0], point[1], 50, 0, [0, 0]),
-    sum_squares: sum(...collect(each range(n) with i => i * i)),
-    trig_test: each range(n) with i => [sin(i), cos(i), tan(i)]
+    mandel_test: each [[-2, -1], [-1, 0], [0, 0], [0.25, 0]] with mandel_inner,
+    sum_squares: sum(...collect(each range(n) with sum_squares_inner)),
+    trig_test: each range(n) with trig_inner
 }
 
 // Run benchmark
