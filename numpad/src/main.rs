@@ -20,8 +20,6 @@ fn main() -> ! {
         let content = std::fs::read_to_string(path).unwrap();
         let pairs = get_pairs(&content).unwrap();
         let variables = Rc::new(RefCell::new(HashMap::new()));
-        // let flat = pairs.clone().flatten();
-        // flat.for_each(|p| println!("{:?}", p));
 
         pairs.for_each(|pair| match pair.as_rule() {
             Rule::statement => {

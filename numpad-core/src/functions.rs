@@ -1,16 +1,20 @@
-use anyhow::{anyhow, Result};
-use dyn_fmt::AsStrFormatExt;
-use pest::iterators::Pairs;
-use std::sync::Mutex;
-use std::{cell::RefCell, cmp::Ordering, collections::HashMap, rc::Rc, sync::LazyLock};
-
-use crate::stats::FunctionCallStats;
 use crate::{
     expressions::evaluate_expression,
     parser::{get_pairs, Rule},
     values::{FunctionArity, IterableValue, LambdaArg, LambdaDef, Value},
 };
+use anyhow::{anyhow, Result};
+use dyn_fmt::AsStrFormatExt;
+use pest::iterators::Pairs;
+use std::{cell::RefCell, cmp::Ordering, collections::HashMap, rc::Rc, sync::LazyLock};
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Mutex;
+
+#[cfg(not(target_arch = "wasm32"))]
+use crate::stats::FunctionCallStats;
+
+#[cfg(not(target_arch = "wasm32"))]
 pub static FUNCTION_CALLS: LazyLock<Mutex<Vec<FunctionCallStats>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 
@@ -991,7 +995,9 @@ impl<'a> FunctionDef<'a> {
         parsed_body: Option<Result<Pairs<Rule>, pest::error::Error<Rule>>>,
         call_depth: usize,
     ) -> Result<Value> {
+        #[cfg(not(target_arch = "wasm32"))]
         let start = std::time::Instant::now();
+
         self.check_arity(args.len())?;
 
         if call_depth > 100 {
@@ -1007,7 +1013,9 @@ impl<'a> FunctionDef<'a> {
                 body,
                 ..
             }) => {
+                #[cfg(not(target_arch = "wasm32"))]
                 let start_var_env = std::time::Instant::now();
+
                 let mut new_variables = variables.borrow_mut().clone();
 
                 for (idx, expected_arg) in expected_args.iter().enumerate() {
@@ -1029,6 +1037,8 @@ impl<'a> FunctionDef<'a> {
                         }
                     }
                 }
+
+                #[cfg(not(target_arch = "wasm32"))]
                 let end_var_env = std::time::Instant::now();
 
                 let return_value = evaluate_expression(
@@ -1042,6 +1052,7 @@ impl<'a> FunctionDef<'a> {
                 )
                 .map_err(|error| anyhow!("in {}: {}", self.get_name(), error));
 
+                #[cfg(not(target_arch = "wasm32"))]
                 FUNCTION_CALLS.lock().unwrap().push(FunctionCallStats {
                     name: self.get_name(),
                     start,
@@ -1056,6 +1067,7 @@ impl<'a> FunctionDef<'a> {
                 let return_value = body(args, variables, call_depth + 1)
                     .map_err(|error| anyhow!("in {}: {}", self.get_name(), error));
 
+                #[cfg(not(target_arch = "wasm32"))]
                 FUNCTION_CALLS.lock().unwrap().push(FunctionCallStats {
                     name: self.get_name(),
                     start,

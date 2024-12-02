@@ -5,18 +5,28 @@ use pest::{iterators::Pairs, Parser};
 #[grammar = "grammar.pest"]
 struct MathParser;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub static CALL_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(not(target_arch = "wasm32"))]
 pub static TOTAL_PARSE_TIME: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 pub fn get_pairs(input: &String) -> Result<Pairs<Rule>, pest::error::Error<Rule>> {
+    #[cfg(not(target_arch = "wasm32"))]
     let start = std::time::Instant::now();
-    CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+
     let pairs = MathParser::parse(Rule::input, input);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+
+    #[cfg(not(target_arch = "wasm32"))]
     TOTAL_PARSE_TIME.fetch_add(
         start.elapsed().as_micros() as usize,
         std::sync::atomic::Ordering::AcqRel,
     );
+
     pairs
 }
 
