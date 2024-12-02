@@ -1,13 +1,18 @@
 use anyhow::{anyhow, Result};
 use dyn_fmt::AsStrFormatExt;
 use pest::iterators::Pairs;
+use std::sync::Mutex;
 use std::{cell::RefCell, cmp::Ordering, collections::HashMap, rc::Rc, sync::LazyLock};
 
+use crate::stats::FunctionCallStats;
 use crate::{
     expressions::evaluate_expression,
     parser::{get_pairs, Rule},
     values::{FunctionArity, IterableValue, LambdaArg, LambdaDef, Value},
 };
+
+pub static FUNCTION_CALLS: LazyLock<Mutex<Vec<FunctionCallStats>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
 
 pub struct BuiltInFunctionDef {
     pub name: String,
@@ -795,7 +800,6 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
                 },
             },
         );
-
         built_ins_map.insert(
             "format",
             BuiltInFunctionDef {
@@ -813,6 +817,14 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<HashMap<&str, BuiltInFunctionDef>> =
 
                     Ok(Value::String(format_str.format(format_args)))
                 },
+            },
+        );
+        built_ins_map.insert(
+            "add2",
+            BuiltInFunctionDef {
+                name: String::from("add2"),
+                arity: FunctionArity::Exact(1),
+                body: |args, _, _| Ok(Value::Number(args[0].as_number()? + 2.0)),
             },
         );
 
@@ -979,6 +991,7 @@ impl<'a> FunctionDef<'a> {
         parsed_body: Option<Result<Pairs<Rule>, pest::error::Error<Rule>>>,
         call_depth: usize,
     ) -> Result<Value> {
+        let start = std::time::Instant::now();
         self.check_arity(args.len())?;
 
         if call_depth > 100 {
@@ -992,14 +1005,10 @@ impl<'a> FunctionDef<'a> {
             FunctionDef::Lambda(LambdaDef {
                 args: expected_args,
                 body,
-                scope,
                 ..
             }) => {
+                let start_var_env = std::time::Instant::now();
                 let mut new_variables = variables.borrow_mut().clone();
-
-                for (var, val) in scope.iter() {
-                    new_variables.insert(var.clone(), val.clone());
-                }
 
                 for (idx, expected_arg) in expected_args.iter().enumerate() {
                     match expected_arg {
@@ -1020,8 +1029,9 @@ impl<'a> FunctionDef<'a> {
                         }
                     }
                 }
+                let end_var_env = std::time::Instant::now();
 
-                evaluate_expression(
+                let return_value = evaluate_expression(
                     parsed_body
                         .unwrap_or_else(|| get_pairs(body))?
                         .next()
@@ -1030,11 +1040,31 @@ impl<'a> FunctionDef<'a> {
                     Rc::new(RefCell::new(new_variables)),
                     call_depth + 1,
                 )
-                .map_err(|error| anyhow!("in {}: {}", self.get_name(), error))
+                .map_err(|error| anyhow!("in {}: {}", self.get_name(), error));
+
+                FUNCTION_CALLS.lock().unwrap().push(FunctionCallStats {
+                    name: self.get_name(),
+                    start,
+                    end: std::time::Instant::now(),
+                    start_var_env: Some(start_var_env),
+                    end_var_env: Some(end_var_env),
+                });
+
+                return return_value;
             }
             FunctionDef::BuiltIn(BuiltInFunctionDef { body, .. }) => {
-                body(args, variables, call_depth + 1)
-                    .map_err(|error| anyhow!("in {}: {}", self.get_name(), error))
+                let return_value = body(args, variables, call_depth + 1)
+                    .map_err(|error| anyhow!("in {}: {}", self.get_name(), error));
+
+                FUNCTION_CALLS.lock().unwrap().push(FunctionCallStats {
+                    name: self.get_name(),
+                    start,
+                    end: std::time::Instant::now(),
+                    start_var_env: None,
+                    end_var_env: None,
+                });
+
+                return return_value;
             }
         }
     }

@@ -85,7 +85,6 @@ pub struct LambdaDef {
     pub name: Option<String>,
     pub args: Vec<LambdaArg>,
     pub body: String,
-    pub scope: HashMap<String, Value>,
 }
 
 impl LambdaDef {

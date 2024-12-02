@@ -5,10 +5,12 @@ use clap::Parser;
 use cli::Args;
 use commands::{exec_command, is_command};
 use numpad_core::expressions::evaluate_expression;
+use numpad_core::functions::FUNCTION_CALLS;
 use numpad_core::parser::{get_pairs, Rule};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Duration;
 
 fn main() -> ! {
     let args = Args::parse();
@@ -18,6 +20,8 @@ fn main() -> ! {
         let content = std::fs::read_to_string(path).unwrap();
         let pairs = get_pairs(&content).unwrap();
         let variables = Rc::new(RefCell::new(HashMap::new()));
+        // let flat = pairs.clone().flatten();
+        // flat.for_each(|p| println!("{:?}", p));
 
         pairs.for_each(|pair| match pair.as_rule() {
             Rule::statement => {
@@ -45,6 +49,40 @@ fn main() -> ! {
             Rule::EOI => {}
             rule => unreachable!("unexpected rule: {:?}", rule),
         });
+
+        println!("---------------------------------------------");
+        println!(
+            "PARSE_COUNT: {}",
+            numpad_core::parser::CALL_COUNT.load(std::sync::atomic::Ordering::Acquire)
+        );
+        let elapsed_ms = Duration::from_micros(
+            numpad_core::parser::TOTAL_PARSE_TIME.load(std::sync::atomic::Ordering::Acquire) as u64,
+        )
+        .as_millis();
+        println!("TOTAL_PARSE_TIME: {}ms", elapsed_ms);
+
+        // println!("FUNCTION_CALLS: [");
+        // println!(
+        //     "\t{}",
+        //     FUNCTION_CALLS
+        //         .lock()
+        //         .unwrap()
+        //         .iter()
+        //         .map(|s| format!("{}", s))
+        //         .collect::<Vec<String>>()
+        //         .join(",\n\t")
+        // );
+        // println!("]");
+
+        println!(
+            "Total function calls: {}",
+            FUNCTION_CALLS.lock().unwrap().len()
+        );
+        println!(
+            "Total function call time: {}ms",
+            FUNCTION_CALLS.lock().unwrap().iter().fold(0.0, |acc, s| acc
+                + ((s.end - s.start).as_secs_f64() * 1_000.0))
+        );
 
         std::process::exit(0);
     }
