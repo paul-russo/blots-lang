@@ -1,10 +1,12 @@
 use crate::{
     functions::{
-        get_built_in_function_def, get_function_def, is_built_in_function, BUILT_IN_FUNCTION_IDENTS,
+        get_built_in_function_def, get_built_in_function_id, get_function_def,
+        is_built_in_function, BUILT_IN_FUNCTION_IDENTS,
     },
+    heap::{Heap, HeapPointer, HeapValue, ListPointer},
     parser::Rule,
     values::{
-        IterableValue, LambdaArg, LambdaDef,
+        LambdaArg, LambdaDef,
         Value::{self, Bool, List, Number, Spread},
     },
 };
@@ -50,23 +52,32 @@ static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
 
 pub fn collect_list(
     pairs: Pairs<Rule>,
-    variables: Rc<RefCell<HashMap<String, Value>>>,
+    heap: Rc<RefCell<Heap>>,
+    bindings: Rc<RefCell<HashMap<String, Value>>>,
     call_depth: usize,
 ) -> Result<Vec<Value>> {
     Ok(pairs
         .into_iter()
         // This can't just be flat_map (at least I think) because we don't want to unwrap
         // each Result as we iterate, since that would result in failed values being skipped.
-        .map(|value| evaluate_expression(value.into_inner(), Rc::clone(&variables), call_depth))
+        .map(|value| {
+            evaluate_expression(
+                value.into_inner(),
+                Rc::clone(&heap),
+                Rc::clone(&bindings),
+                call_depth,
+            )
+        })
         .collect::<Result<Vec<Value>>>()?
         .into_iter()
-        .flatten()
+        // .flatten()
         .collect())
 }
 
 pub fn evaluate_expression(
     pairs: Pairs<Rule>,
-    variables: Rc<RefCell<HashMap<String, Value>>>,
+    heap: Rc<RefCell<Heap>>,
+    bindings: Rc<RefCell<HashMap<String, Value>>>,
     call_depth: usize,
 ) -> Result<Value> {
     PRATT
@@ -80,9 +91,14 @@ pub fn evaluate_expression(
             )),
             Rule::list => {
                 let list_pairs = primary.into_inner();
-                let values = collect_list(list_pairs, Rc::clone(&variables), call_depth)?;
+                let values = collect_list(
+                    list_pairs,
+                    Rc::clone(&heap),
+                    Rc::clone(&bindings),
+                    call_depth,
+                )?;
 
-                Ok(List(values))
+                Ok(heap.borrow_mut().insert_list(values))
             }
             Rule::record => {
                 let record_pairs = primary.into_inner();
@@ -106,67 +122,70 @@ pub fn evaluate_expression(
                                 }
                                 Rule::record_key_dynamic => evaluate_expression(
                                     key_pair.into_inner(),
-                                    Rc::clone(&variables),
+                                    Rc::clone(&heap),
+                                    Rc::clone(&bindings),
                                     call_depth,
                                 )?
-                                .as_string()?
+                                .as_string(&heap.borrow())?
                                 .to_string(),
                                 _ => unreachable!(),
                             };
 
                             let value = evaluate_expression(
                                 inner_pairs.next().unwrap().into_inner(),
-                                Rc::clone(&variables),
+                                Rc::clone(&heap),
+                                Rc::clone(&bindings),
                                 call_depth,
                             )?;
                             record.insert(key, value);
                         }
                         Rule::record_shorthand => {
                             let ident = pair.into_inner().next().unwrap().as_str().to_string();
-                            let value = variables
+                            let value = bindings
                                 .borrow()
                                 .get(&ident)
-                                .cloned()
+                                .copied()
                                 .ok_or(anyhow!("unknown identifier: {}", ident))?;
 
                             record.insert(ident, value);
                         }
-                        Rule::spread_expression => {
-                            let spread_value = evaluate_expression(
-                                pair.into_inner(),
-                                Rc::clone(&variables),
-                                call_depth,
-                            )?;
+                        // Rule::spread_expression => {
+                        //     let spread_value = evaluate_expression(
+                        //         pair.into_inner(),
+                        //         Rc::clone(&heap),
+                        //         Rc::clone(&bindings),
+                        //         call_depth,
+                        //     )?;
 
-                            match spread_value {
-                                Spread(spread_value) => match spread_value {
-                                    IterableValue::List(list) => {
-                                        for (i, value) in list.into_iter().enumerate() {
-                                            record.insert(i.to_string(), value);
-                                        }
-                                    }
-                                    IterableValue::String(s) => {
-                                        for (i, c) in s.chars().enumerate() {
-                                            record.insert(
-                                                i.to_string(),
-                                                Value::String(c.to_string()),
-                                            );
-                                        }
-                                    }
-                                    IterableValue::Record(spread_record) => {
-                                        for (k, v) in spread_record {
-                                            record.insert(k, v);
-                                        }
-                                    }
-                                },
-                                _ => {}
-                            }
-                        }
+                        //     match spread_value {
+                        //         Spread(spread_value) => match spread_value {
+                        //             IterableValue::List(list) => {
+                        //                 for (i, value) in list.into_iter().enumerate() {
+                        //                     record.insert(i.to_string(), value);
+                        //                 }
+                        //             }
+                        //             IterableValue::String(s) => {
+                        //                 for (i, c) in s.chars().enumerate() {
+                        //                     record.insert(
+                        //                         i.to_string(),
+                        //                         Value::String(c.to_string()),
+                        //                     );
+                        //                 }
+                        //             }
+                        //             IterableValue::Record(spread_record) => {
+                        //                 for (k, v) in spread_record {
+                        //                     record.insert(k, v);
+                        //                 }
+                        //             }
+                        //         },
+                        //         _ => {}
+                        //     }
+                        // }
                         _ => {}
                     }
                 }
 
-                Ok(Value::Record(record))
+                Ok(heap.borrow_mut().insert_record(record))
             }
             Rule::bool => {
                 let bool_str = primary.as_str();
@@ -178,7 +197,10 @@ pub fn evaluate_expression(
                 }
             }
             Rule::null => Ok(Value::Null),
-            Rule::string => Ok(Value::String(primary.into_inner().as_str().to_string())),
+            Rule::string => {
+                let contents = primary.into_inner().as_str().to_string();
+                Ok(heap.borrow_mut().insert_string(contents))
+            }
             Rule::assignment => {
                 let mut inner_pairs = primary.into_inner();
                 let ident = inner_pairs.next().unwrap().as_str();
@@ -206,25 +228,29 @@ pub fn evaluate_expression(
                     return Err(anyhow!("cannot assign to keyword: {}", ident));
                 }
 
-                if variables.borrow().contains_key(ident) {
+                if bindings.borrow().contains_key(ident) {
                     return Err(anyhow!("identifier already defined: {}", ident));
                 }
 
                 let expression = inner_pairs.next().unwrap();
                 let mut value = evaluate_expression(
                     expression.into_inner(),
-                    Rc::clone(&variables),
+                    Rc::clone(&heap),
+                    Rc::clone(&bindings),
                     call_depth,
                 )?;
 
                 match value {
-                    Value::Lambda(ref mut lambda) => {
-                        lambda.set_name(ident.to_string());
-                    }
+                    Value::Lambda(pointer) => match pointer.reify_mut(&mut heap.borrow_mut()) {
+                        HeapValue::Lambda(lambda) => {
+                            lambda.set_name(ident.to_string());
+                        }
+                        _ => {}
+                    },
                     _ => {}
                 }
 
-                variables
+                bindings
                     .borrow_mut()
                     .insert(ident.to_string(), value.clone());
                 Ok(value)
@@ -278,7 +304,7 @@ pub fn evaluate_expression(
                     .collect::<Result<Vec<LambdaArg>>>()?;
 
                 let body = inner_pairs.next().unwrap();
-                let lambda = Value::Lambda(LambdaDef {
+                let lambda = heap.borrow_mut().insert_lambda(LambdaDef {
                     name: None,
                     args,
                     body: body.as_str().to_string(),
@@ -294,15 +320,26 @@ pub fn evaluate_expression(
 
                 let condition = evaluate_expression(
                     condition_expr.into_inner(),
-                    Rc::clone(&variables),
+                    Rc::clone(&heap),
+                    Rc::clone(&bindings),
                     call_depth,
                 )?
                 .as_bool()?;
 
                 if condition {
-                    evaluate_expression(then_expr.into_inner(), Rc::clone(&variables), call_depth)
+                    evaluate_expression(
+                        then_expr.into_inner(),
+                        Rc::clone(&heap),
+                        Rc::clone(&bindings),
+                        call_depth,
+                    )
                 } else {
-                    evaluate_expression(else_expr.into_inner(), Rc::clone(&variables), call_depth)
+                    evaluate_expression(
+                        else_expr.into_inner(),
+                        Rc::clone(&heap),
+                        Rc::clone(&bindings),
+                        call_depth,
+                    )
                 }
             }
             Rule::identifier => {
@@ -313,14 +350,14 @@ pub fn evaluate_expression(
                     "e" => return Ok(Number(core::f64::consts::E)),
                     "infinity" => return Ok(Number(f64::INFINITY)),
                     _ => {
-                        if is_built_in_function(ident) {
-                            return Ok(Value::BuiltIn(ident.to_string()));
+                        if let Some(built_in_id) = get_built_in_function_id(ident) {
+                            return Ok(Value::BuiltIn(built_in_id));
                         }
 
-                        let v = variables
+                        let v = bindings
                             .borrow_mut()
                             .get(ident)
-                            .cloned()
+                            .copied()
                             .ok_or(anyhow!("unknown identifier: {}", primary.as_str()));
 
                         v
@@ -328,7 +365,7 @@ pub fn evaluate_expression(
                 }
             }
             Rule::expression => {
-                evaluate_expression(primary.into_inner(), Rc::clone(&variables), call_depth)
+                evaluate_expression(primary.into_inner(), heap, bindings, call_depth)
             }
             _ => unreachable!("{}", primary.as_str()),
         })
@@ -377,26 +414,20 @@ pub fn evaluate_expression(
                 let lhs = lhs?;
                 match lhs {
                     Value::Record(record) => {
-                        let key_value = evaluate_expression(
-                            op.into_inner(),
-                            Rc::clone(&variables),
-                            call_depth,
-                        )?;
+                        let key_value =
+                            evaluate_expression(op.into_inner(), heap, bindings, call_depth)?;
 
                         let key = key_value.as_string()?;
 
-                        Ok(record.get(key).cloned().unwrap_or(Value::Null))
+                        Ok(record.get(key).copied().unwrap_or(Value::Null))
                     }
                     Value::List(list) => {
-                        let index_value = evaluate_expression(
-                            op.into_inner(),
-                            Rc::clone(&variables),
-                            call_depth,
-                        )?;
+                        let index_value =
+                            evaluate_expression(op.into_inner(), heap, bindings, call_depth)?;
 
                         let index = usize::try_from(index_value.as_number()? as u64)?;
 
-                        Ok(list.get(index).cloned().unwrap_or(Value::Null))
+                        Ok(list.get(index).copied().unwrap_or(Value::Null))
                     }
                     _ => Err(anyhow!(
                         "expected a record or list, but got a {}",
@@ -409,21 +440,21 @@ pub fn evaluate_expression(
                 let key = op.into_inner().as_str();
 
                 match lhs {
-                    Value::Record(record) => Ok(record.get(key).cloned().unwrap_or(Value::Null)),
+                    Value::Record(record) => Ok(record.get(key).copied().unwrap_or(Value::Null)),
                     _ => Err(anyhow!("expected a record, but got a {}", lhs.get_type())),
                 }
             }
             Rule::call_list => {
                 let lhs = lhs?;
                 let call_list = op.into_inner();
-                let args = collect_list(call_list, Rc::clone(&variables), call_depth)?;
+                let args = collect_list(call_list, Rc::clone(&bindings), call_depth)?;
 
                 if !lhs.is_lambda() && !lhs.is_built_in() {
                     return Err(anyhow!("can't call a non-function: {}", lhs));
                 }
 
                 if let Some(def) = get_function_def(&lhs) {
-                    return def.call(args, Rc::clone(&variables), None, call_depth);
+                    return def.call(args, Rc::clone(&bindings), None, call_depth);
                 }
 
                 Err(anyhow!("unknown function: {}", lhs))
@@ -553,7 +584,7 @@ pub fn evaluate_expression(
 
                                     get_function_def(&r)
                                         .ok_or(anyhow!("can't call unknown function {}", r))?
-                                        .call(vec![l], Rc::clone(&variables), None, call_depth)
+                                        .call(vec![l], Rc::clone(&bindings), None, call_depth)
                                 })
                                 .collect::<Result<Vec<Value>>>()?;
 
@@ -667,7 +698,7 @@ pub fn evaluate_expression(
                                 .unwrap()
                                 .call(
                                     vec![rhs, Value::List(values)],
-                                    Rc::clone(&variables),
+                                    Rc::clone(&bindings),
                                     None,
                                     call_depth,
                                 )?
@@ -721,7 +752,7 @@ pub fn evaluate_expression(
                         }
 
                         if let Some(def) = get_function_def(&rhs) {
-                            return def.call(vec![lhs], Rc::clone(&variables), None, call_depth);
+                            return def.call(vec![lhs], Rc::clone(&bindings), None, call_depth);
                         }
 
                         Err(anyhow!("unknown function: {}", rhs))

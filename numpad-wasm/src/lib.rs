@@ -16,20 +16,20 @@ use wasm_bindgen::prelude::*;
 #[derive(Debug, Serialize, Deserialize)]
 struct EvaluationResult {
     values: HashMap<String, Value>,
-    variables: HashMap<String, Value>,
+    bindings: HashMap<String, Value>,
     outputs: HashSet<String>,
 }
 
 #[wasm_bindgen]
-pub fn evaluate(expr: &str, variables_js: JsValue, inputs_js: JsValue) -> Result<JsValue, JsError> {
-    let variables = Rc::new(RefCell::new(serde_wasm_bindgen::from_value::<
+pub fn evaluate(expr: &str, bindings_js: JsValue, inputs_js: JsValue) -> Result<JsValue, JsError> {
+    let bindings = Rc::new(RefCell::new(serde_wasm_bindgen::from_value::<
         HashMap<String, Value>,
-    >(variables_js)?));
+    >(bindings_js)?));
 
     let inputs: BTreeMap<String, Value> = serde_wasm_bindgen::from_value(inputs_js)?;
 
-    // Insert the inputs as a record into the variables map.
-    let _ = &variables
+    // Insert the inputs as a record into the bindings map.
+    let _ = &bindings
         .borrow_mut()
         .insert(String::from("inputs"), Value::Record(inputs));
 
@@ -79,7 +79,7 @@ pub fn evaluate(expr: &str, variables_js: JsValue, inputs_js: JsValue) -> Result
                         start_line_col.0, start_line_col.1, end_line_col.0, end_line_col.1
                     );
 
-                    let value = evaluate_expression(inner_pairs, Rc::clone(&variables), 0)
+                    let value = evaluate_expression(inner_pairs, Rc::clone(&bindings), 0)
                         .map_err(|error| JsError::new(&format!("Evaluation error: {}", error)))?;
 
                     values.insert(col_id, value);
@@ -90,11 +90,11 @@ pub fn evaluate(expr: &str, variables_js: JsValue, inputs_js: JsValue) -> Result
         }
     }
 
-    let cloned_variables = variables.borrow_mut().clone();
+    let cloned_bindings = bindings.borrow_mut().clone();
 
     Ok(serde_wasm_bindgen::to_value(&EvaluationResult {
         values,
-        variables: cloned_variables,
+        bindings: cloned_bindings,
         outputs,
     })?)
 }

@@ -2,6 +2,11 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt::Display};
 
+use crate::heap::{
+    Heap, HeapPointer, HeapValue, IterablePointer, LambdaPointer, ListPointer, RecordPointer,
+    StringPointer,
+};
+
 pub enum FunctionArity {
     Exact(usize),
     AtLeast(usize),
@@ -116,52 +121,52 @@ impl PartialOrd for LambdaDef {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
-pub enum IterableValue {
-    List(Vec<Value>),
-    String(String),
-    Record(BTreeMap<String, Value>),
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
+pub enum ReifiedIterableValue<'h> {
+    List(&'h Vec<Value>),
+    String(&'h String),
+    Record(&'h BTreeMap<String, Value>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
-pub enum IterableValueType {
+pub enum ReifiedIterableValueType {
     List,
     String,
     Record,
 }
 
-impl IterableValue {
-    pub fn get_type(&self) -> IterableValueType {
+impl<'h> ReifiedIterableValue<'h> {
+    pub fn get_type(&self) -> ReifiedIterableValueType {
         match self {
-            IterableValue::List(_) => IterableValueType::List,
-            IterableValue::String(_) => IterableValueType::String,
-            IterableValue::Record(_) => IterableValueType::Record,
+            ReifiedIterableValue::List(_) => ReifiedIterableValueType::List,
+            ReifiedIterableValue::String(_) => ReifiedIterableValueType::String,
+            ReifiedIterableValue::Record(_) => ReifiedIterableValueType::Record,
         }
     }
 }
-
-impl IntoIterator for IterableValue {
+impl<'h> IntoIterator for ReifiedIterableValue<'h> {
     type Item = Value;
-    type IntoIter = std::vec::IntoIter<Value>;
+    type IntoIter = std::vec::IntoIter<Self::Item>;
 
     fn into_iter(self) -> Self::IntoIter {
         match self {
-            IterableValue::List(l) => l.into_iter(), // Yields an iterator over the values in the list.
-            IterableValue::String(s) => s
-                .chars()
-                .map(|c| Value::String(c.to_string()))
-                .collect::<Vec<Value>>()
-                .into_iter(), // Yields an iterator over the characters in the string.
-            IterableValue::Record(r) => r
-                .into_iter()
-                .map(|(k, v)| Value::List(vec![Value::String(k), v]))
-                .collect::<Vec<Value>>()
-                .into_iter(), // Yields an iterator over the [key, value] pairs of the record.
+            ReifiedIterableValue::List(l) => l.clone().into_iter(), // Yields an iterator over the values in the list.
+            _ => todo!("have to figure out into_iter for strings and records"),
+            // ReifiedIterableValue::String(s) => s
+            //     .chars()
+            //     .map(|c| Value::String(c.to_string()))
+            //     .collect::<Vec<Value>>()
+            //     .into_iter(), // Yields an iterator over the characters in the string.
+            // ReifiedIterableValue::Record(r) => r
+            //     .into_iter()
+            //     .map(|(k, v)| Value::List(vec![Value::String(k), v]))
+            //     .collect::<Vec<Value>>()
+            //     .into_iter(), // Yields an iterator over the [key, value] pairs of the record.
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
 pub enum ValueType {
     Number,
     List,
@@ -192,40 +197,53 @@ impl Display for ValueType {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
+/// A value, after it has been "reified" (borrowed) from a pointer.
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
+pub enum ReifiedValue<'h> {
+    /// A number is a floating-point value.
+    Number(f64),
+    /// A boolean value is either true or false.
+    Bool(bool),
+    /// A null value represents the absence of a value.
+    Null,
+    /// A list is a sequence of values.
+    List(&'h Vec<Value>),
+    /// A string is a sequence of characters.
+    String(&'h str),
+    /// A record is a collection of key-value pairs.
+    Record(&'h BTreeMap<String, Value>),
+    /// A lambda is a function definition.
+    Lambda(&'h LambdaDef),
+    /// A spread value is "spread" into its container when it is used in a list, record, or function call. (internal only)
+    Spread(ReifiedIterableValue<'h>),
+    /// Like a spread, but the value is never unwrapped. This is used for the "each" keyword. (internal only)
+    Each(ReifiedIterableValue<'h>),
+    /// A built-in function is a function that is implemented in Rust.
+    BuiltIn(usize),
+}
+
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
 pub enum Value {
     /// A number is a floating-point value.
     Number(f64),
-    /// A list is a sequence of values.
-    List(Vec<Value>),
-    /// A spread value is "spread" into its container when it is used in a list, record, or function call. (internal only)
-    Spread(IterableValue),
-    /// Like a spread, but the value is never unwrapped. This is used for the "each" keyword. (internal only)
-    Each(IterableValue),
     /// A boolean value is either true or false.
     Bool(bool),
-    /// A lambda is a function definition.
-    Lambda(LambdaDef),
-    /// A built-in function is a function that is implemented in Rust.
-    BuiltIn(String),
-    /// A string is a sequence of characters.
-    String(String),
-    /// A record is a collection of key-value pairs.
-    Record(BTreeMap<String, Value>),
     /// A null value represents the absence of a value.
     Null,
-}
-
-impl IntoIterator for Value {
-    type Item = Value;
-    type IntoIter = std::vec::IntoIter<Value>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        match self {
-            Value::Spread(iterable) => iterable.into_iter(), // Yields an iterator over the values in the spread.
-            _ => vec![self].into_iter(), // Yields a single value wrapped in a Vec. Note that this will include "Each" values.
-        }
-    }
+    /// A list is a sequence of values.
+    List(ListPointer),
+    /// A string is a sequence of characters.
+    String(StringPointer),
+    /// A record is a collection of key-value pairs.
+    Record(RecordPointer),
+    /// A lambda is a function definition.
+    Lambda(LambdaPointer),
+    /// A spread value is "spread" into its container when it is used in a list, record, or function call. (internal only)
+    Spread(IterablePointer),
+    /// Like a spread, but the value is never unwrapped. This is used for the "each" keyword. (internal only)
+    Each(IterablePointer),
+    /// A built-in function is a function that is implemented in Rust.
+    BuiltIn(usize),
 }
 
 impl Value {
@@ -287,23 +305,23 @@ impl Value {
         }
     }
 
-    pub fn as_list(&self) -> Result<&Vec<Value>> {
+    pub fn as_list<'h>(&self, heap: &'h Heap) -> Result<&'h Vec<Value>> {
         match self {
-            Value::List(l) => Ok(l),
+            Value::List(l) => l.reify(heap).as_list(),
             _ => Err(anyhow!("expected a list, but got a {}", self.get_type())),
         }
     }
 
-    pub fn as_spread(&self) -> Result<&IterableValue> {
+    pub fn as_spread<'h>(&self, heap: &'h Heap) -> Result<&'h HeapValue> {
         match self {
-            Value::Spread(v) => Ok(v),
+            Value::Spread(v) => Ok(v.reify(heap)),
             _ => Err(anyhow!("expected a spread, but got a {}", self.get_type())),
         }
     }
 
-    pub fn as_each(&self) -> Result<&IterableValue> {
+    pub fn as_each<'h>(&self, heap: &'h Heap) -> Result<ReifiedIterableValue<'h>> {
         match self {
-            Value::Each(v) => Ok(v),
+            Value::Each(v) => v.reify(heap).as_iterable(),
             _ => Err(anyhow!("expected an each, but got a {}", self.get_type())),
         }
     }
@@ -315,16 +333,16 @@ impl Value {
         }
     }
 
-    pub fn as_lambda(&self) -> Result<&LambdaDef> {
+    pub fn as_lambda<'h>(&self, heap: &'h Heap) -> Result<&'h LambdaDef> {
         match self {
-            Value::Lambda(def) => Ok(def),
+            Value::Lambda(l) => l.reify(heap).as_lambda(),
             _ => Err(anyhow!("expected a lambda, but got a {}", self.get_type())),
         }
     }
 
-    pub fn as_string(&self) -> Result<&str> {
+    pub fn as_string<'h>(&self, heap: &'h Heap) -> Result<&'h str> {
         match self {
-            Value::String(s) => Ok(s),
+            Value::String(p) => p.reify(heap).as_string(),
             _ => Err(anyhow!("expected a string, but got a {}", self.get_type())),
         }
     }
@@ -338,7 +356,9 @@ impl Value {
 
     pub fn as_built_in(&self) -> Result<&str> {
         match self {
-            Value::BuiltIn(s) => Ok(s),
+            Value::BuiltIn(id) => crate::functions::BUILT_IN_FUNCTION_DEFS
+                .get_ident(*id)
+                .ok_or(anyhow!("built-in function with ID {} not found", id)),
             _ => Err(anyhow!(
                 "expected a built-in function, but got a {}",
                 self.get_type()
@@ -346,13 +366,122 @@ impl Value {
         }
     }
 
+    pub fn reify<'h>(&self, heap: &'h Heap) -> Result<ReifiedValue<'h>> {
+        match self {
+            Value::Number(n) => Ok(ReifiedValue::Number(*n)),
+            Value::List(p) => Ok(ReifiedValue::List(p.reify(heap).as_list()?)),
+            Value::Spread(p) => Ok(ReifiedValue::Spread(p.reify(heap).as_iterable()?)),
+            Value::Each(p) => Ok(ReifiedValue::Each(p.reify(heap).as_iterable()?)),
+            Value::Bool(b) => Ok(ReifiedValue::Bool(*b)),
+            Value::Lambda(p) => Ok(ReifiedValue::Lambda(p.reify(heap).as_lambda()?)),
+            Value::String(p) => Ok(ReifiedValue::String(p.reify(heap).as_string()?)),
+            Value::Null => Ok(ReifiedValue::Null),
+            Value::BuiltIn(id) => Ok(ReifiedValue::BuiltIn(*id)),
+            Value::Record(p) => Ok(ReifiedValue::Record(p.reify(heap).as_record()?)),
+        }
+    }
+
     /// Stringify the value. Returns the same thing as the Display trait impl, except for
     /// Value::String, which is returned without wrapping quotes. Use this for string
     /// concatenation, formatting, etc.
-    pub fn stringify(&self) -> String {
+    pub fn stringify<'h>(&self, heap: &'h Heap) -> String {
         match self {
-            Value::String(s) => format!("{}", s),
-            _ => format!("{}", self),
+            Value::String(p) => p.reify(heap).as_string().map(|s| format!("{}", s)).unwrap(),
+            Value::List(p) => {
+                let mut result = String::from("[");
+                let list = p.reify(heap).as_list().unwrap();
+
+                for (i, value) in list.iter().enumerate() {
+                    result.push_str(&value.stringify(heap));
+                    if i < list.len() - 1 {
+                        result.push_str(", ");
+                    }
+                }
+                result.push_str("]");
+                result
+            }
+            Value::Record(p) => {
+                let mut result = String::from("{");
+                let record = p.reify(heap).as_record().unwrap();
+
+                for (i, (key, value)) in record.iter().enumerate() {
+                    result.push_str(&format!("{}: {}", key, value.stringify(heap)));
+                    if i < record.len() - 1 {
+                        result.push_str(", ");
+                    }
+                }
+                result.push_str("}");
+                result
+            }
+            Value::Lambda(p) => {
+                let lambda = p.reify(heap).as_lambda().unwrap();
+                let mut result = String::from("(");
+                for (i, arg) in lambda.args.iter().enumerate() {
+                    result.push_str(&arg.to_string());
+                    if i < lambda.args.len() - 1 {
+                        result.push_str(", ");
+                    }
+                }
+                result.push_str(&format!(") => {}", lambda.body));
+                result
+            }
+            Value::BuiltIn(id) => format!(
+                "{} (built-in)",
+                crate::functions::BUILT_IN_FUNCTION_DEFS
+                    .get_ident(*id)
+                    .unwrap()
+            ),
+            Value::Spread(p) => match p {
+                IterablePointer::List(l) => {
+                    let list = l.reify(heap).as_list().unwrap();
+                    let mut result = String::from("...");
+                    result.push_str(&list.iter().map(|v| v.stringify(heap)).collect::<String>());
+                    result
+                }
+                IterablePointer::String(s) => {
+                    let string = s.reify(heap).as_string().unwrap();
+                    format!("...{}", string)
+                }
+                IterablePointer::Record(r) => {
+                    let record = r.reify(heap).as_record().unwrap();
+                    let mut result = String::from("...");
+                    result.push_str("{");
+                    for (i, (key, value)) in record.iter().enumerate() {
+                        result.push_str(&format!("{}: {}", key, value.stringify(heap)));
+                        if i < record.len() - 1 {
+                            result.push_str(", ");
+                        }
+                    }
+                    result.push_str("}");
+                    result
+                }
+            },
+            Value::Each(p) => match p {
+                IterablePointer::List(l) => {
+                    let list = l.reify(heap).as_list().unwrap();
+                    let mut result = String::from("each ");
+                    result.push_str(&list.iter().map(|v| v.stringify(heap)).collect::<String>());
+                    result
+                }
+                IterablePointer::String(s) => {
+                    let string = s.reify(heap).as_string().unwrap();
+                    format!("each {}", string)
+                }
+                IterablePointer::Record(r) => {
+                    let record = r.reify(heap).as_record().unwrap();
+                    let mut result = String::from("each ");
+                    result.push_str("{");
+                    for (i, (key, value)) in record.iter().enumerate() {
+                        result.push_str(&format!("{}: {}", key, value.stringify(heap)));
+                        if i < record.len() - 1 {
+                            result.push_str(", ");
+                        }
+                    }
+                    result.push_str("}");
+                    result
+                }
+            },
+            Value::Bool(_) | Value::Number(_) | Value::Null => format!("{}", self),
         }
     }
 }
@@ -361,86 +490,21 @@ impl Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Value::Number(n) => write!(f, "{}", n),
-            Value::List(l) => {
-                write!(f, "[")?;
-                for (i, value) in l.iter().enumerate() {
-                    write!(f, "{}", value)?;
-                    if i < l.len() - 1 {
-                        write!(f, ", ")?;
-                    }
-                }
-                write!(f, "]")
-            }
-            Value::Spread(v) => match v {
-                IterableValue::List(l) => {
-                    write!(f, "...[")?;
-                    for (i, value) in l.iter().enumerate() {
-                        write!(f, "{}", value)?;
-                        if i < l.len() - 1 {
-                            write!(f, ", ")?;
-                        }
-                    }
-                    write!(f, "]")
-                }
-                IterableValue::String(s) => write!(f, "...\"{}\"", s),
-                IterableValue::Record(r) => {
-                    write!(f, "...{{")?;
-                    for (i, (key, value)) in r.iter().enumerate() {
-                        write!(f, "{}: {}", key, value)?;
-                        if i < r.len() - 1 {
-                            write!(f, ", ")?;
-                        }
-                    }
-                    write!(f, "}}")
-                }
-            },
-            Value::Each(v) => match v {
-                IterableValue::List(l) => {
-                    write!(f, "each [")?;
-                    for (i, value) in l.iter().enumerate() {
-                        write!(f, "{}", value)?;
-                        if i < l.len() - 1 {
-                            write!(f, ", ")?;
-                        }
-                    }
-                    write!(f, "]")
-                }
-                IterableValue::String(s) => write!(f, "each \"{}\"", s),
-                IterableValue::Record(r) => {
-                    write!(f, "each {{")?;
-                    for (i, (key, value)) in r.iter().enumerate() {
-                        write!(f, "{}: {}", key, value)?;
-                        if i < r.len() - 1 {
-                            write!(f, ", ")?;
-                        }
-                    }
-                    write!(f, "}}")
-                }
-            },
+            Value::List(p) => write!(f, "{}", p),
+            Value::Spread(p) => write!(f, "...{}", p),
+            Value::Each(p) => write!(f, "each {}", p),
             Value::Bool(b) => write!(f, "{}", b),
-            Value::Lambda(def) => {
-                write!(f, "(")?;
-                for (i, arg) in def.args.iter().enumerate() {
-                    write!(f, "{}", arg)?;
-                    if i < def.args.len() - 1 {
-                        write!(f, ", ")?;
-                    }
-                }
-                write!(f, ") => {}", def.body)
-            }
-            Value::String(s) => write!(f, "\"{}\"", s),
+            Value::Lambda(p) => write!(f, "{}", p),
+            Value::String(p) => write!(f, "{}", p),
             Value::Null => write!(f, "null"),
-            Value::BuiltIn(s) => write!(f, "{} (built-in)", s),
-            Value::Record(r) => {
-                write!(f, "{{")?;
-                for (i, (key, value)) in r.iter().enumerate() {
-                    write!(f, "{}: {}", key, value)?;
-                    if i < r.len() - 1 {
-                        write!(f, ", ")?;
-                    }
-                }
-                write!(f, "}}")
-            }
+            Value::BuiltIn(id) => write!(
+                f,
+                "{} (built-in)",
+                crate::functions::BUILT_IN_FUNCTION_DEFS
+                    .get_ident(*id)
+                    .unwrap()
+            ),
+            Value::Record(p) => write!(f, "{}", p),
         }
     }
 }

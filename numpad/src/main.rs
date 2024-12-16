@@ -6,8 +6,9 @@ use cli::Args;
 use commands::{exec_command, is_command};
 use numpad_core::expressions::evaluate_expression;
 use numpad_core::functions::FUNCTION_CALLS;
+use numpad_core::heap::Heap;
 use numpad_core::parser::{get_pairs, Rule};
-use std::cell::RefCell;
+use std::cell::{LazyCell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
@@ -19,7 +20,8 @@ fn main() -> ! {
         println!("Reading from file: {}", path);
         let content = std::fs::read_to_string(path).unwrap();
         let pairs = get_pairs(&content).unwrap();
-        let variables = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let heap = Rc::new(RefCell::new(Heap::new()));
 
         pairs.for_each(|pair| match pair.as_rule() {
             Rule::statement => {
@@ -28,7 +30,8 @@ fn main() -> ! {
                         Rule::expression => {
                             let result = evaluate_expression(
                                 inner_pair.into_inner(),
-                                Rc::clone(&variables),
+                                Rc::clone(&heap),
+                                Rc::clone(&bindings),
                                 0,
                             );
 
@@ -86,7 +89,7 @@ fn main() -> ! {
     }
 
     let mut lines: Vec<String> = Vec::new();
-    let variables = Rc::new(RefCell::new(HashMap::new()));
+    let bindings = Rc::new(RefCell::new(HashMap::new()));
 
     loop {
         let mut line = String::new();
@@ -113,7 +116,8 @@ fn main() -> ! {
                         Rule::expression => {
                             let result = evaluate_expression(
                                 inner_pair.into_inner(),
-                                Rc::clone(&variables),
+                                Rc::clone(&heap),
+                                Rc::clone(&bindings),
                                 0,
                             );
 
