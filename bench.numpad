@@ -43,7 +43,7 @@ trig_inner = i => [sin(i), cos(i), tan(i)]
 
 // Main computation that exercises different language features
 benchmark = n => {
-    primes: filter(is_prime, range(n)),
+    // primes: filter(is_prime, range(n)),
     fibs: collect(each range(15) with fib_inner),
     factorials: collect(each range(7) with factorial_inner),
     reverse_test: reverse(range(n)),

@@ -7,7 +7,7 @@ use crate::{
 use anyhow::{anyhow, Result};
 use dyn_fmt::AsStrFormatExt;
 use pest::iterators::Pairs;
-use std::{cell::RefCell, cmp::Ordering, collections::HashMap, rc::Rc, sync::LazyLock};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::LazyLock};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Mutex;
@@ -35,7 +35,7 @@ pub enum FunctionDef<'a> {
     Lambda(&'a LambdaDef),
 }
 
-struct BuiltInFunctionDefs<'a> {
+pub struct BuiltInFunctionDefs<'a> {
     pub map: HashMap<&'a str, BuiltInFunctionDef>,
     pub idents_to_ids: HashMap<&'a str, usize>,
     pub idents: Vec<&'a str>,
@@ -313,9 +313,10 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new
                     return Err(anyhow!("range must be no larger than 10,000"));
                 }
 
-                Ok(heap
-                    .borrow_mut()
-                    .insert_list((0..n).map(|e| Value::Number(e as f64)).collect()))
+                let values = (0..n).map(|e| Value::Number(e as f64)).collect();
+                let list = heap.borrow_mut().insert_list(values);
+
+                Ok(list)
             },
         },
     );
@@ -455,36 +456,43 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new
     //         },
     //     },
     // );
-    // map.insert(
-    //     "map",
-    //     BuiltInFunctionDef {
-    //         name: String::from("map"),
-    //         arity: FunctionArity::Exact(2),
-    //         body: |args, heap, bindings, call_depth| {
-    //             let def = get_function_def(&args[0])
-    //                 .ok_or(anyhow!("expected the first argument to be a function"))?;
-    //             let parsed_body = def.get_parsed_body();
+    map.insert(
+        "map",
+        BuiltInFunctionDef {
+            name: String::from("map"),
+            arity: FunctionArity::Exact(2),
+            body: |args, heap, bindings, call_depth| {
+                let def;
+                let list;
 
-    //             let list = args[1].as_list()?;
-    //             let mut new_list = vec![];
+                unsafe {
+                    let borrowed_heap = &heap.try_borrow_unguarded()?;
+                    def = get_function_def(&args[0], borrowed_heap)
+                        .ok_or(anyhow!("expected the first argument to be a function"))?;
+                    list = args[1].as_list(borrowed_heap)?;
+                }
 
-    //             for (i, item) in list.iter().enumerate() {
-    //                 new_list.push(def.call(
-    //                     if !def.check_arity(2).is_err() {
-    //                         vec![item.clone(), Value::Number(i as f64)]
-    //                     } else {
-    //                         vec![item.clone()]
-    //                     },
-    //                     bindings,
-    //                     parsed_body.clone(),
-    //                     call_depth,
-    //                 )?);
-    //             }
+                let parsed_body = def.get_parsed_body();
+                let mut new_list = vec![];
 
-    //             Ok(Value::List(new_list))
-    //         },
-    //     },
-    // );
+                for (i, item) in list.iter().enumerate() {
+                    new_list.push(def.call(
+                        if !def.check_arity(2).is_err() {
+                            vec![*item, Value::Number(i as f64)]
+                        } else {
+                            vec![*item]
+                        },
+                        Rc::clone(&heap),
+                        Rc::clone(&bindings),
+                        parsed_body.clone(),
+                        call_depth,
+                    )?);
+                }
+
+                Ok(heap.borrow_mut().insert_list(new_list))
+            },
+        },
+    );
     // map.insert(
     //     "reduce",
     //     BuiltInFunctionDef {
@@ -517,42 +525,43 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new
     //         },
     //     },
     // );
-    // map.insert(
-    //     "filter",
-    //     BuiltInFunctionDef {
-    //         name: String::from("filter"),
-    //         arity: FunctionArity::Exact(2),
-    //         body: |args, heap, bindings, call_depth| {
-    //             let def = get_function_def(&args[0])
-    //                 .ok_or(anyhow!("expected the first argument to be a function"))?;
-    //             let parsed_body = def.get_parsed_body();
+    map.insert(
+        "filter",
+        BuiltInFunctionDef {
+            name: String::from("filter"),
+            arity: FunctionArity::Exact(2),
+            body: |args, heap, bindings, call_depth| {
+                let borrowed_heap = &heap.borrow();
+                let def = get_function_def(&args[0], borrowed_heap)
+                    .ok_or(anyhow!("expected the first argument to be a function"))?;
+                let parsed_body = def.get_parsed_body();
 
-    //             let list = args[1].as_list()?;
-    //             let mut new_list = vec![];
+                let list = args[1].as_list(borrowed_heap)?;
+                let mut new_list = vec![];
 
-    //             for (i, item) in list.iter().enumerate() {
-    //                 if def
-    //                     .call(
-    //                         if !def.check_arity(2).is_err() {
-    //                             vec![item.clone(), Value::Number(i as f64)]
-    //                         } else {
-    //                             vec![item.clone()]
-    //                         },
-    //                         heap,
-    //                         bindings,
-    //                         parsed_body.clone(),
-    //                         call_depth,
-    //                     )?
-    //                     .as_bool()?
-    //                 {
-    //                     new_list.push(item.clone());
-    //                 }
-    //             }
+                for (i, item) in list.iter().enumerate() {
+                    if def
+                        .call(
+                            if !def.check_arity(2).is_err() {
+                                vec![item.clone(), Value::Number(i as f64)]
+                            } else {
+                                vec![item.clone()]
+                            },
+                            Rc::clone(&heap),
+                            Rc::clone(&bindings),
+                            parsed_body.clone(),
+                            call_depth,
+                        )?
+                        .as_bool()?
+                    {
+                        new_list.push(item.clone());
+                    }
+                }
 
-    //             Ok(Value::List(new_list))
-    //         },
-    //     },
-    // );
+                Ok(heap.borrow_mut().insert_list(new_list))
+            },
+        },
+    );
     // map.insert(
     //     "every",
     //     BuiltInFunctionDef {
@@ -685,18 +694,18 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new
     //         },
     //     },
     // );
-    // map.insert(
-    //     "reverse",
-    //     BuiltInFunctionDef {
-    //         name: String::from("reverse"),
-    //         arity: FunctionArity::Exact(1),
-    //         body: |args, _, _, _| {
-    //             let mut list = args[0].as_list()?.clone();
-    //             list.reverse();
-    //             Ok(Value::List(list))
-    //         },
-    //     },
-    // );
+    map.insert(
+        "reverse",
+        BuiltInFunctionDef {
+            name: String::from("reverse"),
+            arity: FunctionArity::Exact(1),
+            body: |args, heap, _, _| {
+                let mut list = { args[0].as_list(&heap.borrow())?.clone() };
+                list.reverse();
+                Ok(heap.borrow_mut().insert_list(list))
+            },
+        },
+    );
     map.insert(
         "split",
         BuiltInFunctionDef {
@@ -725,13 +734,13 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new
                 let borrowed_heap = &heap.borrow();
                 let delimeter = args[0].as_string(borrowed_heap)?;
                 let list = args[1].as_list(borrowed_heap)?;
+                let joined_string = list
+                    .iter()
+                    .map(|v| v.stringify(borrowed_heap))
+                    .collect::<Vec<String>>()
+                    .join(&delimeter);
 
-                Ok(heap.borrow_mut().insert_string(
-                    list.iter()
-                        .map(|v| v.stringify(borrowed_heap))
-                        .collect::<Vec<String>>()
-                        .join(&delimeter),
-                ))
+                Ok(heap.borrow_mut().insert_string(joined_string))
             },
         },
     );
@@ -794,9 +803,8 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new
             name: String::from("uppercase"),
             arity: FunctionArity::Exact(1),
             body: |args, heap, _, _| {
-                Ok(heap
-                    .borrow_mut()
-                    .insert_string(args[0].as_string(&heap.borrow())?.to_uppercase()))
+                let string = args[0].as_string(&heap.borrow())?.to_uppercase();
+                Ok(heap.borrow_mut().insert_string(string))
             },
         },
     );
@@ -806,9 +814,8 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new
             name: String::from("lowercase"),
             arity: FunctionArity::Exact(1),
             body: |args, heap, _, _| {
-                Ok(heap
-                    .borrow_mut()
-                    .insert_string(args[0].as_string(&heap.borrow())?.to_lowercase()))
+                let string = args[0].as_string(&heap.borrow())?.to_lowercase();
+                Ok(heap.borrow_mut().insert_string(string))
             },
         },
     );
@@ -818,9 +825,8 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new
             name: String::from("to_string"),
             arity: FunctionArity::Exact(1),
             body: |args, heap, _, _| {
-                Ok(heap
-                    .borrow_mut()
-                    .insert_string(args[0].stringify(&heap.borrow())))
+                let string = args[0].stringify(&heap.borrow());
+                Ok(heap.borrow_mut().insert_string(string))
             },
         },
     );
@@ -872,10 +878,12 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new
             name: String::from("collect"),
             arity: FunctionArity::Exact(1),
             body: |args, heap, _, _| {
-                let mut heap = heap.borrow_mut();
-                let iterable = args[0].as_each(&heap)?.to_owned();
-                let values: Vec<Value> = iterable.into_iter().collect();
-                Ok(heap.insert_list(values))
+                let values: Vec<Value> = {
+                    let borrowed_heap = &heap.borrow();
+                    let iterable = args[0].as_each(borrowed_heap)?.to_owned();
+                    iterable.into_iter().collect()
+                };
+                Ok(heap.borrow_mut().insert_list(Rc::new(values)))
             },
         },
     );
@@ -885,15 +893,20 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new
             name: String::from("format"),
             arity: FunctionArity::AtLeast(1),
             body: |args, heap, _, _| {
-                let borrowed_heap = &heap.borrow();
-                let format_str = args[0]
-                    .as_string(borrowed_heap)
-                    .map_err(|_| anyhow!("first argument must be a string"))?;
+                let format_str = unsafe {
+                    let borrowed_heap = &heap.try_borrow_unguarded()?;
+                    args[0]
+                        .as_string(borrowed_heap)
+                        .map_err(|_| anyhow!("first argument must be a string"))?
+                };
 
-                let format_args = &args[1..]
-                    .into_iter()
-                    .map(|v| v.stringify(&heap.borrow()))
-                    .collect::<Vec<String>>();
+                let format_args = {
+                    let borrowed_heap = &heap.borrow();
+                    &args[1..]
+                        .into_iter()
+                        .map(|v| v.stringify(borrowed_heap))
+                        .collect::<Vec<String>>()
+                };
 
                 Ok(heap
                     .borrow_mut()
@@ -1096,7 +1109,7 @@ impl<'a> FunctionDef<'a> {
                 #[cfg(not(target_arch = "wasm32"))]
                 let start_var_env = std::time::Instant::now();
 
-                let mut new_bindings = bindings.borrow_mut().clone();
+                let mut new_bindings = bindings.borrow().clone();
 
                 for (idx, expected_arg) in expected_args.iter().enumerate() {
                     match expected_arg {
@@ -1171,6 +1184,12 @@ pub fn is_built_in_function(ident: &str) -> bool {
 pub fn get_built_in_function_def(id: usize) -> Option<FunctionDef<'static>> {
     BUILT_IN_FUNCTION_DEFS
         .get(BUILT_IN_FUNCTION_IDENTS[id])
+        .map(|def| FunctionDef::BuiltIn(def))
+}
+
+pub fn get_built_in_function_def_by_ident(ident: &str) -> Option<FunctionDef<'static>> {
+    BUILT_IN_FUNCTION_DEFS
+        .get(ident)
         .map(|def| FunctionDef::BuiltIn(def))
 }
 

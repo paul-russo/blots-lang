@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fmt::Display};
+use std::{collections::BTreeMap, fmt::Display, rc::Rc};
 
 use crate::heap::{
     Heap, HeapPointer, HeapValue, IterablePointer, LambdaPointer, ListPointer, RecordPointer,
@@ -222,8 +222,8 @@ pub enum ReifiedValue<'h> {
     BuiltIn(usize),
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
-pub enum Value {
+#[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
+pub enum Value<'h> {
     /// A number is a floating-point value.
     Number(f64),
     /// A boolean value is either true or false.
@@ -244,9 +244,15 @@ pub enum Value {
     Each(IterablePointer),
     /// A built-in function is a function that is implemented in Rust.
     BuiltIn(usize),
+
+    What(&'h Rc<ReifiedIterableValue<'h>>),
 }
 
 impl Value {
+    pub fn new_each(value: Value) -> Result<Value> {
+        Ok(Value::Each(value.as_list_pointer()?.into()))
+    }
+
     pub fn get_type(&self) -> ValueType {
         match self {
             Value::Number(_) => ValueType::Number,
@@ -361,6 +367,51 @@ impl Value {
                 .ok_or(anyhow!("built-in function with ID {} not found", id)),
             _ => Err(anyhow!(
                 "expected a built-in function, but got a {}",
+                self.get_type()
+            )),
+        }
+    }
+
+    pub fn as_record<'h>(&self, heap: &'h Heap) -> Result<&'h BTreeMap<String, Value>> {
+        match self {
+            Value::Record(r) => r.reify(heap).as_record(),
+            _ => Err(anyhow!("expected a record, but got a {}", self.get_type())),
+        }
+    }
+
+    pub fn as_list_pointer(&self) -> Result<ListPointer> {
+        match self {
+            Value::List(p) => Ok(*p),
+            _ => Err(anyhow!("expected a list, but got a {}", self.get_type())),
+        }
+    }
+
+    pub fn as_string_pointer(&self) -> Result<StringPointer> {
+        match self {
+            Value::String(p) => Ok(*p),
+            _ => Err(anyhow!("expected a string, but got a {}", self.get_type())),
+        }
+    }
+
+    pub fn as_record_pointer(&self) -> Result<RecordPointer> {
+        match self {
+            Value::Record(p) => Ok(*p),
+            _ => Err(anyhow!("expected a record, but got a {}", self.get_type())),
+        }
+    }
+
+    pub fn as_lambda_pointer(&self) -> Result<LambdaPointer> {
+        match self {
+            Value::Lambda(p) => Ok(*p),
+            _ => Err(anyhow!("expected a lambda, but got a {}", self.get_type())),
+        }
+    }
+
+    pub fn as_iterable_pointer(&self) -> Result<IterablePointer> {
+        match self {
+            Value::Spread(p) | Value::Each(p) => Ok(*p),
+            _ => Err(anyhow!(
+                "expected a spread or each, but got a {}",
                 self.get_type()
             )),
         }

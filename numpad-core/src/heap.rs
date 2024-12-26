@@ -1,8 +1,10 @@
 use crate::values::{LambdaDef, ReifiedIterableValue, Value};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Display, Formatter};
+use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 pub enum HeapValue {
@@ -65,20 +67,23 @@ impl HeapValue {
 
 #[derive(Debug, Clone)]
 pub struct Heap {
-    values: HashMap<usize, HeapValue>,
+    values: HashMap<usize, Rc<RefCell<HeapValue>>>,
+    counter: usize,
 }
 
 impl Heap {
     pub fn new() -> Self {
         Self {
             values: HashMap::new(),
+            counter: 0,
         }
     }
 
     pub fn insert(&mut self, value: HeapValue) -> usize {
-        let index = self.values.len();
-        self.values.insert(index, value);
-        index
+        self.counter += 1;
+        self.values.insert(self.counter, value);
+
+        self.counter
     }
 
     pub fn insert_list(&mut self, list: Vec<Value>) -> Value {
@@ -97,16 +102,12 @@ impl Heap {
         Value::Lambda(LambdaPointer::new(self.insert(HeapValue::Lambda(lambda))))
     }
 
-    pub fn get(&self, index: usize) -> Option<&HeapValue> {
-        self.values.get(&index)
+    pub fn get(&self, id: usize) -> Option<Rc<HeapValue>> {
+        self.values.get(&id).map(|v| Rc::clone(v))
     }
 
-    pub fn get_mut(&mut self, index: usize) -> Option<&mut HeapValue> {
-        self.values.get_mut(&index)
-    }
-
-    pub fn remove(&mut self, index: usize) -> Option<HeapValue> {
-        self.values.remove(&index)
+    pub fn get_mut(&mut self, id: usize) -> Option<&mut HeapValue> {
+        self.values.get_mut(&id)
     }
 }
 
@@ -161,8 +162,26 @@ pub enum IterablePointer {
     Record(RecordPointer),
 }
 
-impl IterablePointer {
-    pub fn get_type(&self) -> &str {
+impl From<ListPointer> for IterablePointer {
+    fn from(pointer: ListPointer) -> Self {
+        IterablePointer::List(pointer)
+    }
+}
+
+impl From<StringPointer> for IterablePointer {
+    fn from(pointer: StringPointer) -> Self {
+        IterablePointer::String(pointer)
+    }
+}
+
+impl From<RecordPointer> for IterablePointer {
+    fn from(pointer: RecordPointer) -> Self {
+        IterablePointer::Record(pointer)
+    }
+}
+
+impl<'h> HeapPointer<'h> for IterablePointer {
+    fn get_type(&self) -> &str {
         match self {
             IterablePointer::List(pointer) => pointer.get_type(),
             IterablePointer::String(pointer) => pointer.get_type(),
@@ -170,7 +189,7 @@ impl IterablePointer {
         }
     }
 
-    pub fn reify<'h>(&self, heap: &'h Heap) -> &'h HeapValue {
+    fn reify(&self, heap: &'h Heap) -> &'h HeapValue {
         match self {
             IterablePointer::List(pointer) => pointer.reify(heap),
             IterablePointer::String(pointer) => pointer.reify(heap),
@@ -178,7 +197,7 @@ impl IterablePointer {
         }
     }
 
-    pub fn reify_mut<'h>(&self, heap: &'h mut Heap) -> &'h mut HeapValue {
+    fn reify_mut(&self, heap: &'h mut Heap) -> &'h mut HeapValue {
         match self {
             IterablePointer::List(pointer) => pointer.reify_mut(heap),
             IterablePointer::String(pointer) => pointer.reify_mut(heap),

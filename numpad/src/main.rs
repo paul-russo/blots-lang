@@ -8,7 +8,7 @@ use numpad_core::expressions::evaluate_expression;
 use numpad_core::functions::FUNCTION_CALLS;
 use numpad_core::heap::Heap;
 use numpad_core::parser::{get_pairs, Rule};
-use std::cell::{LazyCell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
@@ -89,6 +89,7 @@ fn main() -> ! {
     }
 
     let mut lines: Vec<String> = Vec::new();
+    let heap = Rc::new(RefCell::new(Heap::new()));
     let bindings = Rc::new(RefCell::new(HashMap::new()));
 
     loop {
