@@ -16,12 +16,7 @@ start4 = time_now()
 result4 = each range(10000) with x => x + 2
 end4 = time_now()
 
-start5 = time_now()
-result5 = each range(10000) with add2
-end5 = time_now()
-
 print("map - named: {}s", end1 - start1)
 print("map - anonymous: {}s", end2 - start2)
 print("each with named: {}s", end3 - start3)
 print("each with anonymous: {}s", end4 - start4)
-print("each with built-in: {}s", end5 - start5)
