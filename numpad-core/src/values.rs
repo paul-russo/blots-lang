@@ -1,12 +1,13 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fmt::Display, rc::Rc};
+use std::{collections::BTreeMap, fmt::Display};
 
 use crate::heap::{
     Heap, HeapPointer, HeapValue, IterablePointer, LambdaPointer, ListPointer, RecordPointer,
     StringPointer,
 };
 
+#[derive(Debug)]
 pub enum FunctionArity {
     Exact(usize),
     AtLeast(usize),
@@ -144,6 +145,7 @@ impl<'h> ReifiedIterableValue<'h> {
         }
     }
 }
+
 impl<'h> IntoIterator for ReifiedIterableValue<'h> {
     type Item = Value;
     type IntoIter = std::vec::IntoIter<Self::Item>;
@@ -162,6 +164,18 @@ impl<'h> IntoIterator for ReifiedIterableValue<'h> {
             //     .map(|(k, v)| Value::List(vec![Value::String(k), v]))
             //     .collect::<Vec<Value>>()
             //     .into_iter(), // Yields an iterator over the [key, value] pairs of the record.
+        }
+    }
+}
+
+impl<'h> IntoIterator for ReifiedValue<'h> {
+    type Item = Value;
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match self {
+            ReifiedValue::Spread(iterable, _) => iterable.into_iter(),
+            _ => vec![self.into()].into_iter(),
         }
     }
 }
@@ -207,23 +221,40 @@ pub enum ReifiedValue<'h> {
     /// A null value represents the absence of a value.
     Null,
     /// A list is a sequence of values.
-    List(&'h Vec<Value>),
+    List(&'h Vec<Value>, ListPointer),
     /// A string is a sequence of characters.
-    String(&'h str),
+    String(&'h str, StringPointer),
     /// A record is a collection of key-value pairs.
-    Record(&'h BTreeMap<String, Value>),
+    Record(&'h BTreeMap<String, Value>, RecordPointer),
     /// A lambda is a function definition.
-    Lambda(&'h LambdaDef),
+    Lambda(&'h LambdaDef, LambdaPointer),
     /// A spread value is "spread" into its container when it is used in a list, record, or function call. (internal only)
-    Spread(ReifiedIterableValue<'h>),
+    Spread(ReifiedIterableValue<'h>, IterablePointer),
     /// Like a spread, but the value is never unwrapped. This is used for the "each" keyword. (internal only)
-    Each(ReifiedIterableValue<'h>),
+    Each(ReifiedIterableValue<'h>, IterablePointer),
     /// A built-in function is a function that is implemented in Rust.
     BuiltIn(usize),
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
-pub enum Value<'h> {
+impl From<ReifiedValue<'_>> for Value {
+    fn from(value: ReifiedValue) -> Self {
+        match value {
+            ReifiedValue::Number(n) => Value::Number(n),
+            ReifiedValue::Bool(b) => Value::Bool(b),
+            ReifiedValue::Null => Value::Null,
+            ReifiedValue::List(_, p) => Value::List(p),
+            ReifiedValue::String(_, p) => Value::String(p),
+            ReifiedValue::Record(_, p) => Value::Record(p),
+            ReifiedValue::Lambda(_, p) => Value::Lambda(p),
+            ReifiedValue::Spread(_, p) => Value::Spread(p),
+            ReifiedValue::Each(_, p) => Value::Each(p),
+            ReifiedValue::BuiltIn(id) => Value::BuiltIn(id),
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
+pub enum Value {
     /// A number is a floating-point value.
     Number(f64),
     /// A boolean value is either true or false.
@@ -244,12 +275,10 @@ pub enum Value<'h> {
     Each(IterablePointer),
     /// A built-in function is a function that is implemented in Rust.
     BuiltIn(usize),
-
-    What(&'h Rc<ReifiedIterableValue<'h>>),
 }
 
 impl Value {
-    pub fn new_each(value: Value) -> Result<Value> {
+    pub fn new_each_list(value: Value) -> Result<Value> {
         Ok(Value::Each(value.as_list_pointer()?.into()))
     }
 
@@ -302,6 +331,10 @@ impl Value {
 
     pub fn is_built_in(&self) -> bool {
         matches!(self, Value::BuiltIn(_))
+    }
+
+    pub fn is_callable(&self) -> bool {
+        matches!(self, Value::BuiltIn(_) | Value::Lambda(_))
     }
 
     pub fn as_number(&self) -> Result<f64> {
@@ -420,15 +453,15 @@ impl Value {
     pub fn reify<'h>(&self, heap: &'h Heap) -> Result<ReifiedValue<'h>> {
         match self {
             Value::Number(n) => Ok(ReifiedValue::Number(*n)),
-            Value::List(p) => Ok(ReifiedValue::List(p.reify(heap).as_list()?)),
-            Value::Spread(p) => Ok(ReifiedValue::Spread(p.reify(heap).as_iterable()?)),
-            Value::Each(p) => Ok(ReifiedValue::Each(p.reify(heap).as_iterable()?)),
+            Value::List(p) => Ok(ReifiedValue::List(p.reify(heap).as_list()?, *p)),
+            Value::Spread(p) => Ok(ReifiedValue::Spread(p.reify(heap).as_iterable()?, *p)),
+            Value::Each(p) => Ok(ReifiedValue::Each(p.reify(heap).as_iterable()?, *p)),
             Value::Bool(b) => Ok(ReifiedValue::Bool(*b)),
-            Value::Lambda(p) => Ok(ReifiedValue::Lambda(p.reify(heap).as_lambda()?)),
-            Value::String(p) => Ok(ReifiedValue::String(p.reify(heap).as_string()?)),
+            Value::Lambda(p) => Ok(ReifiedValue::Lambda(p.reify(heap).as_lambda()?, *p)),
+            Value::String(p) => Ok(ReifiedValue::String(p.reify(heap).as_string()?, *p)),
             Value::Null => Ok(ReifiedValue::Null),
             Value::BuiltIn(id) => Ok(ReifiedValue::BuiltIn(*id)),
-            Value::Record(p) => Ok(ReifiedValue::Record(p.reify(heap).as_record()?)),
+            Value::Record(p) => Ok(ReifiedValue::Record(p.reify(heap).as_record()?, *p)),
         }
     }
 

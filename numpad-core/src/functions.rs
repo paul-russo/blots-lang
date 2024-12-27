@@ -19,6 +19,7 @@ use crate::stats::FunctionCallStats;
 pub static FUNCTION_CALLS: LazyLock<Mutex<Vec<FunctionCallStats>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 
+#[derive(Debug)]
 pub struct BuiltInFunctionDef {
     pub name: String,
     pub arity: FunctionArity,
@@ -30,9 +31,10 @@ pub struct BuiltInFunctionDef {
     ) -> Result<Value>,
 }
 
+#[derive(Debug, Clone)]
 pub enum FunctionDef<'a> {
     BuiltIn(&'a BuiltInFunctionDef),
-    Lambda(&'a LambdaDef),
+    Lambda(LambdaDef),
 }
 
 pub struct BuiltInFunctionDefs<'a> {
@@ -336,30 +338,65 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new
             },
         },
     );
-    // map.insert(
-    //     "head",
-    //     BuiltInFunctionDef {
-    //         name: String::from("head"),
-    //         arity: FunctionArity::Exact(1),
-    //         body: |args, _, _, _| match &args[0] {
-    //             Value::List(l) => Ok(l.first().cloned().unwrap_or(Value::List(vec![]))),
-    //             Value::String(s) => Ok(Value::String(s.get(0..1).unwrap_or("").to_string())),
-    //             _ => Err(anyhow!("argument must be a list or string")),
-    //         },
-    //     },
-    // );
-    // map.insert(
-    //     "tail",
-    //     BuiltInFunctionDef {
-    //         name: String::from("tail"),
-    //         arity: FunctionArity::Exact(1),
-    //         body: |args, _, _, _| match &args[0] {
-    //             Value::List(l) => Ok(Value::List(l.get(1..).unwrap_or([].as_slice()).to_vec())),
-    //             Value::String(s) => Ok(Value::String(s.get(1..).unwrap_or("").to_string())),
-    //             _ => Err(anyhow!("argument must be a list or string")),
-    //         },
-    //     },
-    // );
+    map.insert(
+        "head",
+        BuiltInFunctionDef {
+            name: String::from("head"),
+            arity: FunctionArity::Exact(1),
+            body: |args, heap, _, _| match &args[0] {
+                Value::List(p) => p
+                    .reify(&heap.borrow())
+                    .as_list()?
+                    .first()
+                    .copied()
+                    .ok_or(anyhow!("empty list")),
+                Value::String(p) => {
+                    let val = {
+                        p.reify(&heap.borrow())
+                            .as_string()?
+                            .get(0..1)
+                            .ok_or(anyhow!("empty list"))?
+                            .to_string()
+                    };
+
+                    Ok(heap.borrow_mut().insert_string(val))
+                }
+                _ => Err(anyhow!("argument must be a list or string")),
+            },
+        },
+    );
+    map.insert(
+        "tail",
+        BuiltInFunctionDef {
+            name: String::from("tail"),
+            arity: FunctionArity::Exact(1),
+            body: |args, heap, _, _| match &args[0] {
+                Value::List(p) => {
+                    let val = {
+                        p.reify(&heap.borrow())
+                            .as_list()?
+                            .get(1..)
+                            .unwrap_or([].as_slice())
+                            .to_vec()
+                    };
+
+                    Ok(heap.borrow_mut().insert_list(val))
+                }
+                Value::String(s) => {
+                    let val = {
+                        s.reify(&heap.borrow())
+                            .as_string()?
+                            .get(1..)
+                            .unwrap_or("")
+                            .to_string()
+                    };
+
+                    Ok(heap.borrow_mut().insert_string(val))
+                }
+                _ => Err(anyhow!("argument must be a list or string")),
+            },
+        },
+    );
     // map.insert(
     //     "slice",
     //     BuiltInFunctionDef {
@@ -462,19 +499,17 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new
             name: String::from("map"),
             arity: FunctionArity::Exact(2),
             body: |args, heap, bindings, call_depth| {
-                let def;
-                let list;
-
-                unsafe {
-                    let borrowed_heap = &heap.try_borrow_unguarded()?;
-                    def = get_function_def(&args[0], borrowed_heap)
-                        .ok_or(anyhow!("expected the first argument to be a function"))?;
-                    list = args[1].as_list(borrowed_heap)?;
-                }
+                let (def, list) = {
+                    let borrowed_heap = &heap.borrow();
+                    (
+                        get_function_def(&args[0], borrowed_heap)
+                            .ok_or(anyhow!("expected the first argument to be a function"))?,
+                        args[1].as_list(borrowed_heap)?.clone(),
+                    )
+                };
 
                 let parsed_body = def.get_parsed_body();
                 let mut new_list = vec![];
-
                 for (i, item) in list.iter().enumerate() {
                     new_list.push(def.call(
                         if !def.check_arity(2).is_err() {
@@ -531,14 +566,17 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new
             name: String::from("filter"),
             arity: FunctionArity::Exact(2),
             body: |args, heap, bindings, call_depth| {
-                let borrowed_heap = &heap.borrow();
-                let def = get_function_def(&args[0], borrowed_heap)
-                    .ok_or(anyhow!("expected the first argument to be a function"))?;
+                let (def, list) = {
+                    let borrowed_heap = &heap.borrow();
+                    (
+                        get_function_def(&args[0], borrowed_heap)
+                            .ok_or(anyhow!("expected the first argument to be a function"))?,
+                        args[1].as_list(borrowed_heap)?.clone(),
+                    )
+                };
+
                 let parsed_body = def.get_parsed_body();
-
-                let list = args[1].as_list(borrowed_heap)?;
                 let mut new_list = vec![];
-
                 for (i, item) in list.iter().enumerate() {
                     if def
                         .call(
@@ -863,8 +901,8 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new
                 let needle = &args[0];
 
                 match &args[1].reify(&heap.borrow())? {
-                    ReifiedValue::List(l) => Ok(Value::Bool((*l).contains(needle))),
-                    ReifiedValue::String(s) => {
+                    ReifiedValue::List(l, _) => Ok(Value::Bool((*l).contains(needle))),
+                    ReifiedValue::String(s, _) => {
                         Ok(Value::Bool(s.contains(needle.as_string(&heap.borrow())?)))
                     }
                     _ => Err(anyhow!("second argument must be a list or string")),
@@ -883,7 +921,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new
                     let iterable = args[0].as_each(borrowed_heap)?.to_owned();
                     iterable.into_iter().collect()
                 };
-                Ok(heap.borrow_mut().insert_list(Rc::new(values)))
+                Ok(heap.borrow_mut().insert_list(values))
             },
         },
     );
@@ -893,11 +931,12 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new
             name: String::from("format"),
             arity: FunctionArity::AtLeast(1),
             body: |args, heap, _, _| {
-                let format_str = unsafe {
-                    let borrowed_heap = &heap.try_borrow_unguarded()?;
+                let format_str = {
+                    let borrowed_heap = &heap.borrow();
                     args[0]
                         .as_string(borrowed_heap)
                         .map_err(|_| anyhow!("first argument must be a string"))?
+                        .to_string()
                 };
 
                 let format_args = {
@@ -1197,12 +1236,11 @@ pub fn get_built_in_function_id(ident: &str) -> Option<usize> {
     BUILT_IN_FUNCTION_DEFS.get_id(ident)
 }
 
-pub fn get_function_def<'a, 'h>(value: &'a Value, heap: &'h Heap) -> Option<FunctionDef<'a>>
-where
-    'h: 'a, // this means "'h outlives 'a", because the heap lives at least as long as any value
-{
+pub fn get_function_def<'h>(value: &Value, heap: &'h Heap) -> Option<FunctionDef<'static>> {
     match value {
-        Value::Lambda(pointer) => Some(FunctionDef::Lambda(pointer.reify(heap).as_lambda().ok()?)),
+        Value::Lambda(pointer) => Some(FunctionDef::Lambda(
+            pointer.reify(heap).as_lambda().ok()?.clone(),
+        )),
         Value::BuiltIn(id) => Some(get_built_in_function_def(*id)?),
         _ => None,
     }
