@@ -56,10 +56,8 @@ pub fn collect_list(
     bindings: Rc<RefCell<HashMap<String, Value>>>,
     call_depth: usize,
 ) -> Result<Vec<Value>> {
-    Ok(pairs
+    let values = pairs
         .into_iter()
-        // This can't just be flat_map (at least I think) because we don't want to unwrap
-        // each Result as we iterate, since that would result in failed values being skipped.
         .map(|value| {
             evaluate_expression(
                 value.into_inner(),
@@ -68,10 +66,13 @@ pub fn collect_list(
                 call_depth,
             )
         })
-        .collect::<Result<Vec<Value>>>()?
+        .collect::<Result<Vec<Value>>>()?;
+
+    let borrowed_heap = &heap.borrow();
+    Ok(values
         .into_iter()
-        // .flatten()
-        .collect())
+        .flat_map(|value| value.reify(borrowed_heap).unwrap())
+        .collect::<Vec<Value>>())
 }
 
 pub fn evaluate_expression(
@@ -80,8 +81,6 @@ pub fn evaluate_expression(
     bindings: Rc<RefCell<HashMap<String, Value>>>,
     call_depth: usize,
 ) -> Result<Value> {
-    println!("evaluating expression: '{}'", pairs.as_str());
-
     PRATT
         .map_primary(|primary| match primary.as_rule() {
             Rule::number => Ok(Number(
@@ -100,7 +99,7 @@ pub fn evaluate_expression(
                     call_depth,
                 )?;
 
-                Ok(heap.borrow_mut().insert_list(values))
+                Ok(heap.try_borrow_mut()?.insert_list(values))
             }
             Rule::record => {
                 let record_pairs = primary.into_inner();
@@ -151,38 +150,54 @@ pub fn evaluate_expression(
 
                             record.insert(ident, value);
                         }
-                        // Rule::spread_expression => {
-                        //     let spread_value = evaluate_expression(
-                        //         pair.into_inner(),
-                        //         Rc::clone(&heap),
-                        //         Rc::clone(&bindings),
-                        //         call_depth,
-                        //     )?;
+                        Rule::spread_expression => {
+                            let spread_value = evaluate_expression(
+                                pair.into_inner(),
+                                Rc::clone(&heap),
+                                Rc::clone(&bindings),
+                                call_depth,
+                            )?;
 
-                        //     match spread_value {
-                        //         Spread(spread_value) => match spread_value {
-                        //             IterableValue::List(list) => {
-                        //                 for (i, value) in list.into_iter().enumerate() {
-                        //                     record.insert(i.to_string(), value);
-                        //                 }
-                        //             }
-                        //             IterableValue::String(s) => {
-                        //                 for (i, c) in s.chars().enumerate() {
-                        //                     record.insert(
-                        //                         i.to_string(),
-                        //                         Value::String(c.to_string()),
-                        //                     );
-                        //                 }
-                        //             }
-                        //             IterableValue::Record(spread_record) => {
-                        //                 for (k, v) in spread_record {
-                        //                     record.insert(k, v);
-                        //                 }
-                        //             }
-                        //         },
-                        //         _ => {}
-                        //     }
-                        // }
+                            match spread_value {
+                                Spread(spread_value) => match spread_value {
+                                    IterablePointer::List(pointer) => {
+                                        let borrowed_heap = &heap.borrow();
+
+                                        pointer
+                                            .reify(borrowed_heap)
+                                            .as_list()?
+                                            .iter()
+                                            .enumerate()
+                                            .for_each(|(i, value)| {
+                                                record.insert(i.to_string(), *value);
+                                            });
+                                    }
+                                    IterablePointer::String(pointer) => {
+                                        let s = {
+                                            let borrowed_heap = &heap.borrow();
+                                            pointer.reify(borrowed_heap).as_string()?.to_string()
+                                        };
+
+                                        s.chars().enumerate().for_each(|(i, c)| {
+                                            record.insert(
+                                                i.to_string(),
+                                                heap.borrow_mut().insert_string(c.to_string()),
+                                            );
+                                        });
+                                    }
+                                    IterablePointer::Record(pointer) => {
+                                        let borrowed_heap = &heap.borrow();
+                                        let spread_record =
+                                            pointer.reify(borrowed_heap).as_record()?;
+
+                                        for (k, v) in spread_record {
+                                            record.insert(k.clone(), *v);
+                                        }
+                                    }
+                                },
+                                _ => {}
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -422,11 +437,9 @@ pub fn evaluate_expression(
             }
             Rule::access => {
                 let lhs = lhs?;
-                let borrowed_heap = &heap.borrow();
 
                 match lhs {
                     Value::Record(record) => {
-                        let record = record.reify(borrowed_heap).as_record()?;
                         let key_value = evaluate_expression(
                             op.into_inner(),
                             Rc::clone(&heap),
@@ -434,13 +447,13 @@ pub fn evaluate_expression(
                             call_depth,
                         )?;
 
+                        let borrowed_heap = &heap.borrow();
+                        let record = record.reify(borrowed_heap).as_record()?;
                         let key = key_value.as_string(borrowed_heap)?;
 
                         Ok(record.get(key).copied().unwrap_or(Value::Null))
                     }
                     Value::List(list) => {
-                        let list = list.reify(borrowed_heap).as_list()?;
-
                         let index_value = evaluate_expression(
                             op.into_inner(),
                             Rc::clone(&heap),
@@ -448,6 +461,8 @@ pub fn evaluate_expression(
                             call_depth,
                         )?;
 
+                        let borrowed_heap = &heap.borrow();
+                        let list = list.reify(borrowed_heap).as_list()?;
                         let index = usize::try_from(index_value.as_number()? as u64)?;
 
                         Ok(list.get(index).copied().unwrap_or(Value::Null))
@@ -485,10 +500,9 @@ pub fn evaluate_expression(
                     return Err(anyhow!("can't call a non-function: {}", lhs));
                 }
 
-                // Get the function definition in a separate scope so the borrow is dropped
                 let def = {
-                    let borrowed_heap = heap.borrow();
-                    get_function_def(&lhs, &borrowed_heap)
+                    let borrowed_heap = &heap.borrow();
+                    get_function_def(&lhs, borrowed_heap)
                         .ok_or_else(|| anyhow!("unknown function: {}", lhs))?
                 };
 
@@ -509,8 +523,21 @@ pub fn evaluate_expression(
 
             match (lhs, rhs) {
                 (Value::Each(iterable_l), Value::Each(iterable_r)) => {
-                    let iter_l = iterable_l.reify(&heap.borrow()).as_iterable()?.into_iter();
-                    let mut iter_r = iterable_r.reify(&heap.borrow()).as_iterable()?.into_iter();
+                    let (iter_l, mut iter_r) = {
+                        let borrowed_heap = &heap.borrow();
+                        (
+                            iterable_l
+                                .reify(borrowed_heap)
+                                .as_iterable()?
+                                .clone()
+                                .into_iter(),
+                            iterable_r
+                                .reify(borrowed_heap)
+                                .as_iterable()?
+                                .clone()
+                                .into_iter(),
+                        )
+                    };
 
                     if iter_l.len() != iter_r.len() {
                         return Err(anyhow!(
@@ -531,7 +558,7 @@ pub fn evaluate_expression(
                                 .map(|(l, r)| Ok(Bool(l.as_bool()? && r.as_bool()?)))
                                 .collect::<Result<Vec<Value>>>()?;
 
-                            Value::new_each(heap.borrow_mut().insert_list(mapped_list))
+                            Value::new_each_list(heap.borrow_mut().insert_list(mapped_list))
                         }
                         Rule::or | Rule::natural_or => {
                             let mapped_list = iter_l
@@ -539,7 +566,7 @@ pub fn evaluate_expression(
                                 .map(|(l, r)| Ok(Bool(l.as_bool()? || r.as_bool()?)))
                                 .collect::<Result<Vec<Value>>>()?;
 
-                            Value::new_each(heap.borrow_mut().insert_list(mapped_list))
+                            Value::new_each_list(heap.borrow_mut().insert_list(mapped_list))
                         }
                         Rule::add => {
                             if iter_r.all(|v| v.is_string()) {
@@ -548,14 +575,14 @@ pub fn evaluate_expression(
                                     .map(|(l, r)| {
                                         Ok(heap.borrow_mut().insert_string(format!(
                                             "{}{}",
-                                            l.as_string(&heap.borrow())?,
+                                            l.as_string(&heap.borrow())?, // TODO: no borrow while mutably borrowed
                                             r.as_string(&heap.borrow())?
                                         )))
                                     })
                                     .collect::<Result<Vec<Value>>>()?;
 
                                 let list = heap.borrow_mut().insert_list(mapped_list);
-                                return Value::new_each(list);
+                                return Value::new_each_list(list);
                             }
 
                             let mapped_list = iter_l
@@ -564,7 +591,7 @@ pub fn evaluate_expression(
                                 .collect::<Result<Vec<Value>>>()?;
 
                             let list = heap.borrow_mut().insert_list(mapped_list);
-                            Value::new_each(list)
+                            Value::new_each_list(list)
                         }
                         Rule::subtract => {
                             let mapped_list = iter_l
@@ -572,7 +599,7 @@ pub fn evaluate_expression(
                                 .map(|(l, r)| Ok(Number(l.as_number()? - r.as_number()?)))
                                 .collect::<Result<Vec<Value>>>()?;
 
-                            Value::new_each(heap.borrow_mut().insert_list(mapped_list))
+                            Value::new_each_list(heap.borrow_mut().insert_list(mapped_list))
                         }
                         Rule::multiply => {
                             let mapped_list = iter_l
@@ -580,7 +607,7 @@ pub fn evaluate_expression(
                                 .map(|(l, r)| Ok(Number(l.as_number()? * r.as_number()?)))
                                 .collect::<Result<Vec<Value>>>()?;
 
-                            Value::new_each(heap.borrow_mut().insert_list(mapped_list))
+                            Value::new_each_list(heap.borrow_mut().insert_list(mapped_list))
                         }
                         Rule::divide => {
                             let mapped_list = iter_l
@@ -588,7 +615,7 @@ pub fn evaluate_expression(
                                 .map(|(l, r)| Ok(Number(l.as_number()? / r.as_number()?)))
                                 .collect::<Result<Vec<Value>>>()?;
 
-                            Value::new_each(heap.borrow_mut().insert_list(mapped_list))
+                            Value::new_each_list(heap.borrow_mut().insert_list(mapped_list))
                         }
                         Rule::modulo => {
                             let mapped_list = iter_l
@@ -596,7 +623,7 @@ pub fn evaluate_expression(
                                 .map(|(l, r)| Ok(Number(l.as_number()? % r.as_number()?)))
                                 .collect::<Result<Vec<Value>>>()?;
 
-                            Value::new_each(heap.borrow_mut().insert_list(mapped_list))
+                            Value::new_each_list(heap.borrow_mut().insert_list(mapped_list))
                         }
                         Rule::power => {
                             let mapped_list = iter_l
@@ -604,7 +631,7 @@ pub fn evaluate_expression(
                                 .map(|(l, r)| Ok(Number(l.as_number()?.powf(r.as_number()?))))
                                 .collect::<Result<Vec<Value>>>()?;
 
-                            Value::new_each(heap.borrow_mut().insert_list(mapped_list))
+                            Value::new_each_list(heap.borrow_mut().insert_list(mapped_list))
                         }
                         Rule::coalesce => {
                             let mapped_list = iter_l
@@ -612,7 +639,7 @@ pub fn evaluate_expression(
                                 .map(|(l, r)| if l == Value::Null { Ok(r) } else { Ok(l) })
                                 .collect::<Result<Vec<Value>>>()?;
 
-                            Value::new_each(heap.borrow_mut().insert_list(mapped_list))
+                            Value::new_each_list(heap.borrow_mut().insert_list(mapped_list))
                         }
                         Rule::with => {
                             let mapped_list = iter_l
@@ -638,16 +665,13 @@ pub fn evaluate_expression(
                                 .collect::<Result<Vec<Value>>>()?;
 
                             let list = heap.borrow_mut().insert_list(mapped_list);
-                            Value::new_each(list)
+                            Value::new_each_list(list)
                         }
                         _ => unreachable!(),
                     }
                 }
                 (Value::Each(iterable), rhs) => {
-                    let mut iter_l = {
-                        let borrowed_heap = &heap.borrow();
-                        iterable.reify(borrowed_heap).as_iterable()?.into_iter()
-                    };
+                    let mut iter_l = { iterable.reify(&heap.borrow()).as_iterable()?.into_iter() };
 
                     match rule {
                         Rule::equal => Ok(Bool(iter_l.all(|v| v == rhs))),
@@ -661,27 +685,27 @@ pub fn evaluate_expression(
                                 .map(|v| Ok(Bool(v.as_bool()? && rhs.as_bool()?)))
                                 .collect::<Result<Vec<Value>>>()?;
 
-                            Value::new_each(heap.borrow_mut().insert_list(mapped_list))
+                            Value::new_each_list(heap.borrow_mut().insert_list(mapped_list))
                         }
                         Rule::or | Rule::natural_or => {
                             let mapped_list = iter_l
                                 .map(|v| Ok(Bool(v.as_bool()? || rhs.as_bool()?)))
                                 .collect::<Result<Vec<Value>>>()?;
 
-                            Value::new_each(heap.borrow_mut().insert_list(mapped_list))
+                            Value::new_each_list(heap.borrow_mut().insert_list(mapped_list))
                         }
                         Rule::add => {
                             if rhs.is_string() {
-                                let rhs_string = unsafe {
-                                    let borrowed_heap = &heap.try_borrow_unguarded()?;
-                                    rhs.as_string(borrowed_heap)?
+                                let rhs_string = {
+                                    let borrowed_heap = &heap.borrow();
+                                    rhs.as_string(borrowed_heap)?.to_string()
                                 };
 
                                 let mapped_list = iter_l
                                     .map(|v| {
-                                        let string = unsafe {
-                                            let borrowed_heap = &heap.try_borrow_unguarded()?;
-                                            v.as_string(borrowed_heap)?
+                                        let string = {
+                                            let borrowed_heap = &heap.borrow();
+                                            v.as_string(borrowed_heap)?.to_string()
                                         };
 
                                         Ok(heap
@@ -690,49 +714,53 @@ pub fn evaluate_expression(
                                     })
                                     .collect::<Result<Vec<Value>>>()?;
 
-                                return Value::new_each(heap.borrow_mut().insert_list(mapped_list));
+                                return Value::new_each_list(
+                                    heap.borrow_mut().insert_list(mapped_list),
+                                );
                             }
 
                             let mapped_list = iter_l
                                 .map(|v| Ok(Number(v.as_number()? + rhs.as_number()?)))
                                 .collect::<Result<Vec<Value>>>()?;
 
-                            return Value::new_each(heap.borrow_mut().insert_list(mapped_list));
+                            return Value::new_each_list(
+                                heap.borrow_mut().insert_list(mapped_list),
+                            );
                         }
                         Rule::subtract => {
                             let mapped_list = iter_l
                                 .map(|v| Ok(Number(v.as_number()? - rhs.as_number()?)))
                                 .collect::<Result<Vec<Value>>>()?;
 
-                            Value::new_each(heap.borrow_mut().insert_list(mapped_list))
+                            Value::new_each_list(heap.borrow_mut().insert_list(mapped_list))
                         }
                         Rule::multiply => {
                             let mapped_list = iter_l
                                 .map(|v| Ok(Number(v.as_number()? * rhs.as_number()?)))
                                 .collect::<Result<Vec<Value>>>()?;
 
-                            Value::new_each(heap.borrow_mut().insert_list(mapped_list))
+                            Value::new_each_list(heap.borrow_mut().insert_list(mapped_list))
                         }
                         Rule::divide => {
                             let mapped_list = iter_l
                                 .map(|v| Ok(Number(v.as_number()? / rhs.as_number()?)))
                                 .collect::<Result<Vec<Value>>>()?;
 
-                            Value::new_each(heap.borrow_mut().insert_list(mapped_list))
+                            Value::new_each_list(heap.borrow_mut().insert_list(mapped_list))
                         }
                         Rule::modulo => {
                             let mapped_list = iter_l
                                 .map(|v| Ok(Number(v.as_number()? % rhs.as_number()?)))
                                 .collect::<Result<Vec<Value>>>()?;
 
-                            Value::new_each(heap.borrow_mut().insert_list(mapped_list))
+                            Value::new_each_list(heap.borrow_mut().insert_list(mapped_list))
                         }
                         Rule::power => {
                             let mapped_list = iter_l
                                 .map(|v| Ok(Number(v.as_number()?.powf(rhs.as_number()?))))
                                 .collect::<Result<Vec<Value>>>()?;
 
-                            Value::new_each(heap.borrow_mut().insert_list(mapped_list))
+                            Value::new_each_list(heap.borrow_mut().insert_list(mapped_list))
                         }
                         Rule::coalesce => {
                             let mapped_list = iter_l
@@ -745,10 +773,10 @@ pub fn evaluate_expression(
                                 })
                                 .collect::<Result<Vec<Value>>>()?;
 
-                            Value::new_each(heap.borrow_mut().insert_list(mapped_list))
+                            Value::new_each_list(heap.borrow_mut().insert_list(mapped_list))
                         }
                         Rule::with => {
-                            if !rhs.is_lambda() && !rhs.is_built_in() {
+                            if !rhs.is_callable() {
                                 return Err(anyhow!("can't call a non-function: {}", rhs));
                             }
 
@@ -757,19 +785,18 @@ pub fn evaluate_expression(
                                 heap.borrow_mut().insert_list(values)
                             };
 
-                            let mapped_list = get_built_in_function_def_by_ident("map")
-                                .unwrap()
-                                .call(
+                            let call_result =
+                                get_built_in_function_def_by_ident("map").unwrap().call(
                                     vec![rhs, list],
                                     Rc::clone(&heap),
                                     Rc::clone(&bindings),
                                     None,
                                     call_depth,
-                                )?
-                                .as_list(&heap.borrow())?
-                                .to_owned();
+                                )?;
 
-                            Value::new_each(heap.borrow_mut().insert_list(mapped_list))
+                            let mapped_list = { call_result.as_list(&heap.borrow())?.clone() };
+
+                            Value::new_each_list(heap.borrow_mut().insert_list(mapped_list))
                         }
                         _ => unreachable!(),
                     }
@@ -787,7 +814,7 @@ pub fn evaluate_expression(
                         if lhs.is_string() {
                             return Ok(heap.borrow_mut().insert_string(format!(
                                 "{}{}",
-                                lhs.as_string(&heap.borrow())?,
+                                lhs.as_string(&heap.borrow())?, // TODO: no borrow while mutably borrowed
                                 rhs.as_string(&heap.borrow())?
                             )));
                         }
@@ -807,7 +834,7 @@ pub fn evaluate_expression(
                         }
                     }
                     Rule::with => {
-                        if !rhs.is_lambda() && !rhs.is_built_in() {
+                        if !rhs.is_callable() {
                             return Err(anyhow!(
                                 "can't call a non-function ({} is of type {})",
                                 rhs,
@@ -815,17 +842,19 @@ pub fn evaluate_expression(
                             ));
                         }
 
-                        if let Some(def) = get_function_def(&rhs, &heap.borrow()) {
-                            return def.call(
-                                vec![lhs],
-                                Rc::clone(&heap),
-                                Rc::clone(&bindings),
-                                None,
-                                call_depth,
-                            );
+                        let def = { get_function_def(&rhs, &heap.borrow()) };
+
+                        if def.is_none() {
+                            return Err(anyhow!("unknown function: {}", rhs));
                         }
 
-                        Err(anyhow!("unknown function: {}", rhs))
+                        return def.unwrap().call(
+                            vec![lhs],
+                            Rc::clone(&heap),
+                            Rc::clone(&bindings),
+                            None,
+                            call_depth,
+                        );
                     }
                     _ => unreachable!(),
                 },

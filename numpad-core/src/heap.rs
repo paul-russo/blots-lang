@@ -1,10 +1,8 @@
 use crate::values::{LambdaDef, ReifiedIterableValue, Value};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
-use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 pub enum HeapValue {
@@ -67,23 +65,23 @@ impl HeapValue {
 
 #[derive(Debug, Clone)]
 pub struct Heap {
-    values: HashMap<usize, Rc<RefCell<HeapValue>>>,
-    counter: usize,
+    values: Vec<HeapValue>,
+    // counter: usize,
 }
 
 impl Heap {
     pub fn new() -> Self {
         Self {
-            values: HashMap::new(),
-            counter: 0,
+            values: Vec::new(),
+            // counter: 0,
         }
     }
 
     pub fn insert(&mut self, value: HeapValue) -> usize {
-        self.counter += 1;
-        self.values.insert(self.counter, value);
+        // self.counter += 1;
+        self.values.push(value);
 
-        self.counter
+        self.values.len() - 1
     }
 
     pub fn insert_list(&mut self, list: Vec<Value>) -> Value {
@@ -102,12 +100,12 @@ impl Heap {
         Value::Lambda(LambdaPointer::new(self.insert(HeapValue::Lambda(lambda))))
     }
 
-    pub fn get(&self, id: usize) -> Option<Rc<HeapValue>> {
-        self.values.get(&id).map(|v| Rc::clone(v))
+    pub fn get(&self, id: usize) -> Option<&HeapValue> {
+        self.values.get(id)
     }
 
     pub fn get_mut(&mut self, id: usize) -> Option<&mut HeapValue> {
-        self.values.get_mut(&id)
+        self.values.get_mut(id)
     }
 }
 
