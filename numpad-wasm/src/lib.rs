@@ -1,9 +1,10 @@
 use anyhow::Result;
 use numpad_core::{
     expressions::evaluate_expression,
-    functions::BUILT_IN_FUNCTION_IDENTS,
+    functions::get_built_in_function_idents,
+    heap::Heap,
     parser::{get_pairs, get_tokens, Rule, Token},
-    values::Value,
+    values::SerializableValue,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -15,23 +16,29 @@ use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct EvaluationResult {
-    values: HashMap<String, Value>,
-    bindings: HashMap<String, Value>,
+    values: HashMap<String, SerializableValue>,
+    bindings: HashMap<String, SerializableValue>,
     outputs: HashSet<String>,
 }
 
 #[wasm_bindgen]
-pub fn evaluate(expr: &str, bindings_js: JsValue, inputs_js: JsValue) -> Result<JsValue, JsError> {
-    let bindings = Rc::new(RefCell::new(serde_wasm_bindgen::from_value::<
-        HashMap<String, Value>,
-    >(bindings_js)?));
+pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
+    let heap = Rc::new(RefCell::new(Heap::new()));
+    let inputs_given: BTreeMap<String, SerializableValue> =
+        serde_wasm_bindgen::from_value(inputs_js)?;
 
-    let inputs: BTreeMap<String, Value> = serde_wasm_bindgen::from_value(inputs_js)?;
+    let inputs = inputs_given
+        .into_iter()
+        .map(|(key, value)| (key, value.to_value(&mut heap.borrow_mut()).unwrap()))
+        .collect();
 
-    // Insert the inputs as a record into the bindings map.
-    let _ = &bindings
-        .borrow_mut()
-        .insert(String::from("inputs"), Value::Record(inputs));
+    let bindings = Rc::new(RefCell::new(HashMap::new()));
+    {
+        bindings.borrow_mut().insert(
+            String::from("inputs"),
+            heap.borrow_mut().insert_record(inputs),
+        );
+    }
 
     let expr_owned = String::from(expr);
     let pairs =
@@ -79,8 +86,11 @@ pub fn evaluate(expr: &str, bindings_js: JsValue, inputs_js: JsValue) -> Result<
                         start_line_col.0, start_line_col.1, end_line_col.0, end_line_col.1
                     );
 
-                    let value = evaluate_expression(inner_pairs, Rc::clone(&bindings), 0)
-                        .map_err(|error| JsError::new(&format!("Evaluation error: {}", error)))?;
+                    let value =
+                        evaluate_expression(inner_pairs, Rc::clone(&heap), Rc::clone(&bindings), 0)
+                            .map_err(|error| {
+                                JsError::new(&format!("Evaluation error: {}", error))
+                            })?;
 
                     values.insert(col_id, value);
                 }
@@ -90,11 +100,20 @@ pub fn evaluate(expr: &str, bindings_js: JsValue, inputs_js: JsValue) -> Result<
         }
     }
 
-    let cloned_bindings = bindings.borrow_mut().clone();
+    let values_serializable = values
+        .iter()
+        .map(|(k, v)| (k.clone(), v.to_serializable_value(&heap.borrow()).unwrap()))
+        .collect();
+
+    let bindings_serializable = bindings
+        .borrow()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.to_serializable_value(&heap.borrow()).unwrap()))
+        .collect();
 
     Ok(serde_wasm_bindgen::to_value(&EvaluationResult {
-        values,
-        bindings: cloned_bindings,
+        values: values_serializable,
+        bindings: bindings_serializable,
         outputs,
     })?)
 }
@@ -130,10 +149,7 @@ pub fn tokenize(input: &str) -> Result<JsValue, JsError> {
 #[wasm_bindgen]
 pub fn get_built_in_function_names() -> Result<JsValue, JsError> {
     Ok(serde_wasm_bindgen::to_value(
-        &(BUILT_IN_FUNCTION_IDENTS
-            .iter()
-            .cloned()
-            .collect::<Vec<&str>>()),
+        &get_built_in_function_idents(),
     )?)
 }
 

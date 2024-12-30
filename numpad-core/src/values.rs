@@ -2,9 +2,12 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt::Display};
 
-use crate::heap::{
-    Heap, HeapPointer, HeapValue, IterablePointer, LambdaPointer, ListPointer, RecordPointer,
-    StringPointer,
+use crate::{
+    functions::{get_built_in_function_id, get_built_in_function_ident},
+    heap::{
+        Heap, HeapPointer, HeapValue, IterablePointer, LambdaPointer, ListPointer, RecordPointer,
+        StringPointer,
+    },
 };
 
 #[derive(Debug)]
@@ -129,7 +132,7 @@ pub enum ReifiedIterableValue<'h> {
     Record(&'h BTreeMap<String, Value>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum ReifiedIterableValueType {
     List,
     String,
@@ -180,7 +183,7 @@ impl<'h> IntoIterator for ReifiedValue<'h> {
     }
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
+#[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
 pub enum ValueType {
     Number,
     List,
@@ -253,7 +256,144 @@ impl From<ReifiedValue<'_>> for Value {
     }
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
+pub enum SerializableIterableValue {
+    List(Vec<SerializableValue>),
+    String(String),
+    Record(BTreeMap<String, SerializableValue>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
+pub enum SerializableValue {
+    Number(f64),
+    Bool(bool),
+    Null,
+    List(Vec<SerializableValue>),
+    String(String),
+    Record(BTreeMap<String, SerializableValue>),
+    Lambda(LambdaDef),
+    Each(SerializableIterableValue),
+    BuiltIn(String),
+}
+
+impl SerializableValue {
+    pub fn from_value<'h>(value: &Value, heap: &'h Heap) -> Result<SerializableValue> {
+        match value {
+            Value::Number(n) => Ok(SerializableValue::Number(*n)),
+            Value::Bool(b) => Ok(SerializableValue::Bool(*b)),
+            Value::Null => Ok(SerializableValue::Null),
+            Value::List(p) => {
+                let list = p.reify(heap).as_list()?;
+                let serialized_list = list
+                    .iter()
+                    .map(|v| SerializableValue::from_value(v, heap))
+                    .collect::<Result<Vec<SerializableValue>>>()?;
+                Ok(SerializableValue::List(serialized_list))
+            }
+            Value::String(p) => {
+                let string = p.reify(heap).as_string()?;
+                Ok(SerializableValue::String(string.to_string()))
+            }
+            Value::Record(p) => {
+                let record = p.reify(heap).as_record()?;
+                let serialized_record = record
+                    .iter()
+                    .map(|(k, v)| Ok((k.to_string(), SerializableValue::from_value(v, heap)?)))
+                    .collect::<Result<BTreeMap<String, SerializableValue>>>()?;
+                Ok(SerializableValue::Record(serialized_record))
+            }
+            Value::Lambda(p) => Ok(SerializableValue::Lambda(
+                p.reify(heap).as_lambda()?.clone(),
+            )),
+            Value::BuiltIn(id) => Ok(SerializableValue::BuiltIn(
+                get_built_in_function_ident(*id).unwrap().to_string(),
+            )),
+            Value::Each(p) => {
+                let iterable = p.reify(heap).as_iterable()?;
+                let serialized_iterable = match iterable {
+                    ReifiedIterableValue::List(list) => {
+                        let serialized_list = list
+                            .iter()
+                            .map(|v| SerializableValue::from_value(v, heap))
+                            .collect::<Result<Vec<SerializableValue>>>()?;
+                        SerializableIterableValue::List(serialized_list)
+                    }
+                    ReifiedIterableValue::String(string) => {
+                        SerializableIterableValue::String(string.to_string())
+                    }
+                    ReifiedIterableValue::Record(record) => {
+                        let serialized_record = record
+                            .iter()
+                            .map(|(k, v)| {
+                                Ok((k.to_string(), SerializableValue::from_value(v, heap)?))
+                            })
+                            .collect::<Result<BTreeMap<String, SerializableValue>>>()?;
+                        SerializableIterableValue::Record(serialized_record)
+                    }
+                };
+
+                Ok(SerializableValue::Each(serialized_iterable))
+            }
+            Value::Spread(_) => Err(anyhow!("cannot serialize a spread value")),
+        }
+    }
+
+    pub fn to_value<'h>(&self, heap: &'h mut Heap) -> Result<Value> {
+        match self {
+            SerializableValue::Number(n) => Ok(Value::Number(*n)),
+            SerializableValue::Bool(b) => Ok(Value::Bool(*b)),
+            SerializableValue::Null => Ok(Value::Null),
+            SerializableValue::List(list) => {
+                let deserialized_list = list
+                    .iter()
+                    .map(|v| SerializableValue::to_value(v, heap))
+                    .collect::<Result<Vec<Value>>>()?;
+
+                Ok(heap.insert_list(deserialized_list))
+            }
+            SerializableValue::String(s) => Ok(heap.insert_string(s.to_string())),
+            SerializableValue::Record(record) => {
+                let deserialized_record = record
+                    .iter()
+                    .map(|(k, v)| Ok((k.to_string(), SerializableValue::to_value(v, heap)?)))
+                    .collect::<Result<BTreeMap<String, Value>>>()?;
+                Ok(heap.insert_record(deserialized_record))
+            }
+            SerializableValue::Lambda(lambda) => Ok(heap.insert_lambda(lambda.clone())),
+            SerializableValue::BuiltIn(ident) => get_built_in_function_id(ident)
+                .ok_or(anyhow!("built-in function with ident {} not found", ident))
+                .map(|id| Value::BuiltIn(id)),
+            SerializableValue::Each(iterable) => {
+                let deserialized_iterable = match iterable {
+                    SerializableIterableValue::List(list) => {
+                        let deserialized_list = list
+                            .iter()
+                            .map(|v| SerializableValue::to_value(v, heap))
+                            .collect::<Result<Vec<Value>>>()?;
+                        heap.insert_list(deserialized_list)
+                    }
+                    SerializableIterableValue::String(string) => {
+                        heap.insert_string(string.to_string())
+                    }
+                    SerializableIterableValue::Record(record) => {
+                        let deserialized_record = record
+                            .iter()
+                            .map(|(k, v)| {
+                                Ok((k.to_string(), SerializableValue::to_value(v, heap)?))
+                            })
+                            .collect::<Result<BTreeMap<String, Value>>>()?;
+                        heap.insert_record(deserialized_record)
+                    }
+                };
+
+                let p = deserialized_iterable.as_iterable_pointer().unwrap();
+                Ok(Value::Each(p))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
 pub enum Value {
     /// A number is a floating-point value.
     Number(f64),
@@ -395,8 +535,7 @@ impl Value {
 
     pub fn as_built_in(&self) -> Result<&str> {
         match self {
-            Value::BuiltIn(id) => crate::functions::BUILT_IN_FUNCTION_DEFS
-                .get_ident(*id)
+            Value::BuiltIn(id) => get_built_in_function_ident(*id)
                 .ok_or(anyhow!("built-in function with ID {} not found", id)),
             _ => Err(anyhow!(
                 "expected a built-in function, but got a {}",
@@ -448,6 +587,10 @@ impl Value {
                 self.get_type()
             )),
         }
+    }
+
+    pub fn to_serializable_value<'h>(&self, heap: &'h Heap) -> Result<SerializableValue> {
+        SerializableValue::from_value(self, heap)
     }
 
     pub fn reify<'h>(&self, heap: &'h Heap) -> Result<ReifiedValue<'h>> {
@@ -509,12 +652,9 @@ impl Value {
                 result.push_str(&format!(") => {}", lambda.body));
                 result
             }
-            Value::BuiltIn(id) => format!(
-                "{} (built-in)",
-                crate::functions::BUILT_IN_FUNCTION_DEFS
-                    .get_ident(*id)
-                    .unwrap()
-            ),
+            Value::BuiltIn(id) => {
+                format!("{} (built-in)", get_built_in_function_ident(*id).unwrap())
+            }
             Value::Spread(p) => match p {
                 IterablePointer::List(l) => {
                     let list = l.reify(heap).as_list().unwrap();
@@ -584,9 +724,7 @@ impl Display for Value {
             Value::BuiltIn(id) => write!(
                 f,
                 "{} (built-in)",
-                crate::functions::BUILT_IN_FUNCTION_DEFS
-                    .get_ident(*id)
-                    .unwrap()
+                get_built_in_function_ident(*id).unwrap()
             ),
             Value::Record(p) => write!(f, "{}", p),
         }
