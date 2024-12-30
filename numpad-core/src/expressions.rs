@@ -523,7 +523,7 @@ pub fn evaluate_expression(
 
             match (lhs, rhs) {
                 (Value::Each(iterable_l), Value::Each(iterable_r)) => {
-                    let (iter_l, mut iter_r) = {
+                    let (iter_l, iter_r) = {
                         let borrowed_heap = &heap.borrow();
                         (
                             iterable_l
@@ -569,10 +569,10 @@ pub fn evaluate_expression(
                             Value::new_each_list(heap.borrow_mut().insert_list(mapped_list))
                         }
                         Rule::add => {
-                            if iter_r.all(|v| v.is_string()) {
-                                let mapped_list = iter_l
-                                    .zip(iter_r)
-                                    .map(|(l, r)| {
+                            let mapped_list = iter_l
+                                .zip(iter_r)
+                                .map(|(l, r)| match (l, r) {
+                                    (Value::String(_), Value::String(_)) => {
                                         let (l_str, r_str) = {
                                             (
                                                 l.as_string(&heap.borrow())?.to_string(),
@@ -583,16 +583,16 @@ pub fn evaluate_expression(
                                         Ok(heap
                                             .borrow_mut()
                                             .insert_string(format!("{}{}", l_str, r_str)))
-                                    })
-                                    .collect::<Result<Vec<Value>>>()?;
-
-                                let list = heap.borrow_mut().insert_list(mapped_list);
-                                return Value::new_each_list(list);
-                            }
-
-                            let mapped_list = iter_l
-                                .zip(iter_r)
-                                .map(|(l, r)| Ok(Number(l.as_number()? + r.as_number()?)))
+                                    }
+                                    (Value::Number(_), Value::Number(_)) => {
+                                        Ok(Number(l.as_number()? + r.as_number()?))
+                                    }
+                                    _ => Err(anyhow!(
+                                        "can't add {} and {}",
+                                        l.get_type(),
+                                        r.get_type()
+                                    )),
+                                })
                                 .collect::<Result<Vec<Value>>>()?;
 
                             let list = heap.borrow_mut().insert_list(mapped_list);
