@@ -76,7 +76,7 @@ impl<'a> BuiltInFunctionDefs<'a> {
     }
 }
 
-pub static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| {
+static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| {
     let mut map = BuiltInFunctionDefs::new();
 
     map.insert(
@@ -1008,7 +1008,7 @@ pub static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new
     map
 });
 
-pub static BUILT_IN_FUNCTION_IDENTS: LazyLock<Vec<&str>> =
+static BUILT_IN_FUNCTION_IDENTS: LazyLock<Vec<&str>> =
     LazyLock::new(|| BUILT_IN_FUNCTION_DEFS.get_idents());
 
 impl<'a> FunctionDef<'a> {
@@ -1234,6 +1234,14 @@ pub fn get_built_in_function_def_by_ident(ident: &str) -> Option<FunctionDef<'st
 
 pub fn get_built_in_function_id(ident: &str) -> Option<usize> {
     BUILT_IN_FUNCTION_DEFS.get_id(ident)
+}
+
+pub fn get_built_in_function_ident(id: usize) -> Option<&'static str> {
+    BUILT_IN_FUNCTION_DEFS.get_ident(id)
+}
+
+pub fn get_built_in_function_idents() -> Vec<&'static str> {
+    BUILT_IN_FUNCTION_IDENTS.iter().copied().collect()
 }
 
 pub fn get_function_def<'h>(value: &Value, heap: &'h Heap) -> Option<FunctionDef<'static>> {

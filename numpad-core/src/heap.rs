@@ -66,19 +66,14 @@ impl HeapValue {
 #[derive(Debug, Clone)]
 pub struct Heap {
     values: Vec<HeapValue>,
-    // counter: usize,
 }
 
 impl Heap {
     pub fn new() -> Self {
-        Self {
-            values: Vec::new(),
-            // counter: 0,
-        }
+        Self { values: Vec::new() }
     }
 
     pub fn insert(&mut self, value: HeapValue) -> usize {
-        // self.counter += 1;
         self.values.push(value);
 
         self.values.len() - 1

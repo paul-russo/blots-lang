@@ -1,7 +1,7 @@
 use crate::{
     functions::{
         get_built_in_function_def_by_ident, get_built_in_function_id, get_function_def,
-        BUILT_IN_FUNCTION_IDENTS,
+        is_built_in_function,
     },
     heap::{Heap, HeapPointer, HeapValue, IterablePointer},
     parser::Rule,
@@ -222,7 +222,7 @@ pub fn evaluate_expression(
                 let mut inner_pairs = primary.into_inner();
                 let ident = inner_pairs.next().unwrap().as_str();
 
-                if BUILT_IN_FUNCTION_IDENTS.contains(&ident) {
+                if is_built_in_function(&ident) {
                     return Err(anyhow!("cannot assign to built-in function: {}", ident));
                 }
 
@@ -573,11 +573,16 @@ pub fn evaluate_expression(
                                 let mapped_list = iter_l
                                     .zip(iter_r)
                                     .map(|(l, r)| {
-                                        Ok(heap.borrow_mut().insert_string(format!(
-                                            "{}{}",
-                                            l.as_string(&heap.borrow())?, // TODO: no borrow while mutably borrowed
-                                            r.as_string(&heap.borrow())?
-                                        )))
+                                        let (l_str, r_str) = {
+                                            (
+                                                l.as_string(&heap.borrow())?.to_string(),
+                                                r.as_string(&heap.borrow())?.to_string(),
+                                            )
+                                        };
+
+                                        Ok(heap
+                                            .borrow_mut()
+                                            .insert_string(format!("{}{}", l_str, r_str)))
                                     })
                                     .collect::<Result<Vec<Value>>>()?;
 
@@ -812,11 +817,16 @@ pub fn evaluate_expression(
                     Rule::or | Rule::natural_or => Ok(Bool(lhs.as_bool()? || rhs.as_bool()?)),
                     Rule::add => {
                         if lhs.is_string() {
-                            return Ok(heap.borrow_mut().insert_string(format!(
-                                "{}{}",
-                                lhs.as_string(&heap.borrow())?, // TODO: no borrow while mutably borrowed
-                                rhs.as_string(&heap.borrow())?
-                            )));
+                            let (l_str, r_str) = {
+                                (
+                                    lhs.as_string(&heap.borrow())?.to_string(),
+                                    rhs.as_string(&heap.borrow())?.to_string(),
+                                )
+                            };
+
+                            return Ok(heap
+                                .borrow_mut()
+                                .insert_string(format!("{}{}", l_str, r_str)));
                         }
 
                         Ok(Number(lhs.as_number()? + rhs.as_number()?))
