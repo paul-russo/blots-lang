@@ -1,0 +1,7 @@
+start1 = time_now()
+
+f = x => if x < 100 then f(x + 1) else x
+
+print(f(0))
+
+print("that took {} seconds", time_now() - start1)
