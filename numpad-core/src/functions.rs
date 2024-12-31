@@ -310,11 +310,6 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
             arity: FunctionArity::Exact(1),
             body: |args, heap, _, _| {
                 let n = args[0].as_number()? as i64;
-
-                if n > 10_000 {
-                    return Err(anyhow!("range must be no larger than 10,000"));
-                }
-
                 let values = (0..n).map(|e| Value::Number(e as f64)).collect();
                 let list = heap.borrow_mut().insert_list(values);
 
@@ -509,10 +504,12 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                 };
 
                 let parsed_body = def.get_parsed_body();
-                let mut new_list = vec![];
+                let takes_index = !def.check_arity(2).is_err();
+                let mut new_list = Vec::with_capacity(list.len());
+
                 for (i, item) in list.iter().enumerate() {
                     new_list.push(def.call(
-                        if !def.check_arity(2).is_err() {
+                        if takes_index {
                             vec![*item, Value::Number(i as f64)]
                         } else {
                             vec![*item]
@@ -1132,9 +1129,9 @@ impl<'a> FunctionDef<'a> {
 
         self.check_arity(args.len())?;
 
-        if call_depth > 100 {
+        if call_depth > 1000 {
             return Err(anyhow!(
-                "in {}: maximum call depth of 100 exceeded",
+                "in {}: maximum call depth of 1000 exceeded",
                 self.get_name()
             ));
         }
