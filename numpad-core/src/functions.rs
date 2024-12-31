@@ -1,13 +1,13 @@
 use crate::{
     expressions::evaluate_expression,
-    heap::{Heap, HeapPointer},
+    heap::{Heap, HeapPointer, IterablePointer},
     parser::{get_pairs, Rule},
     values::{FunctionArity, LambdaArg, LambdaDef, ReifiedValue, Value},
 };
 use anyhow::{anyhow, Result};
 use dyn_fmt::AsStrFormatExt;
 use pest::iterators::Pairs;
-use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::LazyLock};
+use std::{cell::RefCell, cmp::Ordering, collections::HashMap, rc::Rc, sync::LazyLock};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Mutex;
@@ -392,102 +392,134 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
             },
         },
     );
-    // map.insert(
-    //     "slice",
-    //     BuiltInFunctionDef {
-    //         name: String::from("slice"),
-    //         arity: FunctionArity::Exact(3),
-    //         body: |args, _, _, _| {
-    //             let start = args[0].as_number()? as usize;
-    //             let end = args[1].as_number()? as usize;
+    map.insert(
+        "slice",
+        BuiltInFunctionDef {
+            name: String::from("slice"),
+            arity: FunctionArity::Exact(3),
+            body: |args, heap, _, _| {
+                let start = args[0].as_number()? as usize;
+                let end = args[1].as_number()? as usize;
 
-    //             match &args[2] {
-    //                 Value::List(l) => l
-    //                     .get(start..end)
-    //                     .map_or(Err(anyhow!("index out of bounds")), |l| {
-    //                         Ok(Value::List(l.to_vec()))
-    //                     }),
-    //                 Value::String(s) => s
-    //                     .get(start..end)
-    //                     .map_or(Err(anyhow!("index out of bounds")), |s| {
-    //                         Ok(Value::String(s.to_string()))
-    //                     }),
-    //                 _ => Err(anyhow!("argument must be a list or string")),
-    //             }
-    //         },
-    //     },
-    // );
-    // map.insert(
-    //     "concat",
-    //     BuiltInFunctionDef {
-    //         name: String::from("concat"),
-    //         arity: FunctionArity::AtLeast(2),
-    //         body: |args, _, _, _| {
-    //             let mut list = vec![];
-    //             for arg in args {
-    //                 match arg {
-    //                     Value::List(l) => list.extend(l),
-    //                     Value::Spread(IterableValue::List(l)) => list.extend(l),
-    //                     Value::Spread(IterableValue::String(s)) => {
-    //                         list.extend(s.chars().map(|c| Value::String(c.to_string())))
-    //                     }
-    //                     _ => list.push(arg),
-    //                 }
-    //             }
+                match args[2] {
+                    Value::List(_) => {
+                        let l = {
+                            let borrowed_heap = &heap.borrow();
+                            args[2].as_list(borrowed_heap)?.clone()
+                        };
 
-    //             Ok(Value::List(list))
-    //         },
-    //     },
-    // );
-    // map.insert(
-    //     "dot",
-    //     BuiltInFunctionDef {
-    //         name: String::from("dot"),
-    //         arity: FunctionArity::Exact(2),
-    //         body: |args, _, _, _| {
-    //             let a = args[0].as_list()?;
-    //             let b = args[1].as_list()?;
+                        l.get(start..end)
+                            .map_or(Err(anyhow!("index out of bounds")), |l| {
+                                Ok(heap.borrow_mut().insert_list(l.to_vec()))
+                            })
+                    }
+                    Value::String(_) => {
+                        let s = {
+                            let borrowed_heap = &heap.borrow();
+                            args[2].as_string(borrowed_heap)?.to_string()
+                        };
 
-    //             if a.len() != b.len() {
-    //                 return Err(anyhow!(
-    //                     "cannot calculate dot product of lists with different lengths"
-    //                 ));
-    //             }
+                        s.get(start..end)
+                            .map_or(Err(anyhow!("index out of bounds")), |s| {
+                                Ok(heap.borrow_mut().insert_string(s.to_string()))
+                            })
+                    }
+                    _ => Err(anyhow!("argument must be a list or string")),
+                }
+            },
+        },
+    );
+    map.insert(
+        "concat",
+        BuiltInFunctionDef {
+            name: String::from("concat"),
+            arity: FunctionArity::AtLeast(2),
+            body: |args, heap, _, _| {
+                let mut list = vec![];
 
-    //             Ok(Value::Number(
-    //                 a.iter()
-    //                     .zip(b.iter())
-    //                     .map(|(a, b)| {
-    //                         let a_num = a.as_number()?;
-    //                         let b_num = b.as_number()?;
-    //                         Ok(a_num * b_num)
-    //                     })
-    //                     .collect::<Result<Vec<f64>>>()?
-    //                     .iter()
-    //                     .sum(),
-    //             ))
-    //         },
-    //     },
-    // );
-    // map.insert(
-    //     "unique",
-    //     BuiltInFunctionDef {
-    //         name: String::from("unique"),
-    //         arity: FunctionArity::Exact(1),
-    //         body: |args, _, _, _| {
-    //             let list = args[0].as_list()?.clone();
-    //             let mut unique_list = vec![];
+                for arg in args {
+                    match arg {
+                        Value::List(p) => list.extend(p.reify(&heap.borrow()).as_list()?.clone()),
+                        Value::Spread(IterablePointer::List(p)) => {
+                            list.extend(p.reify(&heap.borrow()).as_list()?.clone())
+                        }
+                        Value::Spread(IterablePointer::String(p)) => {
+                            let string = {
+                                let borrowed_heap = &heap.borrow();
+                                p.reify(borrowed_heap).as_string()?.to_string()
+                            };
 
-    //             for item in list {
-    //                 if !unique_list.contains(&item) {
-    //                     unique_list.push(item);
-    //                 }
-    //             }
+                            list.extend(
+                                string
+                                    .chars()
+                                    .map(|c| heap.borrow_mut().insert_string(c.to_string())),
+                            );
+                        }
+                        _ => list.push(arg),
+                    }
+                }
 
-    //             Ok(Value::List(unique_list))
-    //         },
-    //     },
-    // );
+                Ok(heap.borrow_mut().insert_list(list))
+            },
+        },
+    );
+    map.insert(
+        "dot",
+        BuiltInFunctionDef {
+            name: String::from("dot"),
+            arity: FunctionArity::Exact(2),
+            body: |args, heap, _, _| {
+                let (a, b) = {
+                    let borrowed_heap = &heap.borrow();
+                    (
+                        args[0].as_list(borrowed_heap)?.clone(),
+                        args[1].as_list(borrowed_heap)?.clone(),
+                    )
+                };
+
+                if a.len() != b.len() {
+                    return Err(anyhow!(
+                        "cannot calculate dot product of lists with different lengths"
+                    ));
+                }
+
+                Ok(Value::Number(
+                    a.iter()
+                        .zip(b.iter())
+                        .map(|(a, b)| {
+                            let a_num = a.as_number()?;
+                            let b_num = b.as_number()?;
+                            Ok(a_num * b_num)
+                        })
+                        .collect::<Result<Vec<f64>>>()?
+                        .iter()
+                        .sum(),
+                ))
+            },
+        },
+    );
+    map.insert(
+        "unique",
+        BuiltInFunctionDef {
+            name: String::from("unique"),
+            arity: FunctionArity::Exact(1),
+            body: |args, heap, _, _| {
+                let list = {
+                    let borrowed_heap = &heap.borrow();
+                    args[0].as_list(borrowed_heap)?.clone()
+                };
+                let mut unique_list = vec![];
+
+                for item in list {
+                    if !unique_list.contains(&item) {
+                        unique_list.push(item);
+                    }
+                }
+
+                Ok(heap.borrow_mut().insert_list(unique_list))
+            },
+        },
+    );
     map.insert(
         "map",
         BuiltInFunctionDef {
@@ -525,38 +557,43 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
             },
         },
     );
-    // map.insert(
-    //     "reduce",
-    //     BuiltInFunctionDef {
-    //         name: String::from("reduce"),
-    //         arity: FunctionArity::Exact(3),
-    //         body: |args, heap, bindings, call_depth| {
-    //             let def = get_function_def(&args[0])
-    //                 .ok_or(anyhow!("expected the first argument to be a function"))?;
-    //             let parsed_body = def.get_parsed_body();
+    map.insert(
+        "reduce",
+        BuiltInFunctionDef {
+            name: String::from("reduce"),
+            arity: FunctionArity::Exact(3),
+            body: |args, heap, bindings, call_depth| {
+                let (def, list) = {
+                    let borrowed_heap = &heap.borrow();
+                    (
+                        get_function_def(&args[0], borrowed_heap)
+                            .ok_or(anyhow!("expected the first argument to be a function"))?,
+                        args[1].as_list(borrowed_heap)?.clone(),
+                    )
+                };
 
-    //             let list = args[1].as_list()?;
-    //             let initial = args[2].clone();
+                let parsed_body = def.get_parsed_body();
+                let initial = args[2].clone();
 
-    //             let mut acc = initial;
-    //             for (i, item) in list.iter().enumerate() {
-    //                 acc = def.call(
-    //                     if !def.check_arity(3).is_err() {
-    //                         vec![acc, item.clone(), Value::Number(i as f64)]
-    //                     } else {
-    //                         vec![acc, item.clone()]
-    //                     },
-    //                     heap,
-    //                     bindings,
-    //                     parsed_body.clone(),
-    //                     call_depth,
-    //                 )?;
-    //             }
+                let mut acc = initial;
+                for (i, item) in list.iter().enumerate() {
+                    acc = def.call(
+                        if !def.check_arity(3).is_err() {
+                            vec![acc, item.clone(), Value::Number(i as f64)]
+                        } else {
+                            vec![acc, item.clone()]
+                        },
+                        Rc::clone(&heap),
+                        Rc::clone(&bindings),
+                        parsed_body.clone(),
+                        call_depth,
+                    )?;
+                }
 
-    //             Ok(acc)
-    //         },
-    //     },
-    // );
+                Ok(acc)
+            },
+        },
+    );
     map.insert(
         "filter",
         BuiltInFunctionDef {
@@ -597,138 +634,157 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
             },
         },
     );
-    // map.insert(
-    //     "every",
-    //     BuiltInFunctionDef {
-    //         name: String::from("every"),
-    //         arity: FunctionArity::Exact(2),
-    //         body: |args, heap, bindings, call_depth| {
-    //             let def = get_function_def(&args[0])
-    //                 .ok_or(anyhow!("expected the first argument to be a function"))?;
-    //             let parsed_body = def.get_parsed_body();
+    map.insert(
+        "every",
+        BuiltInFunctionDef {
+            name: String::from("every"),
+            arity: FunctionArity::Exact(2),
+            body: |args, heap, bindings, call_depth| {
+                let (def, list) = {
+                    let borrowed_heap = &heap.borrow();
+                    (
+                        get_function_def(&args[0], borrowed_heap)
+                            .ok_or(anyhow!("expected the first argument to be a function"))?,
+                        args[1].as_list(borrowed_heap)?.clone(),
+                    )
+                };
 
-    //             let list = args[1].as_list()?;
+                let parsed_body = def.get_parsed_body();
 
-    //             for (i, item) in list.iter().enumerate() {
-    //                 if !def
-    //                     .call(
-    //                         if !def.check_arity(2).is_err() {
-    //                             vec![item.clone(), Value::Number(i as f64)]
-    //                         } else {
-    //                             vec![item.clone()]
-    //                         },
-    //                         heap,
-    //                         bindings,
-    //                         parsed_body.clone(),
-    //                         call_depth,
-    //                     )?
-    //                     .as_bool()?
-    //                 {
-    //                     return Ok(Value::Bool(false));
-    //                 }
-    //             }
+                for (i, item) in list.iter().enumerate() {
+                    if !def
+                        .call(
+                            if !def.check_arity(2).is_err() {
+                                vec![item.clone(), Value::Number(i as f64)]
+                            } else {
+                                vec![item.clone()]
+                            },
+                            Rc::clone(&heap),
+                            Rc::clone(&bindings),
+                            parsed_body.clone(),
+                            call_depth,
+                        )?
+                        .as_bool()?
+                    {
+                        return Ok(Value::Bool(false));
+                    }
+                }
 
-    //             Ok(Value::Bool(true))
-    //         },
-    //     },
-    // );
-    // map.insert(
-    //     "some",
-    //     BuiltInFunctionDef {
-    //         name: String::from("some"),
-    //         arity: FunctionArity::Exact(2),
-    //         body: |args, heap, bindings, call_depth| {
-    //             let def = get_function_def(&args[0])
-    //                 .ok_or(anyhow!("expected the first argument to be a function"))?;
-    //             let parsed_body = def.get_parsed_body();
+                Ok(Value::Bool(true))
+            },
+        },
+    );
+    map.insert(
+        "some",
+        BuiltInFunctionDef {
+            name: String::from("some"),
+            arity: FunctionArity::Exact(2),
+            body: |args, heap, bindings, call_depth| {
+                let (def, list) = {
+                    let borrowed_heap = &heap.borrow();
+                    (
+                        get_function_def(&args[0], borrowed_heap)
+                            .ok_or(anyhow!("expected the first argument to be a function"))?,
+                        args[1].as_list(borrowed_heap)?.clone(),
+                    )
+                };
 
-    //             let list = args[1].as_list()?;
+                let parsed_body = def.get_parsed_body();
 
-    //             for (i, item) in list.iter().enumerate() {
-    //                 if def
-    //                     .call(
-    //                         if !def.check_arity(2).is_err() {
-    //                             vec![item.clone(), Value::Number(i as f64)]
-    //                         } else {
-    //                             vec![item.clone()]
-    //                         },
-    //                         heap,
-    //                         bindings,
-    //                         parsed_body.clone(),
-    //                         call_depth,
-    //                     )?
-    //                     .as_bool()?
-    //                 {
-    //                     return Ok(Value::Bool(true));
-    //                 }
-    //             }
+                for (i, item) in list.iter().enumerate() {
+                    if def
+                        .call(
+                            if !def.check_arity(2).is_err() {
+                                vec![item.clone(), Value::Number(i as f64)]
+                            } else {
+                                vec![item.clone()]
+                            },
+                            Rc::clone(&heap),
+                            Rc::clone(&bindings),
+                            parsed_body.clone(),
+                            call_depth,
+                        )?
+                        .as_bool()?
+                    {
+                        return Ok(Value::Bool(true));
+                    }
+                }
 
-    //             Ok(Value::Bool(false))
-    //         },
-    //     },
-    // );
-    // map.insert(
-    //     "sort",
-    //     BuiltInFunctionDef {
-    //         name: String::from("sort"),
-    //         arity: FunctionArity::Exact(1),
-    //         body: |args, _, _, _| {
-    //             let mut list = args[0].as_list()?.clone();
-    //             list.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    //             Ok(Value::List(list))
-    //         },
-    //     },
-    // );
-    // map.insert(
-    //     "sort_by",
-    //     BuiltInFunctionDef {
-    //         name: String::from("sort_by"),
-    //         arity: FunctionArity::Exact(2),
-    //         body: |args, heap, bindings, call_depth| {
-    //             let def = get_function_def(&args[0])
-    //                 .ok_or(anyhow!("expected the first argument to be a function"))?;
-    //             let parsed_body = def.get_parsed_body();
+                Ok(Value::Bool(false))
+            },
+        },
+    );
+    map.insert(
+        "sort",
+        BuiltInFunctionDef {
+            name: String::from("sort"),
+            arity: FunctionArity::Exact(1),
+            body: |args, heap, _, _| {
+                let mut list = {
+                    let borrowed_heap = &heap.borrow();
+                    args[0].as_list(borrowed_heap)?.clone()
+                };
+                list.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-    //             let mut list = args[1].as_list()?.clone();
-    //             let mut err: Option<Result<Value, anyhow::Error>> = None;
+                Ok(heap.borrow_mut().insert_list(list))
+            },
+        },
+    );
+    map.insert(
+        "sort_by",
+        BuiltInFunctionDef {
+            name: String::from("sort_by"),
+            arity: FunctionArity::Exact(2),
+            body: |args, heap, bindings, call_depth| {
+                let (def, mut list) = {
+                    let borrowed_heap = &heap.borrow();
+                    (
+                        get_function_def(&args[0], borrowed_heap)
+                            .ok_or(anyhow!("expected the first argument to be a function"))?,
+                        args[1].as_list(borrowed_heap)?.clone(),
+                    )
+                };
 
-    //             list.sort_by(|a, b| {
-    //                 let call_result = def.call(
-    //                     vec![a.clone(), b.clone()],
-    //                     heap,
-    //                     bindings,
-    //                     parsed_body.clone(),
-    //                     call_depth,
-    //                 );
+                let parsed_body = def.get_parsed_body();
+                let mut err: Option<Result<Value, anyhow::Error>> = None;
 
-    //                 if let Err(e) = call_result {
-    //                     if err.is_none() {
-    //                         err = Some(Err(e));
-    //                     }
+                list.sort_by(|a, b| {
+                    let call_result = def.call(
+                        vec![a.clone(), b.clone()],
+                        Rc::clone(&heap),
+                        Rc::clone(&bindings),
+                        parsed_body.clone(),
+                        call_depth,
+                    );
 
-    //                     return Ordering::Equal;
-    //                 }
+                    if let Err(e) = call_result {
+                        if err.is_none() {
+                            err = Some(Err(e));
+                        }
 
-    //                 let number_result = call_result.unwrap().as_number();
-    //                 if let Err(e) = number_result {
-    //                     if err.is_none() {
-    //                         err = Some(Err(e));
-    //                     }
+                        return Ordering::Equal;
+                    }
 
-    //                     return Ordering::Equal;
-    //                 }
+                    let number_result = call_result.unwrap().as_number();
+                    if let Err(e) = number_result {
+                        if err.is_none() {
+                            err = Some(Err(e));
+                        }
 
-    //                 match number_result.unwrap() {
-    //                     n if n.is_sign_positive() => Ordering::Greater,
-    //                     n if n.is_sign_negative() => Ordering::Less,
-    //                     _ => Ordering::Equal,
-    //                 }
-    //             });
+                        return Ordering::Equal;
+                    }
 
-    //             err.unwrap_or(Ok(Value::List(list)))
-    //         },
-    //     },
-    // );
+                    match number_result.unwrap() {
+                        n if n.is_sign_positive() => Ordering::Greater,
+                        n if n.is_sign_negative() => Ordering::Less,
+                        _ => Ordering::Equal,
+                    }
+                });
+
+                err.unwrap_or(Ok(heap.borrow_mut().insert_list(list)))
+            },
+        },
+    );
     map.insert(
         "reverse",
         BuiltInFunctionDef {
@@ -785,12 +841,13 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
             name: String::from("replace"),
             arity: FunctionArity::Exact(3),
             body: |args, heap, _, _| {
-                let borrowed_heap = &heap.borrow();
-                let old = args[0].as_string(borrowed_heap)?;
-                let new = args[1].as_string(borrowed_heap)?;
-                let s = args[2].as_string(borrowed_heap)?;
+                let borrowed_heap = heap.borrow();
+                let old = args[0].as_string(&borrowed_heap)?.to_string();
+                let new = args[1].as_string(&borrowed_heap)?.to_string();
+                let s = args[2].as_string(&borrowed_heap)?.to_string();
+                drop(borrowed_heap);
 
-                Ok(heap.borrow_mut().insert_string(s.replace(old, new)))
+                Ok(heap.borrow_mut().insert_string(s.replace(&old, &new)))
             },
         },
     );
