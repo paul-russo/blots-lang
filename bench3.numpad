@@ -1,7 +1,5 @@
-start1 = time_now()
+start = time_now()
+map(x => x * 4, range(1000000))
 
-f = x => if x < 100 then f(x + 1) else x
+print("that took {} seconds", time_now() - start)
 
-print(f(0))
-
-print("that took {} seconds", time_now() - start1)
