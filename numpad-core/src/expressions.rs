@@ -68,10 +68,15 @@ pub fn collect_list(
         })
         .collect::<Result<Vec<Value>>>()?;
 
-    let borrowed_heap = &heap.borrow();
     Ok(values
         .into_iter()
-        .flat_map(|value| value.reify(borrowed_heap).unwrap())
+        .flat_map(|value| {
+            value
+                .reify(unsafe { heap.try_borrow_unguarded().unwrap() })
+                .unwrap()
+                .with_heap(Rc::clone(&heap))
+                .into_iter()
+        })
         .collect::<Vec<Value>>())
 }
 
@@ -99,7 +104,7 @@ pub fn evaluate_expression(
                     call_depth,
                 )?;
 
-                Ok(heap.try_borrow_mut()?.insert_list(values))
+                Ok(heap.borrow_mut().insert_list(values))
             }
             Rule::record => {
                 let record_pairs = primary.into_inner();
@@ -524,17 +529,18 @@ pub fn evaluate_expression(
             match (lhs, rhs) {
                 (Value::Each(iterable_l), Value::Each(iterable_r)) => {
                     let (iter_l, iter_r) = {
-                        let borrowed_heap = &heap.borrow();
                         (
                             iterable_l
-                                .reify(borrowed_heap)
+                                .reify(unsafe { heap.try_borrow_unguarded()? })
                                 .as_iterable()?
                                 .clone()
+                                .with_heap(Rc::clone(&heap))
                                 .into_iter(),
                             iterable_r
-                                .reify(borrowed_heap)
+                                .reify(unsafe { heap.try_borrow_unguarded()? })
                                 .as_iterable()?
                                 .clone()
+                                .with_heap(Rc::clone(&heap))
                                 .into_iter(),
                         )
                     };
@@ -676,7 +682,14 @@ pub fn evaluate_expression(
                     }
                 }
                 (Value::Each(iterable), rhs) => {
-                    let mut iter_l = { iterable.reify(&heap.borrow()).as_iterable()?.into_iter() };
+                    let mut iter_l = {
+                        iterable
+                            .reify(unsafe { heap.try_borrow_unguarded()? })
+                            .as_iterable()?
+                            .clone()
+                            .with_heap(Rc::clone(&heap))
+                            .into_iter()
+                    };
 
                     match rule {
                         Rule::equal => Ok(Bool(iter_l.all(|v| v == rhs))),

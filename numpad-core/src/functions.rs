@@ -971,10 +971,14 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
             arity: FunctionArity::Exact(1),
             body: |args, heap, _, _| {
                 let values: Vec<Value> = {
-                    let borrowed_heap = &heap.borrow();
-                    let iterable = args[0].as_each(borrowed_heap)?.to_owned();
-                    iterable.into_iter().collect()
+                    args[0]
+                        .as_each(unsafe { heap.try_borrow_unguarded()? })?
+                        .to_owned()
+                        .with_heap(Rc::clone(&heap))
+                        .into_iter()
+                        .collect()
                 };
+
                 Ok(heap.borrow_mut().insert_list(values))
             },
         },

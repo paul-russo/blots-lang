@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fmt::Display};
+use std::{cell::RefCell, collections::BTreeMap, fmt::Display, rc::Rc};
 
 use crate::{
     functions::{get_built_in_function_id, get_built_in_function_ident},
@@ -125,7 +125,12 @@ impl PartialOrd for LambdaDef {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+pub struct WithHeap<'h, T> {
+    pub value: &'h T,
+    pub heap: Rc<RefCell<Heap>>,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
 pub enum ReifiedIterableValue<'h> {
     List(&'h Vec<Value>),
     String(&'h String),
@@ -140,6 +145,10 @@ pub enum ReifiedIterableValueType {
 }
 
 impl<'h> ReifiedIterableValue<'h> {
+    pub fn with_heap(&'h self, heap: Rc<RefCell<Heap>>) -> WithHeap<'h, ReifiedIterableValue<'h>> {
+        WithHeap { value: self, heap }
+    }
+
     pub fn get_type(&self) -> ReifiedIterableValueType {
         match self {
             ReifiedIterableValue::List(_) => ReifiedIterableValueType::List,
@@ -149,36 +158,41 @@ impl<'h> ReifiedIterableValue<'h> {
     }
 }
 
-impl<'h> IntoIterator for ReifiedIterableValue<'h> {
+impl<'h> IntoIterator for WithHeap<'h, ReifiedIterableValue<'h>> {
     type Item = Value;
     type IntoIter = std::vec::IntoIter<Self::Item>;
 
     fn into_iter(self) -> Self::IntoIter {
-        match self {
-            ReifiedIterableValue::List(l) => l.clone().into_iter(), // Yields an iterator over the values in the list.
-            _ => todo!("have to figure out into_iter for strings and records"),
-            // ReifiedIterableValue::String(s) => s
-            //     .chars()
-            //     .map(|c| Value::String(c.to_string()))
-            //     .collect::<Vec<Value>>()
-            //     .into_iter(), // Yields an iterator over the characters in the string.
-            // ReifiedIterableValue::Record(r) => r
-            //     .into_iter()
-            //     .map(|(k, v)| Value::List(vec![Value::String(k), v]))
-            //     .collect::<Vec<Value>>()
-            //     .into_iter(), // Yields an iterator over the [key, value] pairs of the record.
+        match self.value {
+            // Yields an iterator over the values in the list.
+            ReifiedIterableValue::List(l) => (*l).clone().into_iter(),
+            // Yields an iterator over the characters in the string.
+            ReifiedIterableValue::String(s) => s
+                .chars()
+                .map(|c| self.heap.borrow_mut().insert_string(c.to_string()))
+                .collect::<Vec<Value>>()
+                .into_iter(),
+            // Yields an iterator over the [key, value] pairs of the record.
+            ReifiedIterableValue::Record(r) => r
+                .into_iter()
+                .map(|(k, v)| {
+                    let list = vec![self.heap.borrow_mut().insert_string(k.to_string()), *v];
+                    self.heap.borrow_mut().insert_list(list)
+                })
+                .collect::<Vec<Value>>()
+                .into_iter(),
         }
     }
 }
 
-impl<'h> IntoIterator for ReifiedValue<'h> {
+impl<'h> IntoIterator for WithHeap<'h, ReifiedValue<'h>> {
     type Item = Value;
     type IntoIter = std::vec::IntoIter<Self::Item>;
 
     fn into_iter(self) -> Self::IntoIter {
-        match self {
-            ReifiedValue::Spread(iterable, _) => iterable.into_iter(),
-            _ => vec![self.into()].into_iter(),
+        match self.value {
+            ReifiedValue::Spread(iterable, _) => iterable.with_heap(self.heap).into_iter(),
+            _ => vec![(*self.value).into()].into_iter(),
         }
     }
 }
@@ -215,7 +229,7 @@ impl Display for ValueType {
 }
 
 /// A value, after it has been "reified" (borrowed) from a pointer.
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
 pub enum ReifiedValue<'h> {
     /// A number is a floating-point value.
     Number(f64),
@@ -237,6 +251,12 @@ pub enum ReifiedValue<'h> {
     Each(ReifiedIterableValue<'h>, IterablePointer),
     /// A built-in function is a function that is implemented in Rust.
     BuiltIn(usize),
+}
+
+impl<'h> ReifiedValue<'h> {
+    pub fn with_heap(&'h self, heap: Rc<RefCell<Heap>>) -> WithHeap<'h, ReifiedValue<'h>> {
+        WithHeap { value: self, heap }
+    }
 }
 
 impl From<ReifiedValue<'_>> for Value {
