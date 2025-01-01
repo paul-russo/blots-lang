@@ -822,14 +822,15 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
             name: String::from("join"),
             arity: FunctionArity::Exact(2),
             body: |args, heap, _, _| {
-                let borrowed_heap = &heap.borrow();
-                let delimeter = args[0].as_string(borrowed_heap)?;
-                let list = args[1].as_list(borrowed_heap)?;
-                let joined_string = list
-                    .iter()
-                    .map(|v| v.stringify(borrowed_heap))
-                    .collect::<Vec<String>>()
-                    .join(&delimeter);
+                let joined_string = {
+                    let borrowed_heap = &heap.borrow();
+                    let delimeter = args[0].as_string(borrowed_heap)?;
+                    let list = args[1].as_list(borrowed_heap)?;
+                    list.iter()
+                        .map(|v| v.stringify(borrowed_heap))
+                        .collect::<Vec<String>>()
+                        .join(&delimeter)
+                };
 
                 Ok(heap.borrow_mut().insert_string(joined_string))
             },
@@ -841,13 +842,15 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
             name: String::from("replace"),
             arity: FunctionArity::Exact(3),
             body: |args, heap, _, _| {
-                let borrowed_heap = heap.borrow();
-                let old = args[0].as_string(&borrowed_heap)?.to_string();
-                let new = args[1].as_string(&borrowed_heap)?.to_string();
-                let s = args[2].as_string(&borrowed_heap)?.to_string();
-                drop(borrowed_heap);
+                let string = {
+                    let borrowed_heap = heap.borrow();
+                    let old = args[0].as_string(&borrowed_heap)?.to_string();
+                    let new = args[1].as_string(&borrowed_heap)?.to_string();
+                    let s = args[2].as_string(&borrowed_heap)?.to_string();
+                    s.replace(&old, &new)
+                };
 
-                Ok(heap.borrow_mut().insert_string(s.replace(&old, &new)))
+                Ok(heap.borrow_mut().insert_string(string))
             },
         },
     );
