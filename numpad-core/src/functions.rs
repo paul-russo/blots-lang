@@ -803,9 +803,13 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
             name: String::from("split"),
             arity: FunctionArity::Exact(2),
             body: |args, heap, _, _| {
-                let borrowed_heap = &heap.borrow();
-                let delimeter = args[0].as_string(borrowed_heap)?;
-                let s = args[1].as_string(borrowed_heap)?;
+                let (delimeter, s) = {
+                    let borrowed_heap = &heap.borrow();
+                    (
+                        args[0].as_string(borrowed_heap)?.to_string(),
+                        args[1].as_string(borrowed_heap)?.to_string(),
+                    )
+                };
 
                 let list = s
                     .split(&delimeter)
