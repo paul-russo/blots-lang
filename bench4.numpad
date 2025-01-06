@@ -90,18 +90,14 @@ avg_score = avg(...map(user => user.score, users))
 sorted_users = sort_by((a, b) => b.score - a.score, users)
 
 // Statistical operations
-numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 stats = {
-    mean: avg(...numbers),
-    median: median(...numbers),
-    sum: sum(...numbers),
-    p90: percentile(90, numbers)
+    mean: avg(...nums),
+    median: median(...nums),
+    sum: sum(...nums),
+    p90: percentile(90, nums)
 }
 
 // Function with optional and rest parameters
 flexible_join = (separator?, ...items) => 
     join(separator ?? ", ", map(to_string, items))
-
-// Output examples of usage
-output result1 = flexible_join(" - ", 1, 2, 3)  // "1 - 2 - 3"
-output result2 = flexible_join(null, 1, 2, 3)   // "1, 2, 3"
