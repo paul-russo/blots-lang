@@ -70,7 +70,18 @@ pub struct Heap {
 
 impl Heap {
     pub fn new() -> Self {
-        Self { values: Vec::new() }
+        let mut s = Self { values: Vec::new() };
+
+        let mut constants = BTreeMap::new();
+        constants.insert(String::from("pi"), Value::Number(core::f64::consts::PI));
+        constants.insert(String::from("e"), Value::Number(core::f64::consts::E));
+        constants.insert(String::from("infinity"), Value::Number(f64::INFINITY));
+        constants.insert(String::from("inf"), Value::Number(f64::INFINITY));
+        constants.insert(String::from("max"), Value::Number(f64::MAX));
+        constants.insert(String::from("min"), Value::Number(f64::MIN));
+        s.insert_record(constants);
+
+        s
     }
 
     pub fn insert(&mut self, value: HeapValue) -> usize {

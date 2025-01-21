@@ -1019,11 +1019,35 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
         },
     );
     map.insert(
-        "add2",
+        "keys",
         BuiltInFunctionDef {
-            name: String::from("add2"),
+            name: String::from("keys"),
             arity: FunctionArity::Exact(1),
-            body: |args, _, _, _| Ok(Value::Number(args[0].as_number()? + 2.0)),
+            body: |args, heap, _, _| {
+                let record = args[0].as_record(&heap.borrow())?.clone();
+                let keys = {
+                    let key_strings = record.keys().cloned().collect::<Vec<String>>();
+                    key_strings
+                        .iter()
+                        .map(|k| heap.borrow_mut().insert_string(k.to_string()))
+                        .collect()
+                };
+
+                Ok(heap.borrow_mut().insert_list(keys))
+            },
+        },
+    );
+    map.insert(
+        "values",
+        BuiltInFunctionDef {
+            name: String::from("values"),
+            arity: FunctionArity::Exact(1),
+            body: |args, heap, _, _| {
+                let record = args[0].as_record(&heap.borrow())?.clone();
+                let values = record.values().cloned().collect();
+
+                Ok(heap.borrow_mut().insert_list(values))
+            },
         },
     );
 

@@ -3,7 +3,7 @@ use crate::{
         get_built_in_function_def_by_ident, get_built_in_function_id, get_function_def,
         is_built_in_function,
     },
-    heap::{Heap, HeapPointer, HeapValue, IterablePointer},
+    heap::{Heap, HeapPointer, HeapValue, IterablePointer, RecordPointer},
     parser::Rule,
     values::{
         LambdaArg, LambdaDef,
@@ -231,8 +231,8 @@ pub fn evaluate_expression(
                     return Err(anyhow!("cannot assign to built-in function: {}", ident));
                 }
 
-                if ident == "pi" || ident == "e" || ident == "infinity" {
-                    return Err(anyhow!("cannot assign to constant: {}", ident));
+                if ident == "constants" {
+                    return Err(anyhow!("cannot assign to constants"));
                 }
 
                 if ident == "if"
@@ -369,9 +369,8 @@ pub fn evaluate_expression(
                 let ident = primary.as_str();
 
                 match ident {
-                    "pi" => return Ok(Number(core::f64::consts::PI)),
-                    "e" => return Ok(Number(core::f64::consts::E)),
-                    "infinity" => return Ok(Number(f64::INFINITY)),
+                    "infinity" => Ok(Number(f64::INFINITY)),
+                    "constants" => Ok(Value::Record(RecordPointer::new(0))),
                     _ => {
                         if let Some(built_in_id) = get_built_in_function_id(ident) {
                             return Ok(Value::BuiltIn(built_in_id));
