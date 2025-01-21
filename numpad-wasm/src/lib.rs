@@ -2,9 +2,9 @@ use anyhow::Result;
 use numpad_core::{
     expressions::evaluate_expression,
     functions::get_built_in_function_idents,
-    heap::Heap,
+    heap::{Heap, CONSTANTS},
     parser::{get_pairs, get_tokens, Rule, Token},
-    values::SerializableValue,
+    values::{PrimitiveValue, SerializableValue},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -155,10 +155,6 @@ pub fn get_built_in_function_names() -> Result<JsValue, JsError> {
 
 #[wasm_bindgen]
 pub fn get_constants() -> Result<JsValue, JsError> {
-    let mut constants = HashMap::new();
-    constants.insert(format!("pi"), core::f64::consts::PI);
-    constants.insert(format!("e"), core::f64::consts::E);
-    constants.insert(format!("infinity"), f64::INFINITY);
-
+    let constants: HashMap<String, PrimitiveValue> = CONSTANTS.clone().into_iter().collect();
     Ok(serde_wasm_bindgen::to_value(&constants)?)
 }
