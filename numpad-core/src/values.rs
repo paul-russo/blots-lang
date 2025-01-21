@@ -413,6 +413,23 @@ impl SerializableValue {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub enum PrimitiveValue {
+    Number(f64),
+    Bool(bool),
+    Null,
+}
+
+impl Into<Value> for PrimitiveValue {
+    fn into(self) -> Value {
+        match self {
+            PrimitiveValue::Number(n) => Value::Number(n),
+            PrimitiveValue::Bool(b) => Value::Bool(b),
+            PrimitiveValue::Null => Value::Null,
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
 pub enum Value {
     /// A number is a floating-point value.

@@ -1,8 +1,29 @@
-use crate::values::{LambdaDef, ReifiedIterableValue, Value};
+use crate::values::{LambdaDef, PrimitiveValue, ReifiedIterableValue, Value};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
+use std::sync::LazyLock;
+
+pub static CONSTANTS: LazyLock<BTreeMap<String, PrimitiveValue>> = LazyLock::new(|| {
+    let mut constants = BTreeMap::new();
+    constants.insert(
+        String::from("pi"),
+        PrimitiveValue::Number(core::f64::consts::PI),
+    );
+    constants.insert(
+        String::from("e"),
+        PrimitiveValue::Number(core::f64::consts::E),
+    );
+    constants.insert(
+        String::from("infinity"),
+        PrimitiveValue::Number(f64::INFINITY),
+    );
+    constants.insert(String::from("inf"), PrimitiveValue::Number(f64::INFINITY));
+    constants.insert(String::from("max"), PrimitiveValue::Number(f64::MAX));
+    constants.insert(String::from("min"), PrimitiveValue::Number(f64::MIN));
+    constants
+});
 
 #[derive(Debug, Clone)]
 pub enum HeapValue {
@@ -71,15 +92,13 @@ pub struct Heap {
 impl Heap {
     pub fn new() -> Self {
         let mut s = Self { values: Vec::new() };
-
-        let mut constants = BTreeMap::new();
-        constants.insert(String::from("pi"), Value::Number(core::f64::consts::PI));
-        constants.insert(String::from("e"), Value::Number(core::f64::consts::E));
-        constants.insert(String::from("infinity"), Value::Number(f64::INFINITY));
-        constants.insert(String::from("inf"), Value::Number(f64::INFINITY));
-        constants.insert(String::from("max"), Value::Number(f64::MAX));
-        constants.insert(String::from("min"), Value::Number(f64::MIN));
-        s.insert_record(constants);
+        s.insert_record(
+            CONSTANTS
+                .clone()
+                .into_iter()
+                .map(|(k, v)| (k, v.into()))
+                .collect(),
+        );
 
         s
     }
