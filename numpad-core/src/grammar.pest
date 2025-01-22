@@ -46,10 +46,9 @@ with             =  { "with" }
 
 infix_usage = _{ (WHITESPACE | NEWLINE)+ ~ natural_infix_op ~ WHITESPACE+ | (WHITESPACE | NEWLINE)* ~ infix_op ~ WHITESPACE* }
 
-prefix_op = _{ negation | invert | each }
+prefix_op = _{ negation | invert }
 negation  =  { "-" }
 invert    =  { "!" }
-each      =  { "each" ~ WHITESPACE+ }
 
 postfix_op = _{ factorial | access | call_list | dot_access }
 factorial  =  { "!" }
