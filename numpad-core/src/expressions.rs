@@ -451,8 +451,7 @@ pub fn evaluate_expression(
                         Ok(list.get(index).copied().unwrap_or(Value::Null))
                     }
                     Value::String(string) => {
-                        let borrowed_heap = &heap.borrow();
-                        let string = string.reify(borrowed_heap).as_string()?;
+                        let string = string.reify(&heap.borrow()).as_string()?.to_string();
                         let index = usize::try_from(index_value.as_number()? as u64)?;
 
                         Ok(string
@@ -463,9 +462,8 @@ pub fn evaluate_expression(
                     }
                     Value::Each(iterable) => {
                         let mapped_list = {
-                            let borrowed_heap = &heap.borrow();
                             let iterable = iterable
-                                .reify(borrowed_heap)
+                                .reify(unsafe { heap.try_borrow_unguarded()? })
                                 .as_iterable()?
                                 .clone()
                                 .with_heap(Rc::clone(&heap))
@@ -474,18 +472,21 @@ pub fn evaluate_expression(
                             iterable
                                 .map(|v| match v {
                                     Value::Record(record) => {
+                                        let borrowed_heap = &heap.borrow();
                                         let record = record.reify(borrowed_heap).as_record()?;
                                         let key = index_value.as_string(borrowed_heap)?;
                                         Ok(record.get(key).copied().unwrap_or(Value::Null))
                                     }
                                     Value::List(list) => {
+                                        let borrowed_heap = &heap.borrow();
                                         let list = list.reify(borrowed_heap).as_list()?;
                                         let index =
                                             usize::try_from(index_value.as_number()? as u64)?;
                                         Ok(list.get(index).copied().unwrap_or(Value::Null))
                                     }
                                     Value::String(string) => {
-                                        let string = string.reify(borrowed_heap).as_string()?;
+                                        let string =
+                                            string.reify(&heap.borrow()).as_string()?.to_string();
                                         let index =
                                             usize::try_from(index_value.as_number()? as u64)?;
                                         Ok(string
@@ -534,13 +535,17 @@ pub fn evaluate_expression(
                 )?;
 
                 if !lhs.is_lambda() && !lhs.is_built_in() {
-                    return Err(anyhow!("can't call a non-function: {}", lhs));
+                    return Err(anyhow!(
+                        "can't call a non-function: {}",
+                        lhs.stringify(&heap.borrow())
+                    ));
                 }
 
                 let def = {
                     let borrowed_heap = &heap.borrow();
-                    get_function_def(&lhs, borrowed_heap)
-                        .ok_or_else(|| anyhow!("unknown function: {}", lhs))?
+                    get_function_def(&lhs, borrowed_heap).ok_or_else(|| {
+                        anyhow!("unknown function: {}", lhs.stringify(borrowed_heap))
+                    })?
                 };
 
                 def.call(
@@ -691,12 +696,15 @@ pub fn evaluate_expression(
                                     if !r.is_lambda() && !r.is_built_in() {
                                         return Err(anyhow!(
                                             "right-hand iterable contains non-function {}",
-                                            r
+                                            r.stringify(&heap.borrow())
                                         ));
                                     }
 
                                     get_function_def(&r, &heap.borrow())
-                                        .ok_or(anyhow!("can't call unknown function {}", r))?
+                                        .ok_or(anyhow!(
+                                            "can't call unknown function {}",
+                                            r.stringify(&heap.borrow())
+                                        ))?
                                         .call(
                                             vec![l],
                                             Rc::clone(&heap),
@@ -827,7 +835,10 @@ pub fn evaluate_expression(
                         }
                         Rule::with => {
                             if !rhs.is_callable() {
-                                return Err(anyhow!("can't call a non-function: {}", rhs));
+                                return Err(anyhow!(
+                                    "can't call a non-function: {}",
+                                    rhs.stringify(&heap.borrow())
+                                ));
                             }
 
                             let list = {
@@ -892,7 +903,7 @@ pub fn evaluate_expression(
                         if !rhs.is_callable() {
                             return Err(anyhow!(
                                 "can't call a non-function ({} is of type {})",
-                                rhs,
+                                rhs.stringify(&heap.borrow()),
                                 rhs.get_type()
                             ));
                         }
@@ -900,7 +911,10 @@ pub fn evaluate_expression(
                         let def = { get_function_def(&rhs, &heap.borrow()) };
 
                         if def.is_none() {
-                            return Err(anyhow!("unknown function: {}", rhs));
+                            return Err(anyhow!(
+                                "unknown function: {}",
+                                rhs.stringify(&heap.borrow())
+                            ));
                         }
 
                         return def.unwrap().call(
