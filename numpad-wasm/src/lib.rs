@@ -4,7 +4,7 @@ use numpad_core::{
     functions::get_built_in_function_idents,
     heap::{Heap, CONSTANTS},
     parser::{get_pairs, get_tokens, Rule, Token},
-    values::{PrimitiveValue, SerializableValue},
+    values::SerializableValue,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -155,6 +155,16 @@ pub fn get_built_in_function_names() -> Result<JsValue, JsError> {
 
 #[wasm_bindgen]
 pub fn get_constants() -> Result<JsValue, JsError> {
-    let constants: HashMap<String, PrimitiveValue> = CONSTANTS.clone().into_iter().collect();
-    Ok(serde_wasm_bindgen::to_value(&constants)?)
+    let mut map = HashMap::new();
+    let constants = SerializableValue::Record(
+        CONSTANTS
+            .clone()
+            .into_iter()
+            .map(|(k, v)| (k, v.into()))
+            .collect(),
+    );
+
+    map.insert(String::from("constants"), constants);
+
+    Ok(serde_wasm_bindgen::to_value(&map)?)
 }
