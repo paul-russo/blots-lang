@@ -730,17 +730,18 @@ impl Value {
             Value::Each(p) => match p {
                 IterablePointer::List(l) => {
                     let list = l.reify(heap).as_list().unwrap();
-                    let mut result = String::from("each ");
+                    let mut result = String::from("each(");
                     result.push_str(&list.iter().map(|v| v.stringify(heap)).collect::<String>());
+                    result.push_str(")");
                     result
                 }
                 IterablePointer::String(s) => {
                     let string = s.reify(heap).as_string().unwrap();
-                    format!("each {}", string)
+                    format!("each({})", string)
                 }
                 IterablePointer::Record(r) => {
                     let record = r.reify(heap).as_record().unwrap();
-                    let mut result = String::from("each ");
+                    let mut result = String::from("each(");
                     result.push_str("{");
                     for (i, (key, value)) in record.iter().enumerate() {
                         result.push_str(&format!("{}: {}", key, value.stringify(heap)));
@@ -763,7 +764,7 @@ impl Display for Value {
             Value::Number(n) => write!(f, "{}", n),
             Value::List(p) => write!(f, "{}", p),
             Value::Spread(p) => write!(f, "...{}", p),
-            Value::Each(p) => write!(f, "each {}", p),
+            Value::Each(p) => write!(f, "each({})", p),
             Value::Bool(b) => write!(f, "{}", b),
             Value::Lambda(p) => write!(f, "{}", p),
             Value::String(p) => write!(f, "{}", p),

@@ -428,37 +428,84 @@ pub fn evaluate_expression(
             Rule::access => {
                 let lhs = lhs?;
 
+                let index_value = evaluate_expression(
+                    op.into_inner(),
+                    Rc::clone(&heap),
+                    Rc::clone(&bindings),
+                    call_depth,
+                )?;
+
                 match lhs {
                     Value::Record(record) => {
-                        let key_value = evaluate_expression(
-                            op.into_inner(),
-                            Rc::clone(&heap),
-                            Rc::clone(&bindings),
-                            call_depth,
-                        )?;
-
                         let borrowed_heap = &heap.borrow();
                         let record = record.reify(borrowed_heap).as_record()?;
-                        let key = key_value.as_string(borrowed_heap)?;
+                        let key = index_value.as_string(borrowed_heap)?;
 
                         Ok(record.get(key).copied().unwrap_or(Value::Null))
                     }
                     Value::List(list) => {
-                        let index_value = evaluate_expression(
-                            op.into_inner(),
-                            Rc::clone(&heap),
-                            Rc::clone(&bindings),
-                            call_depth,
-                        )?;
-
                         let borrowed_heap = &heap.borrow();
                         let list = list.reify(borrowed_heap).as_list()?;
                         let index = usize::try_from(index_value.as_number()? as u64)?;
 
                         Ok(list.get(index).copied().unwrap_or(Value::Null))
                     }
+                    Value::String(string) => {
+                        let borrowed_heap = &heap.borrow();
+                        let string = string.reify(borrowed_heap).as_string()?;
+                        let index = usize::try_from(index_value.as_number()? as u64)?;
+
+                        Ok(string
+                            .chars()
+                            .nth(index)
+                            .map(|c| heap.borrow_mut().insert_string(c.to_string()))
+                            .unwrap_or(Value::Null))
+                    }
+                    Value::Each(iterable) => {
+                        let mapped_list = {
+                            let borrowed_heap = &heap.borrow();
+                            let iterable = iterable
+                                .reify(borrowed_heap)
+                                .as_iterable()?
+                                .clone()
+                                .with_heap(Rc::clone(&heap))
+                                .into_iter();
+
+                            iterable
+                                .map(|v| match v {
+                                    Value::Record(record) => {
+                                        let record = record.reify(borrowed_heap).as_record()?;
+                                        let key = index_value.as_string(borrowed_heap)?;
+                                        Ok(record.get(key).copied().unwrap_or(Value::Null))
+                                    }
+                                    Value::List(list) => {
+                                        let list = list.reify(borrowed_heap).as_list()?;
+                                        let index =
+                                            usize::try_from(index_value.as_number()? as u64)?;
+                                        Ok(list.get(index).copied().unwrap_or(Value::Null))
+                                    }
+                                    Value::String(string) => {
+                                        let string = string.reify(borrowed_heap).as_string()?;
+                                        let index =
+                                            usize::try_from(index_value.as_number()? as u64)?;
+                                        Ok(string
+                                            .chars()
+                                            .nth(index)
+                                            .map(|c| heap.borrow_mut().insert_string(c.to_string()))
+                                            .unwrap_or(Value::Null))
+                                    }
+                                    _ => Err(anyhow!(
+                                        "expected a record, list, or string, but got a {}",
+                                        v.get_type()
+                                    )),
+                                })
+                                .collect::<Result<Vec<Value>>>()?
+                        };
+
+                        Value::new_each_list(heap.borrow_mut().insert_list(mapped_list))
+                    }
                     _ => Err(anyhow!(
-                        "expected a record or list, but got a {}",
+                        "expected a record, list, string, or an each, but got a {}",
                         lhs.get_type()
                     )),
                 }
