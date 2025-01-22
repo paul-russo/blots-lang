@@ -9,11 +9,11 @@ result2 = map(x => x + 2, range(10000))
 end2 = time_now()
 
 start3 = time_now()
-result3 = each range(10000) with f
+result3 = each(range(10000)) with f
 end3 = time_now()
 
 start4 = time_now()
-result4 = each range(10000) with x => x + 2
+result4 = each(range(10000)) with x => x + 2
 end4 = time_now()
 
 print("map - named: {}s", end1 - start1)

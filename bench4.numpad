@@ -2,7 +2,7 @@
 x = 42
 y = x + 8 * 2  // 58
 z = (x + 8) * 2  // 100
-pi_rounded = round(pi)  // Built-in pi constant
+pi_rounded = round(constants.pi)  // Built-in pi constant
 sqrt_2 = sqrt(2)
 
 // Lists and list operations
@@ -73,8 +73,8 @@ default_value = maybe_null ?? "default"
 // Each operator for element-wise operations
 nums1 = [1, 2, 3]
 nums2 = [4, 5, 6]
-sums = each nums1 + each nums2  // [5, 7, 9]
-products = each nums1 * each nums2  // [4, 10, 18]
+sums = each(nums1) + each(nums2)  // [5, 7, 9]
+products = each(nums1) * each(nums2)  // [4, 10, 18]
 
 // Complex data transformations
 users = [

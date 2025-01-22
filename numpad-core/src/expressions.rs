@@ -42,8 +42,7 @@ static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
         .op(Op::infix(Rule::power, Assoc::Right) | Op::infix(Rule::coalesce, Assoc::Left))
         .op(Op::prefix(Rule::negation)
             | Op::prefix(Rule::spread_operator)
-            | Op::prefix(Rule::invert)
-            | Op::prefix(Rule::each))
+            | Op::prefix(Rule::invert))
         .op(Op::postfix(Rule::factorial))
         .op(Op::postfix(Rule::access)
             | Op::postfix(Rule::dot_access)
@@ -411,19 +410,6 @@ pub fn evaluate_expression(
             Rule::invert => {
                 let rhs = rhs?.as_bool()?;
                 Ok(Bool(!rhs))
-            }
-            Rule::each => {
-                let rhs = rhs?;
-                match rhs {
-                    List(pointer) => return Ok(Value::Each(IterablePointer::List(pointer))),
-                    Value::String(pointer) => {
-                        return Ok(Value::Each(IterablePointer::String(pointer)))
-                    }
-                    Value::Record(pointer) => {
-                        return Ok(Value::Each(IterablePointer::Record(pointer)))
-                    }
-                    _ => return Err(anyhow!("expected a list, record, or string")),
-                }
             }
             _ => unreachable!(),
         })

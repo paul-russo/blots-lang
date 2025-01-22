@@ -80,6 +80,19 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
     let mut map = BuiltInFunctionDefs::new();
 
     map.insert(
+        "each",
+        BuiltInFunctionDef {
+            name: String::from("each"),
+            arity: FunctionArity::Exact(1),
+            body: |args, _, _, _| match args[0] {
+                Value::List(pointer) => return Ok(Value::Each(IterablePointer::List(pointer))),
+                Value::String(pointer) => return Ok(Value::Each(IterablePointer::String(pointer))),
+                Value::Record(pointer) => return Ok(Value::Each(IterablePointer::Record(pointer))),
+                _ => return Err(anyhow!("expected a list, record, or string")),
+            },
+        },
+    );
+    map.insert(
         "sqrt",
         BuiltInFunctionDef {
             name: String::from("sqrt"),
