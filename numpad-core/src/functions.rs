@@ -972,13 +972,18 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
             name: String::from("includes"),
             arity: FunctionArity::Exact(2),
             body: |args, heap, _, _| {
-                let needle = &args[0];
+                let needle = {
+                    let borrowed_heap = &heap.borrow();
+                    args[0].as_string(borrowed_heap)?.to_string()
+                };
 
                 match &args[1].reify(&heap.borrow())? {
-                    ReifiedValue::List(l, _) => Ok(Value::Bool((*l).contains(needle))),
-                    ReifiedValue::String(s, _) => {
-                        Ok(Value::Bool(s.contains(needle.as_string(&heap.borrow())?)))
-                    }
+                    ReifiedValue::List(l, _) => Ok(Value::Bool(
+                        (*l).iter()
+                            .find(|v| v.as_string(&heap.borrow()).unwrap().eq(&needle))
+                            .is_some(),
+                    )),
+                    ReifiedValue::String(s, _) => Ok(Value::Bool(s.contains(&needle))),
                     _ => Err(anyhow!("second argument must be a list or string")),
                 }
             },
