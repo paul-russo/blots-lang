@@ -1,6 +1,11 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::{cell::RefCell, collections::BTreeMap, fmt::Display, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, HashMap},
+    fmt::Display,
+    rc::Rc,
+};
 
 use crate::{
     functions::{get_built_in_function_id, get_built_in_function_ident},
@@ -86,11 +91,12 @@ impl Display for LambdaArg {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LambdaDef {
     pub name: Option<String>,
     pub args: Vec<LambdaArg>,
     pub body: String,
+    pub scope: HashMap<String, Value>,
 }
 
 impl LambdaDef {
@@ -123,6 +129,14 @@ impl PartialOrd for LambdaDef {
             Some(std::cmp::Ordering::Equal)
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
+pub struct SerializableLambdaDef {
+    pub name: Option<String>,
+    pub args: Vec<LambdaArg>,
+    pub body: String,
+    pub scope: BTreeMap<String, SerializableValue>,
 }
 
 pub struct WithHeap<'h, T> {
@@ -291,7 +305,7 @@ pub enum SerializableValue {
     List(Vec<SerializableValue>),
     String(String),
     Record(BTreeMap<String, SerializableValue>),
-    Lambda(LambdaDef),
+    Lambda(SerializableLambdaDef),
     Each(SerializableIterableValue),
     BuiltIn(String),
 }
@@ -322,9 +336,20 @@ impl SerializableValue {
                     .collect::<Result<BTreeMap<String, SerializableValue>>>()?;
                 Ok(SerializableValue::Record(serialized_record))
             }
-            Value::Lambda(p) => Ok(SerializableValue::Lambda(
-                p.reify(heap).as_lambda()?.clone(),
-            )),
+            Value::Lambda(p) => {
+                let lambda = p.reify(heap).as_lambda()?;
+                Ok(SerializableValue::Lambda(SerializableLambdaDef {
+                    name: lambda.name.clone(),
+                    args: lambda.args.clone(),
+                    body: lambda.body.clone(),
+                    scope: lambda
+                        .scope
+                        .clone()
+                        .into_iter()
+                        .map(|(k, v)| (k, SerializableValue::from_value(&v, heap).unwrap()))
+                        .collect(),
+                }))
+            }
             Value::BuiltIn(id) => Ok(SerializableValue::BuiltIn(
                 get_built_in_function_ident(*id).unwrap().to_string(),
             )),
@@ -379,7 +404,21 @@ impl SerializableValue {
                     .collect::<Result<BTreeMap<String, Value>>>()?;
                 Ok(heap.insert_record(deserialized_record))
             }
-            SerializableValue::Lambda(lambda) => Ok(heap.insert_lambda(lambda.clone())),
+            SerializableValue::Lambda(s_lambda) => {
+                let lambda = LambdaDef {
+                    name: s_lambda.name.clone(),
+                    args: s_lambda.args.clone(),
+                    body: s_lambda.body.clone(),
+                    scope: s_lambda
+                        .scope
+                        .clone()
+                        .iter()
+                        .map(|(k, v)| Ok((k.to_string(), SerializableValue::to_value(v, heap)?)))
+                        .collect::<Result<HashMap<String, Value>>>()?,
+                };
+
+                Ok(heap.insert_lambda(lambda))
+            }
             SerializableValue::BuiltIn(ident) => get_built_in_function_id(ident)
                 .ok_or(anyhow!("built-in function with ident {} not found", ident))
                 .map(|id| Value::BuiltIn(id)),
