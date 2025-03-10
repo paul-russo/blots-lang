@@ -1250,12 +1250,17 @@ impl<'a> FunctionDef<'a> {
             FunctionDef::Lambda(LambdaDef {
                 args: expected_args,
                 body,
+                scope,
                 ..
             }) => {
                 #[cfg(not(target_arch = "wasm32"))]
                 let start_var_env = std::time::Instant::now();
 
-                let mut new_bindings = bindings.borrow().clone();
+                // Only clone the bindings if absolutely necessary
+                let mut new_bindings = HashMap::new();
+                
+                // Extend with captured scope - this should be smaller now with our optimizations
+                new_bindings.extend(scope.clone());
 
                 for (idx, expected_arg) in expected_args.iter().enumerate() {
                     match expected_arg {
