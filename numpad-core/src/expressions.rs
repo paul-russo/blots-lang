@@ -35,7 +35,7 @@ fn extract_identifiers(pairs: Pairs<Rule>, identifiers: &mut Vec<String>) {
                 let mut inner_pairs = pair.into_inner();
                 let _ident = inner_pairs.next().unwrap(); // Skip the identifier being assigned to
                 let value_expr = inner_pairs.next().unwrap();
-                
+
                 // Process the RHS for identifiers
                 extract_identifiers(value_expr.into_inner(), identifiers);
             }
@@ -44,7 +44,7 @@ fn extract_identifiers(pairs: Pairs<Rule>, identifiers: &mut Vec<String>) {
                 let mut inner_pairs = pair.into_inner();
                 let arg_list = inner_pairs.next().unwrap();
                 let body = inner_pairs.next().unwrap();
-                
+
                 // Extract arg names to exclude them from captures
                 let mut lambda_args = HashSet::new();
                 for arg_pair in arg_list.into_inner() {
@@ -55,11 +55,11 @@ fn extract_identifiers(pairs: Pairs<Rule>, identifiers: &mut Vec<String>) {
                         _ => {}
                     }
                 }
-                
+
                 // Extract identifiers from body
                 let mut body_identifiers = Vec::new();
                 extract_identifiers(body.into_inner(), &mut body_identifiers);
-                
+
                 // Only add identifiers that aren't lambda arguments
                 for ident in body_identifiers {
                     if !lambda_args.contains(&ident) {
@@ -317,16 +317,14 @@ pub fn evaluate_expression(
                 match value {
                     Value::Lambda(pointer) => match pointer.reify_mut(&mut heap.borrow_mut()) {
                         HeapValue::Lambda(lambda) => {
-                            lambda.set_name(ident.to_string());
+                            lambda.set_name(ident.to_string(), value);
                         }
                         _ => {}
                     },
                     _ => {}
                 }
 
-                bindings
-                    .borrow_mut()
-                    .insert(ident.to_string(), value.clone());
+                bindings.borrow_mut().insert(ident.to_string(), value);
 
                 Ok(value)
             }
@@ -380,42 +378,39 @@ pub fn evaluate_expression(
 
                 let body = inner_pairs.next().unwrap();
                 let body_str = body.as_str().to_string();
-                
+
                 // Extract only the variables that are referenced in the body and present in the current scope
                 let mut captured_scope = HashMap::new();
                 let current_bindings = bindings.borrow();
-                
-                // Extract all identifiers from the body that might be variable references
-                let parsed_result = get_pairs(&body_str);
-                if let std::result::Result::Ok(parsed) = parsed_result {
-                    let mut identifiers = Vec::new();
-                    extract_identifiers(parsed, &mut identifiers);
-                    
-                    // Create a set of unique identifiers to avoid capturing duplicates
-                    let unique_identifiers: HashSet<String> = identifiers.into_iter().collect();
-                    
-                    // Only capture identifiers that exist in the current scope
-                    for ident in unique_identifiers {
-                        if current_bindings.contains_key(&ident) && 
-                           !is_built_in_function(&ident) &&
-                           ident != "constants" &&
-                           ident != "infinity" && 
-                           ident != "if" && 
-                           ident != "then" && 
-                           ident != "else" && 
-                           ident != "true" && 
-                           ident != "false" && 
-                           ident != "null" && 
-                           ident != "inputs" && 
-                           ident != "and" && 
-                           ident != "or" && 
-                           ident != "each" && 
-                           ident != "with" {
-                            captured_scope.insert(ident.clone(), current_bindings[&ident].clone());
-                        }
+
+                let mut identifiers = Vec::new();
+                extract_identifiers(body.into_inner(), &mut identifiers);
+
+                // Create a set of unique identifiers to avoid capturing duplicates
+                let unique_identifiers: HashSet<String> = identifiers.into_iter().collect();
+
+                // Only capture identifiers that exist in the current scope
+                for ident in unique_identifiers {
+                    if current_bindings.contains_key(&ident)
+                        && !is_built_in_function(&ident)
+                        && ident != "constants"
+                        && ident != "infinity"
+                        && ident != "if"
+                        && ident != "then"
+                        && ident != "else"
+                        && ident != "true"
+                        && ident != "false"
+                        && ident != "null"
+                        && ident != "inputs"
+                        && ident != "and"
+                        && ident != "or"
+                        && ident != "each"
+                        && ident != "with"
+                    {
+                        captured_scope.insert(ident.clone(), current_bindings[&ident].clone());
                     }
                 }
-                
+
                 let lambda = heap.borrow_mut().insert_lambda(LambdaDef {
                     name: None,
                     args,
@@ -640,6 +635,7 @@ pub fn evaluate_expression(
                 };
 
                 def.call(
+                    lhs,
                     args,
                     Rc::clone(&heap),
                     Rc::clone(&bindings),
@@ -797,6 +793,7 @@ pub fn evaluate_expression(
                                             r.stringify(&heap.borrow())
                                         ))?
                                         .call(
+                                            r,
                                             vec![l],
                                             Rc::clone(&heap),
                                             Rc::clone(&bindings),
@@ -939,6 +936,7 @@ pub fn evaluate_expression(
 
                             let call_result =
                                 get_built_in_function_def_by_ident("map").unwrap().call(
+                                    rhs,
                                     vec![rhs, list],
                                     Rc::clone(&heap),
                                     Rc::clone(&bindings),
@@ -1009,6 +1007,7 @@ pub fn evaluate_expression(
                         }
 
                         return def.unwrap().call(
+                            rhs,
                             vec![lhs],
                             Rc::clone(&heap),
                             Rc::clone(&bindings),
@@ -1026,10 +1025,7 @@ pub fn evaluate_expression(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        heap::LambdaPointer,
-        parser::get_pairs,
-    };
+    use crate::{heap::LambdaPointer, parser::get_pairs};
 
     fn parse_and_evaluate(
         input: &str,
