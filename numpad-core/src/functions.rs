@@ -1269,6 +1269,10 @@ impl<'a> FunctionDef<'a> {
                     new_bindings.insert(fn_name.clone(), this_value);
                 }
 
+                if let Some(inputs) = bindings.borrow().get("inputs") {
+                    new_bindings.insert(String::from("inputs"), inputs.clone());
+                }
+
                 for (idx, expected_arg) in expected_args.iter().enumerate() {
                     match expected_arg {
                         LambdaArg::Required(arg_name) => {
