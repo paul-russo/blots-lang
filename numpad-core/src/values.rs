@@ -100,8 +100,8 @@ pub struct LambdaDef {
 }
 
 impl LambdaDef {
-    pub fn set_name(&mut self, name: String) {
-        self.name = Some(name);
+    pub fn set_name(&mut self, name: String, _value: Value) {
+        self.name = Some(name.clone());
     }
 
     pub fn get_arity(&self) -> FunctionArity {
@@ -136,7 +136,7 @@ pub struct SerializableLambdaDef {
     pub name: Option<String>,
     pub args: Vec<LambdaArg>,
     pub body: String,
-    pub scope: BTreeMap<String, SerializableValue>,
+    pub scope: Option<BTreeMap<String, SerializableValue>>,
 }
 
 pub struct WithHeap<'h, T> {
@@ -342,12 +342,14 @@ impl SerializableValue {
                     name: lambda.name.clone(),
                     args: lambda.args.clone(),
                     body: lambda.body.clone(),
-                    scope: lambda
-                        .scope
-                        .clone()
-                        .into_iter()
-                        .map(|(k, v)| (k, SerializableValue::from_value(&v, heap).unwrap()))
-                        .collect(),
+                    scope: Some(
+                        lambda
+                            .scope
+                            .clone()
+                            .into_iter()
+                            .map(|(k, v)| SerializableValue::from_value(&v, heap).map(|sv| (k, sv)))
+                            .collect::<Result<BTreeMap<String, SerializableValue>>>()?,
+                    ),
                 }))
             }
             Value::BuiltIn(id) => Ok(SerializableValue::BuiltIn(
@@ -405,16 +407,20 @@ impl SerializableValue {
                 Ok(heap.insert_record(deserialized_record))
             }
             SerializableValue::Lambda(s_lambda) => {
+                let scope = if let Some(scope) = s_lambda.scope.clone() {
+                    scope
+                        .iter()
+                        .map(|(k, v)| Ok((k.to_string(), SerializableValue::to_value(v, heap)?)))
+                        .collect::<Result<HashMap<String, Value>>>()?
+                } else {
+                    HashMap::new()
+                };
+
                 let lambda = LambdaDef {
                     name: s_lambda.name.clone(),
                     args: s_lambda.args.clone(),
                     body: s_lambda.body.clone(),
-                    scope: s_lambda
-                        .scope
-                        .clone()
-                        .iter()
-                        .map(|(k, v)| Ok((k.to_string(), SerializableValue::to_value(v, heap)?)))
-                        .collect::<Result<HashMap<String, Value>>>()?,
+                    scope,
                 };
 
                 Ok(heap.insert_lambda(lambda))

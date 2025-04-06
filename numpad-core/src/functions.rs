@@ -554,6 +554,7 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
 
                 for (i, item) in list.iter().enumerate() {
                     new_list.push(def.call(
+                        args[0],
                         if takes_index {
                             vec![*item, Value::Number(i as f64)]
                         } else {
@@ -591,6 +592,7 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                 let mut acc = initial;
                 for (i, item) in list.iter().enumerate() {
                     acc = def.call(
+                        args[0],
                         if !def.check_arity(3).is_err() {
                             vec![acc, item.clone(), Value::Number(i as f64)]
                         } else {
@@ -627,6 +629,7 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                 for (i, item) in list.iter().enumerate() {
                     if def
                         .call(
+                            args[0],
                             if !def.check_arity(2).is_err() {
                                 vec![item.clone(), Value::Number(i as f64)]
                             } else {
@@ -667,6 +670,7 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                 for (i, item) in list.iter().enumerate() {
                     if !def
                         .call(
+                            args[0],
                             if !def.check_arity(2).is_err() {
                                 vec![item.clone(), Value::Number(i as f64)]
                             } else {
@@ -707,6 +711,7 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                 for (i, item) in list.iter().enumerate() {
                     if def
                         .call(
+                            args[0],
                             if !def.check_arity(2).is_err() {
                                 vec![item.clone(), Value::Number(i as f64)]
                             } else {
@@ -763,6 +768,7 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
 
                 list.sort_by(|a, b| {
                     let call_result = def.call(
+                        args[0],
                         vec![a.clone(), b.clone()],
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
@@ -1228,6 +1234,7 @@ impl<'a> FunctionDef<'a> {
 
     pub fn call(
         &self,
+        this_value: Value,
         args: Vec<Value>,
         heap: Rc<RefCell<Heap>>,
         bindings: Rc<RefCell<HashMap<String, Value>>>,
@@ -1248,34 +1255,34 @@ impl<'a> FunctionDef<'a> {
 
         match self {
             FunctionDef::Lambda(LambdaDef {
+                name,
                 args: expected_args,
                 body,
                 scope,
-                ..
             }) => {
                 #[cfg(not(target_arch = "wasm32"))]
                 let start_var_env = std::time::Instant::now();
 
-                // Only clone the bindings if absolutely necessary
-                let mut new_bindings = HashMap::new();
-                
-                // Extend with captured scope - this should be smaller now with our optimizations
-                new_bindings.extend(scope.clone());
+                let mut new_bindings = scope.clone();
+
+                if let Some(fn_name) = name {
+                    new_bindings.insert(fn_name.clone(), this_value);
+                }
 
                 for (idx, expected_arg) in expected_args.iter().enumerate() {
                     match expected_arg {
-                        LambdaArg::Required(name) => {
-                            new_bindings.insert(name.clone(), args[idx].clone());
+                        LambdaArg::Required(arg_name) => {
+                            new_bindings.insert(arg_name.clone(), args[idx].clone());
                         }
-                        LambdaArg::Optional(name) => {
+                        LambdaArg::Optional(arg_name) => {
                             new_bindings.insert(
-                                name.clone(),
+                                arg_name.clone(),
                                 args.get(idx).copied().unwrap_or(Value::Null),
                             );
                         }
-                        LambdaArg::Rest(name) => {
+                        LambdaArg::Rest(arg_name) => {
                             new_bindings.insert(
-                                name.clone(),
+                                arg_name.clone(),
                                 heap.borrow_mut()
                                     .insert_list(args.iter().skip(idx).copied().collect()),
                             );
