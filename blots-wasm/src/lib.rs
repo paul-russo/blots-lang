@@ -1,5 +1,5 @@
 use anyhow::Result;
-use numpad_core::{
+use blots_core::{
     expressions::evaluate_expression,
     functions::get_built_in_function_idents,
     heap::{Heap, CONSTANTS},
