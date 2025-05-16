@@ -1,0 +1,17 @@
+start1 = time_now()
+fun = x => x + 2
+map(fun, range(1_000_000))
+end1 = time_now()
+
+start2 = time_now()
+umap = (f, xs) =>
+  if len(xs) > 1 then
+    concat(f(head(xs)), umap(f, tail(xs)))
+  else
+    f(head(xs))
+
+umap(fun, range(100))
+end2 = time_now()
+
+print("map: {}s", end1 - start1)
+print("umap: {}s", end2 - start2)

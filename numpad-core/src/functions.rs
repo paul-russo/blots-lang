@@ -352,18 +352,18 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
             name: String::from("head"),
             arity: FunctionArity::Exact(1),
             body: |args, heap, _, _| match &args[0] {
-                Value::List(p) => p
+                Value::List(p) => Ok(p
                     .reify(&heap.borrow())
                     .as_list()?
                     .first()
                     .copied()
-                    .ok_or(anyhow!("empty list")),
+                    .unwrap_or(Value::Null)),
                 Value::String(p) => {
                     let val = {
                         p.reify(&heap.borrow())
                             .as_string()?
                             .get(0..1)
-                            .ok_or(anyhow!("empty list"))?
+                            .unwrap_or("")
                             .to_string()
                     };
 
