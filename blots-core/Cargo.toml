@@ -1,6 +1,6 @@
 [package]
 edition = "2021"
-name = "numpad-core"
+name = "blots-core"
 version = "0.1.0"
 
 [dependencies]

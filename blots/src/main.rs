@@ -1,13 +1,13 @@
 mod cli;
 mod commands;
 
+use blots_core::expressions::evaluate_expression;
+use blots_core::functions::FUNCTION_CALLS;
+use blots_core::heap::Heap;
+use blots_core::parser::{get_pairs, Rule};
 use clap::Parser;
 use cli::Args;
 use commands::{exec_command, is_command};
-use numpad_core::expressions::evaluate_expression;
-use numpad_core::functions::FUNCTION_CALLS;
-use numpad_core::heap::Heap;
-use numpad_core::parser::{get_pairs, Rule};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -54,10 +54,10 @@ fn main() -> ! {
         println!("---------------------------------------------");
         println!(
             "PARSE_COUNT: {}",
-            numpad_core::parser::CALL_COUNT.load(std::sync::atomic::Ordering::Acquire)
+            blots_core::parser::CALL_COUNT.load(std::sync::atomic::Ordering::Acquire)
         );
         let elapsed_ms = Duration::from_micros(
-            numpad_core::parser::TOTAL_PARSE_TIME.load(std::sync::atomic::Ordering::Acquire) as u64,
+            blots_core::parser::TOTAL_PARSE_TIME.load(std::sync::atomic::Ordering::Acquire) as u64,
         )
         .as_millis();
         println!("TOTAL_PARSE_TIME: {}ms", elapsed_ms);
