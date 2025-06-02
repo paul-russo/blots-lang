@@ -37,7 +37,7 @@ mandelbrot = (x, y, max_iter, iter, z) =>
 
 // Main computation that exercises different language features
 benchmark = n => {
-    primes: filter(is_prime, range(n)),
+    primes: filter(range(n), is_prime),
     fibs: collect(each(range(n)) with (i) => fibonacci(i)),
     factorials: collect(each(range(n)) with (i) => factorial(i)),
     reverse_test: reverse(range(n)),

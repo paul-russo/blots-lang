@@ -16,7 +16,7 @@ function $$map(collection, fn) {
     throw new Error(`Cannot map over ${typeof collection}`);
 }
 
-function $$filter(predicate, collection) {
+function $$filter(collection, predicate) {
     if (Array.isArray(collection)) {
         return collection.filter(predicate);
     }

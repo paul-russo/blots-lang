@@ -6,7 +6,7 @@ fibs_like = collect(each(nums) with (i => i * i + 1))
 print("Fibonacci-like sequence: {}", fibs_like)
 
 // Test filtering with each/with
-evens = filter(x => x % 2 == 0, collect(each(nums) with (i => i * 2)))
+evens = filter(collect(each(nums) with (i => i * 2)), x => x % 2 == 0)
 print("Even doubled numbers: {}", evens)
 
 // Test chained operations

@@ -1,7 +1,7 @@
 // Test built-in functions
 numbers = [1, 2, 3, 4, 5]
 doubled = map(numbers, x => x * 2)
-evens = filter(x => x % 2 == 0, numbers)
+evens = filter(numbers, x => x % 2 == 0)
 
 result = {
     original: numbers,

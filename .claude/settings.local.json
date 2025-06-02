@@ -4,7 +4,8 @@
       "Bash(cargo build:*)",
       "Bash(cargo run:*)",
       "Bash(rg:*)",
-      "Bash(node:*)"
+      "Bash(node:*)",
+      "Bash(find:*)"
     ],
     "deny": []
   }
