@@ -1,0 +1,10 @@
+x = 42
+y = "hello world"
+
+// Export values for next code block
+output x
+output newValue = x * 2
+
+// Print for debugging
+print("x is: {}", x)
+print("y is: {}", y)

@@ -16,6 +16,10 @@ impl Transpiler {
         let pairs = get_pairs(&source_string)?;
         let mut output = String::new();
         
+        // Include runtime helpers
+        output.push_str(&self.get_runtime_helpers());
+        output.push('\n');
+        
         for pair in pairs {
             match pair.as_rule() {
                 Rule::statement => {
@@ -31,6 +35,10 @@ impl Transpiler {
         }
         
         Ok(output)
+    }
+
+    fn get_runtime_helpers(&self) -> String {
+        include_str!("runtime.js").to_string()
     }
 
     fn transpile_statement(&mut self, mut pairs: Pairs<Rule>) -> Result<String> {
@@ -50,12 +58,14 @@ impl Transpiler {
             match pair.as_rule() {
                 Rule::identifier => {
                     let var_name = pair.as_str();
-                    Ok(format!("console.log({});", var_name))
+                    // Export the value to make it available for next code block
+                    Ok(format!("// Export {} for next code block\nif (typeof exports !== 'undefined') exports.{} = {};", var_name, var_name, var_name))
                 }
                 Rule::assignment => {
                     let assignment = self.transpile_assignment(pair.into_inner())?;
-                    let var_name = assignment.split('=').next().unwrap().trim();
-                    Ok(format!("{};\nconsole.log({});", assignment, var_name))
+                    let var_name = assignment.split('=').next().unwrap().trim().replace("const ", "");
+                    // Create the assignment and export the value
+                    Ok(format!("{};\n// Export {} for next code block\nif (typeof exports !== 'undefined') exports.{} = {};", assignment, var_name, var_name, var_name))
                 }
                 rule => Err(anyhow!("Unexpected output declaration rule: {:?}", rule)),
             }
@@ -131,7 +141,12 @@ impl Transpiler {
                 Rule::call_list => {
                     if let Some(last_term) = terms.last_mut() {
                         let args = self.transpile_call_args(pair.into_inner())?;
-                        *last_term = format!("{}({})", last_term, args);
+                        // Handle special case for print function
+                        if last_term == "print" {
+                            *last_term = self.transpile_print_call(&args)?;
+                        } else {
+                            *last_term = format!("{}({})", last_term, args);
+                        }
                     }
                 }
                 // Infix operators
@@ -152,7 +167,35 @@ impl Transpiler {
                 Rule::coalesce => operators.push(" ?? ".to_string()),
                 Rule::natural_and => operators.push(" && ".to_string()),
                 Rule::natural_or => operators.push(" || ".to_string()),
-                Rule::with => operators.push(".map".to_string()),
+                Rule::with => {
+                    // Handle 'with' operator for functional mapping
+                    if terms.len() >= 1 {
+                        let collection = terms.pop().unwrap();
+                        // Continue processing to get the function argument
+                        let mut remaining_terms = Vec::new();
+                        while let Some(pair) = pairs.next() {
+                            match pair.as_rule() {
+                                Rule::lambda => {
+                                    let func = self.transpile_lambda(pair.into_inner())?;
+                                    return Ok(format!("{}.map({})", collection, func));
+                                }
+                                Rule::nested_expression => {
+                                    let func = self.transpile_expression(pair.into_inner())?;
+                                    return Ok(format!("{}.map({})", collection, func));
+                                }
+                                _ => {
+                                    remaining_terms.push(self.transpile_single_term(pair)?);
+                                }
+                            }
+                        }
+                        // If we have remaining terms, treat as function call
+                        if !remaining_terms.is_empty() {
+                            let func = remaining_terms.join("");
+                            return Ok(format!("{}.map({})", collection, func));
+                        }
+                    }
+                    operators.push(".map".to_string());
+                }
                 _ => {}
             }
         }
@@ -306,6 +349,60 @@ impl Transpiler {
         }
         
         Ok(args.join(", "))
+    }
+
+    fn transpile_print_call(&mut self, args: &str) -> Result<String> {
+        if args.is_empty() {
+            return Ok("console.log()".to_string());
+        }
+
+        let args_vec: Vec<&str> = args.split(", ").collect();
+        
+        if args_vec.len() == 1 {
+            // Single argument - just log it directly
+            Ok(format!("console.log({})", args))
+        } else {
+            // Multiple arguments - first is format string, rest are values
+            let format_str = args_vec[0];
+            let values = &args_vec[1..];
+            
+            // Convert Blots format string syntax to JavaScript template literal
+            if format_str.starts_with('"') && format_str.ends_with('"') {
+                let mut template = format_str[1..format_str.len()-1].to_string();
+                
+                // Replace {} placeholders with ${value}
+                for (_i, value) in values.iter().enumerate() {
+                    // Use JSON.stringify to handle complex objects properly
+                    let formatted_value = format!("${{JSON.stringify({}) || {}}}", value, value);
+                    template = template.replacen("{}", &formatted_value, 1);
+                }
+                
+                Ok(format!("console.log(`{}`)", template))
+            } else {
+                // Fallback: just use console.log with all arguments
+                Ok(format!("console.log({})", args))
+            }
+        }
+    }
+
+    fn transpile_single_term(&mut self, pair: pest::iterators::Pair<Rule>) -> Result<String> {
+        match pair.as_rule() {
+            Rule::lambda => self.transpile_lambda(pair.into_inner()),
+            Rule::list => self.transpile_list(pair.into_inner()),
+            Rule::record => self.transpile_record(pair.into_inner()),
+            Rule::bool => Ok(pair.as_str().to_string()),
+            Rule::string => Ok(pair.as_str().to_string()),
+            Rule::null => Ok("null".to_string()),
+            Rule::identifier => Ok(pair.as_str().to_string()),
+            Rule::number => {
+                let num_str = pair.as_str().replace('_', "");
+                Ok(num_str)
+            }
+            Rule::nested_expression => {
+                Ok(format!("({})", self.transpile_expression(pair.into_inner())?))
+            }
+            _ => Ok(pair.as_str().to_string()),
+        }
     }
 }
 

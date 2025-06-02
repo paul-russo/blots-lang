@@ -1,0 +1,15 @@
+// Test the exact pattern from the benchmark that was problematic
+my_factorial = n => if n <= 1 then 1 else n * my_factorial(n - 1)
+
+// This is the pattern that was in the benchmark 
+factorials = collect(each(range(5)) with (i => my_factorial(i)))
+print("Factorials: {}", factorials)
+
+// Also test with built-in factorial
+builtin_factorials = collect(each(range(5)) with (i => factorial(i)))
+print("Built-in factorials: {}", builtin_factorials)
+
+// Test with explicit array like the original issue
+test_points = [[0, 0], [1, 1], [2, 2]]
+results = collect(each(test_points) with (point => point[0] + point[1]))
+print("Point sums: {}", results)

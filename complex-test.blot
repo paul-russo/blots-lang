@@ -1,0 +1,25 @@
+// Test more complex built-in function usage
+start = time_now()
+
+// Math functions
+nums = range(10)
+squares = map(nums, x => x * x)
+even_squares = filter(x => x % 2 == 0, squares)
+
+// String operations  
+message = "Hello World"
+upper = to_uppercase(message)
+words = split(message, " ")
+
+// Math operations
+pi_approx = 3.14159
+result = {
+    sin_val: sin(pi_approx),
+    cos_val: cos(pi_approx),
+    sqrt_val: sqrt(16),
+    factorial_5: factorial(5)
+}
+
+elapsed = time_now() - start
+print("Elapsed time: {} seconds", elapsed)
+print("Result: {}", result)
