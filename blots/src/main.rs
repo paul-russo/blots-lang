@@ -17,31 +17,42 @@ use std::time::Duration;
 fn main() -> ! {
     let args = Args::parse();
 
-    if let Some(path) = args.path {
-        let content = std::fs::read_to_string(&path).unwrap();
+    // Handle transpile mode first
+    if args.transpile {
+        let content = if let Some(ref path) = args.path {
+            std::fs::read_to_string(path).unwrap()
+        } else {
+            // Handle transpile mode with stdin input
+            use std::io::Read;
+            let mut content = String::new();
+            std::io::stdin().read_to_string(&mut content).unwrap();
+            content
+        };
         
-        if args.transpile {
-            let transpile_result = if args.inline_eval {
-                transpile_to_js_with_inline_eval(&content)
-            } else {
-                transpile_to_js(&content)
-            };
-            
-            match transpile_result {
-                Ok(js_code) => {
-                    if let Some(output_path) = args.output {
-                        std::fs::write(output_path, js_code).unwrap();
-                    } else {
-                        println!("{}", js_code);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Transpilation error: {}", e);
-                    std::process::exit(1);
+        let transpile_result = if args.inline_eval {
+            transpile_to_js_with_inline_eval(&content)
+        } else {
+            transpile_to_js(&content)
+        };
+        
+        match transpile_result {
+            Ok(js_code) => {
+                if let Some(output_path) = args.output {
+                    std::fs::write(output_path, js_code).unwrap();
+                } else {
+                    println!("{}", js_code);
                 }
             }
-            std::process::exit(0);
+            Err(e) => {
+                eprintln!("Transpilation error: {}", e);
+                std::process::exit(1);
+            }
         }
+        std::process::exit(0);
+    }
+
+    if let Some(path) = args.path {
+        let content = std::fs::read_to_string(&path).unwrap();
         
         println!("Reading from file: {}", path);
         let pairs = get_pairs(&content).unwrap();
@@ -86,19 +97,6 @@ fn main() -> ! {
         )
         .as_millis();
         println!("TOTAL_PARSE_TIME: {}ms", elapsed_ms);
-
-        // println!("FUNCTION_CALLS: [");
-        // println!(
-        //     "\t{}",
-        //     FUNCTION_CALLS
-        //         .lock()
-        //         .unwrap()
-        //         .iter()
-        //         .map(|s| format!("{}", s))
-        //         .collect::<Vec<String>>()
-        //         .join(",\n\t")
-        // );
-        // println!("]");
 
         println!(
             "Total function calls: {}",
