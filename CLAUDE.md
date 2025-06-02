@@ -34,7 +34,7 @@ cargo test -p blots-core      # Test core library only
 ### WASM Development
 ```bash
 cd blots-wasm
-wasm-pack build --target web   # Build WASM package for web
+wasm-pack build --target bundler   # Build WASM package for bundler
 ```
 
 ## Language Architecture
