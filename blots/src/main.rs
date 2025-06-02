@@ -5,7 +5,7 @@ use blots_core::expressions::evaluate_expression;
 use blots_core::functions::FUNCTION_CALLS;
 use blots_core::heap::Heap;
 use blots_core::parser::{get_pairs, Rule};
-use blots_core::transpiler::transpile_to_js;
+use blots_core::transpiler::{transpile_to_js, transpile_to_js_with_inline_eval};
 use clap::Parser;
 use cli::Args;
 use commands::{exec_command, is_command};
@@ -21,7 +21,13 @@ fn main() -> ! {
         let content = std::fs::read_to_string(&path).unwrap();
         
         if args.transpile {
-            match transpile_to_js(&content) {
+            let transpile_result = if args.inline_eval {
+                transpile_to_js_with_inline_eval(&content)
+            } else {
+                transpile_to_js(&content)
+            };
+            
+            match transpile_result {
                 Ok(js_code) => {
                     if let Some(output_path) = args.output {
                         std::fs::write(output_path, js_code).unwrap();
