@@ -5,6 +5,7 @@ use blots_core::expressions::evaluate_expression;
 use blots_core::functions::FUNCTION_CALLS;
 use blots_core::heap::Heap;
 use blots_core::parser::{get_pairs, Rule};
+use blots_core::transpiler::transpile_to_js;
 use clap::Parser;
 use cli::Args;
 use commands::{exec_command, is_command};
@@ -17,8 +18,26 @@ fn main() -> ! {
     let args = Args::parse();
 
     if let Some(path) = args.path {
+        let content = std::fs::read_to_string(&path).unwrap();
+        
+        if args.transpile {
+            match transpile_to_js(&content) {
+                Ok(js_code) => {
+                    if let Some(output_path) = args.output {
+                        std::fs::write(output_path, js_code).unwrap();
+                    } else {
+                        println!("{}", js_code);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Transpilation error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            std::process::exit(0);
+        }
+        
         println!("Reading from file: {}", path);
-        let content = std::fs::read_to_string(path).unwrap();
         let pairs = get_pairs(&content).unwrap();
         let bindings = Rc::new(RefCell::new(HashMap::new()));
         let heap = Rc::new(RefCell::new(Heap::new()));
