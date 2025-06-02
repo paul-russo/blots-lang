@@ -91,6 +91,40 @@ The transpiler converts Blots syntax to equivalent JavaScript:
 - Records/objects: `{key: value}`
 - Lists/arrays: `[1, 2, 3]`
 - Operators and function calls
+- Print statements: `print("Hello {}", name)` → `console.log(\`Hello ${name}\`)`
+- Output declarations: `output x` → `if (typeof exports !== 'undefined') exports.x = x;`
+
+## Built-in Functions
+
+The transpiler includes a comprehensive JavaScript runtime library with these built-in functions:
+
+**Collection Operations:**
+- `map(collection, fn)` - Transform elements
+- `filter(predicate, collection)` - Filter elements  
+- `collect(iterable)` - Convert to array
+- `each(collection)` - Iterate over collection
+- `reverse(collection)` - Reverse array/string
+- `len(collection)` - Get length
+- `head(collection)` - Get first element
+- `tail(collection)` - Get all but first element
+- `concat(...collections)` - Concatenate arrays/strings
+
+**Math Functions:**
+- `sum(...values)` - Sum numbers
+- `range(n)` - Generate array [0, 1, ..., n-1]
+- `abs(x), floor(x), ceil(x), round(x), sqrt(x)`
+- `sin(x), cos(x), tan(x), asin(x), acos(x), atan(x)`
+- `exp(x), ln(x), log10(x), factorial(n)`
+
+**String Operations:**
+- `split(str, delimiter)` - Split string
+- `join(arr, delimiter)` - Join array elements
+- `to_uppercase(str), to_lowercase(str)` - Case conversion
+
+**Utilities:**
+- `time_now()` - Current timestamp in seconds
+- `not(value)` - Logical negation
+- Type checking: `is_string(x), is_number(x), is_bool(x), is_list(x), is_null(x)`
 
 Note: Function calls must use explicit parentheses for transpilation (e.g., `func(arg)` not `func arg`).
 

@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(cargo build:*)",
-      "Bash(cargo run:*)"
+      "Bash(cargo run:*)",
+      "Bash(rg:*)",
+      "Bash(node:*)"
     ],
     "deny": []
   }

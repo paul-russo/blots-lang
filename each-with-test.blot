@@ -1,0 +1,19 @@
+// Test each and with operations
+numbers = [1, 2, 3, 4, 5]
+
+// Test basic each
+iterated = each(numbers)
+print("each(numbers): {}", iterated)
+
+// Test with operator for mapping
+doubled = each(numbers) with (x => x * 2)
+print("each(numbers) with (x => x * 2): {}", doubled)
+
+// Test collect + each + with pattern
+squares = collect(each(numbers) with (x => x * x))
+print("collect(each(numbers) with (x => x * x)): {}", squares)
+
+// Test with range
+range_nums = range(5)
+range_doubled = each(range_nums) with (x => x * 2)
+print("range(5) with doubling: {}", range_doubled)

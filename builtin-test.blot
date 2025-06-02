@@ -1,0 +1,17 @@
+// Test built-in functions
+numbers = [1, 2, 3, 4, 5]
+doubled = map(numbers, x => x * 2)
+evens = filter(x => x % 2 == 0, numbers)
+
+result = {
+    original: numbers,
+    doubled: doubled,
+    evens: evens,
+    sum: sum(...numbers),
+    length: len(numbers),
+    reversed: reverse(numbers)
+}
+
+print("Numbers: {}", numbers)
+print("Doubled: {}", doubled)
+print("Sum: {}", sum(...numbers))

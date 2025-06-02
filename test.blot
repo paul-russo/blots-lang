@@ -10,13 +10,13 @@ add = (a, b) => a + b
 multiply = x => x * 2
 
 // Test function calls
-sum = add(10, 20)
-doubled = multiply(sum)
+total = add(10, 20)
+doubled = multiply(total)
 
 // Test lists and records
 numbers = [1, 2, 3, 4, 5]
 person = { name: "Alice", age: 30 }
 
 // Test output
-output result
-output doubled
+print("result: {}", result)
+print("doubled: {}", doubled)
