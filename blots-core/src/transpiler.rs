@@ -124,14 +124,24 @@ impl Transpiler {
             match pair.as_rule() {
                 Rule::identifier => {
                     let var_name = pair.as_str();
-                    // Export the value to make it available for next code block
-                    Ok(format!("// Export {} for next code block\nif (typeof exports !== 'undefined') exports.{} = {};", var_name, var_name, var_name))
+                    if self.inline_evaluation {
+                        // For inline evaluation, add to outputs set and export
+                        Ok(format!("$$results.outputs.add('{}');\n// Export {} for next code block\nif (typeof exports !== 'undefined') exports.{} = {};", var_name, var_name, var_name, var_name))
+                    } else {
+                        // Export the value to make it available for next code block
+                        Ok(format!("// Export {} for next code block\nif (typeof exports !== 'undefined') exports.{} = {};", var_name, var_name, var_name))
+                    }
                 }
                 Rule::assignment => {
                     let assignment = self.transpile_assignment(pair.into_inner())?;
                     let var_name = assignment.split('=').next().unwrap().trim().replace("const ", "");
-                    // Create the assignment and export the value
-                    Ok(format!("{};\n// Export {} for next code block\nif (typeof exports !== 'undefined') exports.{} = {};", assignment, var_name, var_name, var_name))
+                    if self.inline_evaluation {
+                        // For inline evaluation, add to outputs set and export
+                        Ok(format!("{};\n$$results.outputs.add('{}');\n// Export {} for next code block\nif (typeof exports !== 'undefined') exports.{} = {};", assignment, var_name, var_name, var_name, var_name))
+                    } else {
+                        // Create the assignment and export the value
+                        Ok(format!("{};\n// Export {} for next code block\nif (typeof exports !== 'undefined') exports.{} = {};", assignment, var_name, var_name, var_name))
+                    }
                 }
                 rule => Err(anyhow!("Unexpected output declaration rule: {:?}", rule)),
             }

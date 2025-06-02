@@ -6,7 +6,7 @@ use blots_core::{
     transpiler::{transpile_to_js, transpile_to_js_with_inline_eval},
     values::{LambdaArg, PrimitiveValue, SerializableLambdaDef, SerializableValue},
 };
-use js_sys::{eval, Array, Object, Reflect};
+use js_sys::{eval, Array, Object, Reflect, Set};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use wasm_bindgen::prelude::*;
@@ -103,6 +103,76 @@ fn parse_function_parameters(params_str: &str) -> Result<Vec<LambdaArg>, JsError
     Ok(args)
 }
 
+fn serializable_value_to_js_value(value: &SerializableValue) -> Result<JsValue, JsError> {
+    match value {
+        SerializableValue::Number(n) => Ok(JsValue::from(*n)),
+        SerializableValue::Bool(b) => Ok(JsValue::from(*b)),
+        SerializableValue::Null => Ok(JsValue::null()),
+        SerializableValue::String(s) => Ok(JsValue::from(s.as_str())),
+        SerializableValue::List(items) => {
+            let array = js_sys::Array::new();
+            for item in items {
+                let js_item = serializable_value_to_js_value(item)?;
+                array.push(&js_item);
+            }
+            Ok(array.into())
+        }
+        SerializableValue::Record(map) => {
+            let obj = js_sys::Object::new();
+            for (key, val) in map {
+                let js_val = serializable_value_to_js_value(val)?;
+                Reflect::set(&obj, &key.into(), &js_val)
+                    .map_err(|e| JsError::new(&format!("Failed to set property: {:?}", e)))?;
+            }
+            Ok(obj.into())
+        }
+        SerializableValue::Lambda(lambda_def) => {
+            // Convert lambda back to JavaScript function
+            let params = lambda_def.args.iter()
+                .map(|arg| match arg {
+                    LambdaArg::Required(name) => name.clone(),
+                    LambdaArg::Optional(name) => format!("{} = undefined", name),
+                    LambdaArg::Rest(name) => format!("...{}", name),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            
+            let func_str = format!("({}) => {}", params, lambda_def.body);
+            
+            // Use eval to create the function
+            let func = eval(&func_str)
+                .map_err(|e| JsError::new(&format!("Failed to create function: {:?}", e)))?;
+            
+            Ok(func)
+        }
+        SerializableValue::Each(_) => {
+            // Each values are internal and shouldn't be in inputs
+            Err(JsError::new("Each values are not supported in inputs"))
+        }
+        SerializableValue::BuiltIn(name) => {
+            // Built-in functions are internal and shouldn't be in inputs
+            Err(JsError::new(&format!("Built-in function '{}' is not supported in inputs", name)))
+        }
+    }
+}
+
+fn convert_inputs_to_js_values(inputs_js: &JsValue) -> Result<JsValue, JsError> {
+    // Try to deserialize the inputs as a SerializableValue structure
+    if let Ok(inputs_map) = serde_wasm_bindgen::from_value::<BTreeMap<String, SerializableValue>>(inputs_js.clone()) {
+        // Convert the SerializableValue map to plain JS values
+        let js_obj = js_sys::Object::new();
+        for (key, serializable_val) in inputs_map {
+            let js_val = serializable_value_to_js_value(&serializable_val)?;
+            Reflect::set(&js_obj, &key.into(), &js_val)
+                .map_err(|e| JsError::new(&format!("Failed to set input property: {:?}", e)))?;
+        }
+        Ok(js_obj.into())
+    } else {
+        // If it's not in SerializableValue format, use it as-is (plain JS values)
+        Ok(inputs_js.clone())
+    }
+}
+
 fn js_value_to_serializable_value(value: &JsValue) -> Result<SerializableValue, JsError> {
     // Handle null and undefined
     if value.is_null() || value.is_undefined() {
@@ -174,7 +244,9 @@ pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
     // Set up inputs in global scope if provided
     if !inputs_js.is_undefined() && !inputs_js.is_null() {
         let global = js_sys::global();
-        Reflect::set(&global, &"inputs".into(), &inputs_js)
+        // Convert SerializableValue inputs to plain JS values for the runtime
+        let converted_inputs = convert_inputs_to_js_values(&inputs_js)?;
+        Reflect::set(&global, &"inputs".into(), &converted_inputs)
             .map_err(|e| JsError::new(&format!("Failed to set inputs: {:?}", e)))?;
     }
 
@@ -251,7 +323,17 @@ pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
 
     // Convert outputs Set to HashSet
     if outputs_obj.is_object() {
-        // For now, skip outputs processing - would need more complex Set handling
+        // Check if it's a JavaScript Set
+        if let Some(js_set) = outputs_obj.dyn_ref::<js_sys::Set>() {
+            // Convert Set to Array for easier iteration
+            let array_from = js_sys::Array::from(js_set);
+            for i in 0..array_from.length() {
+                let value = array_from.get(i);
+                if let Some(output_name) = value.as_string() {
+                    outputs.insert(output_name);
+                }
+            }
+        }
     }
 
     // Return the values and bindings as serialized objects in the expected format

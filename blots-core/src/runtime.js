@@ -145,7 +145,16 @@ function $$range(n) {
     if (typeof n !== 'number') {
         throw new Error('Range expects a number');
     }
-    return Array.from({ length: Math.max(0, Math.floor(n)) }, (_, i) => i);
+    if (n < 1) {
+        throw new Error('Range expects a non-zero positive number');
+    }
+
+    const arr = new Array(n);
+    for (let i = 0; i < n; i++) {
+        arr[i] = i;
+    }
+
+    return arr;
 }
 
 // Math functions
@@ -414,4 +423,15 @@ for (const [name, func] of Object.entries($$builtins)) {
     if (typeof globalThis[name] === 'undefined') {
         globalThis[name] = func;
     }
+}
+
+// Set up inputs variable - it will be populated by the WASM evaluate function
+// Provide a default empty inputs object if not set by WASM
+if (typeof globalThis.inputs === 'undefined') {
+    globalThis.inputs = {};
+}
+
+// Make inputs available as a bare identifier (not just globalThis.inputs)
+if (typeof inputs === 'undefined') {
+    var inputs = globalThis.inputs;
 }
