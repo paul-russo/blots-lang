@@ -46,6 +46,9 @@ function $$each(collection) {
     if (Array.isArray(collection)) {
         return collection;
     }
+    if (typeof collection === 'string') {
+        return Array.from(collection);
+    }
     if (typeof collection === 'object' && collection !== null) {
         return Object.entries(collection);
     }
