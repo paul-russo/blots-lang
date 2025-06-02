@@ -4,7 +4,7 @@ start = time_now()
 // Math functions
 nums = range(10)
 squares = map(nums, x => x * x)
-even_squares = filter(x => x % 2 == 0, squares)
+even_squares = filter(squares, x => x % 2 == 0)
 
 // String operations  
 message = "Hello World"
