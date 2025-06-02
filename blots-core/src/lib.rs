@@ -6,4 +6,5 @@ pub mod functions;
 pub mod heap;
 pub mod parser;
 pub mod stats;
+pub mod transpiler;
 pub mod values;
