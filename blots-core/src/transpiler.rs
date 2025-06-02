@@ -87,7 +87,7 @@ impl Transpiler {
                             Ok(format!("$$results.values['{}'] = {};", position_id, expr))
                         }
                     } else {
-                        Ok(expr)
+                        Ok(self.ensure_semicolon(expr))
                     }
                 }
                 Rule::output_declaration => {
@@ -97,7 +97,7 @@ impl Transpiler {
                         // This is more complex, let's handle it later
                         Ok(output_stmt)
                     } else {
-                        Ok(output_stmt)
+                        Ok(self.ensure_semicolon(output_stmt))
                     }
                 }
                 rule => Err(anyhow!("Unexpected statement rule: {:?}", rule)),
@@ -270,6 +270,12 @@ impl Transpiler {
                     }
                     operators.push(".map".to_string());
                 }
+                Rule::expression => {
+                    // Handle inner expressions (from parentheses that were parsed as silent rules)
+                    let expr_result = self.transpile_expression(pair.into_inner())?;
+                    let formatted = format!("({})", expr_result);
+                    terms.push(formatted);
+                }
                 _ => {}
             }
         }
@@ -285,13 +291,26 @@ impl Transpiler {
             // Handle function call without parentheses: "func arg"
             output = format!("{}({})", terms[0], terms[1]);
         } else {
-            // Combine terms with operators
+            // Combine terms with operators, handling each expressions specially
             if !terms.is_empty() {
                 output.push_str(&terms[0]);
                 for (i, op) in operators.iter().enumerate() {
-                    output.push_str(op);
-                    if let Some(term) = terms.get(i + 1) {
-                        output.push_str(term);
+                    if let Some(next_term) = terms.get(i + 1) {
+                        let current_term = if i == 0 { &terms[0] } else { &output };
+                        
+                        // Check if either side is an each expression
+                        if self.is_each_expression(current_term) || self.is_each_expression(next_term) {
+                            // For each operations, we need to replace the output with the each operation
+                            if i == 0 {
+                                output = self.generate_each_operation(&terms[0], op, next_term);
+                            } else {
+                                // This is tricky - we need to rebuild the output as an each operation
+                                output = self.generate_each_operation(&output, op, next_term);
+                            }
+                        } else {
+                            output.push_str(op);
+                            output.push_str(next_term);
+                        }
                     }
                 }
             }
@@ -349,7 +368,12 @@ impl Transpiler {
         let var_name = pairs.next().unwrap().as_str();
         let value = self.transpile_expression(pairs.next().unwrap().into_inner())?;
         
-        Ok(format!("const {} = {}", var_name, value))
+        if self.inline_evaluation {
+            // Capture the binding in $$results.bindings
+            Ok(format!("const {} = {}; $$results.bindings['{}'] = {}", var_name, value, var_name, var_name))
+        } else {
+            Ok(format!("const {} = {}", var_name, value))
+        }
     }
 
     fn transpile_list(&mut self, mut pairs: Pairs<Rule>) -> Result<String> {
@@ -359,7 +383,7 @@ impl Transpiler {
             match pair.as_rule() {
                 Rule::spread_expression => {
                     let expr = self.transpile_expression(pair.into_inner().skip(1).next().unwrap().into_inner())?;
-                    elements.push(format!("...{}", expr));
+                    elements.push(format!("...$$spreadToArray({})", expr));
                 }
                 Rule::expression => {
                     elements.push(self.transpile_expression(pair.into_inner())?);
@@ -453,8 +477,8 @@ impl Transpiler {
                 
                 // Replace {} placeholders with ${value}
                 for (_i, value) in values.iter().enumerate() {
-                    // Use JSON.stringify to handle complex objects properly
-                    let formatted_value = format!("${{JSON.stringify({}) || {}}}", value, value);
+                    // Use a helper to handle special values like Infinity/NaN that JSON.stringify can't handle
+                    let formatted_value = format!("${{typeof {} === 'number' && !isFinite({}) ? {} : JSON.stringify({}) || {}}}", value, value, value, value, value);
                     template = template.replacen("{}", &formatted_value, 1);
                 }
                 
@@ -484,6 +508,46 @@ impl Transpiler {
             }
             _ => Ok(pair.as_str().to_string()),
         }
+    }
+
+    fn ensure_semicolon(&self, stmt: String) -> String {
+        let trimmed = stmt.trim();
+        if trimmed.is_empty() {
+            return stmt;
+        }
+        
+        // Don't add semicolon if it already ends with one, or if it's a block statement
+        if trimmed.ends_with(';') || trimmed.ends_with('}') || trimmed.ends_with('{') {
+            stmt
+        } else {
+            format!("{};", stmt)
+        }
+    }
+
+    fn is_each_expression(&self, term: &str) -> bool {
+        term.starts_with("each(") || term.starts_with("$$each(")
+    }
+
+    fn generate_each_operation(&self, left: &str, op: &str, right: &str) -> String {
+        let js_op = match op.trim() {
+            "+" => "$$eachAdd",
+            "-" => "$$eachSubtract", 
+            "*" => "$$eachMultiply",
+            "/" => "$$eachDivide",
+            "%" => "$$eachModulo",
+            "**" => "$$eachPower",
+            "&&" => "$$eachAnd",
+            "||" => "$$eachOr",
+            "===" => "$$eachEqual",
+            "!==" => "$$eachNotEqual",
+            "<" => "$$eachLess",
+            "<=" => "$$eachLessEqual",
+            ">" => "$$eachGreater",
+            ">=" => "$$eachGreaterEqual",
+            "??" => "$$eachCoalesce",
+            _ => return format!("{} {} {}", left, op, right), // fallback
+        };
+        format!("{}({}, {})", js_op, left, right)
     }
 }
 
