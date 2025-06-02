@@ -1,6 +1,6 @@
 start1 = time_now()
 fun = x => x + 2
-map(fun, range(1_000_000))
+map(range(1_000_000), fun)
 end1 = time_now()
 
 start2 = time_now()

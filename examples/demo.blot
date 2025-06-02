@@ -1,0 +1,107 @@
+// Basic arithmetic and math functions
+x = 42
+y = x + 8 * 2  // 58
+z = (x + 8) * 2  // 100
+pi_rounded = round(constants.pi)  // Built-in pi constant
+sqrt_2 = sqrt(2)
+
+// Lists and list operations
+numbers = [1, 2, 3, 4, 5]
+doubled = map(numbers, x => x * 2)  // [2, 4, 6, 8, 10]
+evens = filter(numbers, x => x % 2 == 0)  // [2, 4]
+sum_nums = reduce(numbers, (acc, x) => acc + x, 0)  // 15
+
+// String operations
+greeting = "Hello"
+name = "World"
+message = greeting + " " + name + "!"
+upper_msg = to_uppercase(message)
+words = split(message, " ")
+joined = join(words, "-")
+
+// Records (objects)
+person = {
+    name: "Alice",
+    age: 30,
+    skills: ["programming", "math"]
+}
+person_age = person.age
+has_math = includes(person.skills, "math")
+
+// Functional programming with lambdas
+increment = x => x + 1
+add = (a, b) => a + b
+sum_triple = (x, y, z) => x + y + z
+curry_add = x => y => x + y
+add_five = curry_add(5)
+add_five(2)
+
+// Advanced list operations with spread
+list1 = [1, 2, 3]
+list2 = [4, 5, 6]
+combined = [...list1, ...list2]
+
+// Conditionals
+check_number = x => if x > 0 then "positive" 
+    else if x < 0 then "negative" 
+    else "zero"
+
+// Higher-order functions
+compose = (f, g) => x => f(g(x))
+double = x => x * 2
+add_one = x => x + 1
+double_then_add = compose(add_one, double)
+double_then_add(4)
+
+// Working with ranges and transformations
+range_nums = range(5)  // [0, 1, 2, 3, 4]
+squared = map(range_nums, x => x ^ 2)
+even_squares = filter(squared, x => x % 2 == 0)
+
+// Advanced math operations
+factorial_5 = 5!
+power = 2 ^ 3
+modulo = 17 % 5
+
+// Record manipulation
+defaults = { color: "blue", size: "medium" }
+custom = { ...defaults, color: "red" }
+merged = { ...defaults, ...custom }
+
+// Working with nulls and optional values
+maybe_null = null
+default_value = maybe_null ?? "default"
+
+// Each operator for element-wise operations
+nums1 = [1, 2, 3]
+nums2 = [4, 5, 6]
+sums = each(nums1) + each(nums2)  // [5, 7, 9]
+products = each(nums1) * each(nums2)  // [4, 10, 18]
+
+// Complex data transformations
+users = [
+    { name: "Alice", score: 95 },
+    { name: "Bob", score: 80 },
+    { name: "Charlie", score: 85 }
+]
+
+// Get average score
+avg_score = avg(...collect(each(users)['score']))
+
+// Sort users by score
+sorted_users = sort_by(users, (a, b) => b.score - a.score)
+
+// Statistical operations
+nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+stats = {
+    mean: avg(...nums),
+    median: median(...nums),
+    sum: sum(...nums),
+    p90: percentile(nums, 90)
+}
+
+// Function with rest parameters
+flexible_join = (separator, ...items) => 
+    join(map(items, to_string), separator)
+
+flexible_join(",", ...range(5), 8, 16, 32)

@@ -5,7 +5,10 @@
       "Bash(cargo run:*)",
       "Bash(rg:*)",
       "Bash(node:*)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(wasm-pack build:*)",
+      "Bash(rm:*)",
+      "Bash(grep:*)"
     ],
     "deny": []
   }
