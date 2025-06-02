@@ -10,6 +10,10 @@ pub struct Args {
     #[arg(long)]
     pub transpile: bool,
     
+    /// Enable inline evaluation for displaying results at each expression
+    #[arg(long)]
+    pub inline_eval: bool,
+    
     /// Output file for transpiled JavaScript (stdout if not specified)
     #[arg(long, short)]
     pub output: Option<String>,

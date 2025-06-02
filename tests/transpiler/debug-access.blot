@@ -1,0 +1,3 @@
+factors = [1, 2, 3]
+first = factors[0]
+print("first: {}", first)

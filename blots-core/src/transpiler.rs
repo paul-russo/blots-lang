@@ -4,11 +4,22 @@ use pest::iterators::Pairs;
 
 pub struct Transpiler {
     indent_level: usize,
+    inline_evaluation: bool,
 }
 
 impl Transpiler {
     pub fn new() -> Self {
-        Self { indent_level: 0 }
+        Self { 
+            indent_level: 0,
+            inline_evaluation: false,
+        }
+    }
+
+    pub fn new_with_inline_eval() -> Self {
+        Self { 
+            indent_level: 0,
+            inline_evaluation: true,
+        }
     }
 
     pub fn transpile(&mut self, source: &str) -> Result<String> {
@@ -20,10 +31,14 @@ impl Transpiler {
         output.push_str(&self.get_runtime_helpers());
         output.push('\n');
         
+        if self.inline_evaluation {
+            output.push_str("const $$results = { values: {}, bindings: {}, outputs: new Set() };\n");
+        }
+        
         for pair in pairs {
             match pair.as_rule() {
                 Rule::statement => {
-                    let stmt = self.transpile_statement(pair.into_inner())?;
+                    let stmt = self.transpile_statement_with_position(pair)?;
                     if !stmt.trim().is_empty() {
                         output.push_str(&stmt);
                         output.push('\n');
@@ -34,11 +49,62 @@ impl Transpiler {
             }
         }
         
+        if self.inline_evaluation {
+            output.push_str("\n// Return results for inline evaluation\n");
+            output.push_str("if (typeof module !== 'undefined' && module.exports) {\n");
+            output.push_str("    module.exports = $$results;\n");
+            output.push_str("} else if (typeof window !== 'undefined') {\n");
+            output.push_str("    window.$$results = $$results;\n");
+            output.push_str("} else {\n");
+            output.push_str("    globalThis.$$results = $$results;\n");
+            output.push_str("}\n");
+        }
+        
         Ok(output)
     }
 
     fn get_runtime_helpers(&self) -> String {
         include_str!("runtime.js").to_string()
+    }
+
+    fn transpile_statement_with_position(&mut self, pair: pest::iterators::Pair<Rule>) -> Result<String> {
+        if let Some(inner_pair) = pair.into_inner().next() {
+            let start_pos = inner_pair.as_span().start_pos().line_col();
+            let end_pos = inner_pair.as_span().end_pos().line_col();
+            let position_id = format!("{}-{}__{}-{}", start_pos.0, start_pos.1, end_pos.0, end_pos.1);
+            
+            match inner_pair.as_rule() {
+                Rule::expression => {
+                    let expr = self.transpile_expression(inner_pair.into_inner())?;
+                    if self.inline_evaluation {
+                        // For inline evaluation, we need to handle assignments differently
+                        if expr.starts_with("const ") {
+                            // It's an assignment - execute it and capture the variable value
+                            let var_name = expr.split('=').next().unwrap().trim().replace("const ", "");
+                            Ok(format!("{};\n$$results.values['{}'] = {};", expr, position_id, var_name))
+                        } else {
+                            // It's a pure expression - capture its result
+                            Ok(format!("$$results.values['{}'] = {};", position_id, expr))
+                        }
+                    } else {
+                        Ok(expr)
+                    }
+                }
+                Rule::output_declaration => {
+                    let output_stmt = self.transpile_output_declaration(inner_pair.into_inner())?;
+                    if self.inline_evaluation {
+                        // For output declarations, we need to extract the variable name and mark it as output
+                        // This is more complex, let's handle it later
+                        Ok(output_stmt)
+                    } else {
+                        Ok(output_stmt)
+                    }
+                }
+                rule => Err(anyhow!("Unexpected statement rule: {:?}", rule)),
+            }
+        } else {
+            Ok(String::new())
+        }
     }
 
     fn transpile_statement(&mut self, mut pairs: Pairs<Rule>) -> Result<String> {
@@ -128,8 +194,16 @@ impl Transpiler {
                 }
                 Rule::access => {
                     if let Some(last_term) = terms.last_mut() {
-                        let index = self.transpile_expression(pair.into_inner())?;
-                        *last_term = format!("{}[{}]", last_term, index);
+                        let inner_pairs = pair.into_inner();
+                        // Just directly get the first (and likely only) inner pair
+                        let first_pair = inner_pairs.into_iter().next();
+                        if let Some(expr_pair) = first_pair {
+                            // Use transpile_single_term instead for direct handling
+                            let index = self.transpile_single_term(expr_pair)?;
+                            *last_term = format!("{}[{}]", last_term, index);
+                        } else {
+                            *last_term = format!("{}[/* NO INNER PAIR */]", last_term);
+                        }
                     }
                 }
                 Rule::dot_access => {
@@ -238,7 +312,14 @@ impl Transpiler {
         let args = self.transpile_argument_list(pairs.next().unwrap().into_inner())?;
         let body = self.transpile_expression(pairs.next().unwrap().into_inner())?;
         
-        Ok(format!("({}) => {}", args, body))
+        // If body starts with {, it's an object literal and needs parentheses in JS
+        let formatted_body = if body.trim().starts_with('{') {
+            format!("({})", body)
+        } else {
+            body
+        };
+        
+        Ok(format!("({}) => {}", args, formatted_body))
     }
 
     fn transpile_argument_list(&mut self, mut pairs: Pairs<Rule>) -> Result<String> {
@@ -408,5 +489,10 @@ impl Transpiler {
 
 pub fn transpile_to_js(source: &str) -> Result<String> {
     let mut transpiler = Transpiler::new();
+    transpiler.transpile(source)
+}
+
+pub fn transpile_to_js_with_inline_eval(source: &str) -> Result<String> {
+    let mut transpiler = Transpiler::new_with_inline_eval();
     transpiler.transpile(source)
 }

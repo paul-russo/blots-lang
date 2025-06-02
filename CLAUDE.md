@@ -128,6 +128,15 @@ The transpiler includes a comprehensive JavaScript runtime library with these bu
 
 Note: Function calls must use explicit parentheses for transpilation (e.g., `func(arg)` not `func arg`).
 
+## Testing
+
+The `tests/` directory contains comprehensive test files:
+
+- **`tests/transpiler/`**: JavaScript transpiler tests (inline evaluation, built-ins, edge cases)
+- **`tests/language-features/`**: Core language feature tests (each/with operators, functional patterns)
+
+See `tests/README.md` for detailed test documentation and usage examples.
+
 ## File Extensions
 
 Blots source files use the `.blot` extension. See `examples/` directory for sample programs demonstrating language features.

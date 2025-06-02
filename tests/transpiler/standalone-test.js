@@ -216,3 +216,21 @@ for (const [name, func] of Object.entries($$builtins)) {
         globalThis[name] = func;
     }
 }
+const $$results = { values: {}, bindings: {}, outputs: new Set() };
+$$results.values['1-1__1-6'] = 5 + 3;
+const x = 10;
+$$results.values['2-1__2-7'] = x;
+$$results.values['3-1__3-6'] = x * 2;
+$$results.values['4-1__4-14'] = "hello world";
+$$results.values['5-1__5-10'] = [1, 2, 3];
+$$results.values['6-1__6-17'] = sin(3.14159 / 2);
+
+// Return results for inline evaluation
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = $$results;
+} else if (typeof window !== 'undefined') {
+    window.$$results = $$results;
+} else {
+    globalThis.$$results = $$results;
+}
+console.log('Results:', JSON.stringify(module.exports, null, 2))
