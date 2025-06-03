@@ -97,11 +97,11 @@ impl Transpiler {
                     }
                 }
                 Rule::output_declaration => {
-                    let output_stmt = self.transpile_output_declaration(inner_pair.into_inner())?;
+                    let output_stmt = self.transpile_output_declaration(inner_pair.clone().into_inner())?;
                     if self.inline_evaluation {
-                        // For output declarations, we need to extract the variable name and mark it as output
-                        // This is more complex, let's handle it later
-                        Ok(output_stmt)
+                        // For output declarations, extract the variable name and capture its value
+                        let var_name = self.extract_output_variable_name(inner_pair.into_inner())?;
+                        Ok(format!("{};\n$$results.values['{}'] = {};", output_stmt, position_id, var_name))
                     } else {
                         Ok(self.ensure_semicolon(output_stmt))
                     }
@@ -122,6 +122,25 @@ impl Transpiler {
             }
         } else {
             Ok(String::new())
+        }
+    }
+
+    fn extract_output_variable_name(&mut self, mut pairs: Pairs<Rule>) -> Result<String> {
+        if let Some(pair) = pairs.next() {
+            match pair.as_rule() {
+                Rule::identifier => {
+                    Ok(pair.as_str().to_string())
+                }
+                Rule::assignment => {
+                    // Extract variable name from assignment
+                    let assignment = self.transpile_assignment(pair.into_inner())?;
+                    let var_name = assignment.split('=').next().unwrap().trim().replace("const ", "");
+                    Ok(var_name)
+                }
+                rule => Err(anyhow!("Unexpected output declaration rule in extract_output_variable_name: {:?}", rule)),
+            }
+        } else {
+            Err(anyhow!("Empty output declaration in extract_output_variable_name"))
         }
     }
 

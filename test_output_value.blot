@@ -1,0 +1,10 @@
+// Test that output assignments have positional values
+a = 1
+print("a has value: {}", a)
+
+output b = 2
+print("b has value: {}", b)
+
+// This should work - both assignments should have values
+c = a + b
+print("c = a + b = {}", c)
