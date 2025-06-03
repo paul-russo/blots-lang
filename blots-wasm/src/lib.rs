@@ -19,7 +19,30 @@ struct EvaluationResult {
 }
 
 fn parse_js_function_to_lambda(js_func: &JsValue) -> Result<SerializableLambdaDef, JsError> {
-    // Get the function source code by calling toString() on the function
+    // Check if the function has an $$originalSource property
+    if let Some(func) = js_func.dyn_ref::<js_sys::Function>() {
+        if let Ok(original_source) = Reflect::get(func, &"$$originalSource".into()) {
+            if let Some(original_str) = original_source.as_string() {
+                // Parse the original Blots source
+                if let Some(arrow_pos) = original_str.find("=>") {
+                    let params_part = original_str[..arrow_pos].trim();
+                    let body_part = original_str[arrow_pos + 2..].trim();
+
+                    // Parse parameters
+                    let args = parse_function_parameters(params_part)?;
+
+                    return Ok(SerializableLambdaDef {
+                        name: None,
+                        args,
+                        body: body_part.to_string(), // Use original Blots body
+                        scope: None,
+                    });
+                }
+            }
+        }
+    }
+
+    // Fallback: use the transpiled JavaScript source
     let func_str = if let Some(func) = js_func.dyn_ref::<js_sys::Function>() {
         func.to_string()
             .as_string()

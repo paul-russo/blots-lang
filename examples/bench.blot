@@ -47,7 +47,7 @@ benchmark = n => {
 }
 
 // Run benchmark
-results = benchmark(20)
+results = benchmark(30)
 
 print("that took {} seconds", time_now() - start)
 print("results: {}", results)

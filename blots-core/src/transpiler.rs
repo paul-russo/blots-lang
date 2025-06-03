@@ -651,8 +651,11 @@ impl Transpiler {
     }
 
     fn transpile_lambda(&mut self, mut pairs: Pairs<Rule>) -> Result<String> {
-        let args = self.transpile_argument_list(pairs.next().unwrap().into_inner())?;
-        let body = self.transpile_expression(pairs.next().unwrap().into_inner())?;
+        let args_pair = pairs.next().unwrap();
+        let body_pair = pairs.next().unwrap();
+        
+        let args = self.transpile_argument_list(args_pair.clone().into_inner())?;
+        let body = self.transpile_expression(body_pair.clone().into_inner())?;
         
         // If body starts with {, it's an object literal and needs parentheses in JS
         let formatted_body = if body.trim().starts_with('{') {
@@ -661,7 +664,16 @@ impl Transpiler {
             body
         };
         
-        Ok(format!("({}) => {}", args, formatted_body))
+        // Preserve original source for display purposes
+        let original_args = args_pair.as_str();
+        let original_body = body_pair.as_str();
+        let original_source = format!("{} => {}", original_args, original_body);
+        
+        // Create function with original source preserved as a property
+        Ok(format!(
+            "(($$f) => {{ $$f.$$originalSource = `{}`; return $$f; }})(({}) => {})",
+            original_source.replace('`', "\\`"), args, formatted_body
+        ))
     }
 
     fn transpile_argument_list(&mut self, mut pairs: Pairs<Rule>) -> Result<String> {
