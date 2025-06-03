@@ -279,8 +279,8 @@ fn main() -> ! {
                     let accumulated_blots = lines.join("");
                     match transpile_to_js_with_inline_eval(&accumulated_blots) {
                         Ok(full_js) => {
-                            // Add code to show the last evaluated expression
-                            let eval_js = format!("{}\n// Show the last result\nif (typeof $$results !== 'undefined' && $$results.values) {{\n    const keys = Object.keys($$results.values);\n    if (keys.length > 0) {{\n        const lastKey = keys[keys.length - 1];\n        const result = $$results.values[lastKey];\n        if (result !== undefined) {{\n            console.log('=', result);\n        }}\n    }}\n}}", full_js);
+                            // Add code to show the last evaluated expression with function formatting
+                            let eval_js = format!("{}\n// Show the last result with proper function formatting\nif (typeof $$results !== 'undefined' && $$results.values) {{\n    const keys = Object.keys($$results.values);\n    if (keys.length > 0) {{\n        const lastKey = keys[keys.length - 1];\n        const result = $$results.values[lastKey];\n        if (result !== undefined) {{\n            if (typeof result === 'function') {{\n                // Check for original source\n                if (result.$$originalSource) {{\n                    console.log('=', result.$$originalSource);\n                }} else {{\n                    console.log('=', '[Function]');\n                }}\n            }} else {{\n                console.log('=', result);\n            }}\n        }}\n    }}\n}}", full_js);
                             
                             match execute_js_with_bun(&eval_js) {
                                 Ok(output) => {
