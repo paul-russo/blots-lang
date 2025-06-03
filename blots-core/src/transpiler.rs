@@ -414,6 +414,11 @@ impl Transpiler {
                             } else {
                                 output = format!("{}({}, {})", op, &output, next_term);
                             }
+                        } else if self.is_distributive_operator(op) {
+                            // Handle distributive operators with each expressions
+                            let left = if i == 0 { &terms[0] } else { &output };
+                            let right = next_term;
+                            output = self.handle_distributive_operation(left, op, right)?;
                         } else {
                             output.push_str(op);
                             output.push_str(next_term);
@@ -577,6 +582,11 @@ impl Transpiler {
                             let left_term = if i == 0 { &terms[0] } else { &output };
                             let result = self.transpile_with_operator(left_term, next_term)?;
                             output = result;
+                        } else if self.is_distributive_operator(op) {
+                            // Handle distributive operators with each expressions
+                            let left = if i == 0 { &terms[0] } else { &output };
+                            let right = next_term;
+                            output = self.handle_distributive_operation(left, op, right)?;
                         } else {
                             output.push_str(op);
                             output.push_str(next_term);
@@ -591,6 +601,43 @@ impl Transpiler {
     
     fn is_function_operator(&self, op: &str) -> bool {
         matches!(op, "$$add" | "$$subtract" | "$$multiply" | "$$divide" | "$$modulo" | "$$power")
+    }
+    
+    fn is_distributive_operator(&self, op: &str) -> bool {
+        matches!(op, " && " | " || " | " ?? " | " === " | " !== " | " < " | " <= " | " > " | " >= ")
+    }
+    
+    fn handle_distributive_operation(&self, left: &str, op: &str, right: &str) -> Result<String> {
+        let left_is_each = self.is_each_expression(left);
+        let right_is_each = self.is_each_expression(right);
+        
+        if left_is_each && !right_is_each {
+            // each(collection) OP value -> each(collection.map(x => x OP value))
+            let inner_expr = self.extract_each_inner(left);
+            Ok(format!("$$each({}.map(x => x{}{}))", inner_expr, op, right))
+        } else if !left_is_each && right_is_each {
+            // value OP each(collection) -> each(collection.map(x => value OP x))
+            let inner_expr = self.extract_each_inner(right);
+            Ok(format!("$$each({}.map(x => {}{} x))", inner_expr, left, op))
+        } else if left_is_each && right_is_each {
+            // each(coll1) OP each(coll2) -> each(coll1.map((x, i) => x OP coll2[i]))
+            let left_inner = self.extract_each_inner(left);
+            let right_inner = self.extract_each_inner(right);
+            Ok(format!("$$each({}.map((x, i) => x{} ({})[i]))", left_inner, op, right_inner))
+        } else {
+            // Neither side is each - regular operation
+            Ok(format!("{}{}{}", left, op, right))
+        }
+    }
+    
+    fn extract_each_inner<'a>(&self, expr: &'a str) -> &'a str {
+        if expr.starts_with("$$each(") && expr.ends_with(")") {
+            &expr[7..expr.len()-1]
+        } else if expr.starts_with("each(") && expr.ends_with(")") {
+            &expr[5..expr.len()-1]
+        } else {
+            expr
+        }
     }
 
     fn transpile_primary(&mut self, primary: pest::iterators::Pair<Rule>) -> Result<String> {
