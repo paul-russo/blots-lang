@@ -1,0 +1,26 @@
+// Test comprehensive functionality including with operators
+numbers = [1, 2, 3, 4, 5]
+
+// Test basic with operator
+result1 = 10 with x => x * 2
+print("Basic with: {}", result1)
+
+// Test multiple with operators (the fixed case)
+result2 = 5 with x => x * 2 with y => y + 10
+print("Multiple with: {}", result2)
+
+// Test with each
+result3 = each(numbers) with x => x * 3
+print("Each with: {}", collect(result3))
+
+// Test complex expressions without with
+result4 = sum(...numbers) + 10 * 2
+print("Complex expression: {}", result4)
+
+// Test record
+person = { name: "Alice", age: 30 }
+print("Record: {}", person)
+
+// Test function call
+doubled = map(numbers, x => x * 2)
+print("Map result: {}", doubled)

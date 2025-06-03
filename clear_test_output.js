@@ -303,20 +303,8 @@ function $$spreadToArray(value) {
     throw new Error(`Cannot spread ${typeof value} into array`);
 }
 
-// Helper function to check if a value is an 'each' (Proxy object from $$each function)
-function $$isEach(value) {
-    // Check if it's a Proxy by looking for the special properties we add in $$each
-    return value && typeof value === 'object' && Array.isArray(value) && 
-           typeof value.valueOf === 'function' && typeof value.toString === 'function';
-}
-
 // Strict arithmetic operations that match Blots semantics
 function $$add(left, right) {
-    // Handle each operations first
-    if ($$isEach(left) || $$isEach(right)) {
-        return $$each($$eachAdd(left, right));
-    }
-    
     // Only allow string + string or number + number
     if (typeof left === 'string' && typeof right === 'string') {
         return left + right;
@@ -328,11 +316,6 @@ function $$add(left, right) {
 }
 
 function $$subtract(left, right) {
-    // Handle each operations first
-    if ($$isEach(left) || $$isEach(right)) {
-        return $$each($$eachSubtract(left, right));
-    }
-    
     if (typeof left === 'number' && typeof right === 'number') {
         return left - right;
     }
@@ -340,11 +323,6 @@ function $$subtract(left, right) {
 }
 
 function $$multiply(left, right) {
-    // Handle each operations first
-    if ($$isEach(left) || $$isEach(right)) {
-        return $$each($$eachMultiply(left, right));
-    }
-    
     if (typeof left === 'number' && typeof right === 'number') {
         return left * right;
     }
@@ -352,11 +330,6 @@ function $$multiply(left, right) {
 }
 
 function $$divide(left, right) {
-    // Handle each operations first
-    if ($$isEach(left) || $$isEach(right)) {
-        return $$each($$eachDivide(left, right));
-    }
-    
     if (typeof left === 'number' && typeof right === 'number') {
         return left / right;
     }
@@ -364,28 +337,6 @@ function $$divide(left, right) {
 }
 
 function $$modulo(left, right) {
-    // Handle each operations first
-    if ($$isEach(left) || $$isEach(right)) {
-        // Note: No $$eachModulo function exists in the runtime, so we'll implement it inline
-        const leftVals = Array.isArray(left) ? left : [left];
-        const rightVals = Array.isArray(right) ? right : [right];
-        
-        if (Array.isArray(left) && Array.isArray(right) && left.length !== right.length) {
-            throw new Error('left- and right-hand-side iterables must be the same length');
-        }
-        
-        const maxLen = Math.max(leftVals.length, rightVals.length);
-        const result = [];
-        
-        for (let i = 0; i < maxLen; i++) {
-            const l = leftVals[i] || leftVals[0];
-            const r = rightVals[i] || rightVals[0];
-            result.push(l % r);
-        }
-        
-        return $$each(result);
-    }
-    
     if (typeof left === 'number' && typeof right === 'number') {
         return left % right;
     }
@@ -393,28 +344,6 @@ function $$modulo(left, right) {
 }
 
 function $$power(left, right) {
-    // Handle each operations first
-    if ($$isEach(left) || $$isEach(right)) {
-        // Note: No $$eachPower function exists in the runtime, so we'll implement it inline
-        const leftVals = Array.isArray(left) ? left : [left];
-        const rightVals = Array.isArray(right) ? right : [right];
-        
-        if (Array.isArray(left) && Array.isArray(right) && left.length !== right.length) {
-            throw new Error('left- and right-hand-side iterables must be the same length');
-        }
-        
-        const maxLen = Math.max(leftVals.length, rightVals.length);
-        const result = [];
-        
-        for (let i = 0; i < maxLen; i++) {
-            const l = leftVals[i] || leftVals[0];
-            const r = rightVals[i] || rightVals[0];
-            result.push(Math.pow(l, r));
-        }
-        
-        return $$each(result);
-    }
-    
     if (typeof left === 'number' && typeof right === 'number') {
         return Math.pow(left, right);
     }
@@ -553,3 +482,5 @@ if (typeof globalThis.inputs === 'undefined') {
 if (typeof inputs === 'undefined') {
     var inputs = globalThis.inputs;
 }
+const result = $$each([1, 2, 3].map((x) => $$multiply(x, ((y) => $$add(y, 10))(2))));
+console.log(`Result: ${typeof collect(result) === 'number' && !isFinite(collect(result)) ? collect(result) : JSON.stringify(collect(result)) || collect(result)}`);

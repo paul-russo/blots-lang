@@ -1,0 +1,6 @@
+// Test simple each operations
+a = each([2, 4, 6])
+b = each([1, 2, 3])
+
+result = a + b
+print("result: {}", result)
