@@ -1,5 +1,6 @@
 mod cli;
 mod commands;
+mod highlighter;
 
 use blots_core::expressions::evaluate_expression;
 use blots_core::functions::FUNCTION_CALLS;
@@ -14,6 +15,7 @@ use std::collections::HashMap;
 use std::io::{BufWriter, Write, IsTerminal};
 use std::process::Command;
 use rustyline::Editor;
+use highlighter::BlotsHighlighter;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -252,9 +254,14 @@ fn main() -> ! {
     let is_piped = !IsTerminal::is_terminal(&std::io::stdin());
     
     // Initialize rustyline editor for command history (only if not piped)
-    let mut rl: Option<Editor<(), rustyline::history::DefaultHistory>> = if !is_piped {
-        match Editor::new() {
-            Ok(editor) => Some(editor),
+    let highlighter = BlotsHighlighter::new();
+    let mut rl: Option<Editor<BlotsHighlighter, rustyline::history::DefaultHistory>> = if !is_piped {
+        match Editor::with_config(rustyline::Config::builder().build()) {
+            Ok(mut editor) => {
+                // Set up syntax highlighting
+                editor.set_helper(Some(BlotsHighlighter::new()));
+                Some(editor)
+            },
             Err(_) => None, // Fall back to basic input if rustyline fails
         }
     } else {
@@ -313,7 +320,22 @@ fn main() -> ! {
                             match execute_js_with_bun(&eval_js) {
                                 Ok(output) => {
                                     if !output.trim().is_empty() {
-                                        print!("{}", output);
+                                        // Parse and highlight the result
+                                        let output_lines: Vec<&str> = output.trim().lines().collect();
+                                        for line in output_lines {
+                                            if line.starts_with("= ") {
+                                                // This is a result line, highlight it
+                                                let result_value = &line[2..]; // Remove "= " prefix
+                                                if !is_piped {
+                                                    println!("{}", highlighter.highlight_result(result_value));
+                                                } else {
+                                                    println!("= {}", result_value);
+                                                }
+                                            } else {
+                                                // Other output (like print statements), just pass through
+                                                println!("{}", line);
+                                            }
+                                        }
                                     }
                                 }
                                 Err(error) => {
@@ -354,7 +376,14 @@ fn main() -> ! {
                                 );
 
                                 match result {
-                                    Ok(value) => println!("= {}", value),
+                                    Ok(value) => {
+                                        let value_str = format!("{}", value);
+                                        if !is_piped {
+                                            println!("{}", highlighter.highlight_result(&value_str));
+                                        } else {
+                                            println!("= {}", value_str);
+                                        }
+                                    },
                                     Err(error) => println!("[evaluation error] {}", error),
                                 }
                             }
