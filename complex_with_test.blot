@@ -1,0 +1,5 @@
+result1 = each([1,2,3]) with x => x * 2 with x => x / 2
+print("each result: {}", result1)
+
+result2 = 10 with x => x + 5 with y => y * 2 with z => z - 3
+print("multiple with result: {}", result2)

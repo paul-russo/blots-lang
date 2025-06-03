@@ -1,0 +1,2 @@
+result = 5 with x => x * 2 with y => y + 10
+print("Result: {}", result)

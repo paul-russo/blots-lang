@@ -2,6 +2,9 @@ use crate::parser::{get_pairs, Rule};
 use anyhow::{anyhow, Result};
 use pest::iterators::Pairs;
 
+// Note: We implement a custom with-chain parser instead of using the Pratt parser
+// due to Rust borrowing issues with closures that access &mut self
+
 pub struct Transpiler {
     indent_level: usize,
     inline_evaluation: bool,
@@ -60,8 +63,11 @@ impl Transpiler {
             output.push_str("}\n");
         }
         
+        // No longer need post-processing since our with-chain parser handles precedence correctly
+        
         Ok(output)
     }
+
 
     fn get_runtime_helpers(&self) -> String {
         include_str!("runtime.js").to_string()
@@ -150,7 +156,258 @@ impl Transpiler {
         }
     }
 
-    fn transpile_expression(&mut self, mut pairs: Pairs<Rule>) -> Result<String> {
+    fn transpile_expression(&mut self, pairs: Pairs<Rule>) -> Result<String> {
+        self.transpile_expression_pratt(pairs)
+    }
+
+    fn transpile_expression_pratt(&mut self, pairs: Pairs<Rule>) -> Result<String> {
+        // Collect all pairs to analyze the structure
+        let pair_vec: Vec<_> = pairs.collect();
+        
+        // Check if this is a 'with' chain that needs special handling
+        if self.contains_with_chain(&pair_vec) {
+            return self.transpile_with_chain_properly(&pair_vec);
+        }
+        
+        // For non-with expressions, use the regular parsing
+        self.transpile_expression_from_pairs(pair_vec)
+    }
+    
+    fn contains_with_chain(&self, pairs: &[pest::iterators::Pair<Rule>]) -> bool {
+        pairs.iter().any(|p| p.as_rule() == Rule::with)
+    }
+    
+    fn transpile_with_chain_properly(&mut self, pairs: &[pest::iterators::Pair<Rule>]) -> Result<String> {
+        // Parse the with chain by splitting on 'with' keywords and building left-associatively
+        let mut segments = Vec::new();
+        let mut current_segment = Vec::new();
+        
+        for pair in pairs {
+            if pair.as_rule() == Rule::with {
+                if !current_segment.is_empty() {
+                    segments.push(current_segment);
+                    current_segment = Vec::new();
+                }
+            } else {
+                current_segment.push(pair.clone());
+            }
+        }
+        
+        // Add the last segment
+        if !current_segment.is_empty() {
+            segments.push(current_segment);
+        }
+        
+        if segments.len() < 2 {
+            // Not actually a with chain, fall back to regular parsing
+            return self.transpile_expression_from_pairs(pairs.to_vec());
+        }
+        
+        // Build the with chain left-associatively
+        let mut result = self.transpile_segment(&segments[0])?;
+        
+        for segment in &segments[1..] {
+            let right_expr = self.transpile_segment(segment)?;
+            result = self.transpile_with_operator(&result, &right_expr)?;
+        }
+        
+        Ok(result)
+    }
+    
+    fn transpile_segment(&mut self, pairs: &[pest::iterators::Pair<Rule>]) -> Result<String> {
+        if pairs.len() == 1 {
+            match pairs[0].as_rule() {
+                Rule::lambda => self.transpile_lambda(pairs[0].clone().into_inner()),
+                Rule::number => Ok(pairs[0].as_str().replace('_', "")),
+                Rule::identifier => Ok(pairs[0].as_str().to_string()),
+                Rule::string => Ok(pairs[0].as_str().to_string()),
+                Rule::bool => Ok(pairs[0].as_str().to_string()),
+                Rule::null => Ok("null".to_string()),
+                Rule::list => self.transpile_list(pairs[0].clone().into_inner()),
+                Rule::nested_expression => {
+                    Ok(format!("({})", self.transpile_expression(pairs[0].clone().into_inner())?))
+                },
+                _ => self.transpile_single_term(pairs[0].clone()),
+            }
+        } else {
+            // Multiple pairs in segment - this could be a function call or other complex expression
+            self.transpile_expression_from_pairs(pairs.to_vec())
+        }
+    }
+    
+    fn transpile_expression_from_pairs(&mut self, pairs: Vec<pest::iterators::Pair<Rule>>) -> Result<String> {
+        // For non-with expressions, reconstruct the pairs iterator and use the old method
+        // This ensures compatibility with existing transpilation logic
+        
+        // Convert the Vec back to something we can iterate over
+        // We need to carefully reconstruct a Pairs iterator-like behavior
+        
+        // For now, let's handle simple cases and use the old method for complex ones
+        if pairs.len() == 1 {
+            let pair = &pairs[0];
+            match pair.as_rule() {
+                Rule::lambda => self.transpile_lambda(pair.clone().into_inner()),
+                Rule::conditional => self.transpile_conditional(pair.clone().into_inner()),
+                Rule::assignment => self.transpile_assignment(pair.clone().into_inner()),
+                Rule::list => self.transpile_list(pair.clone().into_inner()),
+                Rule::record => self.transpile_record(pair.clone().into_inner()),
+                Rule::nested_expression => {
+                    Ok(format!("({})", self.transpile_expression(pair.clone().into_inner())?))
+                }
+                _ => self.transpile_single_term(pair.clone()),
+            }
+        } else {
+            // For complex expressions, we need to fall back to the old method
+            // Create a temporary iterator from our vector
+            self.transpile_complex_expression_from_pairs(pairs)
+        }
+    }
+    
+    fn transpile_complex_expression_from_pairs(&mut self, pairs: Vec<pest::iterators::Pair<Rule>>) -> Result<String> {
+        // This is a simplified version of the old expression logic for non-with expressions
+        let mut output = String::new();
+        let mut terms = Vec::new();
+        let mut operators = Vec::new();
+        let mut i = 0;
+        
+        while i < pairs.len() {
+            let pair = &pairs[i];
+            
+            match pair.as_rule() {
+                Rule::negation => {
+                    output.push('-');
+                }
+                Rule::invert => {
+                    output.push('!');
+                }
+                Rule::conditional => {
+                    return self.transpile_conditional(pair.clone().into_inner());
+                }
+                Rule::lambda => {
+                    return self.transpile_lambda(pair.clone().into_inner());
+                }
+                Rule::assignment => {
+                    return self.transpile_assignment(pair.clone().into_inner());
+                }
+                Rule::list => {
+                    terms.push(self.transpile_list(pair.clone().into_inner())?);
+                }
+                Rule::record => {
+                    terms.push(self.transpile_record(pair.clone().into_inner())?);
+                }
+                Rule::bool => {
+                    terms.push(pair.as_str().to_string());
+                }
+                Rule::string => {
+                    terms.push(pair.as_str().to_string());
+                }
+                Rule::null => {
+                    terms.push("null".to_string());
+                }
+                Rule::identifier => {
+                    terms.push(pair.as_str().to_string());
+                }
+                Rule::number => {
+                    let num_str = pair.as_str().replace('_', "");
+                    terms.push(num_str);
+                }
+                Rule::nested_expression => {
+                    terms.push(format!("({})", self.transpile_expression(pair.clone().into_inner())?));
+                }
+                Rule::factorial => {
+                    if let Some(last_term) = terms.last_mut() {
+                        *last_term = format!("$$factorial({})", last_term);
+                    }
+                }
+                Rule::access => {
+                    if let Some(last_term) = terms.last_mut() {
+                        let inner_pairs = pair.clone().into_inner();
+                        let first_pair = inner_pairs.into_iter().next();
+                        if let Some(expr_pair) = first_pair {
+                            let index = self.transpile_single_term(expr_pair)?;
+                            *last_term = format!("{}[{}]", last_term, index);
+                        } else {
+                            *last_term = format!("{}[/* NO INNER PAIR */]", last_term);
+                        }
+                    }
+                }
+                Rule::dot_access => {
+                    if let Some(last_term) = terms.last_mut() {
+                        let prop = pair.clone().into_inner().next().unwrap().as_str();
+                        *last_term = format!("{}.{}", last_term, prop);
+                    }
+                }
+                Rule::call_list => {
+                    if let Some(last_term) = terms.last_mut() {
+                        let args = self.transpile_call_args(pair.clone().into_inner())?;
+                        if last_term == "print" {
+                            *last_term = self.transpile_print_call(&args)?;
+                        } else {
+                            *last_term = format!("{}({})", last_term, args);
+                        }
+                    }
+                }
+                // Infix operators
+                Rule::add => operators.push("$$add".to_string()),
+                Rule::subtract => operators.push("$$subtract".to_string()),
+                Rule::multiply => operators.push("$$multiply".to_string()),
+                Rule::divide => operators.push("$$divide".to_string()),
+                Rule::modulo => operators.push("$$modulo".to_string()),
+                Rule::power => operators.push("$$power".to_string()),
+                Rule::equal => operators.push(" === ".to_string()),
+                Rule::not_equal => operators.push(" !== ".to_string()),
+                Rule::less => operators.push(" < ".to_string()),
+                Rule::less_eq => operators.push(" <= ".to_string()),
+                Rule::greater => operators.push(" > ".to_string()),
+                Rule::greater_eq => operators.push(" >= ".to_string()),
+                Rule::and => operators.push(" && ".to_string()),
+                Rule::or => operators.push(" || ".to_string()),
+                Rule::coalesce => operators.push(" ?? ".to_string()),
+                Rule::natural_and => operators.push(" && ".to_string()),
+                Rule::natural_or => operators.push(" || ".to_string()),
+                Rule::expression => {
+                    let expr_result = self.transpile_expression(pair.clone().into_inner())?;
+                    terms.push(format!("({})", expr_result));
+                }
+                _ => {}
+            }
+            
+            i += 1;
+        }
+        
+        // Combine terms and operators
+        if !output.is_empty() {
+            if terms.len() == 1 {
+                output.push_str(&terms[0]);
+            }
+        } else if terms.len() == 1 && operators.is_empty() {
+            output = terms[0].clone();
+        } else if terms.len() == 2 && operators.is_empty() {
+            output = format!("{}({})", terms[0], terms[1]);
+        } else {
+            if !terms.is_empty() {
+                output.push_str(&terms[0]);
+                for (i, op) in operators.iter().enumerate() {
+                    if let Some(next_term) = terms.get(i + 1) {
+                        if self.is_function_operator(op) {
+                            if i == 0 {
+                                output = format!("{}({}, {})", op, &terms[0], next_term);
+                            } else {
+                                output = format!("{}({}, {})", op, &output, next_term);
+                            }
+                        } else {
+                            output.push_str(op);
+                            output.push_str(next_term);
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok(output)
+    }
+
+    fn transpile_expression_old(&mut self, mut pairs: Pairs<Rule>) -> Result<String> {
         let mut output = String::new();
         let mut terms = Vec::new();
         let mut operators = Vec::new();
@@ -199,16 +456,14 @@ impl Transpiler {
                 }
                 Rule::factorial => {
                     if let Some(last_term) = terms.last_mut() {
-                        *last_term = format!("factorial({})", last_term);
+                        *last_term = format!("$$factorial({})", last_term);
                     }
                 }
                 Rule::access => {
                     if let Some(last_term) = terms.last_mut() {
                         let inner_pairs = pair.into_inner();
-                        // Just directly get the first (and likely only) inner pair
                         let first_pair = inner_pairs.into_iter().next();
                         if let Some(expr_pair) = first_pair {
-                            // Use transpile_single_term instead for direct handling
                             let index = self.transpile_single_term(expr_pair)?;
                             *last_term = format!("{}[{}]", last_term, index);
                         } else {
@@ -225,7 +480,6 @@ impl Transpiler {
                 Rule::call_list => {
                     if let Some(last_term) = terms.last_mut() {
                         let args = self.transpile_call_args(pair.into_inner())?;
-                        // Handle special case for print function
                         if last_term == "print" {
                             *last_term = self.transpile_print_call(&args)?;
                         } else {
@@ -234,12 +488,12 @@ impl Transpiler {
                     }
                 }
                 // Infix operators
-                Rule::add => operators.push(" + ".to_string()),
-                Rule::subtract => operators.push(" - ".to_string()),
-                Rule::multiply => operators.push(" * ".to_string()),
-                Rule::divide => operators.push(" / ".to_string()),
-                Rule::modulo => operators.push(" % ".to_string()),
-                Rule::power => operators.push(" ** ".to_string()),
+                Rule::add => operators.push("$$add".to_string()),
+                Rule::subtract => operators.push("$$subtract".to_string()),
+                Rule::multiply => operators.push("$$multiply".to_string()),
+                Rule::divide => operators.push("$$divide".to_string()),
+                Rule::modulo => operators.push("$$modulo".to_string()),
+                Rule::power => operators.push("$$power".to_string()),
                 Rule::equal => operators.push(" === ".to_string()),
                 Rule::not_equal => operators.push(" !== ".to_string()),
                 Rule::less => operators.push(" < ".to_string()),
@@ -252,39 +506,28 @@ impl Transpiler {
                 Rule::natural_and => operators.push(" && ".to_string()),
                 Rule::natural_or => operators.push(" || ".to_string()),
                 Rule::with => {
-                    // Handle 'with' operator for functional mapping
-                    if terms.len() >= 1 {
-                        let collection = terms.pop().unwrap();
-                        // Continue processing to get the function argument
-                        let mut remaining_terms = Vec::new();
-                        while let Some(pair) = pairs.next() {
-                            match pair.as_rule() {
-                                Rule::lambda => {
-                                    let func = self.transpile_lambda(pair.into_inner())?;
-                                    return Ok(format!("{}.map({})", collection, func));
-                                }
+                    // Process 'with' operator immediately to ensure left-associativity
+                    if !terms.is_empty() {
+                        let left = terms.pop().unwrap();
+                        
+                        // Find the next lambda or expression for the right side
+                        if let Some(next_pair) = pairs.next() {
+                            let right = match next_pair.as_rule() {
+                                Rule::lambda => self.transpile_lambda(next_pair.into_inner())?,
                                 Rule::nested_expression => {
-                                    let func = self.transpile_expression(pair.into_inner())?;
-                                    return Ok(format!("{}.map({})", collection, func));
+                                    format!("({})", self.transpile_expression(next_pair.into_inner())?)
                                 }
-                                _ => {
-                                    remaining_terms.push(self.transpile_single_term(pair)?);
-                                }
-                            }
-                        }
-                        // If we have remaining terms, treat as function call
-                        if !remaining_terms.is_empty() {
-                            let func = remaining_terms.join("");
-                            return Ok(format!("{}.map({})", collection, func));
+                                _ => self.transpile_single_term(next_pair)?,
+                            };
+                            
+                            let result = self.transpile_with_operator(&left, &right)?;
+                            terms.push(result);
                         }
                     }
-                    operators.push(".map".to_string());
                 }
                 Rule::expression => {
-                    // Handle inner expressions (from parentheses that were parsed as silent rules)
                     let expr_result = self.transpile_expression(pair.into_inner())?;
-                    let formatted = format!("({})", expr_result);
-                    terms.push(formatted);
+                    terms.push(format!("({})", expr_result));
                 }
                 _ => {}
             }
@@ -298,25 +541,23 @@ impl Transpiler {
         } else if terms.len() == 1 && operators.is_empty() {
             output = terms[0].clone();
         } else if terms.len() == 2 && operators.is_empty() {
-            // Handle function call without parentheses: "func arg"
             output = format!("{}({})", terms[0], terms[1]);
         } else {
-            // Combine terms with operators, handling each expressions specially
             if !terms.is_empty() {
                 output.push_str(&terms[0]);
                 for (i, op) in operators.iter().enumerate() {
                     if let Some(next_term) = terms.get(i + 1) {
-                        let current_term = if i == 0 { &terms[0] } else { &output };
-                        
-                        // Check if either side is an each expression
-                        if self.is_each_expression(current_term) || self.is_each_expression(next_term) {
-                            // For each operations, we need to replace the output with the each operation
+                        if self.is_function_operator(op) {
                             if i == 0 {
-                                output = self.generate_each_operation(&terms[0], op, next_term);
+                                output = format!("{}({}, {})", op, &terms[0], next_term);
                             } else {
-                                // This is tricky - we need to rebuild the output as an each operation
-                                output = self.generate_each_operation(&output, op, next_term);
+                                output = format!("{}({}, {})", op, &output, next_term);
                             }
+                        } else if op == "with" {
+                            // Handle 'with' operator specially
+                            let left_term = if i == 0 { &terms[0] } else { &output };
+                            let result = self.transpile_with_operator(left_term, next_term)?;
+                            output = result;
                         } else {
                             output.push_str(op);
                             output.push_str(next_term);
@@ -327,6 +568,59 @@ impl Transpiler {
         }
 
         Ok(output)
+    }
+    
+    fn is_function_operator(&self, op: &str) -> bool {
+        matches!(op, "$$add" | "$$subtract" | "$$multiply" | "$$divide" | "$$modulo" | "$$power")
+    }
+
+    fn transpile_primary(&mut self, primary: pest::iterators::Pair<Rule>) -> Result<String> {
+        match primary.as_rule() {
+            Rule::conditional => self.transpile_conditional(primary.into_inner()),
+            Rule::lambda => self.transpile_lambda(primary.into_inner()),
+            Rule::assignment => self.transpile_assignment(primary.into_inner()),
+            Rule::list => self.transpile_list(primary.into_inner()),
+            Rule::record => self.transpile_record(primary.into_inner()),
+            Rule::bool => Ok(primary.as_str().to_string()),
+            Rule::string => Ok(primary.as_str().to_string()),
+            Rule::null => Ok("null".to_string()),
+            Rule::identifier => Ok(primary.as_str().to_string()),
+            Rule::number => {
+                let num_str = primary.as_str().replace('_', "");
+                Ok(num_str)
+            }
+            Rule::nested_expression => {
+                Ok(format!("({})", self.transpile_expression(primary.into_inner())?))
+            }
+            Rule::expression => {
+                // Handle inner expressions (from parentheses that were parsed as silent rules)
+                let expr_result = self.transpile_expression(primary.into_inner())?;
+                Ok(format!("({})", expr_result))
+            }
+            _ => Ok(primary.as_str().to_string()),
+        }
+    }
+
+
+    fn transpile_with_operator(&mut self, lhs: &str, rhs: &str) -> Result<String> {
+        // Check if the left side is an 'each' expression
+        let is_each_expr = self.is_each_expression(lhs);
+        
+        if is_each_expr {
+            // For each expressions, use mapping behavior
+            // Extract the inner expression from each(...) or $$each(...)
+            let inner_expr = if lhs.starts_with("$$each(") && lhs.ends_with(")") {
+                &lhs[7..lhs.len()-1]
+            } else if lhs.starts_with("each(") && lhs.ends_with(")") {
+                &lhs[5..lhs.len()-1]
+            } else {
+                lhs
+            };
+            Ok(format!("$$each({}.map({}))", inner_expr, rhs))
+        } else {
+            // For regular values, use function application
+            Ok(format!("({})({})", rhs, lhs))
+        }
     }
 
     fn transpile_conditional(&mut self, mut pairs: Pairs<Rule>) -> Result<String> {
@@ -538,27 +832,6 @@ impl Transpiler {
         term.starts_with("each(") || term.starts_with("$$each(")
     }
 
-    fn generate_each_operation(&self, left: &str, op: &str, right: &str) -> String {
-        let js_op = match op.trim() {
-            "+" => "$$eachAdd",
-            "-" => "$$eachSubtract", 
-            "*" => "$$eachMultiply",
-            "/" => "$$eachDivide",
-            "%" => "$$eachModulo",
-            "**" => "$$eachPower",
-            "&&" => "$$eachAnd",
-            "||" => "$$eachOr",
-            "===" => "$$eachEqual",
-            "!==" => "$$eachNotEqual",
-            "<" => "$$eachLess",
-            "<=" => "$$eachLessEqual",
-            ">" => "$$eachGreater",
-            ">=" => "$$eachGreaterEqual",
-            "??" => "$$eachCoalesce",
-            _ => return format!("{} {} {}", left, op, right), // fallback
-        };
-        format!("{}({}, {})", js_op, left, right)
-    }
 }
 
 pub fn transpile_to_js(source: &str) -> Result<String> {
