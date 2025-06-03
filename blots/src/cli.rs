@@ -18,7 +18,7 @@ pub struct Args {
     #[arg(long, short)]
     pub output: Option<String>,
     
-    /// Execute transpiled JavaScript using Bun instead of the built-in interpreter
-    #[arg(long, short = 'j')]
-    pub js: bool,
+    /// Use the slower built-in interpreter instead of the fast JavaScript runtime
+    #[arg(long)]
+    pub slow: bool,
 }
