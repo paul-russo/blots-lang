@@ -1,0 +1,7 @@
+// Test uppercase function
+text = "hello world"
+print("Original: {}", text)
+print("uppercase(): {}", uppercase(text))
+print("to_uppercase(): {}", to_uppercase(text))
+print("lowercase(): {}", lowercase("HELLO WORLD"))
+print("to_lowercase(): {}", to_lowercase("HELLO WORLD"))
