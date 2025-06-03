@@ -11,8 +11,9 @@ use cli::Args;
 use commands::{exec_command, is_command};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Write, IsTerminal};
 use std::process::Command;
+use rustyline::Editor;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -248,17 +249,44 @@ fn main() -> ! {
     };
 
     // Check if stdin is being piped (not a terminal)
-    use std::io::IsTerminal;
-    let is_piped = !std::io::IsTerminal::is_terminal(&std::io::stdin());
+    let is_piped = !IsTerminal::is_terminal(&std::io::stdin());
+    
+    // Initialize rustyline editor for command history (only if not piped)
+    let mut rl: Option<Editor<(), rustyline::history::DefaultHistory>> = if !is_piped {
+        match Editor::new() {
+            Ok(editor) => Some(editor),
+            Err(_) => None, // Fall back to basic input if rustyline fails
+        }
+    } else {
+        None
+    };
 
     loop {
-        let mut line = String::new();
-        let bytes_read = std::io::stdin().read_line(&mut line).unwrap();
-        
-        // If piped input and we've reached EOF, exit
-        if is_piped && bytes_read == 0 {
-            std::process::exit(0);
-        }
+        let line = if let Some(ref mut editor) = rl {
+            // Use rustyline for interactive input with history
+            match editor.readline("> ") {
+                Ok(input) => {
+                    if !input.trim().is_empty() {
+                        let _ = editor.add_history_entry(&input);
+                    }
+                    input + "\n" // Add newline to match read_line behavior
+                }
+                Err(_) => {
+                    std::process::exit(0); // User pressed Ctrl+C or EOF
+                }
+            }
+        } else {
+            // Fall back to basic stdin for piped input
+            let mut line = String::new();
+            let bytes_read = std::io::stdin().read_line(&mut line).unwrap();
+            
+            // If piped input and we've reached EOF, exit
+            if is_piped && bytes_read == 0 {
+                std::process::exit(0);
+            }
+            
+            line
+        };
         
         if is_command(&line.trim()) {
             exec_command(&line.trim());
