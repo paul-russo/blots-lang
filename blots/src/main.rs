@@ -307,18 +307,22 @@ fn main() -> ! {
             let current_line = line.clone();
             match transpile_to_js(&current_line) {
                 Ok(_) => {
-                    // Line is valid, add it to our accumulated lines
-                    lines.push(current_line);
+                    // Line transpiles successfully, now test it with the accumulated state
+                    let mut test_lines = lines.clone();
+                    test_lines.push(current_line.clone());
                     
-                    // Transpile the accumulated program with inline evaluation 
-                    let accumulated_blots = lines.join("");
-                    match transpile_to_js_with_inline_eval(&accumulated_blots) {
+                    // Transpile the test accumulated program with inline evaluation 
+                    let test_accumulated_blots = test_lines.join("");
+                    match transpile_to_js_with_inline_eval(&test_accumulated_blots) {
                         Ok(full_js) => {
                             // Add code to show the last evaluated expression with function formatting
                             let eval_js = format!("{}\n// Show the last result with proper function formatting\nif (typeof $$results !== 'undefined' && $$results.values) {{\n    const keys = Object.keys($$results.values);\n    if (keys.length > 0) {{\n        const lastKey = keys[keys.length - 1];\n        const result = $$results.values[lastKey];\n        if (result !== undefined) {{\n            if (typeof result === 'function') {{\n                // Check for original source\n                if (result.$$originalSource) {{\n                    console.log('=', result.$$originalSource);\n                }} else {{\n                    console.log('=', '[Function]');\n                }}\n            }} else {{\n                console.log('=', result);\n            }}\n        }}\n    }}\n}}", full_js);
                             
                             match execute_js_with_bun(&eval_js) {
                                 Ok(output) => {
+                                    // Runtime execution succeeded - now it's safe to add to accumulated lines
+                                    lines.push(current_line);
+                                    
                                     if !output.trim().is_empty() {
                                         // Parse and highlight the result
                                         let output_lines: Vec<&str> = output.trim().lines().collect();
@@ -339,11 +343,13 @@ fn main() -> ! {
                                     }
                                 }
                                 Err(error) => {
+                                    // Runtime error - don't add the line to accumulated state
                                     println!("[js error] {}", error.trim());
                                 }
                             }
                         }
                         Err(error) => {
+                            // Transpile error with accumulated state - don't add the line
                             println!("[transpile error] {}", error);
                         }
                     }
