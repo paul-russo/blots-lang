@@ -192,11 +192,11 @@ function $$join(arr, delimiter) {
     return arr.join(delimiter);
 }
 
-function $$to_uppercase(str) {
+function $$uppercase(str) {
     return str.toUpperCase();
 }
 
-function $$to_lowercase(str) {
+function $$lowercase(str) {
     return str.toLowerCase();
 }
 
@@ -520,7 +520,7 @@ const $$builtins = {
     abs: $$abs, floor: $$floor, ceil: $$ceil, round: $$round, sqrt: $$sqrt, 
     sin: $$sin, cos: $$cos, tan: $$tan, asin: $$asin, acos: $$acos, atan: $$atan,
     exp: $$exp, ln: $$ln, log10: $$log10, factorial: $$factorial,
-    split: $$split, join: $$join, to_uppercase: $$to_uppercase, to_lowercase: $$to_lowercase, to_string: $$to_string,
+    split: $$split, join: $$join, uppercase: $$uppercase, lowercase: $$lowercase, to_string: $$to_string,
     includes: $$includes, sort_by: $$sort_by, avg: $$avg, median: $$median, percentile: $$percentile,
     time_now: $$time_now, not: $$not, eq: $$eq,
     is_string: $$is_string, is_number: $$is_number, is_bool: $$is_bool, is_list: $$is_list, is_null: $$is_null,
