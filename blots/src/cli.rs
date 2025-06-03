@@ -19,6 +19,6 @@ pub struct Args {
     pub output: Option<String>,
     
     /// Execute transpiled JavaScript using Bun instead of the built-in interpreter
-    #[arg(long)]
-    pub bun: bool,
+    #[arg(long, short = 'j')]
+    pub js: bool,
 }

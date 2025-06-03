@@ -52,15 +52,15 @@ fn main() -> ! {
         std::process::exit(0);
     }
 
-    // Handle Bun execution mode
-    if args.bun {
+    // Handle JavaScript execution mode
+    if args.js {
         let content = if let Some(ref path) = args.path {
             std::fs::read_to_string(path).unwrap_or_else(|e| {
                 eprintln!("Error reading file {}: {}", path, e);
                 std::process::exit(1);
             })
         } else {
-            eprintln!("Error: --bun flag requires a file path");
+            eprintln!("Error: --js flag requires a file path");
             std::process::exit(1);
         };
         
