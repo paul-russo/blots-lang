@@ -93,8 +93,8 @@ fn main() -> ! {
         std::process::exit(0);
     }
 
-    // Handle JavaScript execution mode for files only
-    if args.js && args.path.is_some() {
+    // Handle JavaScript execution mode for files (default unless --slow is specified)
+    if !args.slow && args.path.is_some() {
         let content = std::fs::read_to_string(args.path.as_ref().unwrap()).unwrap_or_else(|e| {
             eprintln!("Error reading file {}: {}", args.path.as_ref().unwrap(), e);
             std::process::exit(1);
@@ -230,8 +230,8 @@ fn main() -> ! {
     let heap = Rc::new(RefCell::new(Heap::new()));
     let bindings = Rc::new(RefCell::new(HashMap::new()));
     
-    // For JS mode, accumulate transpiled code
-    let mut js_accumulated_code = if args.js {
+    // For JS mode (default unless --slow specified), accumulate transpiled code
+    let mut js_accumulated_code = if !args.slow {
         // Get just the runtime library without any user code
         let runtime = transpile_to_js("").unwrap_or_default();
         // Extract everything up to the user code section
@@ -266,7 +266,7 @@ fn main() -> ! {
         }
 
         if let Some(ref mut _js_code) = js_accumulated_code {
-            // JavaScript evaluation mode with state accumulation
+            // JavaScript evaluation mode with state accumulation (default)
             
             // First, try to transpile just the current line to check for syntax errors
             let current_line = line.clone();
@@ -304,7 +304,7 @@ fn main() -> ! {
                 }
             }
         } else {
-            // Native Blots evaluation mode
+            // Native Blots evaluation mode (--slow flag specified)
             let pairs = match get_pairs(&line) {
                 Ok(pairs) => pairs,
                 Err(error) => {
