@@ -129,7 +129,7 @@ impl Transpiler {
         if let Some(pair) = pairs.next() {
             match pair.as_rule() {
                 Rule::identifier => {
-                    Ok(pair.as_str().to_string())
+                    Ok(self.escape_js_identifier(pair.as_str()))
                 }
                 Rule::assignment => {
                     // Extract variable name from assignment
@@ -148,13 +148,14 @@ impl Transpiler {
         if let Some(pair) = pairs.next() {
             match pair.as_rule() {
                 Rule::identifier => {
-                    let var_name = pair.as_str();
+                    let original_var_name = pair.as_str();
+                    let escaped_var_name = self.escape_js_identifier(original_var_name);
                     if self.inline_evaluation {
                         // For inline evaluation, add to outputs set and export
-                        Ok(format!("$$results.outputs.add('{}');\n// Export {} for next code block\nif (typeof exports !== 'undefined') exports.{} = {};", var_name, var_name, var_name, var_name))
+                        Ok(format!("$$results.outputs.add('{}');\n// Export {} for next code block\nif (typeof exports !== 'undefined') exports.{} = {};", original_var_name, original_var_name, original_var_name, escaped_var_name))
                     } else {
                         // Export the value to make it available for next code block
-                        Ok(format!("// Export {} for next code block\nif (typeof exports !== 'undefined') exports.{} = {};", var_name, var_name, var_name))
+                        Ok(format!("// Export {} for next code block\nif (typeof exports !== 'undefined') exports.{} = {};", original_var_name, original_var_name, escaped_var_name))
                     }
                 }
                 Rule::assignment => {
@@ -238,7 +239,7 @@ impl Transpiler {
             match pairs[0].as_rule() {
                 Rule::lambda => self.transpile_lambda(pairs[0].clone().into_inner()),
                 Rule::number => Ok(pairs[0].as_str().replace('_', "")),
-                Rule::identifier => Ok(pairs[0].as_str().to_string()),
+                Rule::identifier => Ok(self.escape_js_identifier(pairs[0].as_str())),
                 Rule::string => Ok(pairs[0].as_str().to_string()),
                 Rule::bool => Ok(pairs[0].as_str().to_string()),
                 Rule::null => Ok("null".to_string()),
@@ -324,7 +325,7 @@ impl Transpiler {
                     terms.push("null".to_string());
                 }
                 Rule::identifier => {
-                    terms.push(pair.as_str().to_string());
+                    terms.push(self.escape_js_identifier(pair.as_str()));
                 }
                 Rule::number => {
                     let num_str = pair.as_str().replace('_', "");
@@ -469,7 +470,7 @@ impl Transpiler {
                     terms.push("null".to_string());
                 }
                 Rule::identifier => {
-                    terms.push(pair.as_str().to_string());
+                    terms.push(self.escape_js_identifier(pair.as_str()));
                 }
                 Rule::number => {
                     let num_str = pair.as_str().replace('_', "");
@@ -639,6 +640,26 @@ impl Transpiler {
             expr
         }
     }
+    
+    fn escape_js_identifier(&self, ident: &str) -> String {
+        // List of JavaScript reserved keywords that need escaping
+        let js_keywords = [
+            "abstract", "await", "boolean", "break", "byte", "case", "catch", "char",
+            "class", "const", "continue", "debugger", "default", "delete", "do", "double",
+            "else", "enum", "export", "extends", "false", "final", "finally", "float",
+            "for", "function", "goto", "if", "implements", "import", "in", "instanceof",
+            "int", "interface", "let", "long", "native", "new", "package", "private",
+            "protected", "public", "return", "short", "static", "super", "switch",
+            "synchronized", "this", "throw", "throws", "transient", "true", "try",
+            "typeof", "undefined", "var", "void", "volatile", "while", "with", "yield"
+        ];
+        
+        if js_keywords.contains(&ident) {
+            format!("$$_{}", ident)
+        } else {
+            ident.to_string()
+        }
+    }
 
     fn transpile_primary(&mut self, primary: pest::iterators::Pair<Rule>) -> Result<String> {
         match primary.as_rule() {
@@ -650,7 +671,7 @@ impl Transpiler {
             Rule::bool => Ok(primary.as_str().to_string()),
             Rule::string => Ok(primary.as_str().to_string()),
             Rule::null => Ok("null".to_string()),
-            Rule::identifier => Ok(primary.as_str().to_string()),
+            Rule::identifier => Ok(self.escape_js_identifier(primary.as_str())),
             Rule::number => {
                 let num_str = primary.as_str().replace('_', "");
                 Ok(num_str)
@@ -747,14 +768,15 @@ impl Transpiler {
     }
 
     fn transpile_assignment(&mut self, mut pairs: Pairs<Rule>) -> Result<String> {
-        let var_name = pairs.next().unwrap().as_str();
+        let original_var_name = pairs.next().unwrap().as_str();
+        let escaped_var_name = self.escape_js_identifier(original_var_name);
         let value = self.transpile_expression(pairs.next().unwrap().into_inner())?;
         
         if self.inline_evaluation {
-            // Capture the binding in $$results.bindings
-            Ok(format!("const {} = {}; $$results.bindings['{}'] = {}", var_name, value, var_name, var_name))
+            // Capture the binding in $$results.bindings (use original name as the key)
+            Ok(format!("const {} = {}; $$results.bindings['{}'] = {}", escaped_var_name, value, original_var_name, escaped_var_name))
         } else {
-            Ok(format!("const {} = {}", var_name, value))
+            Ok(format!("const {} = {}", escaped_var_name, value))
         }
     }
 
@@ -922,7 +944,7 @@ impl Transpiler {
             Rule::bool => Ok(pair.as_str().to_string()),
             Rule::string => Ok(pair.as_str().to_string()),
             Rule::null => Ok("null".to_string()),
-            Rule::identifier => Ok(pair.as_str().to_string()),
+            Rule::identifier => Ok(self.escape_js_identifier(pair.as_str())),
             Rule::number => {
                 let num_str = pair.as_str().replace('_', "");
                 Ok(num_str)
