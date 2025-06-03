@@ -1,7 +1,7 @@
 start = time_now()
 
 // Helper functions for mathematical operations
-fibonacci = n => if n <= 1 then n else fibonacci(n - 1) + fibonacci(n - 2)
+fibonacci = n => if n <= 1 then n else fibonacci(n - 1) + fibonacci(n - 2) 
 
 factorial = n => if n <= 1 then 1 else n * factorial(n - 1)
 
@@ -31,7 +31,7 @@ mandelbrot = (x, y, max_iter, iter, z) =>
     else if complex_mag(z) > 4 then iter
     else mandelbrot(
         x, y, max_iter, 
-        iter + 1, 
+        iter + 1,
         complex_add(complex_mul(z, z), [x, y])
     )
 
@@ -39,7 +39,7 @@ mandelbrot = (x, y, max_iter, iter, z) =>
 benchmark = n => {
     primes: filter(range(n), is_prime),
     fibs: collect(each(range(n)) with (i) => fibonacci(i)),
-    factorials: collect(each(range(n)) with (i) => factorial(i)),
+    factorials: collect(each(range(n)) with (i) => factorial(i)), 
     reverse_test: reverse(range(n)),
     mandel_test: collect(each([[-2, -1], [-1, 0], [0, 0], [0.25, 0]]) with (point) => mandelbrot(point[0], point[1], 50, 0, [0, 0])),
     sum_squares: sum(...collect(each(range(n)) with (i) => i * i)),

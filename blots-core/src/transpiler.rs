@@ -405,7 +405,7 @@ impl Transpiler {
             output = format!("{}({})", terms[0], terms[1]);
         } else {
             if !terms.is_empty() {
-                output.push_str(&terms[0]);
+                output = terms[0].clone();
                 for (i, op) in operators.iter().enumerate() {
                     if let Some(next_term) = terms.get(i + 1) {
                         if self.is_function_operator(op) {
@@ -563,7 +563,7 @@ impl Transpiler {
             output = format!("{}({})", terms[0], terms[1]);
         } else {
             if !terms.is_empty() {
-                output.push_str(&terms[0]);
+                output = terms[0].clone();
                 for (i, op) in operators.iter().enumerate() {
                     if let Some(next_term) = terms.get(i + 1) {
                         if self.is_function_operator(op) {
@@ -779,19 +779,61 @@ impl Transpiler {
         Ok(args.join(", "))
     }
 
+    fn split_function_args(&self, args: &str) -> Vec<String> {
+        let mut result = Vec::new();
+        let mut current_arg = String::new();
+        let mut paren_depth = 0;
+        let mut in_string = false;
+        let mut chars = args.chars().peekable();
+        
+        while let Some(ch) = chars.next() {
+            match ch {
+                '"' => {
+                    in_string = !in_string;
+                    current_arg.push(ch);
+                }
+                '(' if !in_string => {
+                    paren_depth += 1;
+                    current_arg.push(ch);
+                }
+                ')' if !in_string => {
+                    paren_depth -= 1;
+                    current_arg.push(ch);
+                }
+                ',' if !in_string && paren_depth == 0 => {
+                    // Check if next char is space, if so skip it
+                    if chars.peek() == Some(&' ') {
+                        chars.next();
+                    }
+                    result.push(current_arg.trim().to_string());
+                    current_arg.clear();
+                }
+                _ => {
+                    current_arg.push(ch);
+                }
+            }
+        }
+        
+        if !current_arg.trim().is_empty() {
+            result.push(current_arg.trim().to_string());
+        }
+        
+        result
+    }
+
     fn transpile_print_call(&mut self, args: &str) -> Result<String> {
         if args.is_empty() {
             return Ok("console.log()".to_string());
         }
 
-        let args_vec: Vec<&str> = args.split(", ").collect();
+        let args_vec = self.split_function_args(args);
         
         if args_vec.len() == 1 {
             // Single argument - just log it directly
             Ok(format!("console.log({})", args))
         } else {
             // Multiple arguments - first is format string, rest are values
-            let format_str = args_vec[0];
+            let format_str = &args_vec[0];
             let values = &args_vec[1..];
             
             // Convert Blots format string syntax to JavaScript template literal
@@ -801,7 +843,7 @@ impl Transpiler {
                 // Replace {} placeholders with ${value}
                 for (_i, value) in values.iter().enumerate() {
                     // Use a helper to handle special values like Infinity/NaN that JSON.stringify can't handle
-                    let formatted_value = format!("${{typeof {} === 'number' && !isFinite({}) ? {} : JSON.stringify({}) || {}}}", value, value, value, value, value);
+                    let formatted_value = format!("${{typeof ({}) === 'number' && !isFinite({}) ? ({}) : JSON.stringify({}) || ({})}}", value, value, value, value, value);
                     template = template.replacen("{}", &formatted_value, 1);
                 }
                 

@@ -115,9 +115,19 @@ fn main() -> ! {
     let heap = Rc::new(RefCell::new(Heap::new()));
     let bindings = Rc::new(RefCell::new(HashMap::new()));
 
+    // Check if stdin is being piped (not a terminal)
+    use std::io::IsTerminal;
+    let is_piped = !std::io::IsTerminal::is_terminal(&std::io::stdin());
+
     loop {
         let mut line = String::new();
-        std::io::stdin().read_line(&mut line).unwrap();
+        let bytes_read = std::io::stdin().read_line(&mut line).unwrap();
+        
+        // If piped input and we've reached EOF, exit
+        if is_piped && bytes_read == 0 {
+            std::process::exit(0);
+        }
+        
         lines.push(line.clone());
 
         if is_command(&line.trim()) {

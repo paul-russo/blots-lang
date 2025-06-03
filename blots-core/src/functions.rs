@@ -539,12 +539,12 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
             name: String::from("map"),
             arity: FunctionArity::Exact(2),
             body: |args, heap, bindings, call_depth| {
-                let (def, list) = {
+                let (list, def) = {
                     let borrowed_heap = &heap.borrow();
                     (
-                        get_function_def(&args[0], borrowed_heap)
-                            .ok_or(anyhow!("expected the first argument to be a function"))?,
-                        args[1].as_list(borrowed_heap)?.clone(),
+                        args[0].as_list(borrowed_heap)?.clone(),
+                        get_function_def(&args[1], borrowed_heap)
+                            .ok_or(anyhow!("expected the second argument to be a function"))?,
                     )
                 };
 
@@ -554,7 +554,7 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
 
                 for (i, item) in list.iter().enumerate() {
                     new_list.push(def.call(
-                        args[0],
+                        args[1],
                         if takes_index {
                             vec![*item, Value::Number(i as f64)]
                         } else {
@@ -577,12 +577,12 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
             name: String::from("reduce"),
             arity: FunctionArity::Exact(3),
             body: |args, heap, bindings, call_depth| {
-                let (def, list) = {
+                let (list, def) = {
                     let borrowed_heap = &heap.borrow();
                     (
-                        get_function_def(&args[0], borrowed_heap)
-                            .ok_or(anyhow!("expected the first argument to be a function"))?,
-                        args[1].as_list(borrowed_heap)?.clone(),
+                        args[0].as_list(borrowed_heap)?.clone(),
+                        get_function_def(&args[1], borrowed_heap)
+                            .ok_or(anyhow!("expected the second argument to be a function"))?,
                     )
                 };
 
@@ -592,7 +592,7 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                 let mut acc = initial;
                 for (i, item) in list.iter().enumerate() {
                     acc = def.call(
-                        args[0],
+                        args[1],
                         if !def.check_arity(3).is_err() {
                             vec![acc, item.clone(), Value::Number(i as f64)]
                         } else {
@@ -615,12 +615,12 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
             name: String::from("filter"),
             arity: FunctionArity::Exact(2),
             body: |args, heap, bindings, call_depth| {
-                let (def, list) = {
+                let (list, def) = {
                     let borrowed_heap = &heap.borrow();
                     (
-                        get_function_def(&args[0], borrowed_heap)
-                            .ok_or(anyhow!("expected the first argument to be a function"))?,
-                        args[1].as_list(borrowed_heap)?.clone(),
+                        args[0].as_list(borrowed_heap)?.clone(),
+                        get_function_def(&args[1], borrowed_heap)
+                            .ok_or(anyhow!("expected the second argument to be a function"))?,
                     )
                 };
 
@@ -629,7 +629,7 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                 for (i, item) in list.iter().enumerate() {
                     if def
                         .call(
-                            args[0],
+                            args[1],
                             if !def.check_arity(2).is_err() {
                                 vec![item.clone(), Value::Number(i as f64)]
                             } else {
@@ -656,12 +656,12 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
             name: String::from("every"),
             arity: FunctionArity::Exact(2),
             body: |args, heap, bindings, call_depth| {
-                let (def, list) = {
+                let (list, def) = {
                     let borrowed_heap = &heap.borrow();
                     (
-                        get_function_def(&args[0], borrowed_heap)
-                            .ok_or(anyhow!("expected the first argument to be a function"))?,
-                        args[1].as_list(borrowed_heap)?.clone(),
+                        args[0].as_list(borrowed_heap)?.clone(),
+                        get_function_def(&args[1], borrowed_heap)
+                            .ok_or(anyhow!("expected the second argument to be a function"))?,
                     )
                 };
 
@@ -670,7 +670,7 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                 for (i, item) in list.iter().enumerate() {
                     if !def
                         .call(
-                            args[0],
+                            args[1],
                             if !def.check_arity(2).is_err() {
                                 vec![item.clone(), Value::Number(i as f64)]
                             } else {
@@ -697,12 +697,12 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
             name: String::from("some"),
             arity: FunctionArity::Exact(2),
             body: |args, heap, bindings, call_depth| {
-                let (def, list) = {
+                let (list, def) = {
                     let borrowed_heap = &heap.borrow();
                     (
-                        get_function_def(&args[0], borrowed_heap)
-                            .ok_or(anyhow!("expected the first argument to be a function"))?,
-                        args[1].as_list(borrowed_heap)?.clone(),
+                        args[0].as_list(borrowed_heap)?.clone(),
+                        get_function_def(&args[1], borrowed_heap)
+                            .ok_or(anyhow!("expected the second argument to be a function"))?,
                     )
                 };
 
@@ -711,7 +711,7 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                 for (i, item) in list.iter().enumerate() {
                     if def
                         .call(
-                            args[0],
+                            args[1],
                             if !def.check_arity(2).is_err() {
                                 vec![item.clone(), Value::Number(i as f64)]
                             } else {
@@ -754,12 +754,12 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
             name: String::from("sort_by"),
             arity: FunctionArity::Exact(2),
             body: |args, heap, bindings, call_depth| {
-                let (def, mut list) = {
+                let (mut list, def) = {
                     let borrowed_heap = &heap.borrow();
                     (
-                        get_function_def(&args[0], borrowed_heap)
-                            .ok_or(anyhow!("expected the first argument to be a function"))?,
-                        args[1].as_list(borrowed_heap)?.clone(),
+                        args[0].as_list(borrowed_heap)?.clone(),
+                        get_function_def(&args[1], borrowed_heap)
+                            .ok_or(anyhow!("expected the second argument to be a function"))?,
                     )
                 };
 
@@ -768,7 +768,7 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
 
                 list.sort_by(|a, b| {
                     let call_result = def.call(
-                        args[0],
+                        args[1],
                         vec![a.clone(), b.clone()],
                         Rc::clone(&heap),
                         Rc::clone(&bindings),

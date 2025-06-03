@@ -937,7 +937,7 @@ pub fn evaluate_expression(
                             let call_result =
                                 get_built_in_function_def_by_ident("map").unwrap().call(
                                     rhs,
-                                    vec![rhs, list],
+                                    vec![list, rhs],
                                     Rc::clone(&heap),
                                     Rc::clone(&bindings),
                                     None,
