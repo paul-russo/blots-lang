@@ -11,6 +11,7 @@ use cli::Args;
 use commands::{exec_command, is_command};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::process::Command;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -49,6 +50,84 @@ fn main() -> ! {
             }
         }
         std::process::exit(0);
+    }
+
+    // Handle Bun execution mode
+    if args.bun {
+        let content = if let Some(ref path) = args.path {
+            std::fs::read_to_string(path).unwrap_or_else(|e| {
+                eprintln!("Error reading file {}: {}", path, e);
+                std::process::exit(1);
+            })
+        } else {
+            eprintln!("Error: --bun flag requires a file path");
+            std::process::exit(1);
+        };
+        
+        let transpile_result = if args.inline_eval {
+            transpile_to_js_with_inline_eval(&content)
+        } else {
+            transpile_to_js(&content)
+        };
+        
+        match transpile_result {
+            Ok(js_code) => {
+                // Execute the JavaScript by piping it to Bun
+                let child = Command::new("bun")
+                    .arg("-")
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn();
+                    
+                match child {
+                    Ok(mut process) => {
+                        // Write the JavaScript code to stdin
+                        if let Some(stdin) = process.stdin.take() {
+                            use std::io::{BufWriter, Write};
+                            let mut writer = BufWriter::new(stdin);
+                            if let Err(e) = writer.write_all(js_code.as_bytes()) {
+                                eprintln!("Error writing to Bun stdin: {}", e);
+                                std::process::exit(1);
+                            }
+                            if let Err(e) = writer.flush() {
+                                eprintln!("Error flushing to Bun stdin: {}", e);
+                                std::process::exit(1);
+                            }
+                        }
+                        
+                        // Wait for the process to complete and get output
+                        match process.wait_with_output() {
+                            Ok(output) => {
+                                // Print stdout
+                                if !output.stdout.is_empty() {
+                                    print!("{}", String::from_utf8_lossy(&output.stdout));
+                                }
+                                
+                                // Print stderr
+                                if !output.stderr.is_empty() {
+                                    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+                                }
+                                
+                                std::process::exit(output.status.code().unwrap_or(1));
+                            }
+                            Err(e) => {
+                                eprintln!("Error waiting for Bun process: {}", e);
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error executing Bun: {}. Make sure Bun is installed and in your PATH.", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Transpilation error: {}", e);
+                std::process::exit(1);
+            }
+        }
     }
 
     if let Some(path) = args.path {
