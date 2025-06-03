@@ -11,9 +11,50 @@ use cli::Args;
 use commands::{exec_command, is_command};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::io::{BufWriter, Write};
 use std::process::Command;
 use std::rc::Rc;
 use std::time::Duration;
+
+fn execute_js_with_bun(js_code: &str) -> Result<String, String> {
+    let child = Command::new("bun")
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+        
+    match child {
+        Ok(mut process) => {
+            // Write the JavaScript code to stdin
+            if let Some(stdin) = process.stdin.take() {
+                let mut writer = BufWriter::new(stdin);
+                if let Err(e) = writer.write_all(js_code.as_bytes()) {
+                    return Err(format!("Error writing to Bun stdin: {}", e));
+                }
+                if let Err(e) = writer.flush() {
+                    return Err(format!("Error flushing to Bun stdin: {}", e));
+                }
+            }
+            
+            // Wait for the process to complete and get output
+            match process.wait_with_output() {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    
+                    if output.status.success() {
+                        Ok(stdout.to_string())
+                    } else {
+                        Err(stderr.to_string())
+                    }
+                }
+                Err(e) => Err(format!("Error waiting for Bun process: {}", e))
+            }
+        }
+        Err(e) => Err(format!("Error executing Bun: {}. Make sure Bun is installed and in your PATH.", e))
+    }
+}
 
 fn main() -> ! {
     let args = Args::parse();
@@ -52,17 +93,12 @@ fn main() -> ! {
         std::process::exit(0);
     }
 
-    // Handle JavaScript execution mode
-    if args.js {
-        let content = if let Some(ref path) = args.path {
-            std::fs::read_to_string(path).unwrap_or_else(|e| {
-                eprintln!("Error reading file {}: {}", path, e);
-                std::process::exit(1);
-            })
-        } else {
-            eprintln!("Error: --js flag requires a file path");
+    // Handle JavaScript execution mode for files only
+    if args.js && args.path.is_some() {
+        let content = std::fs::read_to_string(args.path.as_ref().unwrap()).unwrap_or_else(|e| {
+            eprintln!("Error reading file {}: {}", args.path.as_ref().unwrap(), e);
             std::process::exit(1);
-        };
+        });
         
         let transpile_result = if args.inline_eval {
             transpile_to_js_with_inline_eval(&content)
@@ -193,6 +229,23 @@ fn main() -> ! {
     let mut lines: Vec<String> = Vec::new();
     let heap = Rc::new(RefCell::new(Heap::new()));
     let bindings = Rc::new(RefCell::new(HashMap::new()));
+    
+    // For JS mode, accumulate transpiled code
+    let mut js_accumulated_code = if args.js {
+        // Get just the runtime library without any user code
+        let runtime = transpile_to_js("").unwrap_or_default();
+        // Extract everything up to the user code section
+        if let Some(end) = runtime.rfind("// Make inputs available") {
+            let lines: Vec<&str> = runtime[..end].lines().collect();
+            let mut result = lines.join("\n");
+            result.push_str("\n// Make inputs available as a bare identifier (not just globalThis.inputs)\nif (typeof inputs === 'undefined') {\n    var inputs = globalThis.inputs;\n}\n");
+            Some(result)
+        } else {
+            Some(runtime)
+        }
+    } else {
+        None
+    };
 
     // Check if stdin is being piped (not a terminal)
     use std::io::IsTerminal;
@@ -207,44 +260,83 @@ fn main() -> ! {
             std::process::exit(0);
         }
         
-        lines.push(line.clone());
-
         if is_command(&line.trim()) {
             exec_command(&line.trim());
             continue;
         }
 
-        let pairs = match get_pairs(&line) {
-            Ok(pairs) => pairs,
-            Err(error) => {
-                println!("[parse error] {}", error);
-                continue;
-            }
-        };
-
-        pairs.for_each(|pair| match pair.as_rule() {
-            Rule::statement => {
-                if let Some(inner_pair) = pair.into_inner().next() {
-                    match inner_pair.as_rule() {
-                        Rule::expression => {
-                            let result = evaluate_expression(
-                                inner_pair.into_inner(),
-                                Rc::clone(&heap),
-                                Rc::clone(&bindings),
-                                0,
-                            );
-
-                            match result {
-                                Ok(value) => println!("= {}", value),
-                                Err(error) => println!("[evaluation error] {}", error),
+        if let Some(ref mut _js_code) = js_accumulated_code {
+            // JavaScript evaluation mode with state accumulation
+            
+            // First, try to transpile just the current line to check for syntax errors
+            let current_line = line.clone();
+            match transpile_to_js(&current_line) {
+                Ok(_) => {
+                    // Line is valid, add it to our accumulated lines
+                    lines.push(current_line);
+                    
+                    // Transpile the accumulated program with inline evaluation 
+                    let accumulated_blots = lines.join("");
+                    match transpile_to_js_with_inline_eval(&accumulated_blots) {
+                        Ok(full_js) => {
+                            // Add code to show the last evaluated expression
+                            let eval_js = format!("{}\n// Show the last result\nif (typeof $$results !== 'undefined' && $$results.values) {{\n    const keys = Object.keys($$results.values);\n    if (keys.length > 0) {{\n        const lastKey = keys[keys.length - 1];\n        const result = $$results.values[lastKey];\n        if (result !== undefined) {{\n            console.log('=', result);\n        }}\n    }}\n}}", full_js);
+                            
+                            match execute_js_with_bun(&eval_js) {
+                                Ok(output) => {
+                                    if !output.trim().is_empty() {
+                                        print!("{}", output);
+                                    }
+                                }
+                                Err(error) => {
+                                    println!("[js error] {}", error.trim());
+                                }
                             }
                         }
-                        _ => unreachable!("unexpected rule: {:?}", inner_pair.as_rule()),
+                        Err(error) => {
+                            println!("[transpile error] {}", error);
+                        }
                     }
                 }
+                Err(error) => {
+                    // Line has syntax error, don't add it to accumulated lines
+                    println!("[transpile error] {}", error);
+                }
             }
-            Rule::EOI => {}
-            rule => unreachable!("unexpected rule: {:?}", rule),
-        });
+        } else {
+            // Native Blots evaluation mode
+            let pairs = match get_pairs(&line) {
+                Ok(pairs) => pairs,
+                Err(error) => {
+                    println!("[parse error] {}", error);
+                    continue;
+                }
+            };
+
+            pairs.for_each(|pair| match pair.as_rule() {
+                Rule::statement => {
+                    if let Some(inner_pair) = pair.into_inner().next() {
+                        match inner_pair.as_rule() {
+                            Rule::expression => {
+                                let result = evaluate_expression(
+                                    inner_pair.into_inner(),
+                                    Rc::clone(&heap),
+                                    Rc::clone(&bindings),
+                                    0,
+                                );
+
+                                match result {
+                                    Ok(value) => println!("= {}", value),
+                                    Err(error) => println!("[evaluation error] {}", error),
+                                }
+                            }
+                            _ => unreachable!("unexpected rule: {:?}", inner_pair.as_rule()),
+                        }
+                    }
+                }
+                Rule::EOI => {}
+                rule => unreachable!("unexpected rule: {:?}", rule),
+            });
+        }
     }
 }
