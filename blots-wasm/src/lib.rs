@@ -232,6 +232,11 @@ fn js_value_to_serializable_value(value: &JsValue) -> Result<SerializableValue, 
 
     // Handle functions
     if value.is_function() {
+        // First check if this is a built-in function
+        if let Some(builtin_name) = detect_builtin_function(value) {
+            return Ok(SerializableValue::BuiltIn(builtin_name));
+        }
+        
         // Convert JavaScript function to Lambda representation
         let lambda_def = parse_js_function_to_lambda(value)?;
         return Ok(SerializableValue::Lambda(lambda_def));
@@ -448,4 +453,39 @@ pub fn get_constants() -> Result<JsValue, JsError> {
     // Serialize to JsValue for return
     serde_wasm_bindgen::to_value(&constants_map)
         .map_err(|e| JsError::new(&format!("Failed to serialize constants: {:?}", e)))
+}
+
+fn detect_builtin_function(js_func: &JsValue) -> Option<String> {
+    // Get the function as a string to check its implementation
+    if let Some(func_str) = js_func.as_string() {
+        // Check if it matches the pattern of a built-in function
+        if func_str.starts_with("function $$") {
+            // Extract the function name
+            if let Some(start) = func_str.find("$$") {
+                if let Some(end) = func_str[start + 2..].find("(") {
+                    let builtin_name = &func_str[start + 2..start + 2 + end];
+                    return Some(builtin_name.to_string());
+                }
+            }
+        }
+    }
+    
+    // Try calling toString() on the function to get its source
+    if let Some(func) = js_func.dyn_ref::<js_sys::Function>() {
+        let func_str_val = func.to_string();
+        if let Some(func_str) = func_str_val.as_string() {
+            // Check if it matches the pattern of a built-in function
+            if func_str.contains("function $$") {
+                // Extract the function name after $$
+                if let Some(start) = func_str.find("$$") {
+                    if let Some(end) = func_str[start + 2..].find("(") {
+                        let builtin_name = &func_str[start + 2..start + 2 + end];
+                        return Some(builtin_name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    
+    None
 }
