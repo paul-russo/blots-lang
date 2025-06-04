@@ -360,11 +360,7 @@ impl Transpiler {
                 Rule::call_list => {
                     if let Some(last_term) = terms.last_mut() {
                         let args = self.transpile_call_args(pair.clone().into_inner())?;
-                        if last_term == "print" {
-                            *last_term = self.transpile_print_call(&args)?;
-                        } else {
-                            *last_term = format!("{}({})", last_term, args);
-                        }
+                        *last_term = format!("{}({})", last_term, args);
                     }
                 }
                 // Infix operators
@@ -505,11 +501,7 @@ impl Transpiler {
                 Rule::call_list => {
                     if let Some(last_term) = terms.last_mut() {
                         let args = self.transpile_call_args(pair.into_inner())?;
-                        if last_term == "print" {
-                            *last_term = self.transpile_print_call(&args)?;
-                        } else {
-                            *last_term = format!("{}({})", last_term, args);
-                        }
+                        *last_term = format!("{}({})", last_term, args);
                     }
                 }
                 // Infix operators
@@ -860,81 +852,7 @@ impl Transpiler {
         Ok(args.join(", "))
     }
 
-    fn split_function_args(&self, args: &str) -> Vec<String> {
-        let mut result = Vec::new();
-        let mut current_arg = String::new();
-        let mut paren_depth = 0;
-        let mut in_string = false;
-        let mut chars = args.chars().peekable();
-        
-        while let Some(ch) = chars.next() {
-            match ch {
-                '"' => {
-                    in_string = !in_string;
-                    current_arg.push(ch);
-                }
-                '(' if !in_string => {
-                    paren_depth += 1;
-                    current_arg.push(ch);
-                }
-                ')' if !in_string => {
-                    paren_depth -= 1;
-                    current_arg.push(ch);
-                }
-                ',' if !in_string && paren_depth == 0 => {
-                    // Check if next char is space, if so skip it
-                    if chars.peek() == Some(&' ') {
-                        chars.next();
-                    }
-                    result.push(current_arg.trim().to_string());
-                    current_arg.clear();
-                }
-                _ => {
-                    current_arg.push(ch);
-                }
-            }
-        }
-        
-        if !current_arg.trim().is_empty() {
-            result.push(current_arg.trim().to_string());
-        }
-        
-        result
-    }
 
-    fn transpile_print_call(&mut self, args: &str) -> Result<String> {
-        if args.is_empty() {
-            return Ok("console.log()".to_string());
-        }
-
-        let args_vec = self.split_function_args(args);
-        
-        if args_vec.len() == 1 {
-            // Single argument - just log it directly
-            Ok(format!("console.log({})", args))
-        } else {
-            // Multiple arguments - first is format string, rest are values
-            let format_str = &args_vec[0];
-            let values = &args_vec[1..];
-            
-            // Convert Blots format string syntax to JavaScript template literal
-            if format_str.starts_with('"') && format_str.ends_with('"') {
-                let mut template = format_str[1..format_str.len()-1].to_string();
-                
-                // Replace {} placeholders with ${value}
-                for (_i, value) in values.iter().enumerate() {
-                    // Use a helper to handle special values like Infinity/NaN that JSON.stringify can't handle
-                    let formatted_value = format!("${{typeof ({}) === 'number' && !isFinite({}) ? ({}) : JSON.stringify({}) || ({})}}", value, value, value, value, value);
-                    template = template.replacen("{}", &formatted_value, 1);
-                }
-                
-                Ok(format!("console.log(`{}`)", template))
-            } else {
-                // Fallback: just use console.log with all arguments
-                Ok(format!("console.log({})", args))
-            }
-        }
-    }
 
     fn transpile_single_term(&mut self, pair: pest::iterators::Pair<Rule>) -> Result<String> {
         match pair.as_rule() {

@@ -502,6 +502,61 @@ function $$eachDivide(left, right) {
     return result;
 }
 
+// Format function - returns formatted string (available everywhere)
+function $$format(formatStr, ...values) {
+    if (typeof formatStr !== 'string') {
+        throw new Error('First argument to format must be a string');
+    }
+    
+    let template = formatStr;
+    
+    // Replace {} placeholders with values
+    for (const value of values) {
+        // Convert value to string representation for formatting
+        let formattedValue;
+        if (typeof value === 'string') {
+            formattedValue = value;
+        } else if (typeof value === 'number' && !isFinite(value)) {
+            formattedValue = value.toString();
+        } else if (value === null || value === undefined) {
+            formattedValue = 'null';
+        } else {
+            formattedValue = JSON.stringify(value) || value.toString();
+        }
+        
+        template = template.replace('{}', formattedValue);
+    }
+    
+    return template;
+}
+
+// Print function - only available in Node.js/CLI environments
+function $$print(...args) {
+    // Check if we're in a Node.js environment
+    if (typeof process !== 'undefined' && process.versions && process.versions.node) {
+        if (args.length === 0) {
+            console.log();
+        } else if (args.length === 1) {
+            // Single argument - just log it directly
+            console.log(args[0]);
+        } else {
+            // Multiple arguments - first is format string, rest are values
+            const formatStr = args[0];
+            const values = args.slice(1);
+            
+            // Use the format function for consistency
+            if (typeof formatStr === 'string') {
+                console.log($$format(formatStr, ...values));
+            } else {
+                // Fallback: just use console.log with all arguments
+                console.log(...args);
+            }
+        }
+    } else {
+        throw new Error('print function is not available in browser environments');
+    }
+}
+
 // Constants object matching the Rust CONSTANTS
 const $$constants = {
     pi: Math.PI,
@@ -524,8 +579,13 @@ const $$builtins = {
     includes: $$includes, sort_by: $$sort_by, avg: $$avg, median: $$median, percentile: $$percentile,
     time_now: $$time_now, not: $$not, eq: $$eq,
     is_string: $$is_string, is_number: $$is_number, is_bool: $$is_bool, is_list: $$is_list, is_null: $$is_null,
-    constants: $$constants
+    format: $$format, constants: $$constants
 };
+
+// Add print function only in Node.js environments
+if (typeof process !== 'undefined' && process.versions && process.versions.node) {
+    $$builtins.print = $$print;
+}
 
 // Set up aliases at the end of execution
 setTimeout(() => {
