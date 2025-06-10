@@ -183,6 +183,32 @@ function $$factorial(n) {
     return result;
 }
 
+function $$min(...values) {
+    const flattened = values.flat();
+    if (flattened.length === 0) throw new Error('min expects at least one argument');
+    
+    for (const value of flattened) {
+        if (typeof value !== 'number') {
+            throw new Error(`min expects only numbers, got ${typeof value}`);
+        }
+    }
+    
+    return Math.min(...flattened);
+}
+
+function $$max(...values) {
+    const flattened = values.flat();
+    if (flattened.length === 0) throw new Error('max expects at least one argument');
+    
+    for (const value of flattened) {
+        if (typeof value !== 'number') {
+            throw new Error(`max expects only numbers, got ${typeof value}`);
+        }
+    }
+    
+    return Math.max(...flattened);
+}
+
 // String operations
 function $$split(str, delimiter) {
     return str.split(delimiter);
@@ -572,7 +598,7 @@ const $$constants = {
 const $$builtins = {
     map: $$map, filter: $$filter, reduce: $$reduce, collect: $$collect, each: $$each, reverse: $$reverse, 
     len: $$len, head: $$head, tail: $$tail, concat: $$concat, sum: $$sum, range: $$range,
-    abs: $$abs, floor: $$floor, ceil: $$ceil, round: $$round, sqrt: $$sqrt, 
+    abs: $$abs, floor: $$floor, ceil: $$ceil, round: $$round, sqrt: $$sqrt, min: $$min, max: $$max,
     sin: $$sin, cos: $$cos, tan: $$tan, asin: $$asin, acos: $$acos, atan: $$atan,
     exp: $$exp, ln: $$ln, log10: $$log10, factorial: $$factorial,
     split: $$split, join: $$join, uppercase: $$uppercase, lowercase: $$lowercase, to_string: $$to_string,
