@@ -41,7 +41,7 @@ benchmark = n => {
     fibs: collect(each(range(n)) with (i) => fibonacci(i)),
     factorials: collect(each(range(n)) with (i) => factorial(i)), 
     reverse_test: reverse(range(n)),
-    mandel_test: collect(each([[-2, -1], [-1, 0], [0, 0], [0.25, 0]]) with (point) => mandelbrot(point[0], point[1], 50, 0, [0, 0])),
+    mandel_test: collect(each([[-2, -1], [-1, 0], [0, 0], [0.25, 0]]) with (point) => mandelbrot(point[0], point[1], 100, 0, [0, 0])),
     sum_squares: sum(...collect(each(range(n)) with (i) => i * i)),
     trig_test: collect(each(range(n)) with (i) => [sin(i), cos(i), tan(i)])
 }

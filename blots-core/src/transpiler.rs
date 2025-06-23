@@ -295,7 +295,27 @@ impl Transpiler {
             
             match pair.as_rule() {
                 Rule::negation => {
-                    output.push('-');
+                    // Handle unary minus - we need to get the next term and apply negation to it
+                    if let Some(next_pair) = pairs.get(i + 1) {
+                        let next_term = match next_pair.as_rule() {
+                            Rule::lambda => self.transpile_lambda(next_pair.clone().into_inner())?,
+                            Rule::list => self.transpile_list(next_pair.clone().into_inner())?,
+                            Rule::record => self.transpile_record(next_pair.clone().into_inner())?,
+                            Rule::bool => next_pair.as_str().to_string(),
+                            Rule::string => next_pair.as_str().to_string(),
+                            Rule::null => "null".to_string(),
+                            Rule::identifier => self.escape_js_identifier(next_pair.as_str()),
+                            Rule::number => next_pair.as_str().replace('_', ""),
+                            Rule::nested_expression => {
+                                format!("({})", self.transpile_expression(next_pair.clone().into_inner())?)
+                            },
+                            _ => self.transpile_single_term(next_pair.clone())?,
+                        };
+                        terms.push(format!("(-({}))", next_term));
+                        i += 1; // Skip the next pair since we consumed it
+                    } else {
+                        return Err(anyhow!("Negation operator without following term"));
+                    }
                 }
                 Rule::invert => {
                     output.push('!');
@@ -436,7 +456,26 @@ impl Transpiler {
         while let Some(pair) = pairs.next() {
             match pair.as_rule() {
                 Rule::negation => {
-                    output.push('-');
+                    // Handle unary minus
+                    if let Some(next_pair) = pairs.next() {
+                        let next_term = match next_pair.as_rule() {
+                            Rule::lambda => self.transpile_lambda(next_pair.into_inner())?,
+                            Rule::list => self.transpile_list(next_pair.into_inner())?,
+                            Rule::record => self.transpile_record(next_pair.into_inner())?,
+                            Rule::bool => next_pair.as_str().to_string(),
+                            Rule::string => next_pair.as_str().to_string(),
+                            Rule::null => "null".to_string(),
+                            Rule::identifier => self.escape_js_identifier(next_pair.as_str()),
+                            Rule::number => next_pair.as_str().replace('_', ""),
+                            Rule::nested_expression => {
+                                format!("({})", self.transpile_expression(next_pair.into_inner())?)
+                            },
+                            _ => self.transpile_single_term(next_pair)?,
+                        };
+                        terms.push(format!("(-({}))", next_term));
+                    } else {
+                        return Err(anyhow!("Negation operator without following term"));
+                    }
                 }
                 Rule::invert => {
                     output.push('!');
