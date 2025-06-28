@@ -8,7 +8,8 @@
       "Bash(find:*)",
       "Bash(wasm-pack build:*)",
       "Bash(rm:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(cargo test:*)"
     ],
     "deny": []
   }
