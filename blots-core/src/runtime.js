@@ -311,6 +311,20 @@ function $$lowercase(str) {
 }
 
 function $$to_string(value) {
+  // Check if this is a built-in function
+  if (typeof value === "function") {
+    // Check if this function is in our built-ins registry
+    for (const [name, func] of Object.entries($$builtins)) {
+      if (value === func) {
+        return `${name} (built-in function)`;
+      }
+    }
+    // Check if it's a $$ prefixed function directly
+    if (value.name && value.name.startsWith("$$")) {
+      const cleanName = value.name.substring(2);
+      return `${cleanName} (built-in function)`;
+    }
+  }
   return String(value);
 }
 
@@ -775,6 +789,9 @@ function $$format(formatStr, ...values) {
       formattedValue = value.toString();
     } else if (value === null || value === undefined) {
       formattedValue = "null";
+    } else if (typeof value === "function") {
+      // Use our built-in-aware string conversion for functions
+      formattedValue = $$to_string(value);
     } else {
       formattedValue = JSON.stringify(value) || value.toString();
     }
