@@ -40,17 +40,22 @@ impl BinaryOp {
     fn precedence(&self) -> i32 {
         match self {
             BinaryOp::And | BinaryOp::Or => 1,
-            BinaryOp::Equal | BinaryOp::NotEqual | BinaryOp::Less | BinaryOp::LessEq | BinaryOp::Greater | BinaryOp::GreaterEq => 2,
+            BinaryOp::Equal
+            | BinaryOp::NotEqual
+            | BinaryOp::Less
+            | BinaryOp::LessEq
+            | BinaryOp::Greater
+            | BinaryOp::GreaterEq => 2,
             BinaryOp::Add | BinaryOp::Subtract => 3,
             BinaryOp::Multiply | BinaryOp::Divide | BinaryOp::Modulo => 4,
             BinaryOp::Power | BinaryOp::Coalesce => 5,
         }
     }
-    
+
     fn is_right_associative(&self) -> bool {
         matches!(self, BinaryOp::Power)
     }
-    
+
     fn to_js_function(&self) -> String {
         match self {
             BinaryOp::Add => "$$add".to_string(),
@@ -70,9 +75,17 @@ impl BinaryOp {
             BinaryOp::Coalesce => " ?? ".to_string(),
         }
     }
-    
+
     fn is_function_call(&self) -> bool {
-        matches!(self, BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply | BinaryOp::Divide | BinaryOp::Modulo | BinaryOp::Power)
+        matches!(
+            self,
+            BinaryOp::Add
+                | BinaryOp::Subtract
+                | BinaryOp::Multiply
+                | BinaryOp::Divide
+                | BinaryOp::Modulo
+                | BinaryOp::Power
+        )
     }
 }
 
@@ -83,14 +96,14 @@ pub struct Transpiler {
 
 impl Transpiler {
     pub fn new() -> Self {
-        Self { 
+        Self {
             indent_level: 0,
             inline_evaluation: false,
         }
     }
 
     pub fn new_with_inline_eval() -> Self {
-        Self { 
+        Self {
             indent_level: 0,
             inline_evaluation: true,
         }
@@ -100,15 +113,16 @@ impl Transpiler {
         let source_string = source.to_string();
         let pairs = get_pairs(&source_string)?;
         let mut output = String::new();
-        
+
         // Include runtime helpers
         output.push_str(&self.get_runtime_helpers());
         output.push('\n');
-        
+
         if self.inline_evaluation {
-            output.push_str("const $$results = { values: {}, bindings: {}, outputs: new Set() };\n");
+            output
+                .push_str("const $$results = { values: {}, bindings: {}, outputs: new Set() };\n");
         }
-        
+
         for pair in pairs {
             match pair.as_rule() {
                 Rule::statement => {
@@ -122,7 +136,7 @@ impl Transpiler {
                 rule => return Err(anyhow!("Unexpected top-level rule: {:?}", rule)),
             }
         }
-        
+
         if self.inline_evaluation {
             output.push_str("\n// Return results for inline evaluation\n");
             output.push_str("if (typeof module !== 'undefined' && module.exports) {\n");
@@ -133,23 +147,28 @@ impl Transpiler {
             output.push_str("    globalThis.$$results = $$results;\n");
             output.push_str("}\n");
         }
-        
+
         // No longer need post-processing since our with-chain parser handles precedence correctly
-        
+
         Ok(output)
     }
-
 
     fn get_runtime_helpers(&self) -> String {
         include_str!("runtime.js").to_string()
     }
 
-    fn transpile_statement_with_position(&mut self, pair: pest::iterators::Pair<Rule>) -> Result<String> {
+    fn transpile_statement_with_position(
+        &mut self,
+        pair: pest::iterators::Pair<Rule>,
+    ) -> Result<String> {
         if let Some(inner_pair) = pair.into_inner().next() {
             let start_pos = inner_pair.as_span().start_pos().line_col();
             let end_pos = inner_pair.as_span().end_pos().line_col();
-            let position_id = format!("{}-{}__{}-{}", start_pos.0, start_pos.1, end_pos.0, end_pos.1);
-            
+            let position_id = format!(
+                "{}-{}__{}-{}",
+                start_pos.0, start_pos.1, end_pos.0, end_pos.1
+            );
+
             match inner_pair.as_rule() {
                 Rule::expression => {
                     let expr = self.transpile_expression(inner_pair.into_inner())?;
@@ -157,8 +176,12 @@ impl Transpiler {
                         // For inline evaluation, we need to handle assignments differently
                         if expr.starts_with("const ") {
                             // It's an assignment - execute it and capture the variable value
-                            let var_name = expr.split('=').next().unwrap().trim().replace("const ", "");
-                            Ok(format!("{};\n$$results.values['{}'] = {};", expr, position_id, var_name))
+                            let var_name =
+                                expr.split('=').next().unwrap().trim().replace("const ", "");
+                            Ok(format!(
+                                "{};\n$$results.values['{}'] = {};",
+                                expr, position_id, var_name
+                            ))
                         } else {
                             // It's a pure expression - capture its result
                             Ok(format!("$$results.values['{}'] = {};", position_id, expr))
@@ -168,11 +191,16 @@ impl Transpiler {
                     }
                 }
                 Rule::output_declaration => {
-                    let output_stmt = self.transpile_output_declaration(inner_pair.clone().into_inner())?;
+                    let output_stmt =
+                        self.transpile_output_declaration(inner_pair.clone().into_inner())?;
                     if self.inline_evaluation {
                         // For output declarations, extract the variable name and capture its value
-                        let var_name = self.extract_output_variable_name(inner_pair.into_inner())?;
-                        Ok(format!("{};\n$$results.values['{}'] = {};", output_stmt, position_id, var_name))
+                        let var_name =
+                            self.extract_output_variable_name(inner_pair.into_inner())?;
+                        Ok(format!(
+                            "{};\n$$results.values['{}'] = {};",
+                            output_stmt, position_id, var_name
+                        ))
                     } else {
                         Ok(self.ensure_semicolon(output_stmt))
                     }
@@ -199,19 +227,27 @@ impl Transpiler {
     fn extract_output_variable_name(&mut self, mut pairs: Pairs<Rule>) -> Result<String> {
         if let Some(pair) = pairs.next() {
             match pair.as_rule() {
-                Rule::identifier => {
-                    Ok(self.escape_js_identifier(pair.as_str()))
-                }
+                Rule::identifier => Ok(self.escape_js_identifier(pair.as_str())),
                 Rule::assignment => {
                     // Extract variable name from assignment
                     let assignment = self.transpile_assignment(pair.into_inner())?;
-                    let var_name = assignment.split('=').next().unwrap().trim().replace("const ", "");
+                    let var_name = assignment
+                        .split('=')
+                        .next()
+                        .unwrap()
+                        .trim()
+                        .replace("const ", "");
                     Ok(var_name)
                 }
-                rule => Err(anyhow!("Unexpected output declaration rule in extract_output_variable_name: {:?}", rule)),
+                rule => Err(anyhow!(
+                    "Unexpected output declaration rule in extract_output_variable_name: {:?}",
+                    rule
+                )),
             }
         } else {
-            Err(anyhow!("Empty output declaration in extract_output_variable_name"))
+            Err(anyhow!(
+                "Empty output declaration in extract_output_variable_name"
+            ))
         }
     }
 
@@ -231,7 +267,12 @@ impl Transpiler {
                 }
                 Rule::assignment => {
                     let assignment = self.transpile_assignment(pair.into_inner())?;
-                    let var_name = assignment.split('=').next().unwrap().trim().replace("const ", "");
+                    let var_name = assignment
+                        .split('=')
+                        .next()
+                        .unwrap()
+                        .trim()
+                        .replace("const ", "");
                     if self.inline_evaluation {
                         // For inline evaluation, add to outputs set and export
                         Ok(format!("{};\n$$results.outputs.add('{}');\n// Export {} for next code block\nif (typeof exports !== 'undefined') exports.{} = {};", assignment, var_name, var_name, var_name, var_name))
@@ -254,25 +295,28 @@ impl Transpiler {
     fn transpile_expression_pratt(&mut self, pairs: Pairs<Rule>) -> Result<String> {
         // Collect all pairs to analyze the structure
         let pair_vec: Vec<_> = pairs.collect();
-        
+
         // Check if this is a 'with' chain that needs special handling
         if self.contains_with_chain(&pair_vec) {
             return self.transpile_with_chain_properly(&pair_vec);
         }
-        
+
         // For non-with expressions, use the regular parsing
         self.transpile_expression_from_pairs(pair_vec)
     }
-    
+
     fn contains_with_chain(&self, pairs: &[pest::iterators::Pair<Rule>]) -> bool {
         pairs.iter().any(|p| p.as_rule() == Rule::with)
     }
-    
-    fn transpile_with_chain_properly(&mut self, pairs: &[pest::iterators::Pair<Rule>]) -> Result<String> {
+
+    fn transpile_with_chain_properly(
+        &mut self,
+        pairs: &[pest::iterators::Pair<Rule>],
+    ) -> Result<String> {
         // Parse the with chain by splitting on 'with' keywords and building left-associatively
         let mut segments = Vec::new();
         let mut current_segment = Vec::new();
-        
+
         for pair in pairs {
             if pair.as_rule() == Rule::with {
                 if !current_segment.is_empty() {
@@ -283,28 +327,28 @@ impl Transpiler {
                 current_segment.push(pair.clone());
             }
         }
-        
+
         // Add the last segment
         if !current_segment.is_empty() {
             segments.push(current_segment);
         }
-        
+
         if segments.len() < 2 {
             // Not actually a with chain, fall back to regular parsing
             return self.transpile_expression_from_pairs(pairs.to_vec());
         }
-        
+
         // Build the with chain left-associatively
         let mut result = self.transpile_segment(&segments[0])?;
-        
+
         for segment in &segments[1..] {
             let right_expr = self.transpile_segment(segment)?;
             result = self.transpile_with_operator(&result, &right_expr)?;
         }
-        
+
         Ok(result)
     }
-    
+
     fn transpile_segment(&mut self, pairs: &[pest::iterators::Pair<Rule>]) -> Result<String> {
         if pairs.len() == 1 {
             match pairs[0].as_rule() {
@@ -315,9 +359,10 @@ impl Transpiler {
                 Rule::bool => Ok(pairs[0].as_str().to_string()),
                 Rule::null => Ok("null".to_string()),
                 Rule::list => self.transpile_list(pairs[0].clone().into_inner()),
-                Rule::nested_expression => {
-                    Ok(format!("({})", self.transpile_expression(pairs[0].clone().into_inner())?))
-                },
+                Rule::nested_expression => Ok(format!(
+                    "({})",
+                    self.transpile_expression(pairs[0].clone().into_inner())?
+                )),
                 _ => self.transpile_single_term(pairs[0].clone()),
             }
         } else {
@@ -325,14 +370,17 @@ impl Transpiler {
             self.transpile_expression_from_pairs(pairs.to_vec())
         }
     }
-    
-    fn transpile_expression_from_pairs(&mut self, pairs: Vec<pest::iterators::Pair<Rule>>) -> Result<String> {
+
+    fn transpile_expression_from_pairs(
+        &mut self,
+        pairs: Vec<pest::iterators::Pair<Rule>>,
+    ) -> Result<String> {
         // For non-with expressions, reconstruct the pairs iterator and use the old method
         // This ensures compatibility with existing transpilation logic
-        
+
         // Convert the Vec back to something we can iterate over
         // We need to carefully reconstruct a Pairs iterator-like behavior
-        
+
         // For now, let's handle simple cases and use the old method for complex ones
         if pairs.len() == 1 {
             let pair = &pairs[0];
@@ -342,9 +390,10 @@ impl Transpiler {
                 Rule::assignment => self.transpile_assignment(pair.clone().into_inner()),
                 Rule::list => self.transpile_list(pair.clone().into_inner()),
                 Rule::record => self.transpile_record(pair.clone().into_inner()),
-                Rule::nested_expression => {
-                    Ok(format!("({})", self.transpile_expression(pair.clone().into_inner())?))
-                }
+                Rule::nested_expression => Ok(format!(
+                    "({})",
+                    self.transpile_expression(pair.clone().into_inner())?
+                )),
                 _ => self.transpile_single_term(pair.clone()),
             }
         } else {
@@ -353,31 +402,41 @@ impl Transpiler {
             self.transpile_complex_expression_from_pairs(pairs)
         }
     }
-    
-    fn transpile_complex_expression_from_pairs(&mut self, pairs: Vec<pest::iterators::Pair<Rule>>) -> Result<String> {
+
+    fn transpile_complex_expression_from_pairs(
+        &mut self,
+        pairs: Vec<pest::iterators::Pair<Rule>>,
+    ) -> Result<String> {
         // Parse expression with proper operator precedence
         let mut tokens = Vec::new();
         let mut i = 0;
-        
+
         while i < pairs.len() {
             let pair = &pairs[i];
-            
+
             match pair.as_rule() {
                 Rule::negation => {
                     // Handle unary minus - we need to get the next term and apply negation to it
                     if let Some(next_pair) = pairs.get(i + 1) {
                         let next_term = match next_pair.as_rule() {
-                            Rule::lambda => self.transpile_lambda(next_pair.clone().into_inner())?,
+                            Rule::lambda => {
+                                self.transpile_lambda(next_pair.clone().into_inner())?
+                            }
                             Rule::list => self.transpile_list(next_pair.clone().into_inner())?,
-                            Rule::record => self.transpile_record(next_pair.clone().into_inner())?,
+                            Rule::record => {
+                                self.transpile_record(next_pair.clone().into_inner())?
+                            }
                             Rule::bool => next_pair.as_str().to_string(),
                             Rule::string => next_pair.as_str().to_string(),
                             Rule::null => "null".to_string(),
                             Rule::identifier => self.escape_js_identifier(next_pair.as_str()),
                             Rule::number => next_pair.as_str().replace('_', ""),
                             Rule::nested_expression => {
-                                format!("({})", self.transpile_expression(next_pair.clone().into_inner())?)
-                            },
+                                format!(
+                                    "({})",
+                                    self.transpile_expression(next_pair.clone().into_inner())?
+                                )
+                            }
                             _ => self.transpile_single_term(next_pair.clone())?,
                         };
                         tokens.push(ExprToken::Term(format!("(-({}))", next_term)));
@@ -396,10 +455,14 @@ impl Transpiler {
                     return self.transpile_assignment(pair.clone().into_inner());
                 }
                 Rule::list => {
-                    tokens.push(ExprToken::Term(self.transpile_list(pair.clone().into_inner())?));
+                    tokens.push(ExprToken::Term(
+                        self.transpile_list(pair.clone().into_inner())?,
+                    ));
                 }
                 Rule::record => {
-                    tokens.push(ExprToken::Term(self.transpile_record(pair.clone().into_inner())?));
+                    tokens.push(ExprToken::Term(
+                        self.transpile_record(pair.clone().into_inner())?,
+                    ));
                 }
                 Rule::bool => {
                     tokens.push(ExprToken::Term(pair.as_str().to_string()));
@@ -418,7 +481,10 @@ impl Transpiler {
                     tokens.push(ExprToken::Term(num_str));
                 }
                 Rule::nested_expression => {
-                    tokens.push(ExprToken::Term(format!("({})", self.transpile_expression(pair.clone().into_inner())?)));
+                    tokens.push(ExprToken::Term(format!(
+                        "({})",
+                        self.transpile_expression(pair.clone().into_inner())?
+                    )));
                 }
                 // Handle postfix operators by applying them to the last term
                 Rule::factorial => {
@@ -474,19 +540,23 @@ impl Transpiler {
                 }
                 _ => {}
             }
-            
+
             i += 1;
         }
-        
+
         // Apply operator precedence using a precedence climbing algorithm
         self.parse_expression_with_precedence(tokens, 0)
     }
-    
-    fn parse_expression_with_precedence(&mut self, tokens: Vec<ExprToken>, _min_precedence: i32) -> Result<String> {
+
+    fn parse_expression_with_precedence(
+        &mut self,
+        tokens: Vec<ExprToken>,
+        _min_precedence: i32,
+    ) -> Result<String> {
         if tokens.is_empty() {
             return Ok(String::new());
         }
-        
+
         // Handle simple cases
         if tokens.len() == 1 {
             return match &tokens[0] {
@@ -494,23 +564,25 @@ impl Transpiler {
                 ExprToken::Operator(_) => Err(anyhow!("Unexpected operator without operands")),
             };
         }
-        
+
         // Convert to postfix using the shunting yard algorithm, then evaluate
         let postfix = self.to_postfix(tokens)?;
         self.evaluate_postfix(postfix)
     }
-    
+
     fn to_postfix(&self, tokens: Vec<ExprToken>) -> Result<Vec<ExprToken>> {
         let mut output = Vec::new();
         let mut operator_stack = Vec::new();
-        
+
         for token in tokens {
             match token {
                 ExprToken::Term(_) => output.push(token),
                 ExprToken::Operator(op) => {
                     while let Some(ExprToken::Operator(stack_op)) = operator_stack.last() {
-                        if stack_op.precedence() > op.precedence() || 
-                           (stack_op.precedence() == op.precedence() && !op.is_right_associative()) {
+                        if stack_op.precedence() > op.precedence()
+                            || (stack_op.precedence() == op.precedence()
+                                && !op.is_right_associative())
+                        {
                             output.push(operator_stack.pop().unwrap());
                         } else {
                             break;
@@ -520,18 +592,18 @@ impl Transpiler {
                 }
             }
         }
-        
+
         // Pop remaining operators
         while let Some(op) = operator_stack.pop() {
             output.push(op);
         }
-        
+
         Ok(output)
     }
-    
+
     fn evaluate_postfix(&self, postfix: Vec<ExprToken>) -> Result<String> {
         let mut stack = Vec::new();
-        
+
         for token in postfix {
             match token {
                 ExprToken::Term(term) => stack.push(term),
@@ -541,22 +613,22 @@ impl Transpiler {
                     }
                     let right = stack.pop().unwrap();
                     let left = stack.pop().unwrap();
-                    
+
                     let result = if op.is_function_call() {
                         format!("{}({}, {})", op.to_js_function(), left, right)
                     } else {
                         format!("{}{}{}", left, op.to_js_function(), right)
                     };
-                    
+
                     stack.push(result);
                 }
             }
         }
-        
+
         if stack.len() != 1 {
             return Err(anyhow!("Invalid expression"));
         }
-        
+
         Ok(stack.pop().unwrap())
     }
 
@@ -581,7 +653,7 @@ impl Transpiler {
                             Rule::number => next_pair.as_str().replace('_', ""),
                             Rule::nested_expression => {
                                 format!("({})", self.transpile_expression(next_pair.into_inner())?)
-                            },
+                            }
                             _ => self.transpile_single_term(next_pair)?,
                         };
                         terms.push(format!("(-({}))", next_term));
@@ -624,7 +696,10 @@ impl Transpiler {
                     terms.push(num_str);
                 }
                 Rule::nested_expression => {
-                    terms.push(format!("({})", self.transpile_expression(pair.into_inner())?));
+                    terms.push(format!(
+                        "({})",
+                        self.transpile_expression(pair.into_inner())?
+                    ));
                 }
                 Rule::factorial => {
                     if let Some(last_term) = terms.last_mut() {
@@ -677,17 +752,20 @@ impl Transpiler {
                     // Process 'with' operator immediately to ensure left-associativity
                     if !terms.is_empty() {
                         let left = terms.pop().unwrap();
-                        
+
                         // Find the next lambda or expression for the right side
                         if let Some(next_pair) = pairs.next() {
                             let right = match next_pair.as_rule() {
                                 Rule::lambda => self.transpile_lambda(next_pair.into_inner())?,
                                 Rule::nested_expression => {
-                                    format!("({})", self.transpile_expression(next_pair.into_inner())?)
+                                    format!(
+                                        "({})",
+                                        self.transpile_expression(next_pair.into_inner())?
+                                    )
                                 }
                                 _ => self.transpile_single_term(next_pair)?,
                             };
-                            
+
                             let result = self.transpile_with_operator(&left, &right)?;
                             terms.push(result);
                         }
@@ -742,19 +820,25 @@ impl Transpiler {
 
         Ok(output)
     }
-    
+
     fn is_function_operator(&self, op: &str) -> bool {
-        matches!(op, "$$add" | "$$subtract" | "$$multiply" | "$$divide" | "$$modulo" | "$$power")
+        matches!(
+            op,
+            "$$add" | "$$subtract" | "$$multiply" | "$$divide" | "$$modulo" | "$$power"
+        )
     }
-    
+
     fn is_distributive_operator(&self, op: &str) -> bool {
-        matches!(op, " && " | " || " | " ?? " | " === " | " !== " | " < " | " <= " | " > " | " >= ")
+        matches!(
+            op,
+            " && " | " || " | " ?? " | " === " | " !== " | " < " | " <= " | " > " | " >= "
+        )
     }
-    
+
     fn handle_distributive_operation(&self, left: &str, op: &str, right: &str) -> Result<String> {
         let left_is_each = self.is_each_expression(left);
         let right_is_each = self.is_each_expression(right);
-        
+
         if left_is_each && !right_is_each {
             // each(collection) OP value -> each(collection.map(x => x OP value))
             let inner_expr = self.extract_each_inner(left);
@@ -767,36 +851,93 @@ impl Transpiler {
             // each(coll1) OP each(coll2) -> each(coll1.map((x, i) => x OP coll2[i]))
             let left_inner = self.extract_each_inner(left);
             let right_inner = self.extract_each_inner(right);
-            Ok(format!("$$each({}.map((x, i) => x{} ({})[i]))", left_inner, op, right_inner))
+            Ok(format!(
+                "$$each({}.map((x, i) => x{} ({})[i]))",
+                left_inner, op, right_inner
+            ))
         } else {
             // Neither side is each - regular operation
             Ok(format!("{}{}{}", left, op, right))
         }
     }
-    
+
     fn extract_each_inner<'a>(&self, expr: &'a str) -> &'a str {
         if expr.starts_with("$$each(") && expr.ends_with(")") {
-            &expr[7..expr.len()-1]
+            &expr[7..expr.len() - 1]
         } else if expr.starts_with("each(") && expr.ends_with(")") {
-            &expr[5..expr.len()-1]
+            &expr[5..expr.len() - 1]
         } else {
             expr
         }
     }
-    
+
     fn escape_js_identifier(&self, ident: &str) -> String {
         // List of JavaScript reserved keywords that need escaping
         let js_keywords = [
-            "abstract", "await", "boolean", "break", "byte", "case", "catch", "char",
-            "class", "const", "continue", "debugger", "default", "delete", "do", "double",
-            "else", "enum", "export", "extends", "false", "final", "finally", "float",
-            "for", "function", "goto", "if", "implements", "import", "in", "instanceof",
-            "int", "interface", "let", "long", "native", "new", "package", "private",
-            "protected", "public", "return", "short", "static", "super", "switch",
-            "synchronized", "this", "throw", "throws", "transient", "true", "try",
-            "typeof", "undefined", "var", "void", "volatile", "while", "with", "yield"
+            "abstract",
+            "await",
+            "boolean",
+            "break",
+            "byte",
+            "case",
+            "catch",
+            "char",
+            "class",
+            "const",
+            "continue",
+            "debugger",
+            "default",
+            "delete",
+            "do",
+            "double",
+            "else",
+            "enum",
+            "export",
+            "extends",
+            "false",
+            "final",
+            "finally",
+            "float",
+            "for",
+            "function",
+            "goto",
+            "if",
+            "implements",
+            "import",
+            "in",
+            "instanceof",
+            "int",
+            "interface",
+            "let",
+            "long",
+            "native",
+            "new",
+            "package",
+            "private",
+            "protected",
+            "public",
+            "return",
+            "short",
+            "static",
+            "super",
+            "switch",
+            "synchronized",
+            "this",
+            "throw",
+            "throws",
+            "transient",
+            "true",
+            "try",
+            "typeof",
+            "undefined",
+            "var",
+            "void",
+            "volatile",
+            "while",
+            "with",
+            "yield",
         ];
-        
+
         if js_keywords.contains(&ident) {
             format!("$$_{}", ident)
         } else {
@@ -819,9 +960,10 @@ impl Transpiler {
                 let num_str = primary.as_str().replace('_', "");
                 Ok(num_str)
             }
-            Rule::nested_expression => {
-                Ok(format!("({})", self.transpile_expression(primary.into_inner())?))
-            }
+            Rule::nested_expression => Ok(format!(
+                "({})",
+                self.transpile_expression(primary.into_inner())?
+            )),
             Rule::expression => {
                 // Handle inner expressions (from parentheses that were parsed as silent rules)
                 let expr_result = self.transpile_expression(primary.into_inner())?;
@@ -831,18 +973,17 @@ impl Transpiler {
         }
     }
 
-
     fn transpile_with_operator(&mut self, lhs: &str, rhs: &str) -> Result<String> {
         // Check if the left side is an 'each' expression
         let is_each_expr = self.is_each_expression(lhs);
-        
+
         if is_each_expr {
             // For each expressions, use mapping behavior
             // Extract the inner expression from each(...) or $$each(...)
             let inner_expr = if lhs.starts_with("$$each(") && lhs.ends_with(")") {
-                &lhs[7..lhs.len()-1]
+                &lhs[7..lhs.len() - 1]
             } else if lhs.starts_with("each(") && lhs.ends_with(")") {
-                &lhs[5..lhs.len()-1]
+                &lhs[5..lhs.len() - 1]
             } else {
                 lhs
             };
@@ -857,39 +998,41 @@ impl Transpiler {
         let condition = self.transpile_expression(pairs.next().unwrap().into_inner())?;
         let then_expr = self.transpile_expression(pairs.next().unwrap().into_inner())?;
         let else_expr = self.transpile_expression(pairs.next().unwrap().into_inner())?;
-        
+
         Ok(format!("({} ? {} : {})", condition, then_expr, else_expr))
     }
 
     fn transpile_lambda(&mut self, mut pairs: Pairs<Rule>) -> Result<String> {
         let args_pair = pairs.next().unwrap();
         let body_pair = pairs.next().unwrap();
-        
+
         let args = self.transpile_argument_list(args_pair.clone().into_inner())?;
         let body = self.transpile_expression(body_pair.clone().into_inner())?;
-        
+
         // If body starts with {, it's an object literal and needs parentheses in JS
         let formatted_body = if body.trim().starts_with('{') {
             format!("({})", body)
         } else {
             body
         };
-        
+
         // Preserve original source for display purposes
         let original_args = args_pair.as_str();
         let original_body = body_pair.as_str();
         let original_source = format!("{} => {}", original_args, original_body);
-        
+
         // Create function with original source preserved as a property
         Ok(format!(
             "(($$f) => {{ $$f.$$originalSource = `{}`; return $$f; }})(({}) => {})",
-            original_source.replace('`', "\\`"), args, formatted_body
+            original_source.replace('`', "\\`"),
+            args,
+            formatted_body
         ))
     }
 
     fn transpile_argument_list(&mut self, mut pairs: Pairs<Rule>) -> Result<String> {
         let mut args = Vec::new();
-        
+
         while let Some(pair) = pairs.next() {
             match pair.as_rule() {
                 Rule::required_arg => {
@@ -906,7 +1049,7 @@ impl Transpiler {
                 _ => {}
             }
         }
-        
+
         Ok(args.join(", "))
     }
 
@@ -914,16 +1057,17 @@ impl Transpiler {
         let original_var_name = pairs.next().unwrap().as_str();
         let escaped_var_name = self.escape_js_identifier(original_var_name);
         let value_pair = pairs.next().unwrap();
-        
+
         // Check if the value itself is an assignment (chained assignment)
         let value_pairs: Vec<_> = value_pair.into_inner().collect();
-        
+
         // Look for assignments in the value expression
         if value_pairs.len() == 1 && value_pairs[0].as_rule() == Rule::assignment {
             // This is a chained assignment like a = b = 5
             // We need to handle this specially to avoid "const a = const b = 5"
-            let inner_assignment = self.transpile_assignment(value_pairs[0].clone().into_inner())?;
-            
+            let inner_assignment =
+                self.transpile_assignment(value_pairs[0].clone().into_inner())?;
+
             // Extract the variable name from the inner assignment to use as our value
             // For chained assignments, we want the leftmost variable (the one closest to us)
             // e.g., for "const z = 10; const y = z", we want "y"
@@ -934,34 +1078,58 @@ impl Transpiler {
                     let trimmed = stmt.trim();
                     if trimmed.starts_with("const ") && trimmed.contains('=') {
                         let var_part = trimmed.split('=').next().unwrap().trim();
-                        return Ok(format!("{}; const {} = {}", 
-                            inner_assignment, 
-                            escaped_var_name, 
-                            var_part.replace("const ", "")));
+                        return Ok(format!(
+                            "{}; const {} = {}",
+                            inner_assignment,
+                            escaped_var_name,
+                            var_part.replace("const ", "")
+                        ));
                     }
                 }
                 // Fallback - extract from first statement
-                inner_assignment.split('=').next().unwrap().trim().replace("const ", "")
+                inner_assignment
+                    .split('=')
+                    .next()
+                    .unwrap()
+                    .trim()
+                    .replace("const ", "")
             } else {
                 // Single statement
-                inner_assignment.split('=').next().unwrap().trim().replace("const ", "")
+                inner_assignment
+                    .split('=')
+                    .next()
+                    .unwrap()
+                    .trim()
+                    .replace("const ", "")
             };
-            
+
             if self.inline_evaluation {
                 // For inline evaluation, we need both assignments
-                Ok(format!("{}; const {} = {}; $$results.bindings['{}'] = {}", 
-                    inner_assignment, escaped_var_name, inner_var, original_var_name, escaped_var_name))
+                Ok(format!(
+                    "{}; const {} = {}; $$results.bindings['{}'] = {}",
+                    inner_assignment,
+                    escaped_var_name,
+                    inner_var,
+                    original_var_name,
+                    escaped_var_name
+                ))
             } else {
                 // Generate: const b = 5; const a = b;
-                Ok(format!("{}; const {} = {}", inner_assignment, escaped_var_name, inner_var))
+                Ok(format!(
+                    "{}; const {} = {}",
+                    inner_assignment, escaped_var_name, inner_var
+                ))
             }
         } else {
             // Regular assignment - not chained
             let value = self.transpile_expression_from_pairs(value_pairs)?;
-            
+
             if self.inline_evaluation {
                 // Capture the binding in $$results.bindings (use original name as the key)
-                Ok(format!("const {} = {}; $$results.bindings['{}'] = {}", escaped_var_name, value, original_var_name, escaped_var_name))
+                Ok(format!(
+                    "const {} = {}; $$results.bindings['{}'] = {}",
+                    escaped_var_name, value, original_var_name, escaped_var_name
+                ))
             } else {
                 Ok(format!("const {} = {}", escaped_var_name, value))
             }
@@ -970,11 +1138,13 @@ impl Transpiler {
 
     fn transpile_list(&mut self, mut pairs: Pairs<Rule>) -> Result<String> {
         let mut elements = Vec::new();
-        
+
         while let Some(pair) = pairs.next() {
             match pair.as_rule() {
                 Rule::spread_expression => {
-                    let expr = self.transpile_expression(pair.into_inner().skip(1).next().unwrap().into_inner())?;
+                    let expr = self.transpile_expression(
+                        pair.into_inner().skip(1).next().unwrap().into_inner(),
+                    )?;
                     elements.push(format!("...$$spreadToArray({})", expr));
                 }
                 Rule::expression => {
@@ -983,20 +1153,20 @@ impl Transpiler {
                 _ => {}
             }
         }
-        
+
         Ok(format!("[{}]", elements.join(", ")))
     }
 
     fn transpile_record(&mut self, mut pairs: Pairs<Rule>) -> Result<String> {
         let mut properties = Vec::new();
-        
+
         while let Some(pair) = pairs.next() {
             match pair.as_rule() {
                 Rule::record_pair => {
                     let mut inner = pair.into_inner();
                     let key_pair = inner.next().unwrap();
                     let value = self.transpile_expression(inner.next().unwrap().into_inner())?;
-                    
+
                     let key = match key_pair.as_rule() {
                         Rule::record_key_static => {
                             let key_inner = key_pair.into_inner().next().unwrap();
@@ -1011,7 +1181,7 @@ impl Transpiler {
                         }
                         _ => return Err(anyhow!("Unexpected record key rule")),
                     };
-                    
+
                     properties.push(format!("{}: {}", key, value));
                 }
                 Rule::record_shorthand => {
@@ -1019,23 +1189,27 @@ impl Transpiler {
                     properties.push(prop_name.to_string());
                 }
                 Rule::spread_expression => {
-                    let expr = self.transpile_expression(pair.into_inner().skip(1).next().unwrap().into_inner())?;
+                    let expr = self.transpile_expression(
+                        pair.into_inner().skip(1).next().unwrap().into_inner(),
+                    )?;
                     properties.push(format!("...{}", expr));
                 }
                 _ => {}
             }
         }
-        
+
         Ok(format!("{{{}}}", properties.join(", ")))
     }
 
     fn transpile_call_args(&mut self, mut pairs: Pairs<Rule>) -> Result<String> {
         let mut args = Vec::new();
-        
+
         while let Some(pair) = pairs.next() {
             match pair.as_rule() {
                 Rule::spread_expression => {
-                    let expr = self.transpile_expression(pair.into_inner().skip(1).next().unwrap().into_inner())?;
+                    let expr = self.transpile_expression(
+                        pair.into_inner().skip(1).next().unwrap().into_inner(),
+                    )?;
                     args.push(format!("...{}", expr));
                 }
                 Rule::expression => {
@@ -1044,11 +1218,9 @@ impl Transpiler {
                 _ => {}
             }
         }
-        
+
         Ok(args.join(", "))
     }
-
-
 
     fn transpile_single_term(&mut self, pair: pest::iterators::Pair<Rule>) -> Result<String> {
         match pair.as_rule() {
@@ -1063,9 +1235,10 @@ impl Transpiler {
                 let num_str = pair.as_str().replace('_', "");
                 Ok(num_str)
             }
-            Rule::nested_expression => {
-                Ok(format!("({})", self.transpile_expression(pair.into_inner())?))
-            }
+            Rule::nested_expression => Ok(format!(
+                "({})",
+                self.transpile_expression(pair.into_inner())?
+            )),
             _ => Ok(pair.as_str().to_string()),
         }
     }
@@ -1075,7 +1248,7 @@ impl Transpiler {
         if trimmed.is_empty() {
             return stmt;
         }
-        
+
         // Don't add semicolon if it already ends with one, or if it's a block statement
         if trimmed.ends_with(';') || trimmed.ends_with('}') || trimmed.ends_with('{') {
             stmt
@@ -1087,7 +1260,6 @@ impl Transpiler {
     fn is_each_expression(&self, term: &str) -> bool {
         term.starts_with("each(") || term.starts_with("$$each(")
     }
-
 }
 
 pub fn transpile_to_js(source: &str) -> Result<String> {
@@ -1114,7 +1286,7 @@ mod tests {
         // Look for the line that contains user code (usually after all the runtime setup)
         let lines: Vec<&str> = transpiled.lines().collect();
         let mut user_start = lines.len();
-        
+
         // Find the last instance of runtime setup code
         for (i, line) in lines.iter().enumerate().rev() {
             if line.contains("var inputs = globalThis.inputs;") {
@@ -1122,7 +1294,7 @@ mod tests {
                 break;
             }
         }
-        
+
         if user_start < lines.len() {
             lines[user_start..]
                 .iter()
@@ -1149,7 +1321,7 @@ mod tests {
     fn test_chained_assignment_two_variables() {
         let result = transpile_simple("a = b = 5").unwrap();
         let user_code = extract_user_code(&result);
-        
+
         // Should generate: const b = 5; const a = b;
         assert!(user_code.contains("const b = 5"));
         assert!(user_code.contains("const a = b"));
@@ -1160,7 +1332,7 @@ mod tests {
     fn test_chained_assignment_three_variables() {
         let result = transpile_simple("x = y = z = 10").unwrap();
         let user_code = extract_user_code(&result);
-        
+
         // Should generate a chain of assignments
         assert!(user_code.contains("const z = 10"));
         assert!(user_code.contains("const y = z"));
@@ -1173,7 +1345,7 @@ mod tests {
     fn test_chained_assignment_with_expression() {
         let result = transpile_simple("a = b = 2 + 3").unwrap();
         let user_code = extract_user_code(&result);
-        
+
         // Should evaluate the expression first, then assign
         assert!(user_code.contains("const b = $$add(2, 3)"));
         assert!(user_code.contains("const a = b"));
@@ -1183,7 +1355,7 @@ mod tests {
     fn test_chained_assignment_with_list() {
         let result = transpile_simple("c = d = [1, 2, 3]").unwrap();
         let user_code = extract_user_code(&result);
-        
+
         // Should handle list expressions
         assert!(user_code.contains("const d = [1, 2, 3]"));
         assert!(user_code.contains("const c = d"));
@@ -1196,17 +1368,17 @@ mod tests {
         // For now, just test that we don't crash and the assignment is attempted
         let result = transpile_simple("result = (p = q = 42)").unwrap();
         let user_code = extract_user_code(&result);
-        
+
         // The current transpiler has limitations with nested assignments in parentheses
         assert!(user_code.contains("const result = "));
         assert!(user_code.contains("42"));
     }
 
-    #[test] 
+    #[test]
     fn test_complex_chained_assignment_with_operations() {
         let result = transpile_simple("w = x = y = z = 1 + 2 * 3").unwrap();
         let user_code = extract_user_code(&result);
-        
+
         // Should create a proper chain
         assert!(user_code.contains("const z = "));
         assert!(user_code.contains("const y = z"));
@@ -1220,7 +1392,7 @@ mod tests {
     fn test_regular_assignment_still_works() {
         let result = transpile_simple("single = 100").unwrap();
         let user_code = extract_user_code(&result);
-        
+
         assert!(user_code.contains("const single = 100"));
         assert!(!user_code.contains("const single = const"));
     }
@@ -1229,7 +1401,7 @@ mod tests {
     fn test_assignment_with_function_call() {
         let result = transpile_simple("a = b = sum(1, 2, 3)").unwrap();
         let user_code = extract_user_code(&result);
-        
+
         // Should handle function calls in chained assignments
         assert!(user_code.contains("const b = sum(1, 2, 3)"));
         assert!(user_code.contains("const a = b"));
@@ -1239,7 +1411,7 @@ mod tests {
     fn test_mixed_assignments_and_expressions() {
         let result = transpile_simple("x = 5\ny = z = x + 1\nprint(y)").unwrap();
         let user_code = extract_user_code(&result);
-        
+
         assert!(user_code.contains("const x = 5"));
         assert!(user_code.contains("const z = $$add(x, 1)"));
         assert!(user_code.contains("const y = z"));
@@ -1250,7 +1422,7 @@ mod tests {
     fn test_arithmetic_operations() {
         let result = transpile_simple("result = 2 + 3 * 4").unwrap();
         let user_code = extract_user_code(&result);
-        
+
         // Should use the proper function calls for arithmetic
         assert!(user_code.contains("$$add"));
         assert!(user_code.contains("$$multiply"));
@@ -1260,7 +1432,7 @@ mod tests {
     fn test_list_creation() {
         let result = transpile_simple("numbers = [1, 2, 3]").unwrap();
         let user_code = extract_user_code(&result);
-        
+
         assert!(user_code.contains("const numbers = [1, 2, 3]"));
     }
 
@@ -1268,7 +1440,7 @@ mod tests {
     fn test_record_creation() {
         let result = transpile_simple("person = {name: \"Alice\", age: 30}").unwrap();
         let user_code = extract_user_code(&result);
-        
+
         assert!(user_code.contains("const person = {"));
         assert!(user_code.contains("name: \"Alice\""));
         assert!(user_code.contains("age: 30"));
@@ -1278,7 +1450,7 @@ mod tests {
     fn test_lambda_expression() {
         let result = transpile_simple("add = (x, y) => x + y").unwrap();
         let user_code = extract_user_code(&result);
-        
+
         // Lambda expressions are complex, just check that we have the assignment and the add function
         assert!(user_code.contains("const add = "));
         assert!(user_code.contains("$$add(x, y)"));
@@ -1288,7 +1460,7 @@ mod tests {
     fn test_function_call() {
         let result = transpile_simple("result = map([1, 2, 3], (x) => x * 2)").unwrap();
         let user_code = extract_user_code(&result);
-        
+
         // Function calls may be complex, just check basic structure
         assert!(user_code.contains("const result = "));
         assert!(user_code.contains("map"));
@@ -1299,7 +1471,7 @@ mod tests {
     fn test_conditional_expression() {
         let result = transpile_simple("result = if true then 1 else 2").unwrap();
         let user_code = extract_user_code(&result);
-        
+
         assert!(user_code.contains("const result = (true ? 1 : 2)"));
     }
 
@@ -1307,7 +1479,7 @@ mod tests {
     fn test_print_statement() {
         let result = transpile_simple("print(\"Hello, {}!\", \"World\")").unwrap();
         let user_code = extract_user_code(&result);
-        
+
         assert!(user_code.contains("print(\"Hello, {}!\", \"World\")"));
     }
 
@@ -1315,7 +1487,7 @@ mod tests {
     fn test_inline_evaluation_mode() {
         let mut transpiler = Transpiler::new_with_inline_eval();
         let result = transpiler.transpile("x = 5").unwrap();
-        
+
         // Should include inline evaluation setup
         assert!(result.contains("$$results"));
         assert!(result.contains("$$results.bindings"));
@@ -1326,7 +1498,7 @@ mod tests {
         let mut transpiler = Transpiler::new_with_inline_eval();
         let result = transpiler.transpile("a = b = 10").unwrap();
         let user_code = extract_user_code(&result);
-        
+
         // Should handle chained assignments in inline mode
         assert!(user_code.contains("$$results.bindings"));
         assert!(user_code.contains("const b = 10"));
@@ -1337,7 +1509,7 @@ mod tests {
     fn test_assignment_does_not_break_other_expressions() {
         let result = transpile_simple("x = 5\ny = x + 1\nz = y * 2").unwrap();
         let user_code = extract_user_code(&result);
-        
+
         assert!(user_code.contains("const x = 5"));
         assert!(user_code.contains("const y = $$add(x, 1)"));
         assert!(user_code.contains("const z = $$multiply(y, 2)"));
@@ -1349,7 +1521,7 @@ mod tests {
     #[test]
     fn test_runtime_includes_fixed_to_string() {
         let result = transpile_simple("x = 5").unwrap();
-        
+
         // The runtime should include our fixed $$to_string function
         assert!(result.contains("function $$to_string(value)"));
         assert!(result.contains("// Check if this is a built-in function"));
@@ -1360,7 +1532,7 @@ mod tests {
     #[test]
     fn test_runtime_includes_fixed_format() {
         let result = transpile_simple("x = 5").unwrap();
-        
+
         // The runtime should include our fixed $$format function
         assert!(result.contains("function $$format(formatStr, ...values)"));
         assert!(result.contains("} else if (typeof value === \"function\") {"));
@@ -1370,7 +1542,7 @@ mod tests {
     #[test]
     fn test_runtime_includes_builtins_registry() {
         let result = transpile_simple("x = 5").unwrap();
-        
+
         // The runtime should include the $$builtins registry
         assert!(result.contains("const $$builtins = {"));
         assert!(result.contains("map: $$map,"));
@@ -1383,7 +1555,7 @@ mod tests {
     fn test_to_string_function_call_transpilation() {
         let result = transpile_simple("result = to_string(map)").unwrap();
         let user_code = extract_user_code(&result);
-        
+
         // Should transpile to_string call correctly
         assert!(user_code.contains("const result = to_string(map)"));
     }
@@ -1392,7 +1564,7 @@ mod tests {
     fn test_format_function_call_transpilation() {
         let result = transpile_simple("print(\"Function: {}\", filter)").unwrap();
         let user_code = extract_user_code(&result);
-        
+
         // Should transpile format call correctly
         assert!(user_code.contains("print(\"Function: {}\", filter)"));
     }
@@ -1400,7 +1572,7 @@ mod tests {
     #[test]
     fn test_runtime_arithmetic_functions() {
         let result = transpile_simple("x = 1 + 2").unwrap();
-        
+
         // Should include arithmetic functions in runtime
         assert!(result.contains("function $$add(left, right)"));
         assert!(result.contains("function $$subtract(left, right)"));
@@ -1411,7 +1583,7 @@ mod tests {
     #[test]
     fn test_runtime_collection_functions() {
         let result = transpile_simple("x = [1, 2, 3]").unwrap();
-        
+
         // Should include collection functions in runtime
         assert!(result.contains("function $$map(collection, fn)"));
         assert!(result.contains("function $$filter(collection, predicate)"));
@@ -1422,7 +1594,7 @@ mod tests {
     #[test]
     fn test_runtime_math_functions() {
         let result = transpile_simple("x = 5").unwrap();
-        
+
         // Should include math functions in runtime
         assert!(result.contains("function $$abs(x)"));
         assert!(result.contains("function $$sin(x)"));
@@ -1434,7 +1606,7 @@ mod tests {
     #[test]
     fn test_runtime_string_functions() {
         let result = transpile_simple("x = \"hello\"").unwrap();
-        
+
         // Should include string functions in runtime
         assert!(result.contains("function $$split(str, delimiter)"));
         assert!(result.contains("function $$join(arr, delimiter)"));
@@ -1446,7 +1618,7 @@ mod tests {
     #[test]
     fn test_runtime_type_checking_functions() {
         let result = transpile_simple("x = true").unwrap();
-        
+
         // Should include type checking functions in runtime
         assert!(result.contains("function $$is_string(value)"));
         assert!(result.contains("function $$is_number(value)"));
@@ -1459,13 +1631,13 @@ mod tests {
     #[test]
     fn test_runtime_setup_code() {
         let result = transpile_simple("x = 5").unwrap();
-        
+
         // Should include proper runtime setup
         assert!(result.contains("// Set up aliases at the end of execution"));
         assert!(result.contains("setTimeout(() => {"));
         assert!(result.contains("for (const [name, func] of Object.entries($$builtins))"));
         assert!(result.contains("globalThis[name] = func;"));
-        
+
         // Should include immediate setup too
         assert!(result.contains("// Immediately make them available for function declarations"));
     }
@@ -1473,7 +1645,7 @@ mod tests {
     #[test]
     fn test_runtime_inputs_setup() {
         let result = transpile_simple("x = inputs.value").unwrap();
-        
+
         // Should include inputs setup
         assert!(result.contains("// Set up inputs variable"));
         assert!(result.contains("if (typeof globalThis.inputs === \"undefined\")"));
@@ -1484,7 +1656,7 @@ mod tests {
     #[test]
     fn test_runtime_constants() {
         let result = transpile_simple("x = 5").unwrap();
-        
+
         // Should include constants
         assert!(result.contains("const $$constants = {"));
         assert!(result.contains("pi: Math.PI,"));
@@ -1495,7 +1667,7 @@ mod tests {
     #[test]
     fn test_print_function_environment_check() {
         let result = transpile_simple("print(\"hello\")").unwrap();
-        
+
         // Should include environment-aware print function
         assert!(result.contains("function $$print(...args)"));
         assert!(result.contains("typeof process !== \"undefined\""));
@@ -1507,9 +1679,227 @@ mod tests {
     #[test]
     fn test_runtime_header_comment() {
         let result = transpile_simple("x = 5").unwrap();
-        
+
         // Should start with the correct header
         assert!(result.starts_with("// Blots JavaScript Runtime Library"));
         assert!(result.contains("// Built-in functions for transpiled Blots code"));
+    }
+
+    // Order of Operations Tests
+    #[test]
+    fn test_basic_precedence_multiplication_over_addition() {
+        let result = transpile_simple("result = 2 + 3 * 4").unwrap();
+        let user_code = extract_user_code(&result);
+
+        // Should transpile to: $$add(2, $$multiply(3, 4))
+        // This ensures multiplication happens before addition
+        assert!(user_code.contains("$$add(2, $$multiply(3, 4))"));
+        assert!(!user_code.contains("$$multiply($$add(2, 3), 4)"));
+    }
+
+    #[test]
+    fn test_basic_precedence_division_over_subtraction() {
+        let result = transpile_simple("result = 10 - 6 / 2").unwrap();
+        let user_code = extract_user_code(&result);
+
+        // Should transpile to: $$subtract(10, $$divide(6, 2))
+        assert!(user_code.contains("$$subtract(10, $$divide(6, 2))"));
+        assert!(!user_code.contains("$$divide($$subtract(10, 6), 2)"));
+    }
+
+    #[test]
+    fn test_same_precedence_left_to_right_addition_subtraction() {
+        let result = transpile_simple("result = 10 - 5 + 2").unwrap();
+        let user_code = extract_user_code(&result);
+
+        // Should transpile to: $$add($$subtract(10, 5), 2)
+        // Left-to-right for same precedence
+        assert!(user_code.contains("$$add($$subtract(10, 5), 2)"));
+        assert!(!user_code.contains("$$subtract(10, $$add(5, 2))"));
+    }
+
+    #[test]
+    fn test_same_precedence_left_to_right_multiplication_division() {
+        let result = transpile_simple("result = 12 / 3 * 2").unwrap();
+        let user_code = extract_user_code(&result);
+
+        // Should transpile to: $$multiply($$divide(12, 3), 2)
+        assert!(user_code.contains("$$multiply($$divide(12, 3), 2)"));
+        assert!(!user_code.contains("$$divide(12, $$multiply(3, 2))"));
+    }
+
+    #[test]
+    fn test_parentheses_override_precedence() {
+        let result = transpile_simple("result = (2 + 3) * 4").unwrap();
+        let user_code = extract_user_code(&result);
+
+        // Should transpile to: $$multiply(($$add(2, 3)), 4)
+        assert!(user_code.contains("$$multiply(($$add(2, 3)), 4)"));
+    }
+
+    #[test]
+    fn test_complex_mixed_operations() {
+        let result = transpile_simple("result = 2 + 3 * 4 - 5").unwrap();
+        let user_code = extract_user_code(&result);
+
+        // Should transpile to: $$subtract($$add(2, $$multiply(3, 4)), 5)
+        assert!(user_code.contains("$$subtract($$add(2, $$multiply(3, 4)), 5)"));
+    }
+
+    #[test]
+    fn test_nested_parentheses() {
+        let result = transpile_simple("result = 2 * (3 + (4 * 5))").unwrap();
+        let user_code = extract_user_code(&result);
+
+        // Should handle nested parentheses correctly
+        assert!(user_code.contains("$$multiply(2, ($$add(3, ($$multiply(4, 5)))))"));
+    }
+
+    #[test]
+    fn test_power_operator_highest_precedence() {
+        let result = transpile_simple("result = 2 + 3 ^ 2").unwrap();
+        let user_code = extract_user_code(&result);
+
+        // Power should have highest precedence
+        assert!(user_code.contains("$$add(2, $$power(3, 2))"));
+        assert!(!user_code.contains("$$power($$add(2, 3), 2)"));
+    }
+
+    #[test]
+    fn test_power_operator_right_associative() {
+        let result = transpile_simple("result = 2 ^ 3 ^ 2").unwrap();
+        let user_code = extract_user_code(&result);
+
+        // Power is right-associative: 2^(3^2) = 2^9 = 512
+        assert!(user_code.contains("$$power(2, $$power(3, 2))"));
+        assert!(!user_code.contains("$$power($$power(2, 3), 2)"));
+    }
+
+    #[test]
+    fn test_unary_minus_with_precedence() {
+        let result = transpile_simple("result = -5 + 3 * 2").unwrap();
+        let user_code = extract_user_code(&result);
+
+        // Should handle unary minus correctly with precedence
+        // The double parentheses are expected due to how unary minus is processed
+        assert!(user_code.contains("$$add((-(5)), $$multiply(3, 2))"));
+    }
+
+    #[test]
+    fn test_comparison_operators_lower_precedence() {
+        let result = transpile_simple("result = 5 + 3 > 2 * 4").unwrap();
+        let user_code = extract_user_code(&result);
+
+        // Arithmetic should happen before comparison
+        assert!(user_code.contains("$$add(5, 3) > $$multiply(2, 4)"));
+    }
+
+    #[test]
+    fn test_logical_operators_lowest_precedence() {
+        let result = transpile_simple("result = 5 > 3 && 2 + 1 < 4").unwrap();
+        let user_code = extract_user_code(&result);
+
+        // Arithmetic and comparison before logical
+        assert!(user_code.contains("5 > 3 && $$add(2, 1) < 4"));
+    }
+
+    // Tests that also validate JS runtime execution
+    #[test]
+    fn test_order_of_operations_runtime_execution() {
+        use std::fs;
+        use std::process::Command;
+
+        // Test cases with expected results
+        let test_cases = vec![
+            ("2 + 3 * 4", "14"),    // Basic precedence
+            ("10 - 6 / 2", "7"),    // Division before subtraction
+            ("12 / 3 * 2", "8"),    // Same precedence left-to-right
+            ("(2 + 3) * 4", "20"),  // Parentheses override
+            ("2 + 3 * 4 - 5", "9"), // Complex mixed operations
+            ("-5 + 3 * 2", "1"),    // Unary minus
+        ];
+
+        for (expression, expected) in test_cases {
+            let source = format!("result = {}\nprint(result)", expression);
+            let transpiled = transpile_simple(&source).unwrap();
+
+            // Write to temp file
+            let temp_file = format!(
+                "/tmp/blots_test_{}.js",
+                expression
+                    .replace(" ", "_")
+                    .replace("/", "div")
+                    .replace("*", "mul")
+                    .replace("+", "add")
+                    .replace("-", "sub")
+                    .replace("(", "")
+                    .replace(")", "")
+            );
+            fs::write(&temp_file, &transpiled).unwrap();
+
+            // Execute with Node.js if available
+            if let Ok(output) = Command::new("node").arg(&temp_file).output() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert!(
+                    stdout.trim() == expected,
+                    "Expression '{}' should equal '{}', got '{}'",
+                    expression,
+                    expected,
+                    stdout.trim()
+                );
+            }
+
+            // Clean up
+            let _ = fs::remove_file(&temp_file);
+        }
+    }
+
+    #[test]
+    fn test_complex_order_of_operations_runtime() {
+        use std::fs;
+        use std::process::Command;
+
+        // More complex test cases
+        let test_cases = vec![
+            ("20 / 4 + 2 * 3", "11"),    // Multiple different operators
+            ("15 - 8 / 2 + 1", "12"),    // Mixed operations
+            ("3 * 4 + 12 / 3", "16"),    // Multiple same-precedence groups
+            ("((2 + 3) * 4) - 5", "15"), // Nested parentheses
+            ("2 * (3 + (4 * 5))", "46"), // Deep nesting
+        ];
+
+        for (expression, expected) in test_cases {
+            let source = format!("result = {}\nprint(result)", expression);
+            let transpiled = transpile_simple(&source).unwrap();
+
+            // Write to temp file
+            let temp_file = format!(
+                "/tmp/blots_complex_test_{}.js",
+                expression
+                    .replace(" ", "_")
+                    .replace("/", "div")
+                    .replace("*", "mul")
+                    .replace("+", "add")
+                    .replace("-", "sub")
+                    .replace("(", "lp")
+                    .replace(")", "rp")
+            );
+            fs::write(&temp_file, &transpiled).unwrap();
+
+            // Execute with Node.js if available
+            if let Ok(output) = Command::new("node").arg(&temp_file).output() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert!(
+                    stdout.trim() == expected,
+                    "Complex expression '{}' should equal '{}', got '{}'",
+                    expression,
+                    expected,
+                    stdout.trim()
+                );
+            }
+
+            // Clean up
+            let _ = fs::remove_file(&temp_file);
+        }
     }
 }
