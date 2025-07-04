@@ -5,6 +5,77 @@ use pest::iterators::Pairs;
 // Note: We implement a custom with-chain parser instead of using the Pratt parser
 // due to Rust borrowing issues with closures that access &mut self
 
+// Expression tokens for precedence parsing
+#[derive(Debug, Clone)]
+enum ExprToken {
+    Term(String),
+    Operator(BinaryOp),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BinaryOp {
+    // Lowest precedence
+    And,
+    Or,
+    // Comparison
+    Equal,
+    NotEqual,
+    Less,
+    LessEq,
+    Greater,
+    GreaterEq,
+    // Addition/Subtraction
+    Add,
+    Subtract,
+    // Multiplication/Division
+    Multiply,
+    Divide,
+    Modulo,
+    // Highest precedence
+    Power,
+    Coalesce,
+}
+
+impl BinaryOp {
+    fn precedence(&self) -> i32 {
+        match self {
+            BinaryOp::And | BinaryOp::Or => 1,
+            BinaryOp::Equal | BinaryOp::NotEqual | BinaryOp::Less | BinaryOp::LessEq | BinaryOp::Greater | BinaryOp::GreaterEq => 2,
+            BinaryOp::Add | BinaryOp::Subtract => 3,
+            BinaryOp::Multiply | BinaryOp::Divide | BinaryOp::Modulo => 4,
+            BinaryOp::Power | BinaryOp::Coalesce => 5,
+        }
+    }
+    
+    fn is_right_associative(&self) -> bool {
+        matches!(self, BinaryOp::Power)
+    }
+    
+    fn to_js_function(&self) -> String {
+        match self {
+            BinaryOp::Add => "$$add".to_string(),
+            BinaryOp::Subtract => "$$subtract".to_string(),
+            BinaryOp::Multiply => "$$multiply".to_string(),
+            BinaryOp::Divide => "$$divide".to_string(),
+            BinaryOp::Modulo => "$$modulo".to_string(),
+            BinaryOp::Power => "$$power".to_string(),
+            BinaryOp::Equal => " === ".to_string(),
+            BinaryOp::NotEqual => " !== ".to_string(),
+            BinaryOp::Less => " < ".to_string(),
+            BinaryOp::LessEq => " <= ".to_string(),
+            BinaryOp::Greater => " > ".to_string(),
+            BinaryOp::GreaterEq => " >= ".to_string(),
+            BinaryOp::And => " && ".to_string(),
+            BinaryOp::Or => " || ".to_string(),
+            BinaryOp::Coalesce => " ?? ".to_string(),
+        }
+    }
+    
+    fn is_function_call(&self) -> bool {
+        matches!(self, BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply | BinaryOp::Divide | BinaryOp::Modulo | BinaryOp::Power)
+    }
+}
+
 pub struct Transpiler {
     indent_level: usize,
     inline_evaluation: bool,
@@ -284,10 +355,8 @@ impl Transpiler {
     }
     
     fn transpile_complex_expression_from_pairs(&mut self, pairs: Vec<pest::iterators::Pair<Rule>>) -> Result<String> {
-        // This is a simplified version of the old expression logic for non-with expressions
-        let mut output = String::new();
-        let mut terms = Vec::new();
-        let mut operators = Vec::new();
+        // Parse expression with proper operator precedence
+        let mut tokens = Vec::new();
         let mut i = 0;
         
         while i < pairs.len() {
@@ -311,14 +380,11 @@ impl Transpiler {
                             },
                             _ => self.transpile_single_term(next_pair.clone())?,
                         };
-                        terms.push(format!("(-({}))", next_term));
+                        tokens.push(ExprToken::Term(format!("(-({}))", next_term)));
                         i += 1; // Skip the next pair since we consumed it
                     } else {
                         return Err(anyhow!("Negation operator without following term"));
                     }
-                }
-                Rule::invert => {
-                    output.push('!');
                 }
                 Rule::conditional => {
                     return self.transpile_conditional(pair.clone().into_inner());
@@ -330,37 +396,38 @@ impl Transpiler {
                     return self.transpile_assignment(pair.clone().into_inner());
                 }
                 Rule::list => {
-                    terms.push(self.transpile_list(pair.clone().into_inner())?);
+                    tokens.push(ExprToken::Term(self.transpile_list(pair.clone().into_inner())?));
                 }
                 Rule::record => {
-                    terms.push(self.transpile_record(pair.clone().into_inner())?);
+                    tokens.push(ExprToken::Term(self.transpile_record(pair.clone().into_inner())?));
                 }
                 Rule::bool => {
-                    terms.push(pair.as_str().to_string());
+                    tokens.push(ExprToken::Term(pair.as_str().to_string()));
                 }
                 Rule::string => {
-                    terms.push(pair.as_str().to_string());
+                    tokens.push(ExprToken::Term(pair.as_str().to_string()));
                 }
                 Rule::null => {
-                    terms.push("null".to_string());
+                    tokens.push(ExprToken::Term("null".to_string()));
                 }
                 Rule::identifier => {
-                    terms.push(self.escape_js_identifier(pair.as_str()));
+                    tokens.push(ExprToken::Term(self.escape_js_identifier(pair.as_str())));
                 }
                 Rule::number => {
                     let num_str = pair.as_str().replace('_', "");
-                    terms.push(num_str);
+                    tokens.push(ExprToken::Term(num_str));
                 }
                 Rule::nested_expression => {
-                    terms.push(format!("({})", self.transpile_expression(pair.clone().into_inner())?));
+                    tokens.push(ExprToken::Term(format!("({})", self.transpile_expression(pair.clone().into_inner())?)));
                 }
+                // Handle postfix operators by applying them to the last term
                 Rule::factorial => {
-                    if let Some(last_term) = terms.last_mut() {
+                    if let Some(ExprToken::Term(last_term)) = tokens.last_mut() {
                         *last_term = format!("$$factorial({})", last_term);
                     }
                 }
                 Rule::access => {
-                    if let Some(last_term) = terms.last_mut() {
+                    if let Some(ExprToken::Term(last_term)) = tokens.last_mut() {
                         let inner_pairs = pair.clone().into_inner();
                         let first_pair = inner_pairs.into_iter().next();
                         if let Some(expr_pair) = first_pair {
@@ -372,38 +439,38 @@ impl Transpiler {
                     }
                 }
                 Rule::dot_access => {
-                    if let Some(last_term) = terms.last_mut() {
+                    if let Some(ExprToken::Term(last_term)) = tokens.last_mut() {
                         let prop = pair.clone().into_inner().next().unwrap().as_str();
                         *last_term = format!("{}.{}", last_term, prop);
                     }
                 }
                 Rule::call_list => {
-                    if let Some(last_term) = terms.last_mut() {
+                    if let Some(ExprToken::Term(last_term)) = tokens.last_mut() {
                         let args = self.transpile_call_args(pair.clone().into_inner())?;
                         *last_term = format!("{}({})", last_term, args);
                     }
                 }
                 // Infix operators
-                Rule::add => operators.push("$$add".to_string()),
-                Rule::subtract => operators.push("$$subtract".to_string()),
-                Rule::multiply => operators.push("$$multiply".to_string()),
-                Rule::divide => operators.push("$$divide".to_string()),
-                Rule::modulo => operators.push("$$modulo".to_string()),
-                Rule::power => operators.push("$$power".to_string()),
-                Rule::equal => operators.push(" === ".to_string()),
-                Rule::not_equal => operators.push(" !== ".to_string()),
-                Rule::less => operators.push(" < ".to_string()),
-                Rule::less_eq => operators.push(" <= ".to_string()),
-                Rule::greater => operators.push(" > ".to_string()),
-                Rule::greater_eq => operators.push(" >= ".to_string()),
-                Rule::and => operators.push(" && ".to_string()),
-                Rule::or => operators.push(" || ".to_string()),
-                Rule::coalesce => operators.push(" ?? ".to_string()),
-                Rule::natural_and => operators.push(" && ".to_string()),
-                Rule::natural_or => operators.push(" || ".to_string()),
+                Rule::add => tokens.push(ExprToken::Operator(BinaryOp::Add)),
+                Rule::subtract => tokens.push(ExprToken::Operator(BinaryOp::Subtract)),
+                Rule::multiply => tokens.push(ExprToken::Operator(BinaryOp::Multiply)),
+                Rule::divide => tokens.push(ExprToken::Operator(BinaryOp::Divide)),
+                Rule::modulo => tokens.push(ExprToken::Operator(BinaryOp::Modulo)),
+                Rule::power => tokens.push(ExprToken::Operator(BinaryOp::Power)),
+                Rule::equal => tokens.push(ExprToken::Operator(BinaryOp::Equal)),
+                Rule::not_equal => tokens.push(ExprToken::Operator(BinaryOp::NotEqual)),
+                Rule::less => tokens.push(ExprToken::Operator(BinaryOp::Less)),
+                Rule::less_eq => tokens.push(ExprToken::Operator(BinaryOp::LessEq)),
+                Rule::greater => tokens.push(ExprToken::Operator(BinaryOp::Greater)),
+                Rule::greater_eq => tokens.push(ExprToken::Operator(BinaryOp::GreaterEq)),
+                Rule::and => tokens.push(ExprToken::Operator(BinaryOp::And)),
+                Rule::or => tokens.push(ExprToken::Operator(BinaryOp::Or)),
+                Rule::coalesce => tokens.push(ExprToken::Operator(BinaryOp::Coalesce)),
+                Rule::natural_and => tokens.push(ExprToken::Operator(BinaryOp::And)),
+                Rule::natural_or => tokens.push(ExprToken::Operator(BinaryOp::Or)),
                 Rule::expression => {
                     let expr_result = self.transpile_expression(pair.clone().into_inner())?;
-                    terms.push(format!("({})", expr_result));
+                    tokens.push(ExprToken::Term(format!("({})", expr_result)));
                 }
                 _ => {}
             }
@@ -411,41 +478,86 @@ impl Transpiler {
             i += 1;
         }
         
-        // Combine terms and operators
-        if !output.is_empty() {
-            if terms.len() == 1 {
-                output.push_str(&terms[0]);
-            }
-        } else if terms.len() == 1 && operators.is_empty() {
-            output = terms[0].clone();
-        } else if terms.len() == 2 && operators.is_empty() {
-            output = format!("{}({})", terms[0], terms[1]);
-        } else {
-            if !terms.is_empty() {
-                output = terms[0].clone();
-                for (i, op) in operators.iter().enumerate() {
-                    if let Some(next_term) = terms.get(i + 1) {
-                        if self.is_function_operator(op) {
-                            if i == 0 {
-                                output = format!("{}({}, {})", op, &terms[0], next_term);
-                            } else {
-                                output = format!("{}({}, {})", op, &output, next_term);
-                            }
-                        } else if self.is_distributive_operator(op) {
-                            // Handle distributive operators with each expressions
-                            let left = if i == 0 { &terms[0] } else { &output };
-                            let right = next_term;
-                            output = self.handle_distributive_operation(left, op, right)?;
+        // Apply operator precedence using a precedence climbing algorithm
+        self.parse_expression_with_precedence(tokens, 0)
+    }
+    
+    fn parse_expression_with_precedence(&mut self, tokens: Vec<ExprToken>, _min_precedence: i32) -> Result<String> {
+        if tokens.is_empty() {
+            return Ok(String::new());
+        }
+        
+        // Handle simple cases
+        if tokens.len() == 1 {
+            return match &tokens[0] {
+                ExprToken::Term(term) => Ok(term.clone()),
+                ExprToken::Operator(_) => Err(anyhow!("Unexpected operator without operands")),
+            };
+        }
+        
+        // Convert to postfix using the shunting yard algorithm, then evaluate
+        let postfix = self.to_postfix(tokens)?;
+        self.evaluate_postfix(postfix)
+    }
+    
+    fn to_postfix(&self, tokens: Vec<ExprToken>) -> Result<Vec<ExprToken>> {
+        let mut output = Vec::new();
+        let mut operator_stack = Vec::new();
+        
+        for token in tokens {
+            match token {
+                ExprToken::Term(_) => output.push(token),
+                ExprToken::Operator(op) => {
+                    while let Some(ExprToken::Operator(stack_op)) = operator_stack.last() {
+                        if stack_op.precedence() > op.precedence() || 
+                           (stack_op.precedence() == op.precedence() && !op.is_right_associative()) {
+                            output.push(operator_stack.pop().unwrap());
                         } else {
-                            output.push_str(op);
-                            output.push_str(next_term);
+                            break;
                         }
                     }
+                    operator_stack.push(token);
                 }
             }
         }
         
+        // Pop remaining operators
+        while let Some(op) = operator_stack.pop() {
+            output.push(op);
+        }
+        
         Ok(output)
+    }
+    
+    fn evaluate_postfix(&self, postfix: Vec<ExprToken>) -> Result<String> {
+        let mut stack = Vec::new();
+        
+        for token in postfix {
+            match token {
+                ExprToken::Term(term) => stack.push(term),
+                ExprToken::Operator(op) => {
+                    if stack.len() < 2 {
+                        return Err(anyhow!("Not enough operands for operator"));
+                    }
+                    let right = stack.pop().unwrap();
+                    let left = stack.pop().unwrap();
+                    
+                    let result = if op.is_function_call() {
+                        format!("{}({}, {})", op.to_js_function(), left, right)
+                    } else {
+                        format!("{}{}{}", left, op.to_js_function(), right)
+                    };
+                    
+                    stack.push(result);
+                }
+            }
+        }
+        
+        if stack.len() != 1 {
+            return Err(anyhow!("Invalid expression"));
+        }
+        
+        Ok(stack.pop().unwrap())
     }
 
     fn transpile_expression_old(&mut self, mut pairs: Pairs<Rule>) -> Result<String> {

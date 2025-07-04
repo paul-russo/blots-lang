@@ -1,0 +1,73 @@
+// Order of Operations (PEMDAS) Test Cases
+// P: Parentheses, E: Exponents, M: Multiplication, D: Division, A: Addition, S: Subtraction
+
+// Basic arithmetic precedence
+basic_1 = 2 + 3 * 4        // Should be 14, not 20
+basic_2 = 10 - 6 / 2       // Should be 7, not 2
+basic_3 = 8 / 2 + 3        // Should be 7, not 8/5
+basic_4 = 5 * 2 + 3        // Should be 13, not 25
+
+// Parentheses override precedence
+paren_1 = (2 + 3) * 4      // Should be 20
+paren_2 = 10 - (6 / 2)     // Should be 7
+paren_3 = (8 / 2) + 3      // Should be 7
+paren_4 = 5 * (2 + 3)      // Should be 25
+
+// Left-to-right evaluation for same precedence
+same_prec_1 = 12 / 3 * 2   // Should be 8, not 2
+same_prec_2 = 10 - 5 + 2   // Should be 7, not 3
+same_prec_3 = 8 / 4 / 2    // Should be 1, not 4
+
+// Complex mixed operations
+complex_1 = 2 + 3 * 4 - 5  // Should be 9
+complex_2 = 20 / 4 + 2 * 3 // Should be 11
+complex_3 = 15 - 8 / 2 + 1 // Should be 12
+complex_4 = 3 * 4 + 12 / 3 // Should be 16
+
+// Nested parentheses
+nested_1 = ((2 + 3) * 4) - 5      // Should be 15
+nested_2 = 2 * (3 + (4 * 5))      // Should be 46
+nested_3 = (10 - (6 / 2)) * 2     // Should be 14
+nested_4 = ((8 + 2) / 2) * 3      // Should be 15
+
+// Mixed with negative numbers
+negative_1 = -5 + 3 * 2            // Should be 1
+negative_2 = 10 + -2 * 3           // Should be 4
+negative_3 = -8 / 2 + 3            // Should be -1
+negative_4 = 5 * -2 + 15           // Should be 5
+
+// Test outputs
+print("Basic precedence tests:")
+print("2 + 3 * 4 = {} (should be 14)", basic_1)
+print("10 - 6 / 2 = {} (should be 7)", basic_2)
+print("8 / 2 + 3 = {} (should be 7)", basic_3)
+print("5 * 2 + 3 = {} (should be 13)", basic_4)
+
+print("\nParentheses tests:")
+print("(2 + 3) * 4 = {} (should be 20)", paren_1)
+print("10 - (6 / 2) = {} (should be 7)", paren_2)
+print("(8 / 2) + 3 = {} (should be 7)", paren_3)
+print("5 * (2 + 3) = {} (should be 25)", paren_4)
+
+print("\nSame precedence tests:")
+print("12 / 3 * 2 = {} (should be 8)", same_prec_1)
+print("10 - 5 + 2 = {} (should be 7)", same_prec_2)
+print("8 / 4 / 2 = {} (should be 1)", same_prec_3)
+
+print("\nComplex operations:")
+print("2 + 3 * 4 - 5 = {} (should be 9)", complex_1)
+print("20 / 4 + 2 * 3 = {} (should be 11)", complex_2)
+print("15 - 8 / 2 + 1 = {} (should be 12)", complex_3)
+print("3 * 4 + 12 / 3 = {} (should be 16)", complex_4)
+
+print("\nNested parentheses:")
+print("((2 + 3) * 4) - 5 = {} (should be 15)", nested_1)
+print("2 * (3 + (4 * 5)) = {} (should be 46)", nested_2)
+print("(10 - (6 / 2)) * 2 = {} (should be 14)", nested_3)
+print("((8 + 2) / 2) * 3 = {} (should be 15)", nested_4)
+
+print("\nNegative numbers:")
+print("-5 + 3 * 2 = {} (should be 1)", negative_1)
+print("10 + -2 * 3 = {} (should be 4)", negative_2)
+print("-8 / 2 + 3 = {} (should be -1)", negative_3)
+print("5 * -2 + 15 = {} (should be 5)", negative_4)
