@@ -101,6 +101,7 @@ dependencies = [
  "dyn-fmt",
  "pest",
  "pest_derive",
+ "regex",
  "serde",
 ]
 

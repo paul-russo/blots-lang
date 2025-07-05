@@ -6,7 +6,7 @@ use blots_core::expressions::evaluate_expression;
 use blots_core::functions::FUNCTION_CALLS;
 use blots_core::heap::Heap;
 use blots_core::parser::{get_pairs, Rule};
-use blots_core::transpiler::{transpile_to_js, transpile_to_js_with_inline_eval};
+use blots_core::transpiler::{transpile_to_js, transpile_to_js_with_inline_eval, translate_js_identifiers, translate_js_error};
 use clap::Parser;
 use cli::Args;
 use commands::{exec_command, is_command};
@@ -330,10 +330,11 @@ fn main() -> ! {
                                             if line.starts_with("= ") {
                                                 // This is a result line, highlight it
                                                 let result_value = &line[2..]; // Remove "= " prefix
+                                                let cleaned_result = translate_js_identifiers(result_value);
                                                 if !is_piped {
-                                                    println!("{}", highlighter.highlight_result(result_value));
+                                                    println!("{}", highlighter.highlight_result(&cleaned_result));
                                                 } else {
-                                                    println!("= {}", result_value);
+                                                    println!("= {}", cleaned_result);
                                                 }
                                             } else {
                                                 // Other output (like print statements), just pass through
@@ -344,7 +345,8 @@ fn main() -> ! {
                                 }
                                 Err(error) => {
                                     // Runtime error - don't add the line to accumulated state
-                                    println!("[js error] {}", error.trim());
+                                    let cleaned_error = translate_js_error(error.trim());
+                                    println!("[js error] {}", cleaned_error);
                                 }
                             }
                         }

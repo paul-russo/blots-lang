@@ -8,4 +8,5 @@ anyhow = "1.0.86"
 dyn-fmt = "0.4.3"
 pest = "2.4.0"
 pest_derive = "2.4.0"
+regex = "1.10.2"
 serde = { version = "1.0.209", features = ["derive"] }

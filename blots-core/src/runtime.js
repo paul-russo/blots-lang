@@ -926,6 +926,11 @@ setTimeout(() => {
     if (typeof globalThis[name] === "undefined") {
       globalThis[name] = func;
     }
+    // Also provide with $$_ prefix for transpiled code
+    const prefixedName = `$$_${name}`;
+    if (typeof globalThis[prefixedName] === "undefined") {
+      globalThis[prefixedName] = func;
+    }
   }
 }, 0);
 
@@ -933,6 +938,11 @@ setTimeout(() => {
 for (const [name, func] of Object.entries($$builtins)) {
   if (typeof globalThis[name] === "undefined") {
     globalThis[name] = func;
+  }
+  // Also provide with $$_ prefix for transpiled code
+  const prefixedName = `$$_${name}`;
+  if (typeof globalThis[prefixedName] === "undefined") {
+    globalThis[prefixedName] = func;
   }
 }
 
