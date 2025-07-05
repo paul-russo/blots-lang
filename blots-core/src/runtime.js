@@ -948,11 +948,11 @@ for (const [name, func] of Object.entries($$builtins)) {
 
 // Set up inputs variable - it will be populated by the WASM evaluate function
 // Provide a default empty inputs object if not set by WASM
-if (typeof globalThis.inputs === "undefined") {
-  globalThis.inputs = {};
+if (typeof globalThis.$$_inputs === "undefined") {
+  globalThis.$$_inputs = {};
 }
 
-// Make inputs available as a bare identifier (not just globalThis.inputs)
-if (typeof inputs === "undefined") {
-  var inputs = globalThis.inputs;
+// Make inputs available as a bare identifier (not just globalThis.$$_inputs)
+if (typeof $$_inputs === "undefined") {
+  var $$_inputs = globalThis.$$_inputs;
 }
