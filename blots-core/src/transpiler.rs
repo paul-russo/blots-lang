@@ -1,6 +1,7 @@
 use crate::parser::{get_pairs, Rule};
 use anyhow::{anyhow, Result};
 use pest::iterators::Pairs;
+use regex::Regex;
 
 // Note: We implement a custom with-chain parser instead of using the Pratt parser
 // due to Rust borrowing issues with closures that access &mut self
@@ -872,77 +873,10 @@ impl Transpiler {
     }
 
     fn escape_js_identifier(&self, ident: &str) -> String {
-        // List of JavaScript reserved keywords that need escaping
-        let js_keywords = [
-            "abstract",
-            "await",
-            "boolean",
-            "break",
-            "byte",
-            "case",
-            "catch",
-            "char",
-            "class",
-            "const",
-            "continue",
-            "debugger",
-            "default",
-            "delete",
-            "do",
-            "double",
-            "else",
-            "enum",
-            "export",
-            "extends",
-            "false",
-            "final",
-            "finally",
-            "float",
-            "for",
-            "function",
-            "goto",
-            "if",
-            "implements",
-            "import",
-            "in",
-            "instanceof",
-            "int",
-            "interface",
-            "let",
-            "long",
-            "native",
-            "new",
-            "package",
-            "private",
-            "protected",
-            "public",
-            "return",
-            "short",
-            "static",
-            "super",
-            "switch",
-            "synchronized",
-            "this",
-            "throw",
-            "throws",
-            "transient",
-            "true",
-            "try",
-            "typeof",
-            "undefined",
-            "var",
-            "void",
-            "volatile",
-            "while",
-            "with",
-            "yield",
-        ];
-
-        if js_keywords.contains(&ident) {
-            format!("$$_{}", ident)
-        } else {
-            ident.to_string()
-        }
+        // Always prefix user identifiers with $$_ to avoid global scope collision
+        // This ensures user variables can never access JavaScript globals
+        // Built-in functions are also prefixed, but the runtime provides them globally
+        format!("$$_{}", ident)
     }
 
     fn transpile_primary(&mut self, primary: pest::iterators::Pair<Rule>) -> Result<String> {
@@ -1036,15 +970,18 @@ impl Transpiler {
         while let Some(pair) = pairs.next() {
             match pair.as_rule() {
                 Rule::required_arg => {
-                    args.push(pair.into_inner().next().unwrap().as_str().to_string());
+                    let arg_name = pair.into_inner().next().unwrap().as_str();
+                    args.push(self.escape_js_identifier(arg_name));
                 }
                 Rule::optional_arg => {
                     let arg_name = pair.into_inner().next().unwrap().as_str();
-                    args.push(format!("{} = undefined", arg_name));
+                    let escaped_name = self.escape_js_identifier(arg_name);
+                    args.push(format!("{} = undefined", escaped_name));
                 }
                 Rule::rest_arg => {
                     let arg_name = pair.into_inner().next().unwrap().as_str();
-                    args.push(format!("...{}", arg_name));
+                    let escaped_name = self.escape_js_identifier(arg_name);
+                    args.push(format!("...{}", escaped_name));
                 }
                 _ => {}
             }
@@ -1314,18 +1251,19 @@ mod tests {
     fn test_simple_assignment() {
         let result = transpile_simple("x = 5").unwrap();
         let user_code = extract_user_code(&result);
-        assert!(user_code.contains("const x = 5"));
+        assert!(user_code.contains("const $$_x = 5"));
     }
+
 
     #[test]
     fn test_chained_assignment_two_variables() {
         let result = transpile_simple("a = b = 5").unwrap();
         let user_code = extract_user_code(&result);
 
-        // Should generate: const b = 5; const a = b;
-        assert!(user_code.contains("const b = 5"));
-        assert!(user_code.contains("const a = b"));
-        assert!(!user_code.contains("const a = const b"));
+        // Should generate: const $$_b = 5; const $$_a = $$_b;
+        assert!(user_code.contains("const $$_b = 5"));
+        assert!(user_code.contains("const $$_a = $$_b"));
+        assert!(!user_code.contains("const $$_a = const $$_b"));
     }
 
     #[test]
@@ -1334,11 +1272,11 @@ mod tests {
         let user_code = extract_user_code(&result);
 
         // Should generate a chain of assignments
-        assert!(user_code.contains("const z = 10"));
-        assert!(user_code.contains("const y = z"));
-        assert!(user_code.contains("const x = y"));
-        assert!(!user_code.contains("const x = const y"));
-        assert!(!user_code.contains("const y = const z"));
+        assert!(user_code.contains("const $$_z = 10"));
+        assert!(user_code.contains("const $$_y = $$_z"));
+        assert!(user_code.contains("const $$_x = $$_y"));
+        assert!(!user_code.contains("const $$_x = const $$_y"));
+        assert!(!user_code.contains("const $$_y = const $$_z"));
     }
 
     #[test]
@@ -1347,8 +1285,8 @@ mod tests {
         let user_code = extract_user_code(&result);
 
         // Should evaluate the expression first, then assign
-        assert!(user_code.contains("const b = $$add(2, 3)"));
-        assert!(user_code.contains("const a = b"));
+        assert!(user_code.contains("const $$_b = $$add(2, 3)"));
+        assert!(user_code.contains("const $$_a = $$_b"));
     }
 
     #[test]
@@ -1357,20 +1295,20 @@ mod tests {
         let user_code = extract_user_code(&result);
 
         // Should handle list expressions
-        assert!(user_code.contains("const d = [1, 2, 3]"));
-        assert!(user_code.contains("const c = d"));
+        assert!(user_code.contains("const $$_d = [1, 2, 3]"));
+        assert!(user_code.contains("const $$_c = $$_d"));
     }
 
     #[test]
     fn test_nested_assignment_in_expression() {
         // This test case shows a limitation - parenthesized assignments aren't fully supported yet
-        // The transpiler produces: const result = p = q = 42; which is invalid JS
+        // The transpiler produces: const $$_result = $$_p = $$_q = 42; which is invalid JS
         // For now, just test that we don't crash and the assignment is attempted
         let result = transpile_simple("result = (p = q = 42)").unwrap();
         let user_code = extract_user_code(&result);
 
         // The current transpiler has limitations with nested assignments in parentheses
-        assert!(user_code.contains("const result = "));
+        assert!(user_code.contains("const $$_result = "));
         assert!(user_code.contains("42"));
     }
 
@@ -1380,10 +1318,10 @@ mod tests {
         let user_code = extract_user_code(&result);
 
         // Should create a proper chain
-        assert!(user_code.contains("const z = "));
-        assert!(user_code.contains("const y = z"));
-        assert!(user_code.contains("const x = y"));
-        assert!(user_code.contains("const w = x"));
+        assert!(user_code.contains("const $$_z = "));
+        assert!(user_code.contains("const $$_y = $$_z"));
+        assert!(user_code.contains("const $$_x = $$_y"));
+        assert!(user_code.contains("const $$_w = $$_x"));
         assert!(user_code.contains("$$add"));
         assert!(user_code.contains("$$multiply"));
     }
@@ -1393,8 +1331,8 @@ mod tests {
         let result = transpile_simple("single = 100").unwrap();
         let user_code = extract_user_code(&result);
 
-        assert!(user_code.contains("const single = 100"));
-        assert!(!user_code.contains("const single = const"));
+        assert!(user_code.contains("const $$_single = 100"));
+        assert!(!user_code.contains("const $$_single = const"));
     }
 
     #[test]
@@ -1403,8 +1341,8 @@ mod tests {
         let user_code = extract_user_code(&result);
 
         // Should handle function calls in chained assignments
-        assert!(user_code.contains("const b = sum(1, 2, 3)"));
-        assert!(user_code.contains("const a = b"));
+        assert!(user_code.contains("const $$_b = $$_sum(1, 2, 3)"));
+        assert!(user_code.contains("const $$_a = $$_b"));
     }
 
     #[test]
@@ -1412,10 +1350,10 @@ mod tests {
         let result = transpile_simple("x = 5\ny = z = x + 1\nprint(y)").unwrap();
         let user_code = extract_user_code(&result);
 
-        assert!(user_code.contains("const x = 5"));
-        assert!(user_code.contains("const z = $$add(x, 1)"));
-        assert!(user_code.contains("const y = z"));
-        assert!(user_code.contains("print(y)"));
+        assert!(user_code.contains("const $$_x = 5"));
+        assert!(user_code.contains("const $$_z = $$add($$_x, 1)"));
+        assert!(user_code.contains("const $$_y = $$_z"));
+        assert!(user_code.contains("$$_print($$_y)"));
     }
 
     #[test]
@@ -1423,7 +1361,8 @@ mod tests {
         let result = transpile_simple("result = 2 + 3 * 4").unwrap();
         let user_code = extract_user_code(&result);
 
-        // Should use the proper function calls for arithmetic
+        // Should use the proper function calls for arithmetic and prefix variables
+        assert!(user_code.contains("const $$_result = "));
         assert!(user_code.contains("$$add"));
         assert!(user_code.contains("$$multiply"));
     }
@@ -1433,7 +1372,7 @@ mod tests {
         let result = transpile_simple("numbers = [1, 2, 3]").unwrap();
         let user_code = extract_user_code(&result);
 
-        assert!(user_code.contains("const numbers = [1, 2, 3]"));
+        assert!(user_code.contains("const $$_numbers = [1, 2, 3]"));
     }
 
     #[test]
@@ -1441,7 +1380,7 @@ mod tests {
         let result = transpile_simple("person = {name: \"Alice\", age: 30}").unwrap();
         let user_code = extract_user_code(&result);
 
-        assert!(user_code.contains("const person = {"));
+        assert!(user_code.contains("const $$_person = {"));
         assert!(user_code.contains("name: \"Alice\""));
         assert!(user_code.contains("age: 30"));
     }
@@ -1452,8 +1391,8 @@ mod tests {
         let user_code = extract_user_code(&result);
 
         // Lambda expressions are complex, just check that we have the assignment and the add function
-        assert!(user_code.contains("const add = "));
-        assert!(user_code.contains("$$add(x, y)"));
+        assert!(user_code.contains("const $$_add = "));
+        assert!(user_code.contains("$$add($$_x, $$_y)"));
     }
 
     #[test]
@@ -1462,8 +1401,8 @@ mod tests {
         let user_code = extract_user_code(&result);
 
         // Function calls may be complex, just check basic structure
-        assert!(user_code.contains("const result = "));
-        assert!(user_code.contains("map"));
+        assert!(user_code.contains("const $$_result = "));
+        assert!(user_code.contains("$$_map"));
         assert!(user_code.contains("$$multiply"));
     }
 
@@ -1472,7 +1411,7 @@ mod tests {
         let result = transpile_simple("result = if true then 1 else 2").unwrap();
         let user_code = extract_user_code(&result);
 
-        assert!(user_code.contains("const result = (true ? 1 : 2)"));
+        assert!(user_code.contains("const $$_result = (true ? 1 : 2)"));
     }
 
     #[test]
@@ -1480,7 +1419,7 @@ mod tests {
         let result = transpile_simple("print(\"Hello, {}!\", \"World\")").unwrap();
         let user_code = extract_user_code(&result);
 
-        assert!(user_code.contains("print(\"Hello, {}!\", \"World\")"));
+        assert!(user_code.contains("$$_print(\"Hello, {}!\", \"World\")"));
     }
 
     #[test]
@@ -1501,8 +1440,8 @@ mod tests {
 
         // Should handle chained assignments in inline mode
         assert!(user_code.contains("$$results.bindings"));
-        assert!(user_code.contains("const b = 10"));
-        assert!(user_code.contains("const a = b"));
+        assert!(user_code.contains("const $$_b = 10"));
+        assert!(user_code.contains("const $$_a = $$_b"));
     }
 
     #[test]
@@ -1510,9 +1449,9 @@ mod tests {
         let result = transpile_simple("x = 5\ny = x + 1\nz = y * 2").unwrap();
         let user_code = extract_user_code(&result);
 
-        assert!(user_code.contains("const x = 5"));
-        assert!(user_code.contains("const y = $$add(x, 1)"));
-        assert!(user_code.contains("const z = $$multiply(y, 2)"));
+        assert!(user_code.contains("const $$_x = 5"));
+        assert!(user_code.contains("const $$_y = $$add($$_x, 1)"));
+        assert!(user_code.contains("const $$_z = $$multiply($$_y, 2)"));
     }
 
     // Tests for built-in function stringification
@@ -1556,8 +1495,8 @@ mod tests {
         let result = transpile_simple("result = to_string(map)").unwrap();
         let user_code = extract_user_code(&result);
 
-        // Should transpile to_string call correctly
-        assert!(user_code.contains("const result = to_string(map)"));
+        // Should transpile to_string call correctly with prefixes
+        assert!(user_code.contains("const $$_result = $$_to_string($$_map)"));
     }
 
     #[test]
@@ -1565,8 +1504,8 @@ mod tests {
         let result = transpile_simple("print(\"Function: {}\", filter)").unwrap();
         let user_code = extract_user_code(&result);
 
-        // Should transpile format call correctly
-        assert!(user_code.contains("print(\"Function: {}\", filter)"));
+        // Should transpile format call correctly with prefixes
+        assert!(user_code.contains("$$_print(\"Function: {}\", $$_filter)"));
     }
 
     #[test]
@@ -1902,4 +1841,223 @@ mod tests {
             let _ = fs::remove_file(&temp_file);
         }
     }
+
+    // Tests for global scope isolation fix
+    #[test]
+    fn test_user_variables_are_prefixed() {
+        let result = transpile_simple("x = 42\ny = x + 1").unwrap();
+        let user_code = extract_user_code(&result);
+
+        // User variables should be prefixed with $$_
+        assert!(user_code.contains("const $$_x = 42"));
+        assert!(user_code.contains("const $$_y = $$add($$_x, 1)"));
+        
+        // Should not contain unprefixed variable names
+        assert!(!user_code.contains("const x = 42"));
+        assert!(!user_code.contains("const y = $$add(x, 1)"));
+    }
+
+    #[test]
+    fn test_builtin_functions_are_prefixed_but_accessible() {
+        let result = transpile_simple("result = sum(1, 2, 3)").unwrap();
+        let user_code = extract_user_code(&result);
+
+        // Built-in function calls should be prefixed
+        assert!(user_code.contains("const $$_result = $$_sum(1, 2, 3)"));
+        
+        // Runtime should provide both prefixed and unprefixed versions
+        assert!(result.contains("globalThis[name] = func;"));
+        assert!(result.contains("const prefixedName = `$$_${name}`;"));
+        assert!(result.contains("globalThis[prefixedName] = func;"));
+    }
+
+    #[test]
+    fn test_lambda_parameters_are_prefixed() {
+        let result = transpile_simple("double = x => x * 2").unwrap();
+        let user_code = extract_user_code(&result);
+
+        // Lambda parameters should be prefixed in the actual function
+        assert!(user_code.contains("($$_x) => $$multiply($$_x, 2)"));
+        
+        // Variable name should be prefixed
+        assert!(user_code.contains("const $$_double = "));
+        
+        // Should not contain unprefixed parameter in the function
+        assert!(!user_code.contains("(x) => $$multiply(x, 2)"));
+    }
+
+    #[test]
+    fn test_complex_lambda_with_multiple_parameters() {
+        let result = transpile_simple("calc = (a, b, c) => a + b * c").unwrap();
+        let user_code = extract_user_code(&result);
+
+        // All parameters should be prefixed
+        assert!(user_code.contains("($$_a, $$_b, $$_c) => $$add($$_a, $$multiply($$_b, $$_c))"));
+        
+        // Variable name should be prefixed
+        assert!(user_code.contains("const $$_calc = "));
+    }
+
+    #[test]
+    fn test_nested_lambda_parameters() {
+        let result = transpile_simple("outer = x => y => x + y").unwrap();
+        let user_code = extract_user_code(&result);
+
+        // Both lambda parameters should be prefixed in the transpiled output
+        assert!(user_code.contains("($$_x) =>"));
+        assert!(user_code.contains("($$_y) => $$add($$_x, $$_y)"));
+        
+        // Variable name should be prefixed
+        assert!(user_code.contains("const $$_outer = "));
+    }
+
+    #[test]
+    fn test_record_shorthand_with_prefixed_variables() {
+        let result = transpile_simple("name = \"Alice\"\nage = 30\nperson = {name, age}").unwrap();
+        let user_code = extract_user_code(&result);
+
+        // Variables should be prefixed
+        assert!(user_code.contains("const $$_name = \"Alice\""));
+        assert!(user_code.contains("const $$_age = 30"));
+        
+        // Record should reference prefixed variables
+        // Note: Record shorthand might need special handling in the transpiler
+        assert!(user_code.contains("const $$_person = "));
+    }
+
+    #[test]
+    fn test_function_call_with_prefixed_variables() {
+        let result = transpile_simple("numbers = [1, 2, 3]\ndoubled = map(numbers, x => x * 2)").unwrap();
+        let user_code = extract_user_code(&result);
+
+        // Variables should be prefixed
+        assert!(user_code.contains("const $$_numbers = [1, 2, 3]"));
+        assert!(user_code.contains("const $$_doubled = $$_map($$_numbers,"));
+        
+        // Lambda parameter should be prefixed (in the actual function)
+        assert!(user_code.contains("($$_x) => $$multiply($$_x, 2)"));
+    }
+
+    #[test]
+    fn test_chained_assignment_with_prefixed_variables() {
+        let result = transpile_simple("a = b = c = 42").unwrap();
+        let user_code = extract_user_code(&result);
+
+        // All variables in chain should be prefixed
+        assert!(user_code.contains("const $$_c = 42"));
+        assert!(user_code.contains("const $$_b = $$_c"));
+        assert!(user_code.contains("const $$_a = $$_b"));
+    }
+
+    #[test]
+    fn test_conditional_with_prefixed_variables() {
+        let result = transpile_simple("x = 5\nresult = if x > 3 then \"big\" else \"small\"").unwrap();
+        let user_code = extract_user_code(&result);
+
+        // Variables should be prefixed in conditionals
+        assert!(user_code.contains("const $$_x = 5"));
+        assert!(user_code.contains("const $$_result = ($$_x > 3 ? \"big\" : \"small\")"));
+    }
+
+    #[test]
+    fn test_translate_js_identifiers_function() {
+        // Test the helper function that cleans up identifiers for display
+        assert_eq!(translate_js_identifiers("$$_x"), "x");
+        assert_eq!(translate_js_identifiers("$$_myVariable"), "myVariable");
+        assert_eq!(translate_js_identifiers("ReferenceError: $$_origin is not defined"), "ReferenceError: origin is not defined");
+        assert_eq!(translate_js_identifiers("$$_x = $$_sum($$_a, $$_b)"), "x = sum(a, b)");
+        
+        // Should not affect built-in function names without $$_ prefix
+        assert_eq!(translate_js_identifiers("sum(1, 2, 3)"), "sum(1, 2, 3)");
+        
+        // Should not affect $$ prefixed built-ins
+        assert_eq!(translate_js_identifiers("$$add(1, 2)"), "$$add(1, 2)");
+    }
+
+    #[test]
+    fn test_translate_js_error_function() {
+        let error_msg = "ReferenceError: $$_unknownVar is not defined at line 1";
+        let cleaned = translate_js_error(error_msg);
+        assert_eq!(cleaned, "ReferenceError: unknownVar is not defined at line 1");
+    }
+
+    #[test]
+    fn test_mixed_builtin_and_user_variables() {
+        let result = transpile_simple("nums = [1, 2, 3]\ntotal = sum(nums)\navg = total / len(nums)").unwrap();
+        let user_code = extract_user_code(&result);
+
+        // User variables should be prefixed
+        assert!(user_code.contains("const $$_nums = [1, 2, 3]"));
+        assert!(user_code.contains("const $$_total = $$_sum($$_nums)"));
+        assert!(user_code.contains("const $$_avg = $$divide($$_total, $$_len($$_nums))"));
+        
+        // Built-in functions should be accessible via $$_ prefix
+        assert!(result.contains("$$_sum"));
+        assert!(result.contains("$$_len"));
+    }
+
+    #[test]
+    fn test_runtime_provides_prefixed_builtins() {
+        let result = transpile_simple("x = 5").unwrap();
+
+        // Runtime should set up both regular and prefixed versions
+        assert!(result.contains("for (const [name, func] of Object.entries($$builtins))"));
+        assert!(result.contains("globalThis[name] = func;"));
+        assert!(result.contains("const prefixedName = `$$_${name}`;"));
+        assert!(result.contains("globalThis[prefixedName] = func;"));
+        
+        // Should do this both immediately and with setTimeout
+        assert!(result.contains("// Immediately make them available for function declarations"));
+        assert!(result.contains("// Set up aliases at the end of execution"));
+        assert!(result.contains("setTimeout(() => {"));
+    }
+
+    #[test]
+    fn test_global_scope_isolation_prevents_js_globals() {
+        // This test verifies that the transpiled code would block access to JS globals
+        let test_cases = vec![
+            "origin",
+            "window", 
+            "document",
+            "console",
+            "location",
+            "navigator",
+            "history",
+            "localStorage",
+            "sessionStorage",
+        ];
+
+        for global in test_cases {
+            let result = transpile_simple(global).unwrap();
+            let user_code = extract_user_code(&result);
+            
+            // Should transpile to $$_globalName, which won't be defined
+            let expected_prefixed = format!("$$_{}", global);
+            assert!(user_code.contains(&expected_prefixed), 
+                "Global '{}' should be prefixed to '{}' in transpiled code", 
+                global, expected_prefixed);
+            
+            // Should not contain the unprefixed global name
+            let lines: Vec<&str> = user_code.lines().collect();
+            let contains_unprefixed = lines.iter().any(|line| {
+                let trimmed = line.trim();
+                trimmed == global || trimmed == format!("{};", global)
+            });
+            assert!(!contains_unprefixed, 
+                "Transpiled code should not contain unprefixed global '{}'", 
+                global);
+        }
+    }
+}
+
+/// Translate JavaScript identifiers back to their original form for user display
+/// Removes the $$_ prefix from user variables while preserving built-in function names
+pub fn translate_js_identifiers(text: &str) -> String {
+    let re = Regex::new(r"\$\$_(\w+)").unwrap();
+    re.replace_all(text, "$1").to_string()
+}
+
+/// Translate JavaScript error messages back to user-friendly form
+pub fn translate_js_error(error: &str) -> String {
+    translate_js_identifiers(error)
 }

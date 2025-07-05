@@ -3,7 +3,7 @@ use blots_core::{
     functions::get_built_in_function_idents,
     heap::CONSTANTS,
     parser::{get_tokens, Token},
-    transpiler::{transpile_to_js, transpile_to_js_with_inline_eval},
+    transpiler::{transpile_to_js, transpile_to_js_with_inline_eval, translate_js_identifiers, translate_js_error},
     values::{LambdaArg, PrimitiveValue, SerializableLambdaDef, SerializableValue},
 };
 use js_sys::{eval, Array, Object, Reflect, Set};
@@ -280,7 +280,7 @@ pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
 
     // Execute the transpiled JavaScript
     let result = eval(&js_code)
-        .map_err(|e| JsError::new(&format!("JavaScript execution error: {:?}", e)))?;
+        .map_err(|e| JsError::new(&format!("JavaScript execution error: {}", translate_js_error(&format!("{:?}", e)))))?;
 
     // The transpiled code with inline evaluation returns $$results object
     // Extract the results from the global scope
@@ -329,7 +329,8 @@ pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
             if let Some(key) = keys.get(i).as_string() {
                 if let Ok(js_value) = Reflect::get(&obj, &keys.get(i)) {
                     let serializable_value = js_value_to_serializable_value(&js_value)?;
-                    values.insert(key, serializable_value);
+                    let cleaned_key = translate_js_identifiers(&key);
+                    values.insert(cleaned_key, serializable_value);
                 }
             }
         }
@@ -343,7 +344,8 @@ pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
             if let Some(key) = keys.get(i).as_string() {
                 if let Ok(js_value) = Reflect::get(&obj, &keys.get(i)) {
                     let serializable_value = js_value_to_serializable_value(&js_value)?;
-                    bindings.insert(key, serializable_value);
+                    let cleaned_key = translate_js_identifiers(&key);
+                    bindings.insert(cleaned_key, serializable_value);
                 }
             }
         }
