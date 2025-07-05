@@ -274,7 +274,7 @@ pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
         let global = js_sys::global();
         // Convert SerializableValue inputs to plain JS values for the runtime
         let converted_inputs = convert_inputs_to_js_values(&inputs_js)?;
-        Reflect::set(&global, &"inputs".into(), &converted_inputs)
+        Reflect::set(&global, &"$$_inputs".into(), &converted_inputs)
             .map_err(|e| JsError::new(&format!("Failed to set inputs: {:?}", e)))?;
     }
 

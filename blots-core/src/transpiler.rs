@@ -1226,7 +1226,7 @@ mod tests {
 
         // Find the last instance of runtime setup code
         for (i, line) in lines.iter().enumerate().rev() {
-            if line.contains("var inputs = globalThis.inputs;") {
+            if line.contains("var $$_inputs = globalThis.$$_inputs;") {
                 user_start = i + 1;
                 break;
             }
@@ -1585,11 +1585,11 @@ mod tests {
     fn test_runtime_inputs_setup() {
         let result = transpile_simple("x = inputs.value").unwrap();
 
-        // Should include inputs setup
+        // Should include inputs setup with prefixed names
         assert!(result.contains("// Set up inputs variable"));
-        assert!(result.contains("if (typeof globalThis.inputs === \"undefined\")"));
-        assert!(result.contains("globalThis.inputs = {};"));
-        assert!(result.contains("var inputs = globalThis.inputs;"));
+        assert!(result.contains("if (typeof globalThis.$$_inputs === \"undefined\")"));
+        assert!(result.contains("globalThis.$$_inputs = {};"));
+        assert!(result.contains("var $$_inputs = globalThis.$$_inputs;"));
     }
 
     #[test]
