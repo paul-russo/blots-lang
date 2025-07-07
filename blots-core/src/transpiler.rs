@@ -913,7 +913,7 @@ impl Transpiler {
 
     fn transpile_with_operator(&mut self, lhs: &str, rhs: &str) -> Result<String> {
         // Debug: print what we're receiving
-        
+
         // Check if the left side is an 'each' expression
         let is_each_expr = self.is_each_expression(lhs);
 
@@ -921,7 +921,7 @@ impl Transpiler {
             // For each expressions, use mapping behavior
             // Remove outer parentheses if present, since we're appending .map()
             let clean_lhs = if lhs.starts_with("(") && lhs.ends_with(")") {
-                &lhs[1..lhs.len()-1]
+                &lhs[1..lhs.len() - 1]
             } else {
                 lhs
             };
@@ -1069,12 +1069,12 @@ impl Transpiler {
             }
         } else {
             // Regular assignment - not chained
-            
+
             // Special handling for expressions that contain 'with' operator
             if self.contains_with_chain(&value_pairs) {
                 // Use the with chain handler directly
                 let value = self.transpile_with_chain_properly(&value_pairs)?;
-                
+
                 if self.inline_evaluation {
                     Ok(format!(
                         "const {} = {}; $$results.bindings['{}'] = {}",
@@ -1223,16 +1223,17 @@ impl Transpiler {
 
     fn is_each_expression(&self, term: &str) -> bool {
         // Check for direct each expressions
-        if term.starts_with("each(") || term.starts_with("$$each(") || term.starts_with("$$_each(") {
+        if term.starts_with("each(") || term.starts_with("$$each(") || term.starts_with("$$_each(")
+        {
             return true;
         }
-        
+
         // Check for parenthesized each expressions like "($$_each(...))"
         if term.starts_with("(") && term.ends_with(")") {
-            let inner = &term[1..term.len()-1];
+            let inner = &term[1..term.len() - 1];
             return self.is_each_expression(inner);
         }
-        
+
         false
     }
 }
@@ -1291,7 +1292,6 @@ mod tests {
         let user_code = extract_user_code(&result);
         assert!(user_code.contains("const $$_x = 5"));
     }
-
 
     #[test]
     fn test_chained_assignment_two_variables() {
@@ -1889,7 +1889,7 @@ mod tests {
         // User variables should be prefixed with $$_
         assert!(user_code.contains("const $$_x = 42"));
         assert!(user_code.contains("const $$_y = $$add($$_x, 1)"));
-        
+
         // Should not contain unprefixed variable names
         assert!(!user_code.contains("const x = 42"));
         assert!(!user_code.contains("const y = $$add(x, 1)"));
@@ -1902,7 +1902,7 @@ mod tests {
 
         // Built-in function calls should be prefixed
         assert!(user_code.contains("const $$_result = $$_sum(1, 2, 3)"));
-        
+
         // Runtime should provide both prefixed and unprefixed versions
         assert!(result.contains("globalThis[name] = func;"));
         assert!(result.contains("const prefixedName = `$$_${name}`;"));
@@ -1916,10 +1916,10 @@ mod tests {
 
         // Lambda parameters should be prefixed in the actual function
         assert!(user_code.contains("($$_x) => $$multiply($$_x, 2)"));
-        
+
         // Variable name should be prefixed
         assert!(user_code.contains("const $$_double = "));
-        
+
         // Should not contain unprefixed parameter in the function
         assert!(!user_code.contains("(x) => $$multiply(x, 2)"));
     }
@@ -1931,7 +1931,7 @@ mod tests {
 
         // All parameters should be prefixed
         assert!(user_code.contains("($$_a, $$_b, $$_c) => $$add($$_a, $$multiply($$_b, $$_c))"));
-        
+
         // Variable name should be prefixed
         assert!(user_code.contains("const $$_calc = "));
     }
@@ -1944,7 +1944,7 @@ mod tests {
         // Both lambda parameters should be prefixed in the transpiled output
         assert!(user_code.contains("($$_x) =>"));
         assert!(user_code.contains("($$_y) => $$add($$_x, $$_y)"));
-        
+
         // Variable name should be prefixed
         assert!(user_code.contains("const $$_outer = "));
     }
@@ -1957,7 +1957,7 @@ mod tests {
         // Variables should be prefixed
         assert!(user_code.contains("const $$_name = \"Alice\""));
         assert!(user_code.contains("const $$_age = 30"));
-        
+
         // Record should reference prefixed variables
         // Note: Record shorthand might need special handling in the transpiler
         assert!(user_code.contains("const $$_person = "));
@@ -1965,13 +1965,14 @@ mod tests {
 
     #[test]
     fn test_function_call_with_prefixed_variables() {
-        let result = transpile_simple("numbers = [1, 2, 3]\ndoubled = map(numbers, x => x * 2)").unwrap();
+        let result =
+            transpile_simple("numbers = [1, 2, 3]\ndoubled = map(numbers, x => x * 2)").unwrap();
         let user_code = extract_user_code(&result);
 
         // Variables should be prefixed
         assert!(user_code.contains("const $$_numbers = [1, 2, 3]"));
         assert!(user_code.contains("const $$_doubled = $$_map($$_numbers,"));
-        
+
         // Lambda parameter should be prefixed (in the actual function)
         assert!(user_code.contains("($$_x) => $$multiply($$_x, 2)"));
     }
@@ -1989,7 +1990,8 @@ mod tests {
 
     #[test]
     fn test_conditional_with_prefixed_variables() {
-        let result = transpile_simple("x = 5\nresult = if x > 3 then \"big\" else \"small\"").unwrap();
+        let result =
+            transpile_simple("x = 5\nresult = if x > 3 then \"big\" else \"small\"").unwrap();
         let user_code = extract_user_code(&result);
 
         // Variables should be prefixed in conditionals
@@ -2002,12 +2004,18 @@ mod tests {
         // Test the helper function that cleans up identifiers for display
         assert_eq!(translate_js_identifiers("$$_x"), "x");
         assert_eq!(translate_js_identifiers("$$_myVariable"), "myVariable");
-        assert_eq!(translate_js_identifiers("ReferenceError: $$_origin is not defined"), "ReferenceError: origin is not defined");
-        assert_eq!(translate_js_identifiers("$$_x = $$_sum($$_a, $$_b)"), "x = sum(a, b)");
-        
+        assert_eq!(
+            translate_js_identifiers("ReferenceError: $$_origin is not defined"),
+            "ReferenceError: origin is not defined"
+        );
+        assert_eq!(
+            translate_js_identifiers("$$_x = $$_sum($$_a, $$_b)"),
+            "x = sum(a, b)"
+        );
+
         // Should not affect built-in function names without $$_ prefix
         assert_eq!(translate_js_identifiers("sum(1, 2, 3)"), "sum(1, 2, 3)");
-        
+
         // Should not affect $$ prefixed built-ins
         assert_eq!(translate_js_identifiers("$$add(1, 2)"), "$$add(1, 2)");
     }
@@ -2016,19 +2024,24 @@ mod tests {
     fn test_translate_js_error_function() {
         let error_msg = "ReferenceError: $$_unknownVar is not defined at line 1";
         let cleaned = translate_js_error(error_msg);
-        assert_eq!(cleaned, "ReferenceError: unknownVar is not defined at line 1");
+        assert_eq!(
+            cleaned,
+            "ReferenceError: unknownVar is not defined at line 1"
+        );
     }
 
     #[test]
     fn test_mixed_builtin_and_user_variables() {
-        let result = transpile_simple("nums = [1, 2, 3]\ntotal = sum(nums)\navg = total / len(nums)").unwrap();
+        let result =
+            transpile_simple("nums = [1, 2, 3]\ntotal = sum(nums)\navg = total / len(nums)")
+                .unwrap();
         let user_code = extract_user_code(&result);
 
         // User variables should be prefixed
         assert!(user_code.contains("const $$_nums = [1, 2, 3]"));
         assert!(user_code.contains("const $$_total = $$_sum($$_nums)"));
         assert!(user_code.contains("const $$_avg = $$divide($$_total, $$_len($$_nums))"));
-        
+
         // Built-in functions should be accessible via $$_ prefix
         assert!(result.contains("$$_sum"));
         assert!(result.contains("$$_len"));
@@ -2043,7 +2056,7 @@ mod tests {
         assert!(result.contains("globalThis[name] = func;"));
         assert!(result.contains("const prefixedName = `$$_${name}`;"));
         assert!(result.contains("globalThis[prefixedName] = func;"));
-        
+
         // Should do this both immediately and with setTimeout
         assert!(result.contains("// Immediately make them available for function declarations"));
         assert!(result.contains("// Set up aliases at the end of execution"));
@@ -2055,7 +2068,7 @@ mod tests {
         // This test verifies that the transpiled code would block access to JS globals
         let test_cases = vec![
             "origin",
-            "window", 
+            "window",
             "document",
             "console",
             "location",
@@ -2068,22 +2081,27 @@ mod tests {
         for global in test_cases {
             let result = transpile_simple(global).unwrap();
             let user_code = extract_user_code(&result);
-            
+
             // Should transpile to $$_globalName, which won't be defined
             let expected_prefixed = format!("$$_{}", global);
-            assert!(user_code.contains(&expected_prefixed), 
-                "Global '{}' should be prefixed to '{}' in transpiled code", 
-                global, expected_prefixed);
-            
+            assert!(
+                user_code.contains(&expected_prefixed),
+                "Global '{}' should be prefixed to '{}' in transpiled code",
+                global,
+                expected_prefixed
+            );
+
             // Should not contain the unprefixed global name
             let lines: Vec<&str> = user_code.lines().collect();
             let contains_unprefixed = lines.iter().any(|line| {
                 let trimmed = line.trim();
                 trimmed == global || trimmed == format!("{};", global)
             });
-            assert!(!contains_unprefixed, 
-                "Transpiled code should not contain unprefixed global '{}'", 
-                global);
+            assert!(
+                !contains_unprefixed,
+                "Transpiled code should not contain unprefixed global '{}'",
+                global
+            );
         }
     }
 
@@ -2095,11 +2113,16 @@ mod tests {
 
         // Should properly capture the full with expression and apply the lambda to 5
         assert!(user_code.contains("const $$_y = "));
-        assert!(user_code.contains("(5)"), "Should contain function application (5)");
-        
+        assert!(
+            user_code.contains("(5)"),
+            "Should contain function application (5)"
+        );
+
         // Should not assign the function directly without applying it
-        assert!(!user_code.starts_with("const $$_y = (($$f) => { $$f.$$originalSource"), 
-               "Should not assign the lambda function directly");
+        assert!(
+            !user_code.starts_with("const $$_y = (($$f) => { $$f.$$originalSource"),
+            "Should not assign the lambda function directly"
+        );
     }
 
     // Tests for each(...) with expression transpilation
@@ -2110,13 +2133,13 @@ mod tests {
     fn test_simple_each_with_expression() {
         let result = transpile_simple("result = each(range(n)) with i => i * 2").unwrap();
         let user_code = extract_user_code(&result);
-        
+
         // Should properly escape all variables and use .map() for each(...) with
         assert!(user_code.contains("$$_each($$_range($$_n))"));
         assert!(user_code.contains(".map("));
         assert!(user_code.contains("$$_i"));
         assert!(user_code.contains("$$multiply($$_i, 2)"));
-        
+
         // Should not contain unescaped variable names in executable code
         let executable_code = user_code.replace("$$originalSource", "");
         assert!(!executable_code.contains("each(range(n))"));
@@ -2127,13 +2150,13 @@ mod tests {
     fn test_parenthesized_each_with_expression() {
         let result = transpile_simple("result = (each(range(n))) with i => i * 2").unwrap();
         let user_code = extract_user_code(&result);
-        
+
         // Should handle parentheses around each(...) and still escape properly
         assert!(user_code.contains("$$_each($$_range($$_n))"));
         assert!(user_code.contains(".map("));
         assert!(user_code.contains("$$_i"));
         assert!(user_code.contains("$$multiply($$_i, 2)"));
-        
+
         // Should not contain unescaped variables in executable code
         let executable_code = user_code.replace("$$originalSource", "");
         assert!(!executable_code.contains("each(range(n))"));
@@ -2142,17 +2165,19 @@ mod tests {
 
     #[test]
     fn test_complex_each_with_nested_functions() {
-        let result = transpile_simple("fibs = collect(each(range(n)) with i => fibonacci(i))").unwrap();
+        let result =
+            transpile_simple("fibs = collect(each(range(n)) with i => fibonacci(i))").unwrap();
         let user_code = extract_user_code(&result);
-        
+
         // Should escape all variables in complex nested expressions
         assert!(user_code.contains("$$_collect($$_each($$_range($$_n))"));
         assert!(user_code.contains("$$_fibonacci($$_i)"));
         assert!(user_code.contains(".map("));
-        
+
         // Should not have any unescaped variables in executable code (excluding debug metadata)
         // Remove all debug metadata lines that contain $$originalSource
-        let executable_code = user_code.lines()
+        let executable_code = user_code
+            .lines()
             .filter(|line| !line.contains("$$originalSource"))
             .collect::<Vec<_>>()
             .join("\n");
@@ -2162,32 +2187,35 @@ mod tests {
 
     #[test]
     fn test_record_shorthand_with_each_expression() {
-        let result = transpile_simple("data = each(range(n)) with x => { x, value: x * 2 }").unwrap();
+        let result =
+            transpile_simple("data = each(range(n)) with x => { x, value: x * 2 }").unwrap();
         let user_code = extract_user_code(&result);
-        
+
         // Should properly handle record shorthand syntax
         assert!(user_code.contains("$$_each($$_range($$_n))"));
-        assert!(user_code.contains("x: $$_x"));  // Record shorthand should expand properly
+        assert!(user_code.contains("x: $$_x")); // Record shorthand should expand properly
         assert!(user_code.contains("value: $$multiply($$_x, 2)"));
-        
+
         // The important thing is that in the actual executable code, shorthand is expanded properly
         // The $$originalSource metadata will contain the original unescaped form for debugging
-        assert!(user_code.contains("({x: $$_x, value:"));  // Should be expanded to { x: $$_x,
+        assert!(user_code.contains("({x: $$_x, value:")); // Should be expanded to { x: $$_x,
     }
 
     #[test]
     fn test_record_spread_with_each_expression() {
-        let result = transpile_simple("times = each(range(n)) with x => { x, ...get_data(x) }").unwrap();
+        let result =
+            transpile_simple("times = each(range(n)) with x => { x, ...get_data(x) }").unwrap();
         let user_code = extract_user_code(&result);
-        
+
         // Should handle spread syntax correctly
         assert!(user_code.contains("$$_each($$_range($$_n))"));
         assert!(user_code.contains("x: $$_x"));
         assert!(user_code.contains("...$$_get_data($$_x)"));
-        
+
         // Should not contain unescaped variables in executable code
         // Remove all debug metadata lines that contain $$originalSource
-        let executable_code = user_code.lines()
+        let executable_code = user_code
+            .lines()
             .filter(|line| !line.contains("$$originalSource"))
             .collect::<Vec<_>>()
             .join("\n");
@@ -2197,17 +2225,20 @@ mod tests {
 
     #[test]
     fn test_nested_each_with_expressions() {
-        let result = transpile_simple("matrix = each(range(n)) with i => each(range(m)) with j => i * j").unwrap();
+        let result =
+            transpile_simple("matrix = each(range(n)) with i => each(range(m)) with j => i * j")
+                .unwrap();
         let user_code = extract_user_code(&result);
-        
+
         // Should handle nested each(...) with expressions
         assert!(user_code.contains("$$_each($$_range($$_n))"));
         assert!(user_code.contains("$$_each($$_range($$_m))"));
         assert!(user_code.contains("$$multiply($$_i, $$_j)"));
-        
+
         // Should not contain unescaped variables in executable code
         // Remove all debug metadata lines that contain $$originalSource
-        let executable_code = user_code.lines()
+        let executable_code = user_code
+            .lines()
             .filter(|line| !line.contains("$$originalSource"))
             .collect::<Vec<_>>()
             .join("\n");
@@ -2217,17 +2248,21 @@ mod tests {
 
     #[test]
     fn test_each_with_complex_lambda() {
-        let result = transpile_simple("result = each(data) with item => { transformed: process(item.value), index: item.id }").unwrap();
+        let result = transpile_simple(
+            "result = each(data) with item => { transformed: process(item.value), index: item.id }",
+        )
+        .unwrap();
         let user_code = extract_user_code(&result);
-        
+
         // Should properly escape all parts of complex lambda expressions
         assert!(user_code.contains("$$_each($$_data)"));
         assert!(user_code.contains("$$_process($$_item.value)"));
         assert!(user_code.contains("$$_item.id"));
-        
+
         // Should not contain unescaped variables in executable code
         // Remove all debug metadata lines that contain $$originalSource
-        let executable_code = user_code.lines()
+        let executable_code = user_code
+            .lines()
             .filter(|line| !line.contains("$$originalSource"))
             .collect::<Vec<_>>()
             .join("\n");
@@ -2239,13 +2274,13 @@ mod tests {
     fn test_multiple_each_expressions_in_record() {
         let result = transpile_simple("result = { evens: each(range(n)) with x => x * 2, odds: each(range(m)) with y => y * 2 + 1 }").unwrap();
         let user_code = extract_user_code(&result);
-        
+
         // Should handle multiple each(...) with expressions in the same record
         assert!(user_code.contains("evens: $$_each($$_range($$_n))"));
         assert!(user_code.contains("odds: $$_each($$_range($$_m))"));
         assert!(user_code.contains("$$multiply($$_x, 2)"));
         assert!(user_code.contains("$$add($$multiply($$_y, 2), 1)"));
-        
+
         // Should not contain unescaped variables in executable code
         let executable_code = user_code.replace("$$originalSource", "");
         assert!(!executable_code.contains("range(n)"));
@@ -2254,16 +2289,20 @@ mod tests {
 
     #[test]
     fn test_each_with_function_calls_in_lambda() {
-        let result = transpile_simple("processed = each(items) with item => transform(filter(item, predicate), mapper)").unwrap();
+        let result = transpile_simple(
+            "processed = each(items) with item => transform(filter(item, predicate), mapper)",
+        )
+        .unwrap();
         let user_code = extract_user_code(&result);
-        
+
         // Should escape all function calls and variables within the lambda
         assert!(user_code.contains("$$_each($$_items)"));
         assert!(user_code.contains("$$_transform($$_filter($$_item, $$_predicate), $$_mapper)"));
-        
+
         // Should not contain unescaped variables in executable code
         // Remove all debug metadata lines that contain $$originalSource
-        let executable_code = user_code.lines()
+        let executable_code = user_code
+            .lines()
             .filter(|line| !line.contains("$$originalSource"))
             .collect::<Vec<_>>()
             .join("\n");
@@ -2276,13 +2315,12 @@ mod tests {
         // This test specifically covers the pattern that was failing in bench.blot
         let result = transpile_simple("benchmark = { fibs: collect((each(range(n))) with i => fibonacci(i)), squares: collect((each(range(n))) with i => i * i) }").unwrap();
         let user_code = extract_user_code(&result);
-        
-        
+
         // Should handle the exact pattern from bench.blot that was causing issues
         assert!(user_code.contains("$$_collect($$_each($$_range($$_n))"));
         assert!(user_code.contains("$$_fibonacci($$_i)"));
         assert!(user_code.contains("$$multiply($$_i, $$_i)"));
-        
+
         // Note: $$originalSource metadata intentionally contains original unescaped code for debugging
     }
 }
@@ -2298,4 +2336,3 @@ pub fn translate_js_identifiers(text: &str) -> String {
 pub fn translate_js_error(error: &str) -> String {
     translate_js_identifiers(error)
 }
-

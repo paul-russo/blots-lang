@@ -3,7 +3,10 @@ use blots_core::{
     functions::get_built_in_function_idents,
     heap::CONSTANTS,
     parser::{get_tokens, Token},
-    transpiler::{transpile_to_js, transpile_to_js_with_inline_eval, translate_js_identifiers, translate_js_error},
+    transpiler::{
+        translate_js_error, translate_js_identifiers, transpile_to_js,
+        transpile_to_js_with_inline_eval,
+    },
     values::{LambdaArg, PrimitiveValue, SerializableLambdaDef, SerializableValue},
 };
 use js_sys::{eval, Array, Object, Reflect, Set};
@@ -151,7 +154,9 @@ fn serializable_value_to_js_value(value: &SerializableValue) -> Result<JsValue, 
         }
         SerializableValue::Lambda(lambda_def) => {
             // Convert lambda back to JavaScript function
-            let params = lambda_def.args.iter()
+            let params = lambda_def
+                .args
+                .iter()
                 .map(|arg| match arg {
                     LambdaArg::Required(name) => name.clone(),
                     LambdaArg::Optional(name) => format!("{} = undefined", name),
@@ -159,13 +164,13 @@ fn serializable_value_to_js_value(value: &SerializableValue) -> Result<JsValue, 
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            
+
             let func_str = format!("({}) => {}", params, lambda_def.body);
-            
+
             // Use eval to create the function
             let func = eval(&func_str)
                 .map_err(|e| JsError::new(&format!("Failed to create function: {:?}", e)))?;
-            
+
             Ok(func)
         }
         SerializableValue::Each(_) => {
@@ -174,14 +179,19 @@ fn serializable_value_to_js_value(value: &SerializableValue) -> Result<JsValue, 
         }
         SerializableValue::BuiltIn(name) => {
             // Built-in functions are internal and shouldn't be in inputs
-            Err(JsError::new(&format!("Built-in function '{}' is not supported in inputs", name)))
+            Err(JsError::new(&format!(
+                "Built-in function '{}' is not supported in inputs",
+                name
+            )))
         }
     }
 }
 
 fn convert_inputs_to_js_values(inputs_js: &JsValue) -> Result<JsValue, JsError> {
     // Try to deserialize the inputs as a SerializableValue structure
-    if let Ok(inputs_map) = serde_wasm_bindgen::from_value::<BTreeMap<String, SerializableValue>>(inputs_js.clone()) {
+    if let Ok(inputs_map) =
+        serde_wasm_bindgen::from_value::<BTreeMap<String, SerializableValue>>(inputs_js.clone())
+    {
         // Convert the SerializableValue map to plain JS values
         let js_obj = js_sys::Object::new();
         for (key, serializable_val) in inputs_map {
@@ -236,7 +246,7 @@ fn js_value_to_serializable_value(value: &JsValue) -> Result<SerializableValue, 
         if let Some(builtin_name) = detect_builtin_function(value) {
             return Ok(SerializableValue::BuiltIn(builtin_name));
         }
-        
+
         // Convert JavaScript function to Lambda representation
         let lambda_def = parse_js_function_to_lambda(value)?;
         return Ok(SerializableValue::Lambda(lambda_def));
@@ -279,8 +289,12 @@ pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
     }
 
     // Execute the transpiled JavaScript
-    let result = eval(&js_code)
-        .map_err(|e| JsError::new(&format!("JavaScript execution error: {}", translate_js_error(&format!("{:?}", e)))))?;
+    let result = eval(&js_code).map_err(|e| {
+        JsError::new(&format!(
+            "JavaScript execution error: {}",
+            translate_js_error(&format!("{:?}", e))
+        ))
+    })?;
 
     // The transpiled code with inline evaluation returns $$results object
     // Extract the results from the global scope
@@ -471,7 +485,7 @@ fn detect_builtin_function(js_func: &JsValue) -> Option<String> {
             }
         }
     }
-    
+
     // Try calling toString() on the function to get its source
     if let Some(func) = js_func.dyn_ref::<js_sys::Function>() {
         let func_str_val = func.to_string();
@@ -488,6 +502,6 @@ fn detect_builtin_function(js_func: &JsValue) -> Option<String> {
             }
         }
     }
-    
+
     None
 }
