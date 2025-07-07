@@ -1,5 +1,5 @@
 start = time_now()
-map(x => x * 4, range(1000000))
+map(range(1000000), x => x * 4)
 
 print("that took {} seconds", time_now() - start)
 

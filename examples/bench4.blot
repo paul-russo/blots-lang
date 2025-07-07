@@ -25,6 +25,6 @@ t = 20
 // Create a closure that only uses one variable
 fn = x => x + a
 
-map(fn, range(1000000))
+map(range(1000000), fn)
 
 print("that took {} seconds", time_now() - start)

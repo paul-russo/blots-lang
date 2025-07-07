@@ -1,11 +1,11 @@
 f = x => x + 2
 
 start1 = time_now()
-result1 = map(f, range(10000))
+result1 = map(range(10000), f)
 end1 = time_now()
 
 start2 = time_now()
-result2 = map(x => x + 2, range(10000))
+result2 = map(range(10000), x => x + 2)
 end2 = time_now()
 
 start3 = time_now()
