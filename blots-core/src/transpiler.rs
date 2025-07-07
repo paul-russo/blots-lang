@@ -1203,6 +1203,10 @@ impl Transpiler {
                 "({})",
                 self.transpile_expression(pair.into_inner())?
             )),
+            Rule::expression => {
+                // Handle expression rules by transpiling their inner content
+                self.transpile_expression(pair.into_inner())
+            }
             _ => Ok(pair.as_str().to_string()),
         }
     }
@@ -2322,6 +2326,24 @@ mod tests {
         assert!(user_code.contains("$$multiply($$_i, $$_i)"));
 
         // Note: $$originalSource metadata intentionally contains original unescaped code for debugging
+    }
+
+    #[test]
+    fn test_parenthesized_expression_in_lambda() {
+        // This test covers the bug where (x + 1) in lambda doesn't escape x
+        let result = transpile_simple("[1,2,3] with x => (x + 1)").unwrap();
+        let user_code = extract_user_code(&result);
+
+        // Should correctly escape the variable inside parentheses
+        assert!(user_code.contains("$$add($$_x, 1)"));
+
+        // Should not contain unescaped x in executable code
+        let executable_code = user_code
+            .lines()
+            .filter(|line| !line.contains("$$originalSource"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!executable_code.contains("x + 1"));
     }
 }
 
