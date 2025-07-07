@@ -364,6 +364,10 @@ impl Transpiler {
                     "({})",
                     self.transpile_expression(pairs[0].clone().into_inner())?
                 )),
+                Rule::expression => {
+                    // For expression rules, we need to transpile the inner content
+                    self.transpile_expression(pairs[0].clone().into_inner())
+                }
                 _ => self.transpile_single_term(pairs[0].clone()),
             }
         } else {
@@ -908,23 +912,25 @@ impl Transpiler {
     }
 
     fn transpile_with_operator(&mut self, lhs: &str, rhs: &str) -> Result<String> {
+        // Debug: print what we're receiving
+        
         // Check if the left side is an 'each' expression
         let is_each_expr = self.is_each_expression(lhs);
 
         if is_each_expr {
             // For each expressions, use mapping behavior
-            // Extract the inner expression from each(...) or $$each(...)
-            let inner_expr = if lhs.starts_with("$$each(") && lhs.ends_with(")") {
-                &lhs[7..lhs.len() - 1]
-            } else if lhs.starts_with("each(") && lhs.ends_with(")") {
-                &lhs[5..lhs.len() - 1]
+            // Remove outer parentheses if present, since we're appending .map()
+            let clean_lhs = if lhs.starts_with("(") && lhs.ends_with(")") {
+                &lhs[1..lhs.len()-1]
             } else {
                 lhs
             };
-            Ok(format!("$$each({}.map({}))", inner_expr, rhs))
+            let result = format!("{}.map({})", clean_lhs, rhs);
+            Ok(result)
         } else {
             // For regular values, use function application
-            Ok(format!("({})({})", rhs, lhs))
+            let result = format!("({})({})", rhs, lhs);
+            Ok(result)
         }
     }
 
@@ -995,6 +1001,10 @@ impl Transpiler {
         let escaped_var_name = self.escape_js_identifier(original_var_name);
         let value_pair = pairs.next().unwrap();
 
+        // Debug: Check what we're getting as the value
+        // println!("DEBUG assignment value_pair rule: {:?}", value_pair.as_rule());
+        // println!("DEBUG assignment value_pair content: {}", value_pair.as_str());
+
         // Check if the value itself is an assignment (chained assignment)
         let value_pairs: Vec<_> = value_pair.into_inner().collect();
 
@@ -1059,16 +1069,32 @@ impl Transpiler {
             }
         } else {
             // Regular assignment - not chained
-            let value = self.transpile_expression_from_pairs(value_pairs)?;
-
-            if self.inline_evaluation {
-                // Capture the binding in $$results.bindings (use original name as the key)
-                Ok(format!(
-                    "const {} = {}; $$results.bindings['{}'] = {}",
-                    escaped_var_name, value, original_var_name, escaped_var_name
-                ))
+            
+            // Special handling for expressions that contain 'with' operator
+            if self.contains_with_chain(&value_pairs) {
+                // Use the with chain handler directly
+                let value = self.transpile_with_chain_properly(&value_pairs)?;
+                
+                if self.inline_evaluation {
+                    Ok(format!(
+                        "const {} = {}; $$results.bindings['{}'] = {}",
+                        escaped_var_name, value, original_var_name, escaped_var_name
+                    ))
+                } else {
+                    Ok(format!("const {} = {}", escaped_var_name, value))
+                }
             } else {
-                Ok(format!("const {} = {}", escaped_var_name, value))
+                let value = self.transpile_expression_from_pairs(value_pairs)?;
+
+                if self.inline_evaluation {
+                    // Capture the binding in $$results.bindings (use original name as the key)
+                    Ok(format!(
+                        "const {} = {}; $$results.bindings['{}'] = {}",
+                        escaped_var_name, value, original_var_name, escaped_var_name
+                    ))
+                } else {
+                    Ok(format!("const {} = {}", escaped_var_name, value))
+                }
             }
         }
     }
@@ -1123,7 +1149,8 @@ impl Transpiler {
                 }
                 Rule::record_shorthand => {
                     let prop_name = pair.into_inner().next().unwrap().as_str();
-                    properties.push(prop_name.to_string());
+                    let escaped_prop = self.escape_js_identifier(prop_name);
+                    properties.push(format!("{}: {}", prop_name, escaped_prop));
                 }
                 Rule::spread_expression => {
                     let expr = self.transpile_expression(
@@ -1195,7 +1222,18 @@ impl Transpiler {
     }
 
     fn is_each_expression(&self, term: &str) -> bool {
-        term.starts_with("each(") || term.starts_with("$$each(")
+        // Check for direct each expressions
+        if term.starts_with("each(") || term.starts_with("$$each(") || term.starts_with("$$_each(") {
+            return true;
+        }
+        
+        // Check for parenthesized each expressions like "($$_each(...))"
+        if term.starts_with("(") && term.ends_with(")") {
+            let inner = &term[1..term.len()-1];
+            return self.is_each_expression(inner);
+        }
+        
+        false
     }
 }
 
@@ -2048,6 +2086,21 @@ mod tests {
                 global);
         }
     }
+
+    #[test]
+    fn test_with_operator_in_assignment_fixed() {
+        // This test verifies that assignment properly captures the full with expression
+        let result = transpile_simple("y = 5 with x => x + 1").unwrap();
+        let user_code = extract_user_code(&result);
+
+        // Should properly capture the full with expression and apply the lambda to 5
+        assert!(user_code.contains("const $$_y = "));
+        assert!(user_code.contains("(5)"), "Should contain function application (5)");
+        
+        // Should not assign the function directly without applying it
+        assert!(!user_code.starts_with("const $$_y = (($$f) => { $$f.$$originalSource"), 
+               "Should not assign the lambda function directly");
+    }
 }
 
 /// Translate JavaScript identifiers back to their original form for user display
@@ -2061,3 +2114,4 @@ pub fn translate_js_identifiers(text: &str) -> String {
 pub fn translate_js_error(error: &str) -> String {
     translate_js_identifiers(error)
 }
+

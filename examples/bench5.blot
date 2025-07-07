@@ -6,9 +6,9 @@ end1 = time_now()
 start2 = time_now()
 umap = (f, xs) =>
   if len(xs) > 1 then
-    concat(f(head(xs)), umap(f, tail(xs)))
+    concat([f(head(xs))], umap(f, tail(xs)))
   else
-    f(head(xs))
+    [f(head(xs))]
 
 umap(fun, range(100))
 end2 = time_now()
