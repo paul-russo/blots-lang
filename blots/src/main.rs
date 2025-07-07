@@ -6,16 +6,18 @@ use blots_core::expressions::evaluate_expression;
 use blots_core::functions::FUNCTION_CALLS;
 use blots_core::heap::Heap;
 use blots_core::parser::{get_pairs, Rule};
-use blots_core::transpiler::{transpile_to_js, transpile_to_js_with_inline_eval, translate_js_identifiers, translate_js_error};
+use blots_core::transpiler::{
+    translate_js_error, translate_js_identifiers, transpile_to_js, transpile_to_js_with_inline_eval,
+};
 use clap::Parser;
 use cli::Args;
 use commands::{exec_command, is_command};
+use highlighter::BlotsHighlighter;
+use rustyline::Editor;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::{BufWriter, Write, IsTerminal};
+use std::io::{BufWriter, IsTerminal, Write};
 use std::process::Command;
-use rustyline::Editor;
-use highlighter::BlotsHighlighter;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -26,7 +28,7 @@ fn execute_js_with_bun(js_code: &str) -> Result<String, String> {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn();
-        
+
     match child {
         Ok(mut process) => {
             // Write the JavaScript code to stdin
@@ -39,23 +41,26 @@ fn execute_js_with_bun(js_code: &str) -> Result<String, String> {
                     return Err(format!("Error flushing to Bun stdin: {}", e));
                 }
             }
-            
+
             // Wait for the process to complete and get output
             match process.wait_with_output() {
                 Ok(output) => {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    
+
                     if output.status.success() {
                         Ok(stdout.to_string())
                     } else {
                         Err(stderr.to_string())
                     }
                 }
-                Err(e) => Err(format!("Error waiting for Bun process: {}", e))
+                Err(e) => Err(format!("Error waiting for Bun process: {}", e)),
             }
         }
-        Err(e) => Err(format!("Error executing Bun: {}. Make sure Bun is installed and in your PATH.", e))
+        Err(e) => Err(format!(
+            "Error executing Bun: {}. Make sure Bun is installed and in your PATH.",
+            e
+        )),
     }
 }
 
@@ -73,13 +78,13 @@ fn main() -> ! {
             std::io::stdin().read_to_string(&mut content).unwrap();
             content
         };
-        
+
         let transpile_result = if args.inline_eval {
             transpile_to_js_with_inline_eval(&content)
         } else {
             transpile_to_js(&content)
         };
-        
+
         match transpile_result {
             Ok(js_code) => {
                 if let Some(output_path) = args.output {
@@ -102,13 +107,13 @@ fn main() -> ! {
             eprintln!("Error reading file {}: {}", args.path.as_ref().unwrap(), e);
             std::process::exit(1);
         });
-        
+
         let transpile_result = if args.inline_eval {
             transpile_to_js_with_inline_eval(&content)
         } else {
             transpile_to_js(&content)
         };
-        
+
         match transpile_result {
             Ok(js_code) => {
                 // Execute the JavaScript by piping it to Bun
@@ -118,7 +123,7 @@ fn main() -> ! {
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
                     .spawn();
-                    
+
                 match child {
                     Ok(mut process) => {
                         // Write the JavaScript code to stdin
@@ -134,7 +139,7 @@ fn main() -> ! {
                                 std::process::exit(1);
                             }
                         }
-                        
+
                         // Wait for the process to complete and get output
                         match process.wait_with_output() {
                             Ok(output) => {
@@ -142,12 +147,12 @@ fn main() -> ! {
                                 if !output.stdout.is_empty() {
                                     print!("{}", String::from_utf8_lossy(&output.stdout));
                                 }
-                                
+
                                 // Print stderr
                                 if !output.stderr.is_empty() {
                                     eprint!("{}", String::from_utf8_lossy(&output.stderr));
                                 }
-                                
+
                                 std::process::exit(output.status.code().unwrap_or(1));
                             }
                             Err(e) => {
@@ -157,7 +162,10 @@ fn main() -> ! {
                         }
                     }
                     Err(e) => {
-                        eprintln!("Error executing Bun: {}. Make sure Bun is installed and in your PATH.", e);
+                        eprintln!(
+                            "Error executing Bun: {}. Make sure Bun is installed and in your PATH.",
+                            e
+                        );
                         std::process::exit(1);
                     }
                 }
@@ -171,7 +179,7 @@ fn main() -> ! {
 
     if let Some(path) = args.path {
         let content = std::fs::read_to_string(&path).unwrap();
-        
+
         println!("Reading from file: {}", path);
         let pairs = get_pairs(&content).unwrap();
         let bindings = Rc::new(RefCell::new(HashMap::new()));
@@ -232,7 +240,7 @@ fn main() -> ! {
     let mut lines: Vec<String> = Vec::new();
     let heap = Rc::new(RefCell::new(Heap::new()));
     let bindings = Rc::new(RefCell::new(HashMap::new()));
-    
+
     // For JS mode (default unless --slow specified), accumulate transpiled code
     let mut js_accumulated_code = if !args.slow {
         // Get just the runtime library without any user code
@@ -252,16 +260,17 @@ fn main() -> ! {
 
     // Check if stdin is being piped (not a terminal)
     let is_piped = !IsTerminal::is_terminal(&std::io::stdin());
-    
+
     // Initialize rustyline editor for command history (only if not piped)
     let highlighter = BlotsHighlighter::new();
-    let mut rl: Option<Editor<BlotsHighlighter, rustyline::history::DefaultHistory>> = if !is_piped {
+    let mut rl: Option<Editor<BlotsHighlighter, rustyline::history::DefaultHistory>> = if !is_piped
+    {
         match Editor::with_config(rustyline::Config::builder().build()) {
             Ok(mut editor) => {
                 // Set up syntax highlighting
                 editor.set_helper(Some(BlotsHighlighter::new()));
                 Some(editor)
-            },
+            }
             Err(_) => None, // Fall back to basic input if rustyline fails
         }
     } else {
@@ -286,15 +295,15 @@ fn main() -> ! {
             // Fall back to basic stdin for piped input
             let mut line = String::new();
             let bytes_read = std::io::stdin().read_line(&mut line).unwrap();
-            
+
             // If piped input and we've reached EOF, exit
             if is_piped && bytes_read == 0 {
                 std::process::exit(0);
             }
-            
+
             line
         };
-        
+
         if is_command(&line.trim()) {
             exec_command(&line.trim());
             continue;
@@ -302,7 +311,7 @@ fn main() -> ! {
 
         if let Some(ref mut _js_code) = js_accumulated_code {
             // JavaScript evaluation mode with state accumulation (default)
-            
+
             // First, try to transpile just the current line to check for syntax errors
             let current_line = line.clone();
             match transpile_to_js(&current_line) {
@@ -310,29 +319,35 @@ fn main() -> ! {
                     // Line transpiles successfully, now test it with the accumulated state
                     let mut test_lines = lines.clone();
                     test_lines.push(current_line.clone());
-                    
-                    // Transpile the test accumulated program with inline evaluation 
+
+                    // Transpile the test accumulated program with inline evaluation
                     let test_accumulated_blots = test_lines.join("");
                     match transpile_to_js_with_inline_eval(&test_accumulated_blots) {
                         Ok(full_js) => {
                             // Add code to show the last evaluated expression with function formatting
                             let eval_js = format!("{}\n// Show the last result with proper function formatting\nif (typeof $$results !== 'undefined' && $$results.values) {{\n    const keys = Object.keys($$results.values);\n    if (keys.length > 0) {{\n        const lastKey = keys[keys.length - 1];\n        const result = $$results.values[lastKey];\n        if (result !== undefined) {{\n            if (typeof result === 'function') {{\n                // Check if this is a built-in function\n                const funcStr = result.toString();\n                if (funcStr.includes('function $$')) {{\n                    // Extract built-in function name\n                    const match = funcStr.match(/function \\$\\$(\\w+)\\s*\\(/);\n                    if (match) {{\n                        console.log('=', `BuiltIn(${{match[1]}})`);\n                    }} else {{\n                        console.log('=', 'BuiltIn');\n                    }}\n                }} else if (result.$$originalSource) {{\n                    // User-defined lambda with original source\n                    console.log('=', result.$$originalSource);\n                }} else {{\n                    // Other function types\n                    console.log('=', '[Function]');\n                }}\n            }} else {{\n                console.log('=', result);\n            }}\n        }}\n    }}\n}}", full_js);
-                            
+
                             match execute_js_with_bun(&eval_js) {
                                 Ok(output) => {
                                     // Runtime execution succeeded - now it's safe to add to accumulated lines
                                     lines.push(current_line);
-                                    
+
                                     if !output.trim().is_empty() {
                                         // Parse and highlight the result
-                                        let output_lines: Vec<&str> = output.trim().lines().collect();
+                                        let output_lines: Vec<&str> =
+                                            output.trim().lines().collect();
                                         for line in output_lines {
                                             if line.starts_with("= ") {
                                                 // This is a result line, highlight it
                                                 let result_value = &line[2..]; // Remove "= " prefix
-                                                let cleaned_result = translate_js_identifiers(result_value);
+                                                let cleaned_result =
+                                                    translate_js_identifiers(result_value);
                                                 if !is_piped {
-                                                    println!("{}", highlighter.highlight_result(&cleaned_result));
+                                                    println!(
+                                                        "{}",
+                                                        highlighter
+                                                            .highlight_result(&cleaned_result)
+                                                    );
                                                 } else {
                                                     println!("= {}", cleaned_result);
                                                 }
@@ -387,11 +402,14 @@ fn main() -> ! {
                                     Ok(value) => {
                                         let value_str = format!("{}", value);
                                         if !is_piped {
-                                            println!("{}", highlighter.highlight_result(&value_str));
+                                            println!(
+                                                "{}",
+                                                highlighter.highlight_result(&value_str)
+                                            );
                                         } else {
                                             println!("= {}", value_str);
                                         }
-                                    },
+                                    }
                                     Err(error) => println!("[evaluation error] {}", error),
                                 }
                             }
