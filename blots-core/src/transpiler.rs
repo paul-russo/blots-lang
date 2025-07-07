@@ -2101,6 +2101,190 @@ mod tests {
         assert!(!user_code.starts_with("const $$_y = (($$f) => { $$f.$$originalSource"), 
                "Should not assign the lambda function directly");
     }
+
+    // Tests for each(...) with expression transpilation
+    // These tests prevent regression of the issue where variables in each(...) with expressions
+    // were not being properly escaped, causing ReferenceError: n is not defined
+
+    #[test]
+    fn test_simple_each_with_expression() {
+        let result = transpile_simple("result = each(range(n)) with i => i * 2").unwrap();
+        let user_code = extract_user_code(&result);
+        
+        // Should properly escape all variables and use .map() for each(...) with
+        assert!(user_code.contains("$$_each($$_range($$_n))"));
+        assert!(user_code.contains(".map("));
+        assert!(user_code.contains("$$_i"));
+        assert!(user_code.contains("$$multiply($$_i, 2)"));
+        
+        // Should not contain unescaped variable names in executable code
+        let executable_code = user_code.replace("$$originalSource", "");
+        assert!(!executable_code.contains("each(range(n))"));
+        assert!(!executable_code.contains("(i) =>"));
+    }
+
+    #[test]
+    fn test_parenthesized_each_with_expression() {
+        let result = transpile_simple("result = (each(range(n))) with i => i * 2").unwrap();
+        let user_code = extract_user_code(&result);
+        
+        // Should handle parentheses around each(...) and still escape properly
+        assert!(user_code.contains("$$_each($$_range($$_n))"));
+        assert!(user_code.contains(".map("));
+        assert!(user_code.contains("$$_i"));
+        assert!(user_code.contains("$$multiply($$_i, 2)"));
+        
+        // Should not contain unescaped variables in executable code
+        let executable_code = user_code.replace("$$originalSource", "");
+        assert!(!executable_code.contains("each(range(n))"));
+        assert!(!executable_code.contains("range(n)"));
+    }
+
+    #[test]
+    fn test_complex_each_with_nested_functions() {
+        let result = transpile_simple("fibs = collect(each(range(n)) with i => fibonacci(i))").unwrap();
+        let user_code = extract_user_code(&result);
+        
+        // Should escape all variables in complex nested expressions
+        assert!(user_code.contains("$$_collect($$_each($$_range($$_n))"));
+        assert!(user_code.contains("$$_fibonacci($$_i)"));
+        assert!(user_code.contains(".map("));
+        
+        // Should not have any unescaped variables in executable code (excluding debug metadata)
+        // Remove all debug metadata lines that contain $$originalSource
+        let executable_code = user_code.lines()
+            .filter(|line| !line.contains("$$originalSource"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!executable_code.contains("range(n)"));
+        assert!(!executable_code.contains("fibonacci(i)"));
+    }
+
+    #[test]
+    fn test_record_shorthand_with_each_expression() {
+        let result = transpile_simple("data = each(range(n)) with x => { x, value: x * 2 }").unwrap();
+        let user_code = extract_user_code(&result);
+        
+        // Should properly handle record shorthand syntax
+        assert!(user_code.contains("$$_each($$_range($$_n))"));
+        assert!(user_code.contains("x: $$_x"));  // Record shorthand should expand properly
+        assert!(user_code.contains("value: $$multiply($$_x, 2)"));
+        
+        // The important thing is that in the actual executable code, shorthand is expanded properly
+        // The $$originalSource metadata will contain the original unescaped form for debugging
+        assert!(user_code.contains("({x: $$_x, value:"));  // Should be expanded to { x: $$_x,
+    }
+
+    #[test]
+    fn test_record_spread_with_each_expression() {
+        let result = transpile_simple("times = each(range(n)) with x => { x, ...get_data(x) }").unwrap();
+        let user_code = extract_user_code(&result);
+        
+        // Should handle spread syntax correctly
+        assert!(user_code.contains("$$_each($$_range($$_n))"));
+        assert!(user_code.contains("x: $$_x"));
+        assert!(user_code.contains("...$$_get_data($$_x)"));
+        
+        // Should not contain unescaped variables in executable code
+        // Remove all debug metadata lines that contain $$originalSource
+        let executable_code = user_code.lines()
+            .filter(|line| !line.contains("$$originalSource"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!executable_code.contains("get_data(x)"));
+        assert!(!executable_code.contains("range(n)"));
+    }
+
+    #[test]
+    fn test_nested_each_with_expressions() {
+        let result = transpile_simple("matrix = each(range(n)) with i => each(range(m)) with j => i * j").unwrap();
+        let user_code = extract_user_code(&result);
+        
+        // Should handle nested each(...) with expressions
+        assert!(user_code.contains("$$_each($$_range($$_n))"));
+        assert!(user_code.contains("$$_each($$_range($$_m))"));
+        assert!(user_code.contains("$$multiply($$_i, $$_j)"));
+        
+        // Should not contain unescaped variables in executable code
+        // Remove all debug metadata lines that contain $$originalSource
+        let executable_code = user_code.lines()
+            .filter(|line| !line.contains("$$originalSource"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!executable_code.contains("range(n)"));
+        assert!(!executable_code.contains("range(m)"));
+    }
+
+    #[test]
+    fn test_each_with_complex_lambda() {
+        let result = transpile_simple("result = each(data) with item => { transformed: process(item.value), index: item.id }").unwrap();
+        let user_code = extract_user_code(&result);
+        
+        // Should properly escape all parts of complex lambda expressions
+        assert!(user_code.contains("$$_each($$_data)"));
+        assert!(user_code.contains("$$_process($$_item.value)"));
+        assert!(user_code.contains("$$_item.id"));
+        
+        // Should not contain unescaped variables in executable code
+        // Remove all debug metadata lines that contain $$originalSource
+        let executable_code = user_code.lines()
+            .filter(|line| !line.contains("$$originalSource"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!executable_code.contains("process(item.value)"));
+        assert!(!executable_code.contains("item.id"));
+    }
+
+    #[test]
+    fn test_multiple_each_expressions_in_record() {
+        let result = transpile_simple("result = { evens: each(range(n)) with x => x * 2, odds: each(range(m)) with y => y * 2 + 1 }").unwrap();
+        let user_code = extract_user_code(&result);
+        
+        // Should handle multiple each(...) with expressions in the same record
+        assert!(user_code.contains("evens: $$_each($$_range($$_n))"));
+        assert!(user_code.contains("odds: $$_each($$_range($$_m))"));
+        assert!(user_code.contains("$$multiply($$_x, 2)"));
+        assert!(user_code.contains("$$add($$multiply($$_y, 2), 1)"));
+        
+        // Should not contain unescaped variables in executable code
+        let executable_code = user_code.replace("$$originalSource", "");
+        assert!(!executable_code.contains("range(n)"));
+        assert!(!executable_code.contains("range(m)"));
+    }
+
+    #[test]
+    fn test_each_with_function_calls_in_lambda() {
+        let result = transpile_simple("processed = each(items) with item => transform(filter(item, predicate), mapper)").unwrap();
+        let user_code = extract_user_code(&result);
+        
+        // Should escape all function calls and variables within the lambda
+        assert!(user_code.contains("$$_each($$_items)"));
+        assert!(user_code.contains("$$_transform($$_filter($$_item, $$_predicate), $$_mapper)"));
+        
+        // Should not contain unescaped variables in executable code
+        // Remove all debug metadata lines that contain $$originalSource
+        let executable_code = user_code.lines()
+            .filter(|line| !line.contains("$$originalSource"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!executable_code.contains("filter(item, predicate)"));
+        assert!(!executable_code.contains("transform(filter"));
+    }
+
+    #[test]
+    fn test_benchmarks_pattern_regression() {
+        // This test specifically covers the pattern that was failing in bench.blot
+        let result = transpile_simple("benchmark = { fibs: collect((each(range(n))) with i => fibonacci(i)), squares: collect((each(range(n))) with i => i * i) }").unwrap();
+        let user_code = extract_user_code(&result);
+        
+        
+        // Should handle the exact pattern from bench.blot that was causing issues
+        assert!(user_code.contains("$$_collect($$_each($$_range($$_n))"));
+        assert!(user_code.contains("$$_fibonacci($$_i)"));
+        assert!(user_code.contains("$$multiply($$_i, $$_i)"));
+        
+        // Note: $$originalSource metadata intentionally contains original unescaped code for debugging
+    }
 }
 
 /// Translate JavaScript identifiers back to their original form for user display
