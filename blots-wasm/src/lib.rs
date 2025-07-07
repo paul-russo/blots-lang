@@ -374,7 +374,8 @@ pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
             for i in 0..array_from.length() {
                 let value = array_from.get(i);
                 if let Some(output_name) = value.as_string() {
-                    outputs.insert(output_name);
+                    let cleaned_output = translate_js_identifiers(&output_name);
+                    outputs.insert(cleaned_output);
                 }
             }
         }
