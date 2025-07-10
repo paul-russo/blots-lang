@@ -1,4 +1,5 @@
 use crate::parser::{get_pairs, Rule};
+use crate::source_map::{SourceMap, SourceMapBuilder};
 use anyhow::{anyhow, Result};
 use pest::iterators::Pairs;
 use regex::Regex;
@@ -93,6 +94,8 @@ impl BinaryOp {
 pub struct Transpiler {
     indent_level: usize,
     inline_evaluation: bool,
+    source_map_builder: Option<SourceMapBuilder>,
+    enable_source_maps: bool,
 }
 
 impl Transpiler {
@@ -100,6 +103,8 @@ impl Transpiler {
         Self {
             indent_level: 0,
             inline_evaluation: false,
+            source_map_builder: None,
+            enable_source_maps: false,
         }
     }
 
@@ -107,7 +112,14 @@ impl Transpiler {
         Self {
             indent_level: 0,
             inline_evaluation: true,
+            source_map_builder: None,
+            enable_source_maps: false,
         }
+    }
+
+    pub fn enable_source_maps(&mut self, source_name: String, source_content: String) {
+        self.enable_source_maps = true;
+        self.source_map_builder = Some(SourceMapBuilder::new(source_name, source_content));
     }
 
     pub fn transpile(&mut self, source: &str) -> Result<String> {
@@ -1240,6 +1252,26 @@ impl Transpiler {
 
         false
     }
+
+    fn write_with_mapping(&mut self, generated_code: &str, source_position: Option<((usize, usize), (usize, usize))>) {
+        if let Some(builder) = &mut self.source_map_builder {
+            if let Some((start, end)) = source_position {
+                builder.add_mapping(start, end);
+            }
+            builder.track_generated_position(generated_code);
+        }
+    }
+
+    fn get_position_from_pair(&self, pair: &pest::iterators::Pair<Rule>) -> ((usize, usize), (usize, usize)) {
+        let span = pair.as_span();
+        let start = span.start_pos().line_col();
+        let end = span.end_pos().line_col();
+        (start, end)
+    }
+
+    pub fn get_source_map(&mut self) -> Option<SourceMap> {
+        self.source_map_builder.take().map(|builder| builder.build())
+    }
 }
 
 pub fn transpile_to_js(source: &str) -> Result<String> {
@@ -1250,6 +1282,22 @@ pub fn transpile_to_js(source: &str) -> Result<String> {
 pub fn transpile_to_js_with_inline_eval(source: &str) -> Result<String> {
     let mut transpiler = Transpiler::new_with_inline_eval();
     transpiler.transpile(source)
+}
+
+pub fn transpile_to_js_with_source_map(source: &str, source_name: String) -> Result<(String, SourceMap)> {
+    let mut transpiler = Transpiler::new();
+    transpiler.enable_source_maps(source_name, source.to_string());
+    let output = transpiler.transpile(source)?;
+    let source_map = transpiler.get_source_map().ok_or_else(|| anyhow!("Failed to generate source map"))?;
+    Ok((output, source_map))
+}
+
+pub fn transpile_to_js_with_inline_eval_and_source_map(source: &str, source_name: String) -> Result<(String, SourceMap)> {
+    let mut transpiler = Transpiler::new_with_inline_eval();
+    transpiler.enable_source_maps(source_name, source.to_string());
+    let output = transpiler.transpile(source)?;
+    let source_map = transpiler.get_source_map().ok_or_else(|| anyhow!("Failed to generate source map"))?;
+    Ok((output, source_map))
 }
 
 #[cfg(test)]

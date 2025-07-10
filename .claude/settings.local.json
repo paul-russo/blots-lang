@@ -9,7 +9,9 @@
       "Bash(wasm-pack build:*)",
       "Bash(rm:*)",
       "Bash(grep:*)",
-      "Bash(cargo test:*)"
+      "Bash(cargo test:*)",
+      "Bash(chmod:*)",
+      "Bash(ls:*)"
     ],
     "deny": []
   }
