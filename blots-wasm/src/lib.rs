@@ -3,9 +3,11 @@ use blots_core::{
     functions::get_built_in_function_idents,
     heap::CONSTANTS,
     parser::{get_tokens, Token},
+    source_map::SourceMap,
     transpiler::{
         translate_js_error, translate_js_identifiers, transpile_to_js,
-        transpile_to_js_with_inline_eval,
+        transpile_to_js_with_inline_eval, transpile_to_js_with_source_map,
+        transpile_to_js_with_inline_eval_and_source_map,
     },
     values::{LambdaArg, PrimitiveValue, SerializableLambdaDef, SerializableValue},
 };
@@ -274,7 +276,17 @@ fn js_value_to_serializable_value(value: &JsValue) -> Result<SerializableValue, 
 }
 
 #[wasm_bindgen]
-pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
+pub fn evaluate(expr: &str, inputs_js: JsValue, source_mapped: Option<bool>) -> Result<JsValue, JsError> {
+    let use_source_maps = source_mapped.unwrap_or(false);
+    
+    if use_source_maps {
+        evaluate_with_source_map(expr, inputs_js)
+    } else {
+        evaluate_without_source_map(expr, inputs_js)
+    }
+}
+
+fn evaluate_without_source_map(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
     // Transpile Blots code to JavaScript with inline evaluation
     let js_code = transpile_to_js_with_inline_eval(expr)
         .map_err(|e| JsError::new(&format!("Transpilation error: {}", e)))?;
@@ -407,14 +419,87 @@ pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
 }
 
 #[wasm_bindgen]
-pub fn transpile(expr: &str) -> Result<String, JsError> {
-    transpile_to_js(expr).map_err(|e| JsError::new(&format!("Transpilation error: {}", e)))
+pub fn transpile(expr: &str, source_mapped: Option<bool>) -> Result<JsValue, JsError> {
+    let use_source_maps = source_mapped.unwrap_or(false);
+    
+    if use_source_maps {
+        let (js_code, source_map) = transpile_to_js_with_source_map(expr, "input.blot".to_string())
+            .map_err(|e| JsError::new(&format!("Transpilation error: {}", e)))?;
+        
+        let result = Object::new();
+        Reflect::set(&result, &"code".into(), &js_code.into())
+            .map_err(|e| JsError::new(&format!("Failed to set code: {:?}", e)))?;
+        
+        let source_map_js = serde_wasm_bindgen::to_value(&source_map)
+            .map_err(|e| JsError::new(&format!("Failed to serialize source map: {:?}", e)))?;
+        Reflect::set(&result, &"sourceMap".into(), &source_map_js)
+            .map_err(|e| JsError::new(&format!("Failed to set source map: {:?}", e)))?;
+        
+        Ok(result.into())
+    } else {
+        let code = transpile_to_js(expr)
+            .map_err(|e| JsError::new(&format!("Transpilation error: {}", e)))?;
+        Ok(JsValue::from_str(&code))
+    }
 }
 
 #[wasm_bindgen]
-pub fn transpile_with_inline_eval(expr: &str) -> Result<String, JsError> {
-    transpile_to_js_with_inline_eval(expr)
-        .map_err(|e| JsError::new(&format!("Transpilation error: {}", e)))
+pub fn transpile_with_inline_eval(expr: &str, source_mapped: Option<bool>) -> Result<JsValue, JsError> {
+    let use_source_maps = source_mapped.unwrap_or(false);
+    
+    if use_source_maps {
+        let (js_code, source_map) = transpile_to_js_with_inline_eval_and_source_map(expr, "input.blot".to_string())
+            .map_err(|e| JsError::new(&format!("Transpilation error: {}", e)))?;
+        
+        let result = Object::new();
+        Reflect::set(&result, &"code".into(), &js_code.into())
+            .map_err(|e| JsError::new(&format!("Failed to set code: {:?}", e)))?;
+        
+        let source_map_js = serde_wasm_bindgen::to_value(&source_map)
+            .map_err(|e| JsError::new(&format!("Failed to serialize source map: {:?}", e)))?;
+        Reflect::set(&result, &"sourceMap".into(), &source_map_js)
+            .map_err(|e| JsError::new(&format!("Failed to set source map: {:?}", e)))?;
+        
+        Ok(result.into())
+    } else {
+        let code = transpile_to_js_with_inline_eval(expr)
+            .map_err(|e| JsError::new(&format!("Transpilation error: {}", e)))?;
+        Ok(JsValue::from_str(&code))
+    }
+}
+
+#[wasm_bindgen]
+pub fn transpile_with_source_map(expr: &str, source_name: String) -> Result<JsValue, JsError> {
+    let (js_code, source_map) = transpile_to_js_with_source_map(expr, source_name)
+        .map_err(|e| JsError::new(&format!("Transpilation error: {}", e)))?;
+    
+    let result = Object::new();
+    Reflect::set(&result, &"code".into(), &js_code.into())
+        .map_err(|e| JsError::new(&format!("Failed to set code: {:?}", e)))?;
+    
+    let source_map_js = serde_wasm_bindgen::to_value(&source_map)
+        .map_err(|e| JsError::new(&format!("Failed to serialize source map: {:?}", e)))?;
+    Reflect::set(&result, &"sourceMap".into(), &source_map_js)
+        .map_err(|e| JsError::new(&format!("Failed to set source map: {:?}", e)))?;
+    
+    Ok(result.into())
+}
+
+#[wasm_bindgen]
+pub fn transpile_with_inline_eval_and_source_map(expr: &str, source_name: String) -> Result<JsValue, JsError> {
+    let (js_code, source_map) = transpile_to_js_with_inline_eval_and_source_map(expr, source_name)
+        .map_err(|e| JsError::new(&format!("Transpilation error: {}", e)))?;
+    
+    let result = Object::new();
+    Reflect::set(&result, &"code".into(), &js_code.into())
+        .map_err(|e| JsError::new(&format!("Failed to set code: {:?}", e)))?;
+    
+    let source_map_js = serde_wasm_bindgen::to_value(&source_map)
+        .map_err(|e| JsError::new(&format!("Failed to serialize source map: {:?}", e)))?;
+    Reflect::set(&result, &"sourceMap".into(), &source_map_js)
+        .map_err(|e| JsError::new(&format!("Failed to set source map: {:?}", e)))?;
+    
+    Ok(result.into())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -505,4 +590,249 @@ fn detect_builtin_function(js_func: &JsValue) -> Option<String> {
     }
 
     None
+}
+
+fn evaluate_with_source_map(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
+    // Transpile Blots code to JavaScript with inline evaluation and source map
+    let (js_code, source_map) = transpile_to_js_with_inline_eval_and_source_map(expr, "input.blot".to_string())
+        .map_err(|e| JsError::new(&format!("Transpilation error: {}", e)))?;
+
+    // Set up inputs in global scope if provided
+    if !inputs_js.is_undefined() && !inputs_js.is_null() {
+        let global = js_sys::global();
+        // Convert SerializableValue inputs to plain JS values for the runtime
+        let converted_inputs = convert_inputs_to_js_values(&inputs_js)?;
+        Reflect::set(&global, &"$$_inputs".into(), &converted_inputs)
+            .map_err(|e| JsError::new(&format!("Failed to set inputs: {:?}", e)))?;
+    }
+
+    // Store the source map for error mapping
+    let global = js_sys::global();
+    let source_map_js = serde_wasm_bindgen::to_value(&source_map)
+        .map_err(|e| JsError::new(&format!("Failed to serialize source map: {:?}", e)))?;
+    Reflect::set(&global, &"$$_sourceMap".into(), &source_map_js)
+        .map_err(|e| JsError::new(&format!("Failed to set source map: {:?}", e)))?;
+
+    // Execute the transpiled JavaScript
+    let _result = eval(&js_code).map_err(|e| {
+        let error_str = format!("{:?}", e);
+        
+        // Since source map mappings aren't implemented yet, try to at least clean up the error
+        let cleaned_error = enhance_error_message(&error_str, expr);
+        JsError::new(&cleaned_error)
+    })?;
+
+    // The transpiled code with inline evaluation returns $$results object
+    // Extract the results from the global scope
+    let results_obj = Reflect::get(&global, &"$$results".into())
+        .map_err(|e| JsError::new(&format!("Failed to get results: {:?}", e)))?;
+
+    if results_obj.is_undefined() {
+        // No inline evaluation results, return empty result with SerializableValue format
+        let result_obj = Object::new();
+        let empty_values: BTreeMap<String, SerializableValue> = BTreeMap::new();
+        let empty_bindings: BTreeMap<String, SerializableValue> = BTreeMap::new();
+
+        let values_js = serde_wasm_bindgen::to_value(&empty_values)
+            .map_err(|e| JsError::new(&format!("Failed to serialize empty values: {:?}", e)))?;
+        let bindings_js = serde_wasm_bindgen::to_value(&empty_bindings)
+            .map_err(|e| JsError::new(&format!("Failed to serialize empty bindings: {:?}", e)))?;
+
+        Reflect::set(&result_obj, &"values".into(), &values_js)
+            .map_err(|e| JsError::new(&format!("Failed to set empty values: {:?}", e)))?;
+        Reflect::set(&result_obj, &"bindings".into(), &bindings_js)
+            .map_err(|e| JsError::new(&format!("Failed to set empty bindings: {:?}", e)))?;
+        Reflect::set(&result_obj, &"outputs".into(), &js_sys::Array::new())
+            .map_err(|e| JsError::new(&format!("Failed to set empty outputs: {:?}", e)))?;
+        return Ok(result_obj.into());
+    }
+
+    // Extract values, bindings, and outputs from the results object
+    let values_obj = Reflect::get(&results_obj, &"values".into())
+        .map_err(|e| JsError::new(&format!("Failed to get values: {:?}", e)))?;
+    let bindings_obj = Reflect::get(&results_obj, &"bindings".into())
+        .map_err(|e| JsError::new(&format!("Failed to get bindings: {:?}", e)))?;
+    let outputs_obj = Reflect::get(&results_obj, &"outputs".into())
+        .map_err(|e| JsError::new(&format!("Failed to get outputs: {:?}", e)))?;
+
+    // Convert JS values to SerializableValue format for compatibility
+    let mut values = BTreeMap::new();
+    let mut bindings = BTreeMap::new();
+    let mut outputs: HashSet<String> = HashSet::new();
+
+    // Convert values object to HashMap with SerializableValue
+    if values_obj.is_object() {
+        let obj = Object::from(values_obj);
+        let keys = Object::keys(&obj);
+        for i in 0..keys.length() {
+            if let Some(key) = keys.get(i).as_string() {
+                if let Ok(js_value) = Reflect::get(&obj, &keys.get(i)) {
+                    let serializable_value = js_value_to_serializable_value(&js_value)?;
+                    let cleaned_key = translate_js_identifiers(&key);
+                    values.insert(cleaned_key, serializable_value);
+                }
+            }
+        }
+    }
+
+    // Convert bindings object to HashMap with SerializableValue
+    if bindings_obj.is_object() {
+        let obj = Object::from(bindings_obj);
+        let keys = Object::keys(&obj);
+        for i in 0..keys.length() {
+            if let Some(key) = keys.get(i).as_string() {
+                if let Ok(js_value) = Reflect::get(&obj, &keys.get(i)) {
+                    let serializable_value = js_value_to_serializable_value(&js_value)?;
+                    let cleaned_key = translate_js_identifiers(&key);
+                    bindings.insert(cleaned_key, serializable_value);
+                }
+            }
+        }
+    }
+
+    // Convert outputs Set to HashSet
+    if outputs_obj.is_object() {
+        // Check if it's a JavaScript Set
+        if let Some(js_set) = outputs_obj.dyn_ref::<js_sys::Set>() {
+            // Convert Set to Array for easier iteration
+            let array_from = js_sys::Array::from(js_set);
+            for i in 0..array_from.length() {
+                let value = array_from.get(i);
+                if let Some(output_name) = value.as_string() {
+                    let cleaned_output = translate_js_identifiers(&output_name);
+                    outputs.insert(cleaned_output);
+                }
+            }
+        }
+    }
+
+    // Return the values and bindings as serialized objects in the expected format
+    let result_obj = Object::new();
+
+    // Serialize values and bindings to JsValue
+    let values_js = serde_wasm_bindgen::to_value(&values)
+        .map_err(|e| JsError::new(&format!("Failed to serialize values: {:?}", e)))?;
+    let bindings_js = serde_wasm_bindgen::to_value(&bindings)
+        .map_err(|e| JsError::new(&format!("Failed to serialize bindings: {:?}", e)))?;
+
+    // Create outputs array (simplified)
+    let outputs_array = js_sys::Array::new();
+    for output in outputs {
+        outputs_array.push(&output.into());
+    }
+
+    Reflect::set(&result_obj, &"values".into(), &values_js)
+        .map_err(|e| JsError::new(&format!("Failed to set values: {:?}", e)))?;
+    Reflect::set(&result_obj, &"bindings".into(), &bindings_js)
+        .map_err(|e| JsError::new(&format!("Failed to set bindings: {:?}", e)))?;
+    Reflect::set(&result_obj, &"outputs".into(), &outputs_array)
+        .map_err(|e| JsError::new(&format!("Failed to set outputs array: {:?}", e)))?;
+
+    Ok(result_obj.into())
+}
+
+fn map_js_error_to_blots(error_str: &str, source_map: &SourceMap) -> Result<String> {
+    // Extract line and column from JavaScript error
+    // Look for patterns like "at eval (eval at <anonymous>...:line:col)"
+    let re = regex::Regex::new(r":(\d+):(\d+)").unwrap();
+    
+    if let Some(captures) = re.captures(error_str) {
+        if let (Some(line_str), Some(col_str)) = (captures.get(1), captures.get(2)) {
+            if let (Ok(js_line), Ok(js_col)) = (line_str.as_str().parse::<usize>(), col_str.as_str().parse::<usize>()) {
+                // Find the corresponding Blots source location
+                for mapping in &source_map.mappings {
+                    if mapping.generated_line == js_line && mapping.generated_column <= js_col {
+                        let source_line = mapping.source_range.start.line;
+                        let source_col = mapping.source_range.start.column;
+                        
+                        // Extract the error message
+                        let error_msg = if let Some(pos) = error_str.find("Error:") {
+                            &error_str[pos..]
+                        } else {
+                            error_str
+                        };
+                        
+                        // Get the source line for context
+                        let source_lines: Vec<&str> = source_map.sources_content[0].lines().collect();
+                        let context = if source_line > 0 && source_line <= source_lines.len() {
+                            format!("\n\n{}\n{}^", 
+                                source_lines[source_line - 1],
+                                " ".repeat(source_col - 1))
+                        } else {
+                            String::new()
+                        };
+                        
+                        return Ok(format!("{}\n  at {}:{}:{}{}", 
+                            error_msg,
+                            source_map.sources[0],
+                            source_line,
+                            source_col,
+                            context
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    
+    Err(anyhow::anyhow!("Could not map error"))
+}
+
+fn enhance_error_message(error_str: &str, blots_code: &str) -> String {
+    // Extract the error message
+    let error_msg = if let Some(pos) = error_str.find("Error:") {
+        let end_pos = error_str[pos..].find('\n').unwrap_or(error_str[pos..].len());
+        &error_str[pos..pos + end_pos]
+    } else {
+        error_str
+    };
+    
+    // Try to identify which operation caused the error
+    let enhanced_msg = if error_msg.contains("can't add") && error_msg.contains("boolean") {
+        // Find the line with + operator and boolean
+        let lines: Vec<&str> = blots_code.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            if line.contains('+') && (blots_code.contains("true") || blots_code.contains("false")) {
+                return format!("{}\n  at line {} in your Blots code:\n\n{}\n{}^",
+                    error_msg,
+                    i + 1,
+                    line,
+                    " ".repeat(line.find('+').unwrap_or(0))
+                );
+            }
+        }
+        error_msg.to_string()
+    } else if error_msg.contains("can't multiply") && error_msg.contains("string") {
+        // Find the line with * operator
+        let lines: Vec<&str> = blots_code.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            if line.contains('*') {
+                return format!("{}\n  at line {} in your Blots code:\n\n{}\n{}^",
+                    error_msg,
+                    i + 1,
+                    line,
+                    " ".repeat(line.find('*').unwrap_or(0))
+                );
+            }
+        }
+        error_msg.to_string()
+    } else if error_msg.contains("can't divide") {
+        // Find the line with / operator
+        let lines: Vec<&str> = blots_code.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            if line.contains('/') {
+                return format!("{}\n  at line {} in your Blots code:\n\n{}\n{}^",
+                    error_msg,
+                    i + 1,
+                    line,
+                    " ".repeat(line.find('/').unwrap_or(0))
+                );
+            }
+        }
+        error_msg.to_string()
+    } else {
+        translate_js_error(error_msg)
+    };
+    
+    enhanced_msg
 }

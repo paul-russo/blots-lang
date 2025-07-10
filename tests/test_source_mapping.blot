@@ -1,0 +1,24 @@
+# Test file for source mapping
+# This file contains intentional errors to test error mapping
+
+# Test 1: Type error in arithmetic
+x = 42
+y = true
+result = x + y  # This should cause a type error
+
+# Test 2: Function call with wrong argument type
+double = (n) => n * 2
+output = double("not a number")  # This should cause a type error
+
+# Test 3: Nested error in complex expression
+data = [1, 2, 3, 4, 5]
+processed = data 
+  |> map((x) => x + "invalid")  # Type error here
+  |> filter((x) => x > 10)
+
+# Test 4: Error in record construction
+person = {
+  name: "Alice",
+  age: 30,
+  score: 100 / false  # Division by boolean
+}
