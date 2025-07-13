@@ -160,3 +160,108 @@ pub fn map_js_position_to_source(
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_source_map_builder_tracks_position() {
+        let mut builder = SourceMapBuilder::new("test.blot".to_string(), "x = 1 + 2".to_string());
+        
+        // Simulate generating some JS code
+        builder.track_generated_position("const ");
+        assert_eq!(builder.get_current_position(), (1, 6));
+        
+        builder.track_generated_position("x = ");
+        assert_eq!(builder.get_current_position(), (1, 10));
+        
+        builder.track_generated_position("1 + 2;\n");
+        assert_eq!(builder.get_current_position(), (2, 0));
+    }
+
+    #[test]
+    fn test_source_map_builder_with_newlines() {
+        let mut builder = SourceMapBuilder::new("test.blot".to_string(), "x = 1\ny = 2".to_string());
+        
+        builder.track_generated_position("const x = 1;\n");
+        assert_eq!(builder.get_current_position(), (2, 0));
+        
+        builder.track_generated_position("const y = 2;\n");
+        assert_eq!(builder.get_current_position(), (3, 0));
+    }
+
+    #[test]
+    fn test_source_map_add_mapping() {
+        let mut source_map = SourceMap::new("test.blot".to_string(), "x = 1 + 2".to_string());
+        
+        source_map.add_mapping(1, 1, 1, 9, 1, 10);
+        source_map.add_mapping(1, 5, 1, 7, 1, 14);
+        
+        assert_eq!(source_map.mappings.len(), 2);
+        assert_eq!(source_map.mappings[0].source_range.start.line, 1);
+        assert_eq!(source_map.mappings[0].source_range.start.column, 1);
+        assert_eq!(source_map.mappings[0].generated_line, 1);
+        assert_eq!(source_map.mappings[0].generated_column, 10);
+    }
+
+    #[test]
+    fn test_source_map_to_comment() {
+        let source_map = SourceMap::new("test.blot".to_string(), "x = 1".to_string());
+        let comment = source_map.to_comment();
+        
+        assert!(comment.starts_with("//# sourceMappingURL=data:application/json;base64,"));
+    }
+
+    #[test]
+    fn test_map_js_position_to_source() {
+        let mut source_map = SourceMap::new("test.blot".to_string(), "x = 42\ny = true\nresult = x + y".to_string());
+        
+        // Add some mappings
+        source_map.add_mapping(1, 1, 1, 6, 10, 0);   // x = 42
+        source_map.add_mapping(2, 1, 2, 8, 11, 0);   // y = true
+        source_map.add_mapping(3, 10, 3, 15, 12, 20); // x + y
+        
+        // Test exact match
+        let location = map_js_position_to_source(12, 20, &source_map);
+        assert!(location.is_some());
+        let loc = location.unwrap();
+        assert_eq!(loc.line, 3);
+        assert_eq!(loc.column, 10);
+        assert_eq!(loc.source_file, "test.blot");
+        assert_eq!(loc.source_line, Some("result = x + y".to_string()));
+        
+        // Test no match
+        let no_location = map_js_position_to_source(100, 100, &source_map);
+        assert!(no_location.is_none());
+    }
+
+    #[test]
+    fn test_source_map_builder_with_mappings() {
+        let mut builder = SourceMapBuilder::new("test.blot".to_string(), "x = 1\ny = 2".to_string());
+        
+        // Track some generated code
+        builder.track_generated_position("const $$_x = ");
+        builder.add_mapping((1, 1), (1, 5));
+        
+        builder.track_generated_position("1;\n");
+        
+        builder.track_generated_position("const $$_y = ");
+        builder.add_mapping((2, 1), (2, 5));
+        
+        builder.track_generated_position("2;\n");
+        
+        let source_map = builder.build();
+        assert_eq!(source_map.mappings.len(), 2);
+        
+        // Check first mapping
+        assert_eq!(source_map.mappings[0].source_range.start.line, 1);
+        assert_eq!(source_map.mappings[0].generated_line, 1);
+        assert_eq!(source_map.mappings[0].generated_column, 13);
+        
+        // Check second mapping
+        assert_eq!(source_map.mappings[1].source_range.start.line, 2);
+        assert_eq!(source_map.mappings[1].generated_line, 2);
+        assert_eq!(source_map.mappings[1].generated_column, 13);
+    }
+}

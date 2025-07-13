@@ -836,3 +836,8 @@ fn enhance_error_message(error_str: &str, blots_code: &str) -> String {
     
     enhanced_msg
 }
+
+#[cfg(test)]
+mod tests;
+#[cfg(test)]
+mod error_tests;
