@@ -17,6 +17,9 @@ js-sys = "0.3.70"
 web-sys = "0.3.70"
 regex = "1.10.2"
 
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
 # https://github.com/rustwasm/wasm-pack/issues/1351
 [package.metadata.wasm-pack.profile.dev.wasm-bindgen]
 dwarf-debug-info = true

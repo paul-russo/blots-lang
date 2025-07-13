@@ -11,7 +11,8 @@
       "Bash(grep:*)",
       "Bash(cargo test:*)",
       "Bash(chmod:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(wasm-pack test:*)"
     ],
     "deny": []
   }
