@@ -1,5 +1,0 @@
-// Test inputs and dot access
-print("inputs: {}", inputs)
-print("inputs.base_salary: {}", inputs.base_salary)
-salary = inputs.base_salary * inputs.base_salary_modifier
-print("salary: {}", salary)

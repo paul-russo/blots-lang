@@ -4,18 +4,6 @@ This directory contains test files for the Blots programming language and its Ja
 
 ## Directory Structure
 
-### `transpiler/`
-Tests specifically for the JavaScript transpiler functionality:
-
-- **`builtin-test.blot/.js`** - Tests built-in functions (map, filter, math functions, etc.)
-- **`complex-test.blot`** - Tests complex math operations and timing functions
-- **`debug-access.blot`** - Tests array access transpilation (was used to debug `arr[0]` issues)
-- **`inline-test.blot/.js`** - Tests inline evaluation feature for Soulver-like behavior
-- **`output-test.blot`** - Tests output declarations and print statements
-- **`simple-debug.blot`** - Simple array access test case
-- **`standalone-test.blot/.js`** - Tests standalone expressions (not bound to variables)
-- **`test.blot`** - Basic transpiler functionality test with various language features
-
 ### `language-features/`
 Tests for specific Blots language features:
 
@@ -25,25 +13,10 @@ Tests for specific Blots language features:
 
 ## Running Tests
 
-### Transpiler Tests
-```bash
-# Basic transpilation
-cargo run -p blots -- tests/transpiler/test.blot --transpile
-
-# With inline evaluation (Soulver-like results)
-cargo run -p blots -- tests/transpiler/inline-test.blot --transpile --inline-eval
-
-# Run transpiled JavaScript
-cargo run -p blots -- tests/transpiler/builtin-test.blot --transpile | node
-```
-
 ### Language Feature Tests  
 ```bash
 # Test functional programming patterns
-cargo run -p blots -- tests/language-features/each-with-test.blot --transpile | node
-
-# Test complex benchmarks
-cargo run -p blots -- tests/language-features/benchmark-pattern.blot --transpile | node
+cargo run -p blots -- tests/language-features/each-with-test.blot
 ```
 
 ## Test Categories

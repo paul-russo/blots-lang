@@ -1,3 +1,0 @@
-// Test multiple sequential with operations
-result = each([1,2,3]) with x => x * 2 with x => x / 2
-print("Result: {}", collect(result))

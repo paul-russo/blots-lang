@@ -1,7 +1,0 @@
-// Simulate inputs object for testing
-inputs = { base_salary: 50000, base_salary_modifier: 1.2 }
-print("inputs: {}", inputs)
-print("inputs.base_salary: {}", inputs.base_salary)
-print("inputs.base_salary_modifier: {}", inputs.base_salary_modifier)
-salary = inputs.base_salary * inputs.base_salary_modifier
-print("salary: {}", salary)
