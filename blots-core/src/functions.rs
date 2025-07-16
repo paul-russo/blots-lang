@@ -411,14 +411,14 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
             name: String::from("slice"),
             arity: FunctionArity::Exact(3),
             body: |args, heap, _, _| {
-                let start = args[0].as_number()? as usize;
-                let end = args[1].as_number()? as usize;
+                let start = args[1].as_number()? as usize;
+                let end = args[2].as_number()? as usize;
 
-                match args[2] {
+                match args[0] {
                     Value::List(_) => {
                         let l = {
                             let borrowed_heap = &heap.borrow();
-                            args[2].as_list(borrowed_heap)?.clone()
+                            args[0].as_list(borrowed_heap)?.clone()
                         };
 
                         l.get(start..end)
@@ -429,7 +429,7 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                     Value::String(_) => {
                         let s = {
                             let borrowed_heap = &heap.borrow();
-                            args[2].as_string(borrowed_heap)?.to_string()
+                            args[0].as_string(borrowed_heap)?.to_string()
                         };
 
                         s.get(start..end)
@@ -822,7 +822,7 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
             name: String::from("split"),
             arity: FunctionArity::Exact(2),
             body: |args, heap, _, _| {
-                let (delimeter, s) = {
+                let (s, delimeter) = {
                     let borrowed_heap = &heap.borrow();
                     (
                         args[0].as_string(borrowed_heap)?.to_string(),
@@ -847,8 +847,8 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
             body: |args, heap, _, _| {
                 let joined_string = {
                     let borrowed_heap = &heap.borrow();
-                    let delimeter = args[0].as_string(borrowed_heap)?;
-                    let list = args[1].as_list(borrowed_heap)?;
+                    let delimeter = args[1].as_string(borrowed_heap)?;
+                    let list = args[0].as_list(borrowed_heap)?;
                     list.iter()
                         .map(|v| v.stringify(borrowed_heap))
                         .collect::<Vec<String>>()
@@ -867,9 +867,9 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
             body: |args, heap, _, _| {
                 let string = {
                     let borrowed_heap = heap.borrow();
-                    let old = args[0].as_string(&borrowed_heap)?.to_string();
-                    let new = args[1].as_string(&borrowed_heap)?.to_string();
-                    let s = args[2].as_string(&borrowed_heap)?.to_string();
+                    let old = args[1].as_string(&borrowed_heap)?.to_string();
+                    let new = args[2].as_string(&borrowed_heap)?.to_string();
+                    let s = args[0].as_string(&borrowed_heap)?.to_string();
                     s.replace(&old, &new)
                 };
 
@@ -895,9 +895,9 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
             name: String::from("percentile"),
             arity: FunctionArity::Exact(2),
             body: |args, heap, _, _| {
-                let p = args[0].as_number()?;
+                let p = args[1].as_number()?;
                 let heap = &heap.borrow();
-                let list = args[1].as_list(heap)?;
+                let list = args[0].as_list(heap)?;
 
                 if p < 0.0 || p > 100.0 {
                     return Err(anyhow!("percentile must be between 0 and 100"));
@@ -980,10 +980,10 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
             body: |args, heap, _, _| {
                 let needle = {
                     let borrowed_heap = &heap.borrow();
-                    args[0].as_string(borrowed_heap)?.to_string()
+                    args[1].as_string(borrowed_heap)?.to_string()
                 };
 
-                match &args[1].reify(&heap.borrow())? {
+                match &args[0].reify(&heap.borrow())? {
                     ReifiedValue::List(l, _) => Ok(Value::Bool(
                         (*l).iter()
                             .find(|v| v.as_string(&heap.borrow()).unwrap().eq(&needle))
