@@ -1,5 +1,0 @@
-// Test accessing inputs properties (inputs is pre-defined in runtime)
-print("inputs: {}", inputs)
-print("inputs.base_salary: {}", inputs.base_salary)
-salary = inputs.base_salary * 2
-print("salary: {}", salary)

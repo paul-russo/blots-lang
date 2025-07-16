@@ -1,2 +1,0 @@
-result = each([1,2,3])
-print("each result: {}", result)
