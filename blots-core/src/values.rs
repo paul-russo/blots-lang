@@ -216,7 +216,6 @@ pub enum ValueType {
     Number,
     List,
     Spread,
-    Each,
     Bool,
     Lambda,
     BuiltIn,
@@ -231,7 +230,6 @@ impl Display for ValueType {
             ValueType::Number => write!(f, "number"),
             ValueType::List => write!(f, "list"),
             ValueType::Spread => write!(f, "spread"),
-            ValueType::Each => write!(f, "each"),
             ValueType::Bool => write!(f, "boolean"),
             ValueType::Lambda => write!(f, "lambda"),
             ValueType::BuiltIn => write!(f, "built-in function"),
@@ -261,8 +259,6 @@ pub enum ReifiedValue<'h> {
     Lambda(&'h LambdaDef, LambdaPointer),
     /// A spread value is "spread" into its container when it is used in a list, record, or function call. (internal only)
     Spread(ReifiedIterableValue<'h>, IterablePointer),
-    /// Like a spread, but the value is never unwrapped. This is used for the "each" keyword. (internal only)
-    Each(ReifiedIterableValue<'h>, IterablePointer),
     /// A built-in function is a function that is implemented in Rust.
     BuiltIn(usize),
 }
@@ -284,7 +280,6 @@ impl From<ReifiedValue<'_>> for Value {
             ReifiedValue::Record(_, p) => Value::Record(p),
             ReifiedValue::Lambda(_, p) => Value::Lambda(p),
             ReifiedValue::Spread(_, p) => Value::Spread(p),
-            ReifiedValue::Each(_, p) => Value::Each(p),
             ReifiedValue::BuiltIn(id) => Value::BuiltIn(id),
         }
     }
@@ -306,7 +301,6 @@ pub enum SerializableValue {
     String(String),
     Record(BTreeMap<String, SerializableValue>),
     Lambda(SerializableLambdaDef),
-    Each(SerializableIterableValue),
     BuiltIn(String),
 }
 
@@ -355,32 +349,6 @@ impl SerializableValue {
             Value::BuiltIn(id) => Ok(SerializableValue::BuiltIn(
                 get_built_in_function_ident(*id).unwrap().to_string(),
             )),
-            Value::Each(p) => {
-                let iterable = p.reify(heap).as_iterable()?;
-                let serialized_iterable = match iterable {
-                    ReifiedIterableValue::List(list) => {
-                        let serialized_list = list
-                            .iter()
-                            .map(|v| SerializableValue::from_value(v, heap))
-                            .collect::<Result<Vec<SerializableValue>>>()?;
-                        SerializableIterableValue::List(serialized_list)
-                    }
-                    ReifiedIterableValue::String(string) => {
-                        SerializableIterableValue::String(string.to_string())
-                    }
-                    ReifiedIterableValue::Record(record) => {
-                        let serialized_record = record
-                            .iter()
-                            .map(|(k, v)| {
-                                Ok((k.to_string(), SerializableValue::from_value(v, heap)?))
-                            })
-                            .collect::<Result<BTreeMap<String, SerializableValue>>>()?;
-                        SerializableIterableValue::Record(serialized_record)
-                    }
-                };
-
-                Ok(SerializableValue::Each(serialized_iterable))
-            }
             Value::Spread(_) => Err(anyhow!("cannot serialize a spread value")),
         }
     }
@@ -428,32 +396,6 @@ impl SerializableValue {
             SerializableValue::BuiltIn(ident) => get_built_in_function_id(ident)
                 .ok_or(anyhow!("built-in function with ident {} not found", ident))
                 .map(|id| Value::BuiltIn(id)),
-            SerializableValue::Each(iterable) => {
-                let deserialized_iterable = match iterable {
-                    SerializableIterableValue::List(list) => {
-                        let deserialized_list = list
-                            .iter()
-                            .map(|v| SerializableValue::to_value(v, heap))
-                            .collect::<Result<Vec<Value>>>()?;
-                        heap.insert_list(deserialized_list)
-                    }
-                    SerializableIterableValue::String(string) => {
-                        heap.insert_string(string.to_string())
-                    }
-                    SerializableIterableValue::Record(record) => {
-                        let deserialized_record = record
-                            .iter()
-                            .map(|(k, v)| {
-                                Ok((k.to_string(), SerializableValue::to_value(v, heap)?))
-                            })
-                            .collect::<Result<BTreeMap<String, Value>>>()?;
-                        heap.insert_record(deserialized_record)
-                    }
-                };
-
-                let p = deserialized_iterable.as_iterable_pointer().unwrap();
-                Ok(Value::Each(p))
-            }
         }
     }
 }
@@ -503,23 +445,16 @@ pub enum Value {
     Lambda(LambdaPointer),
     /// A spread value is "spread" into its container when it is used in a list, record, or function call. (internal only)
     Spread(IterablePointer),
-    /// Like a spread, but the value is never unwrapped. This is used for the "each" keyword. (internal only)
-    Each(IterablePointer),
     /// A built-in function is a function that is implemented in Rust.
     BuiltIn(usize),
 }
 
 impl Value {
-    pub fn new_each_list(value: Value) -> Result<Value> {
-        Ok(Value::Each(value.as_list_pointer()?.into()))
-    }
-
     pub fn get_type(&self) -> ValueType {
         match self {
             Value::Number(_) => ValueType::Number,
             Value::List(_) => ValueType::List,
             Value::Spread(_) => ValueType::Spread,
-            Value::Each(_) => ValueType::Each,
             Value::Bool(_) => ValueType::Bool,
             Value::Lambda(_) => ValueType::Lambda,
             Value::String(_) => ValueType::String,
@@ -538,10 +473,6 @@ impl Value {
     }
 
     pub fn is_spread(&self) -> bool {
-        matches!(self, Value::Spread(_))
-    }
-
-    pub fn is_each(&self) -> bool {
         matches!(self, Value::Spread(_))
     }
 
@@ -587,13 +518,6 @@ impl Value {
         match self {
             Value::Spread(v) => Ok(v.reify(heap)),
             _ => Err(anyhow!("expected a spread, but got a {}", self.get_type())),
-        }
-    }
-
-    pub fn as_each<'h>(&self, heap: &'h Heap) -> Result<ReifiedIterableValue<'h>> {
-        match self {
-            Value::Each(v) => v.reify(heap).as_iterable(),
-            _ => Err(anyhow!("expected an each, but got a {}", self.get_type())),
         }
     }
 
@@ -673,9 +597,9 @@ impl Value {
 
     pub fn as_iterable_pointer(&self) -> Result<IterablePointer> {
         match self {
-            Value::Spread(p) | Value::Each(p) => Ok(*p),
+            Value::Spread(p) => Ok(*p),
             _ => Err(anyhow!(
-                "expected a spread or each, but got a {}",
+                "expected a spread, but got a {}",
                 self.get_type()
             )),
         }
@@ -690,7 +614,6 @@ impl Value {
             Value::Number(n) => Ok(ReifiedValue::Number(*n)),
             Value::List(p) => Ok(ReifiedValue::List(p.reify(heap).as_list()?, *p)),
             Value::Spread(p) => Ok(ReifiedValue::Spread(p.reify(heap).as_iterable()?, *p)),
-            Value::Each(p) => Ok(ReifiedValue::Each(p.reify(heap).as_iterable()?, *p)),
             Value::Bool(b) => Ok(ReifiedValue::Bool(*b)),
             Value::Lambda(p) => Ok(ReifiedValue::Lambda(p.reify(heap).as_lambda()?, *p)),
             Value::String(p) => Ok(ReifiedValue::String(p.reify(heap).as_string()?, *p)),
@@ -772,32 +695,6 @@ impl Value {
                     result
                 }
             },
-            Value::Each(p) => match p {
-                IterablePointer::List(l) => {
-                    let list = l.reify(heap).as_list().unwrap();
-                    let mut result = String::from("each(");
-                    result.push_str(&list.iter().map(|v| v.stringify(heap)).collect::<String>());
-                    result.push_str(")");
-                    result
-                }
-                IterablePointer::String(s) => {
-                    let string = s.reify(heap).as_string().unwrap();
-                    format!("each({})", string)
-                }
-                IterablePointer::Record(r) => {
-                    let record = r.reify(heap).as_record().unwrap();
-                    let mut result = String::from("each(");
-                    result.push_str("{");
-                    for (i, (key, value)) in record.iter().enumerate() {
-                        result.push_str(&format!("{}: {}", key, value.stringify(heap)));
-                        if i < record.len() - 1 {
-                            result.push_str(", ");
-                        }
-                    }
-                    result.push_str("}");
-                    result
-                }
-            },
             Value::Bool(_) | Value::Number(_) | Value::Null => format!("{}", self),
         }
     }
@@ -809,7 +706,6 @@ impl Display for Value {
             Value::Number(n) => write!(f, "{}", n),
             Value::List(p) => write!(f, "{}", p),
             Value::Spread(p) => write!(f, "...{}", p),
-            Value::Each(p) => write!(f, "each({})", p),
             Value::Bool(b) => write!(f, "{}", b),
             Value::Lambda(p) => write!(f, "{}", p),
             Value::String(p) => write!(f, "{}", p),

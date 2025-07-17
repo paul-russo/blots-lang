@@ -14,7 +14,7 @@ is_prime = n =>
     if n <= 1 then false
     else if n <= 3 then true
     else if n % 2 == 0 then false
-    else !is_divisible_by_any(n, collect((each(range(floor(sqrt(n)) - 2))) + 3))
+    else !is_divisible_by_any(n, (range(floor(sqrt(n)) - 2)) + 3)
 
 // Complex number operations using records
 complex_add = (a, b) => [a[0] + b[0], a[1] + b[1]]
@@ -38,12 +38,12 @@ mandelbrot = (x, y, max_iter, iter, z) =>
 // Main computation that exercises different language features
 benchmark = n => {
     primes: filter(range(n), is_prime),
-    fibs: collect((each(range(n))) with (i) => fibonacci(i)),
-    factorials: collect((each(range(n))) with (i) => factorial(i)), 
+    fibs: (range(n)) with (i) => fibonacci(i),
+    factorials: (range(n)) with (i) => factorial(i), 
     reverse_test: reverse(range(n)),
-    mandel_test: collect((each([[-2, -1], [-1, 0], [0, 0], [0.25, 0]])) with (point) => mandelbrot(point[0], point[1], 100, 0, [0, 0])),
-    sum_squares: sum(...collect((each(range(n))) with (i) => i * i)),
-    trig_test: collect((each(range(n))) with (i) => [sin(i), cos(i), tan(i)])
+    mandel_test: ([[-2, -1], [-1, 0], [0, 0], [0.25, 0]]) with (point) => mandelbrot(point[0], point[1], 100, 0, [0, 0]),
+    sum_squares: sum(...((range(n)) with (i) => i * i)),
+    trig_test: (range(n)) with (i) => [sin(i), cos(i), tan(i)]
 }
 
 // Run benchmark

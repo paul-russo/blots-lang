@@ -21,8 +21,8 @@ impl BlotsHighlighter {
             // Comments: // to end of line
             comment_regex: Regex::new(r"//.*$").unwrap(),
 
-            // Keywords: if, then, else, output, each, with
-            keyword_regex: Regex::new(r"\b(if|then|else|output|each|with)\b").unwrap(),
+            // Keywords: if, then, else, output, with
+            keyword_regex: Regex::new(r"\b(if|then|else|output|with)\b").unwrap(),
 
             // Operators: all the operators from the grammar
             operator_regex: Regex::new(r"(=>|\+|-|\*|/|%|\^|==|!=|<=|<|>=|>|&&|\|\||\?\?|!|\.|=|\{|\}|\[|\]|\(|\)|,|\?|\.\.\.|\band\b|\bor\b)").unwrap(),

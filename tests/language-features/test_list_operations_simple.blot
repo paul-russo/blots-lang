@@ -1,0 +1,6 @@
+// Test simple element-wise operations
+a = [2, 4, 6]
+b = [1, 2, 3]
+
+result = a + b
+print("result: {}", result)

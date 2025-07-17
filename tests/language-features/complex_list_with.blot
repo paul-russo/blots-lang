@@ -1,0 +1,20 @@
+// Test complex list with operations
+nums = range(10)
+
+// Test list with transformations
+fibs_like = nums with (i => i * i + 1)
+print("Fibonacci-like sequence: {}", fibs_like)
+
+// Test filtering with transformations
+evens = filter(nums with (i => i * 2), x => x % 2 == 0)
+print("Even doubled numbers: {}", evens)
+
+// Test chained operations
+result = range(5) with (x => x * x)
+sum_of_squares = sum(...result)
+print("Sum of squares 0-4: {}", sum_of_squares)
+
+// Test with nested lists
+point_list = [[1, 2], [3, 4], [5, 6]]
+distances = point_list with (point => sqrt(point[0] * point[0] + point[1] * point[1]))
+print("Distances from origin: {}", distances)

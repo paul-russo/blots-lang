@@ -119,13 +119,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blots-core",
- "js-sys",
  "regex",
  "serde",
  "serde-wasm-bindgen",
  "wasm-bindgen",
  "wasm-bindgen-test",
- "web-sys",
 ]
 
 [[package]]

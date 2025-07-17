@@ -1,0 +1,15 @@
+// Test with operations on lists
+numbers = [1, 2, 3, 4, 5]
+
+// Test with operator for mapping
+doubled = numbers with (x => x * 2)
+print("numbers with (x => x * 2): {}", doubled)
+
+// Test with for squaring
+squares = numbers with (x => x * x)
+print("numbers with (x => x * x): {}", squares)
+
+// Test with range
+range_nums = range(5)
+range_doubled = range_nums with (x => x * 2)
+print("range(5) with doubling: {}", range_doubled)

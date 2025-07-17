@@ -1,0 +1,15 @@
+// Test all element-wise operations
+a = [2, 4, 6]
+b = [1, 2, 3]
+
+print("a: {}", a)
+print("b: {}", b)
+
+print("a + b: {}", a + b)
+print("a - b: {}", a - b)
+print("a * b: {}", a * b)
+print("a / b: {}", a / b)
+
+// Test with scalars
+print("a + 1: {}", a + 1)
+print("a * 2: {}", a * 2)
