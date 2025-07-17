@@ -1338,4 +1338,213 @@ mod tests {
         let result = parse_and_evaluate("3 ?? 10", None, None).unwrap();
         assert_eq!(result, Value::Number(3.0));
     }
+
+    // Element-wise operations tests
+    #[test]
+    fn list_elementwise_addition() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let result = parse_and_evaluate("[1, 2, 3] + [4, 5, 6]", Some(Rc::clone(&heap)), None).unwrap();
+        let expected = vec![Value::Number(5.0), Value::Number(7.0), Value::Number(9.0)];
+        assert_eq!(result.as_list(&heap.borrow()).unwrap(), &expected);
+    }
+
+    #[test]
+    fn list_elementwise_subtraction() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let result = parse_and_evaluate("[5, 7, 9] - [1, 2, 3]", Some(Rc::clone(&heap)), None).unwrap();
+        let expected = vec![Value::Number(4.0), Value::Number(5.0), Value::Number(6.0)];
+        assert_eq!(result.as_list(&heap.borrow()).unwrap(), &expected);
+    }
+
+    #[test]
+    fn list_elementwise_multiplication() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let result = parse_and_evaluate("[2, 3, 4] * [5, 6, 7]", Some(Rc::clone(&heap)), None).unwrap();
+        let expected = vec![Value::Number(10.0), Value::Number(18.0), Value::Number(28.0)];
+        assert_eq!(result.as_list(&heap.borrow()).unwrap(), &expected);
+    }
+
+    #[test]
+    fn list_elementwise_division() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let result = parse_and_evaluate("[10, 20, 30] / [2, 4, 5]", Some(Rc::clone(&heap)), None).unwrap();
+        let expected = vec![Value::Number(5.0), Value::Number(5.0), Value::Number(6.0)];
+        assert_eq!(result.as_list(&heap.borrow()).unwrap(), &expected);
+    }
+
+    #[test]
+    fn list_elementwise_power() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let result = parse_and_evaluate("[2, 3, 4] ^ [2, 2, 2]", Some(Rc::clone(&heap)), None).unwrap();
+        let expected = vec![Value::Number(4.0), Value::Number(9.0), Value::Number(16.0)];
+        assert_eq!(result.as_list(&heap.borrow()).unwrap(), &expected);
+    }
+
+    #[test]
+    fn list_elementwise_modulo() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let result = parse_and_evaluate("[10, 11, 12] % [3, 3, 3]", Some(Rc::clone(&heap)), None).unwrap();
+        let expected = vec![Value::Number(1.0), Value::Number(2.0), Value::Number(0.0)];
+        assert_eq!(result.as_list(&heap.borrow()).unwrap(), &expected);
+    }
+
+    #[test]
+    fn list_elementwise_different_lengths_error() {
+        let result = parse_and_evaluate("[1, 2, 3] + [4, 5]", None, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("left- and right-hand-side lists must be the same length"));
+    }
+
+    // Broadcast operations tests
+    #[test]
+    fn list_scalar_addition() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let result = parse_and_evaluate("[1, 2, 3] + 10", Some(Rc::clone(&heap)), None).unwrap();
+        let expected = vec![Value::Number(11.0), Value::Number(12.0), Value::Number(13.0)];
+        assert_eq!(result.as_list(&heap.borrow()).unwrap(), &expected);
+    }
+
+    #[test]
+    fn list_scalar_subtraction() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let result = parse_and_evaluate("[10, 20, 30] - 5", Some(Rc::clone(&heap)), None).unwrap();
+        let expected = vec![Value::Number(5.0), Value::Number(15.0), Value::Number(25.0)];
+        assert_eq!(result.as_list(&heap.borrow()).unwrap(), &expected);
+    }
+
+    #[test]
+    fn list_scalar_multiplication() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let result = parse_and_evaluate("[2, 3, 4] * 2", Some(Rc::clone(&heap)), None).unwrap();
+        let expected = vec![Value::Number(4.0), Value::Number(6.0), Value::Number(8.0)];
+        assert_eq!(result.as_list(&heap.borrow()).unwrap(), &expected);
+    }
+
+    #[test]
+    fn list_scalar_division() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let result = parse_and_evaluate("[10, 20, 30] / 10", Some(Rc::clone(&heap)), None).unwrap();
+        let expected = vec![Value::Number(1.0), Value::Number(2.0), Value::Number(3.0)];
+        assert_eq!(result.as_list(&heap.borrow()).unwrap(), &expected);
+    }
+
+    #[test]
+    fn list_scalar_power() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let result = parse_and_evaluate("[2, 3, 4] ^ 2", Some(Rc::clone(&heap)), None).unwrap();
+        let expected = vec![Value::Number(4.0), Value::Number(9.0), Value::Number(16.0)];
+        assert_eq!(result.as_list(&heap.borrow()).unwrap(), &expected);
+    }
+
+    #[test]
+    fn list_scalar_modulo() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let result = parse_and_evaluate("[10, 11, 12] % 3", Some(Rc::clone(&heap)), None).unwrap();
+        let expected = vec![Value::Number(1.0), Value::Number(2.0), Value::Number(0.0)];
+        assert_eq!(result.as_list(&heap.borrow()).unwrap(), &expected);
+    }
+
+    #[test]
+    fn list_with_operator() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let result = parse_and_evaluate("[1, 2, 3] with (x => x * x)", Some(Rc::clone(&heap)), None).unwrap();
+        let expected = vec![Value::Number(1.0), Value::Number(4.0), Value::Number(9.0)];
+        assert_eq!(result.as_list(&heap.borrow()).unwrap(), &expected);
+    }
+
+    #[test]
+    fn list_with_builtin_function() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let result = parse_and_evaluate("[4, 9, 16] with sqrt", Some(Rc::clone(&heap)), None).unwrap();
+        let expected = vec![Value::Number(2.0), Value::Number(3.0), Value::Number(4.0)];
+        assert_eq!(result.as_list(&heap.borrow()).unwrap(), &expected);
+    }
+
+    #[test]
+    fn list_elementwise_boolean_and() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let result = parse_and_evaluate("[true, true, false] && [true, false, true]", Some(Rc::clone(&heap)), None).unwrap();
+        let expected = vec![Value::Bool(true), Value::Bool(false), Value::Bool(false)];
+        assert_eq!(result.as_list(&heap.borrow()).unwrap(), &expected);
+    }
+
+    #[test]
+    fn list_elementwise_boolean_or() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let result = parse_and_evaluate("[true, false, false] || [false, true, false]", Some(Rc::clone(&heap)), None).unwrap();
+        let expected = vec![Value::Bool(true), Value::Bool(true), Value::Bool(false)];
+        assert_eq!(result.as_list(&heap.borrow()).unwrap(), &expected);
+    }
+
+    #[test]
+    fn list_elementwise_coalesce() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let result = parse_and_evaluate("[null, 2, null] ?? [1, null, 3]", Some(Rc::clone(&heap)), None).unwrap();
+        let expected = vec![Value::Number(1.0), Value::Number(2.0), Value::Number(3.0)];
+        assert_eq!(result.as_list(&heap.borrow()).unwrap(), &expected);
+    }
+
+    #[test]
+    fn list_scalar_coalesce() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let result = parse_and_evaluate("[null, 2, null] ?? 5", Some(Rc::clone(&heap)), None).unwrap();
+        let expected = vec![Value::Number(5.0), Value::Number(2.0), Value::Number(5.0)];
+        assert_eq!(result.as_list(&heap.borrow()).unwrap(), &expected);
+    }
+
+    #[test]
+    fn list_elementwise_string_concat() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let result = parse_and_evaluate("[\"a\", \"b\", \"c\"] + [\"1\", \"2\", \"3\"]", Some(Rc::clone(&heap)), None).unwrap();
+        let borrowed_heap = heap.borrow();
+        let result_list = result.as_list(&borrowed_heap).unwrap();
+        assert_eq!(result_list.len(), 3);
+        assert_eq!(result_list[0].as_string(&borrowed_heap).unwrap(), "a1");
+        assert_eq!(result_list[1].as_string(&borrowed_heap).unwrap(), "b2");
+        assert_eq!(result_list[2].as_string(&borrowed_heap).unwrap(), "c3");
+    }
+
+    #[test]
+    fn list_scalar_string_concat() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let result = parse_and_evaluate("[\"a\", \"b\", \"c\"] + \"!\"", Some(Rc::clone(&heap)), None).unwrap();
+        let borrowed_heap = heap.borrow();
+        let result_list = result.as_list(&borrowed_heap).unwrap();
+        assert_eq!(result_list.len(), 3);
+        assert_eq!(result_list[0].as_string(&borrowed_heap).unwrap(), "a!");
+        assert_eq!(result_list[1].as_string(&borrowed_heap).unwrap(), "b!");
+        assert_eq!(result_list[2].as_string(&borrowed_heap).unwrap(), "c!");
+    }
+
+    #[test]
+    fn nested_list_operations() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let result = parse_and_evaluate("([1, 2, 3] + [4, 5, 6]) * 2", Some(Rc::clone(&heap)), None).unwrap();
+        let expected = vec![Value::Number(10.0), Value::Number(14.0), Value::Number(18.0)];
+        assert_eq!(result.as_list(&heap.borrow()).unwrap(), &expected);
+    }
+
+    #[test]
+    fn list_comparison_all_equal() {
+        let result = parse_and_evaluate("[1, 1, 1] == 1", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn list_comparison_not_all_equal() {
+        let result = parse_and_evaluate("[1, 2, 1] == 1", None, None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    #[test]
+    fn list_comparison_all_less() {
+        let result = parse_and_evaluate("[1, 2, 3] < 5", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn list_comparison_not_all_less() {
+        let result = parse_and_evaluate("[1, 6, 3] < 5", None, None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
 }
