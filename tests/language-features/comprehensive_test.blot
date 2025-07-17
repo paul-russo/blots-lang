@@ -9,9 +9,9 @@ print("Basic with: {}", result1)
 result2 = 5 with x => x * 2 with y => y + 10
 print("Multiple with: {}", result2)
 
-// Test with each
-result3 = each(numbers) with x => x * 3
-print("Each with: {}", collect(result3))
+// Test element-wise with
+result3 = numbers with x => x * 3
+print("Element-wise with: {}", result3)
 
 // Test complex expressions without with
 result4 = sum(...numbers) + 10 * 2

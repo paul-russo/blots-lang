@@ -1,9 +1,0 @@
-// Test each addition
-result1 = each([1,2,3]) + each([1,2,3])
-print("each + each: {}", result1)
-
-result2 = each([1,2,3]) + 5
-print("each + number: {}", result2)
-
-result3 = 10 + each([1,2,3])
-print("number + each: {}", result3)

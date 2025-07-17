@@ -80,19 +80,6 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
     let mut map = BuiltInFunctionDefs::new();
 
     map.insert(
-        "each",
-        BuiltInFunctionDef {
-            name: String::from("each"),
-            arity: FunctionArity::Exact(1),
-            body: |args, _, _, _| match args[0] {
-                Value::List(pointer) => return Ok(Value::Each(IterablePointer::List(pointer))),
-                Value::String(pointer) => return Ok(Value::Each(IterablePointer::String(pointer))),
-                Value::Record(pointer) => return Ok(Value::Each(IterablePointer::Record(pointer))),
-                _ => return Err(anyhow!("expected a list, record, or string")),
-            },
-        },
-    );
-    map.insert(
         "sqrt",
         BuiltInFunctionDef {
             name: String::from("sqrt"),
@@ -995,25 +982,7 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
             },
         },
     );
-    map.insert(
-        "collect",
-        BuiltInFunctionDef {
-            name: String::from("collect"),
-            arity: FunctionArity::Exact(1),
-            body: |args, heap, _, _| {
-                let values: Vec<Value> = {
-                    args[0]
-                        .as_each(unsafe { heap.try_borrow_unguarded()? })?
-                        .to_owned()
-                        .with_heap(Rc::clone(&heap))
-                        .into_iter()
-                        .collect()
-                };
 
-                Ok(heap.borrow_mut().insert_list(values))
-            },
-        },
-    );
     map.insert(
         "format",
         BuiltInFunctionDef {

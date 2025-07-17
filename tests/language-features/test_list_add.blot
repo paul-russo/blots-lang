@@ -1,0 +1,8 @@
+// Test list addition
+result1 = [1,2,3] + [1,2,3]
+print("list + list: {}", result1)
+
+result2 = [1,2,3] + 5
+print("list + number: {}", result2)
+
+// Note: number + list is not supported, need to use list + number
