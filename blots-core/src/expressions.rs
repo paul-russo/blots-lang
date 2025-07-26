@@ -297,7 +297,7 @@ pub fn evaluate_expression(
                     || ident == "and"
                     || ident == "or"
                     || ident == "with"
-                    || ident == "compute"
+                    || ident == "do"
                     || ident == "return"
                 {
                     return Err(anyhow!("cannot assign to keyword: {}", ident));
@@ -450,7 +450,7 @@ pub fn evaluate_expression(
                     )
                 }
             }
-            Rule::compute_block => {
+            Rule::do_block => {
                 let mut inner_pairs = primary.into_inner();
 
                 // Create new scope from current bindings
@@ -462,7 +462,7 @@ pub fn evaluate_expression(
                 // Process all pairs
                 while let Some(pair) = inner_pairs.next() {
                     match pair.as_rule() {
-                        Rule::compute_statement => {
+                        Rule::do_statement => {
                             // Step statement contains either an expression or a comment
                             if let Some(inner) = pair.into_inner().next() {
                                 if inner.as_rule() == Rule::expression {
