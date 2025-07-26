@@ -203,15 +203,32 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
         "min",
         BuiltInFunctionDef {
             name: String::from("min"),
-            arity: FunctionArity::AtLeast(2),
-            body: |args, _, _, _| {
-                Ok(Value::Number(
+            arity: FunctionArity::AtLeast(1),
+            body: |args, heap, _, _| {
+                let nums = if args.len() == 1 {
+                    // Check if single argument is a list
+                    match &args[0] {
+                        Value::List(_) => {
+                            let borrowed_heap = heap.borrow();
+                            let list = args[0].as_list(&borrowed_heap)?;
+                            list.iter()
+                                .map(|a| a.as_number())
+                                .collect::<Result<Vec<f64>>>()?
+                        }
+                        _ => vec![args[0].as_number()?],
+                    }
+                } else {
                     args.iter()
                         .map(|a| a.as_number())
                         .collect::<Result<Vec<f64>>>()?
-                        .iter()
-                        .copied()
-                        .fold(f64::INFINITY, f64::min),
+                };
+
+                if nums.is_empty() {
+                    return Err(anyhow!("min requires at least one number"));
+                }
+
+                Ok(Value::Number(
+                    nums.iter().copied().fold(f64::INFINITY, f64::min),
                 ))
             },
         },
@@ -220,15 +237,32 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
         "max",
         BuiltInFunctionDef {
             name: String::from("max"),
-            arity: FunctionArity::AtLeast(2),
-            body: |args, _, _, _| {
-                Ok(Value::Number(
+            arity: FunctionArity::AtLeast(1),
+            body: |args, heap, _, _| {
+                let nums = if args.len() == 1 {
+                    // Check if single argument is a list
+                    match &args[0] {
+                        Value::List(_) => {
+                            let borrowed_heap = heap.borrow();
+                            let list = args[0].as_list(&borrowed_heap)?;
+                            list.iter()
+                                .map(|a| a.as_number())
+                                .collect::<Result<Vec<f64>>>()?
+                        }
+                        _ => vec![args[0].as_number()?],
+                    }
+                } else {
                     args.iter()
                         .map(|a| a.as_number())
                         .collect::<Result<Vec<f64>>>()?
-                        .iter()
-                        .copied()
-                        .fold(f64::NEG_INFINITY, f64::max),
+                };
+
+                if nums.is_empty() {
+                    return Err(anyhow!("max requires at least one number"));
+                }
+
+                Ok(Value::Number(
+                    nums.iter().copied().fold(f64::NEG_INFINITY, f64::max),
                 ))
             },
         },
@@ -237,16 +271,31 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
         "avg",
         BuiltInFunctionDef {
             name: String::from("avg"),
-            arity: FunctionArity::AtLeast(2),
-            body: |args, _, _, _| {
-                Ok(Value::Number(
+            arity: FunctionArity::AtLeast(1),
+            body: |args, heap, _, _| {
+                let nums = if args.len() == 1 {
+                    // Check if single argument is a list
+                    match &args[0] {
+                        Value::List(_) => {
+                            let borrowed_heap = heap.borrow();
+                            let list = args[0].as_list(&borrowed_heap)?;
+                            list.iter()
+                                .map(|a| a.as_number())
+                                .collect::<Result<Vec<f64>>>()?
+                        }
+                        _ => vec![args[0].as_number()?],
+                    }
+                } else {
                     args.iter()
                         .map(|a| a.as_number())
                         .collect::<Result<Vec<f64>>>()?
-                        .iter()
-                        .sum::<f64>()
-                        / args.len() as f64,
-                ))
+                };
+
+                if nums.is_empty() {
+                    return Err(anyhow!("avg requires at least one number"));
+                }
+
+                Ok(Value::Number(nums.iter().sum::<f64>() / nums.len() as f64))
             },
         },
     );
@@ -254,15 +303,31 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
         "sum",
         BuiltInFunctionDef {
             name: String::from("sum"),
-            arity: FunctionArity::AtLeast(2),
-            body: |args, _, _, _| {
-                Ok(Value::Number(
+            arity: FunctionArity::AtLeast(1),
+            body: |args, heap, _, _| {
+                let nums = if args.len() == 1 {
+                    // Check if single argument is a list
+                    match &args[0] {
+                        Value::List(_) => {
+                            let borrowed_heap = heap.borrow();
+                            let list = args[0].as_list(&borrowed_heap)?;
+                            list.iter()
+                                .map(|a| a.as_number())
+                                .collect::<Result<Vec<f64>>>()?
+                        }
+                        _ => vec![args[0].as_number()?],
+                    }
+                } else {
                     args.iter()
                         .map(|a| a.as_number())
                         .collect::<Result<Vec<f64>>>()?
-                        .iter()
-                        .sum(),
-                ))
+                };
+
+                if nums.is_empty() {
+                    return Err(anyhow!("sum requires at least one number"));
+                }
+
+                Ok(Value::Number(nums.iter().sum()))
             },
         },
     );
@@ -270,15 +335,31 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
         "prod",
         BuiltInFunctionDef {
             name: String::from("prod"),
-            arity: FunctionArity::AtLeast(2),
-            body: |args, _, _, _| {
-                Ok(Value::Number(
+            arity: FunctionArity::AtLeast(1),
+            body: |args, heap, _, _| {
+                let nums = if args.len() == 1 {
+                    // Check if single argument is a list
+                    match &args[0] {
+                        Value::List(_) => {
+                            let borrowed_heap = heap.borrow();
+                            let list = args[0].as_list(&borrowed_heap)?;
+                            list.iter()
+                                .map(|a| a.as_number())
+                                .collect::<Result<Vec<f64>>>()?
+                        }
+                        _ => vec![args[0].as_number()?],
+                    }
+                } else {
                     args.iter()
                         .map(|a| a.as_number())
                         .collect::<Result<Vec<f64>>>()?
-                        .iter()
-                        .product(),
-                ))
+                };
+
+                if nums.is_empty() {
+                    return Err(anyhow!("prod requires at least one number"));
+                }
+
+                Ok(Value::Number(nums.iter().product()))
             },
         },
     );
@@ -286,12 +367,29 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
         "median",
         BuiltInFunctionDef {
             name: String::from("median"),
-            arity: FunctionArity::AtLeast(2),
-            body: |args, _, _, _| {
-                let mut nums = args
-                    .into_iter()
-                    .map(|a| a.as_number())
-                    .collect::<Result<Vec<f64>>>()?;
+            arity: FunctionArity::AtLeast(1),
+            body: |args, heap, _, _| {
+                let mut nums = if args.len() == 1 {
+                    // Check if single argument is a list
+                    match &args[0] {
+                        Value::List(_) => {
+                            let borrowed_heap = heap.borrow();
+                            let list = args[0].as_list(&borrowed_heap)?;
+                            list.iter()
+                                .map(|a| a.as_number())
+                                .collect::<Result<Vec<f64>>>()?
+                        }
+                        _ => vec![args[0].as_number()?],
+                    }
+                } else {
+                    args.into_iter()
+                        .map(|a| a.as_number())
+                        .collect::<Result<Vec<f64>>>()?
+                };
+
+                if nums.is_empty() {
+                    return Err(anyhow!("median requires at least one number"));
+                }
 
                 nums.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 let len = nums.len();
