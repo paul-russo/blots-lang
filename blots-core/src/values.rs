@@ -598,10 +598,7 @@ impl Value {
     pub fn as_iterable_pointer(&self) -> Result<IterablePointer> {
         match self {
             Value::Spread(p) => Ok(*p),
-            _ => Err(anyhow!(
-                "expected a spread, but got a {}",
-                self.get_type()
-            )),
+            _ => Err(anyhow!("expected a spread, but got a {}", self.get_type())),
         }
     }
 

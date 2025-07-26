@@ -48,6 +48,55 @@ fn main() -> ! {
                                 _ => {}
                             }
                         }
+                        Rule::output_declaration => {
+                            let mut inner_pairs = inner_pair.into_inner();
+                            let output_content = inner_pairs.next().unwrap();
+
+                            match output_content.as_rule() {
+                                Rule::assignment => {
+                                    let mut assignment_pairs = output_content.into_inner();
+                                    let identifier = assignment_pairs.next().unwrap().as_str();
+                                    let expression = assignment_pairs.next().unwrap();
+
+                                    let value = evaluate_expression(
+                                        expression.into_inner(),
+                                        Rc::clone(&heap),
+                                        Rc::clone(&bindings),
+                                        0,
+                                    );
+
+                                    match value {
+                                        Ok(val) => {
+                                            bindings
+                                                .borrow_mut()
+                                                .insert(identifier.to_string(), val.clone());
+                                            println!("{} = {}", identifier, val);
+                                        }
+                                        Err(error) => {
+                                            println!("[evaluation error] {}", error);
+                                            std::process::exit(1);
+                                        }
+                                    }
+                                }
+                                Rule::identifier => {
+                                    let identifier = output_content.as_str();
+                                    if let Some(value) = bindings.borrow().get(identifier) {
+                                        println!("{} = {}", identifier, value);
+                                    } else {
+                                        println!(
+                                            "[evaluation error] undefined identifier: {}",
+                                            identifier
+                                        );
+                                        std::process::exit(1);
+                                    }
+                                }
+                                _ => unreachable!(
+                                    "unexpected output_declaration content: {:?}",
+                                    output_content.as_rule()
+                                ),
+                            }
+                        }
+                        Rule::comment => {} // Ignore comments
                         _ => unreachable!("unexpected rule: {:?}", inner_pair.as_rule()),
                     }
                 }

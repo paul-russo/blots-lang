@@ -80,9 +80,9 @@ assignment = !{ identifier ~ "=" ~ expression }
 
 output_declaration = ${ "output" ~ WHITESPACE+ ~ (assignment | identifier) }
 
-compute_statement = { (expression | comment) ~ comment? }
-return_statement  = { "return" ~ WHITESPACE+ ~ expression }
-compute_block     = { "compute" ~ (WHITESPACE | NEWLINE)+ ~ (WHITESPACE* ~ compute_statement ~ (NEWLINE+ | ";"))* ~ (WHITESPACE | NEWLINE)* ~ return_statement }
+compute_statement =  { (expression | comment) ~ comment? }
+return_statement  = ${ WHITESPACE* ~ "return" ~ WHITESPACE+ ~ expression }
+compute_block     = ${ "compute" ~ (WHITESPACE | NEWLINE)+ ~ "{" ~ (WHITESPACE | NEWLINE)* ~ (WHITESPACE* ~ compute_statement ~ WHITESPACE* ~ (NEWLINE+ | ";") ~ (WHITESPACE | NEWLINE)*)* ~ (WHITESPACE | NEWLINE)* ~ return_statement ~ (WHITESPACE | NEWLINE)* ~ "}" }
 
 statement =  { (output_declaration | expression | comment) ~ comment? }
 input     = _{ SOI ~ statement? ~ (NEWLINE ~ statement?)* ~ EOI }
