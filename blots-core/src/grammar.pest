@@ -20,7 +20,7 @@ optional_arg  =  { identifier ~ "?" }
 rest_arg      =  { "..." ~ identifier }
 
 identifier      = @{ !(reserved_word ~ !identifier_rest) ~ (ASCII_ALPHA | "_")+ ~ identifier_rest* }
-reserved_word   = _{ "if" | "then" | "else" | "true" | "false" | "null" | "and" | "or" | "with" | "do" | "return" | "output" }
+reserved_word   = _{ "if" | "then" | "else" | "true" | "false" | "null" | "and" | "or" | "not" | "with" | "do" | "return" | "output" }
 identifier_rest = _{ ASCII_ALPHA+ | ASCII_DIGIT+ | "_"+ }
 
 infix_op   = _{ add | subtract | multiply | divide | modulo | power | equal | not_equal | less_eq | less | greater_eq | greater | and | or | coalesce }
@@ -47,9 +47,12 @@ with             =  { "with" }
 
 infix_usage = _{ (WHITESPACE | NEWLINE)+ ~ natural_infix_op ~ WHITESPACE+ | (WHITESPACE | NEWLINE)* ~ infix_op ~ WHITESPACE* }
 
-prefix_op = _{ negation | invert }
+prefix_op = _{ negation | invert | not }
 negation  =  { "-" }
 invert    =  { "!" }
+not       =  { "not" }
+
+prefix_usage = _{ not ~ WHITESPACE+ | prefix_op }
 
 postfix_op = _{ factorial | access | call_list | dot_access }
 factorial  =  { "!" }
@@ -72,7 +75,7 @@ record             = !{ "{}" | "{" ~ NEWLINE* ~ ((record_pair | record_shorthand
 
 conditional = ${ "if" ~ WHITESPACE+ ~ expression ~ WHITESPACE+ ~ "then" ~ (WHITESPACE | NEWLINE)+ ~ expression ~ (WHITESPACE | NEWLINE)+ ~ "else" ~ (WHITESPACE | NEWLINE)+ ~ expression }
 
-expression        = ${ prefix_op* ~ term ~ postfix_op* ~ (infix_usage ~ prefix_op* ~ term ~ postfix_op*)* }
+expression        = ${ prefix_usage* ~ term ~ postfix_op* ~ (infix_usage ~ prefix_usage* ~ term ~ postfix_op*)* }
 nested_expression = _{ "(" ~ (WHITESPACE | NEWLINE)* ~ expression ~ (WHITESPACE | NEWLINE)* ~ ")" }
 term              = _{ conditional | do_block | lambda | assignment | list | record | bool | string | null | identifier | number | nested_expression }
 
