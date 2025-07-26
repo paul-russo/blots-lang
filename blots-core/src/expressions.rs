@@ -95,7 +95,8 @@ static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
         .op(Op::infix(Rule::power, Assoc::Right) | Op::infix(Rule::coalesce, Assoc::Left))
         .op(Op::prefix(Rule::negation)
             | Op::prefix(Rule::spread_operator)
-            | Op::prefix(Rule::invert))
+            | Op::prefix(Rule::invert)
+            | Op::prefix(Rule::not))
         .op(Op::postfix(Rule::factorial))
         .op(Op::postfix(Rule::access)
             | Op::postfix(Rule::dot_access)
@@ -296,6 +297,7 @@ pub fn evaluate_expression(
                     || ident == "inputs"
                     || ident == "and"
                     || ident == "or"
+                    || ident == "not"
                     || ident == "with"
                     || ident == "do"
                     || ident == "return"
@@ -537,6 +539,10 @@ pub fn evaluate_expression(
                 }
             }
             Rule::invert => {
+                let rhs = rhs?.as_bool()?;
+                Ok(Bool(!rhs))
+            }
+            Rule::not => {
                 let rhs = rhs?.as_bool()?;
                 Ok(Bool(!rhs))
             }
@@ -1649,5 +1655,54 @@ mod tests {
     fn list_comparison_not_all_less() {
         let result = parse_and_evaluate("[1, 6, 3] < 5", None, None).unwrap();
         assert_eq!(result, Value::Bool(false));
+    }
+
+    #[test]
+    fn not_operator_basic() {
+        let result = parse_and_evaluate("not true", None, None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    #[test]
+    fn not_operator_with_false() {
+        let result = parse_and_evaluate("not false", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn not_operator_with_expression() {
+        let result = parse_and_evaluate("not (5 > 10)", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn not_operator_double_negation() {
+        let result = parse_and_evaluate("not not true", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn not_operator_with_and() {
+        let result = parse_and_evaluate("not (true and false)", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn not_operator_with_or() {
+        let result = parse_and_evaluate("not (false or false)", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn not_operator_precedence() {
+        let result = parse_and_evaluate("not true and false", None, None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    #[test]
+    fn not_operator_comparison_with_invert() {
+        let not_result = parse_and_evaluate("not true", None, None).unwrap();
+        let invert_result = parse_and_evaluate("!true", None, None).unwrap();
+        assert_eq!(not_result, invert_result);
     }
 }
