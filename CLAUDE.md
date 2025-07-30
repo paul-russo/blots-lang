@@ -66,7 +66,7 @@ The CLI (`blots/src/main.rs`) supports:
 - Interactive REPL with expression evaluation
 - File execution mode
 - Performance statistics (parse time, function call tracking)
-- Simple command system (quit, help, history)
+- Simple command system (quit, help)
 
 ## WASM Integration
 
