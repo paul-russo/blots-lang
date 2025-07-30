@@ -85,7 +85,6 @@ fn main() -> ! {
         std::process::exit(0);
     }
 
-    let mut lines: Vec<String> = Vec::new();
     let heap = Rc::new(RefCell::new(Heap::new()));
     let bindings = Rc::new(RefCell::new(HashMap::new()));
 
@@ -108,14 +107,15 @@ fn main() -> ! {
         None
     };
 
+    let mut accumulated_input = String::new();
+    let mut continuation = false;
+
     loop {
+        let prompt = if continuation { "... " } else { "> " };
         let line = if let Some(ref mut editor) = rl {
             // Use rustyline for interactive input with history
-            match editor.readline("> ") {
+            match editor.readline(prompt) {
                 Ok(input) => {
-                    if !input.trim().is_empty() {
-                        let _ = editor.add_history_entry(&input);
-                    }
                     input + "\n" // Add newline to match read_line behavior
                 }
                 Err(_) => {
@@ -135,18 +135,43 @@ fn main() -> ! {
             line
         };
 
-        if is_command(&line.trim()) {
+        // Check for commands only on first line
+        if !continuation && is_command(&line.trim()) {
             exec_command(&line.trim());
             continue;
         }
 
-        let pairs = match get_pairs(&line) {
+        // Accumulate the input
+        accumulated_input.push_str(&line);
+
+        // Try to parse the accumulated input
+        let pairs = match get_pairs(&accumulated_input) {
             Ok(pairs) => pairs,
             Err(error) => {
-                println!("[parse error] {}", error);
-                continue;
+                // Check for unmatched brackets
+                if accumulated_input.matches('(').count() > accumulated_input.matches(')').count()
+                    || accumulated_input.matches('[').count()
+                        > accumulated_input.matches(']').count()
+                    || accumulated_input.matches('{').count()
+                        > accumulated_input.matches('}').count()
+                {
+                    continuation = true;
+                    continue;
+                } else {
+                    println!("[parse error] {}", error);
+                    accumulated_input.clear();
+                    continuation = false;
+                    continue;
+                }
             }
         };
+
+        // Add to history if using rustyline
+        if let Some(ref mut editor) = rl {
+            if !accumulated_input.trim().is_empty() {
+                let _ = editor.add_history_entry(accumulated_input.trim());
+            }
+        }
 
         pairs.for_each(|pair| match pair.as_rule() {
             Rule::statement => {
@@ -180,5 +205,9 @@ fn main() -> ! {
             Rule::EOI => {}
             rule => unreachable!("unexpected rule: {:?}", rule),
         });
+
+        // Reset for next input
+        accumulated_input.clear();
+        continuation = false;
     }
 }
