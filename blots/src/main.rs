@@ -33,7 +33,7 @@ fn main() -> ! {
                     }
                 };
 
-                let formatted = match Formatter::format(&content) {
+                let formatted = match Formatter::format_preserving_comments(&content) {
                     Ok(formatted) => formatted,
                     Err(e) => {
                         eprintln!("Error formatting file: {}", e);

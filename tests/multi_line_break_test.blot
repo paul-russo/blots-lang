@@ -1,0 +1,13 @@
+// This is a long line that will be broken
+veryLongList = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+
+// This blank line should remain after the list
+x = 42
+
+// Multiple lines that stay together
+a = 1
+b = 2
+c = 3
+
+// Blank line before this comment
+result = a + b + c
