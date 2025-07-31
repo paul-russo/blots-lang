@@ -1,0 +1,6 @@
+obj = {
+  // This comment is indented
+  y: 1,
+    // This comment is more indented
+  z: 2
+}

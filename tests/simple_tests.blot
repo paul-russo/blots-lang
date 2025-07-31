@@ -1,0 +1,11 @@
+// Simple function call
+a = func(1, 2, 3)
+
+// Function call with record
+b = func({a: 1, b: 2})
+
+// Lambda returning number
+c = map(list, x => x + 1)
+
+// Lambda returning record
+d = map(list, x => {a: x, b: x * 2})

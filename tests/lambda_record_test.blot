@@ -1,0 +1,6 @@
+// Test lambda returning a record
+result = map(items, item => {
+  name: item.name,
+  value: item.value * 2,
+  computed: calculate(item)
+})

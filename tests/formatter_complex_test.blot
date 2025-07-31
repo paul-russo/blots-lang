@@ -1,0 +1,12 @@
+simple = {a: 1, b: 2}
+nested = {outer: {inner: 1}}
+conditional_spread = {...(if true then {a: 1} else {})}
+lambda_with_record = map(list, x => {
+  id: x,
+  value: x * 2
+})
+mixed = {
+  simple: 1,
+  ...(if condition then {conditional: true} else {}),
+  nested: {a: 1, b: 2}
+}
