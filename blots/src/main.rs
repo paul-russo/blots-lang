@@ -3,11 +3,12 @@ mod commands;
 mod highlighter;
 
 use blots_core::expressions::evaluate_expression;
+use blots_core::formatter::Formatter;
 use blots_core::functions::FUNCTION_CALLS;
 use blots_core::heap::Heap;
 use blots_core::parser::{get_pairs, Rule};
 use clap::Parser;
-use cli::Args;
+use cli::{Args, Commands};
 use commands::{exec_command, is_command};
 use highlighter::BlotsHighlighter;
 use rustyline::Editor;
@@ -19,6 +20,56 @@ use std::time::Duration;
 
 fn main() -> ! {
     let args = Args::parse();
+
+    // Handle subcommands
+    if let Some(command) = args.command {
+        match command {
+            Commands::Format { path, write, check } => {
+                let content = match std::fs::read_to_string(&path) {
+                    Ok(content) => content,
+                    Err(e) => {
+                        eprintln!("Error reading file: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+
+                let formatted = match Formatter::format(&content) {
+                    Ok(formatted) => formatted,
+                    Err(e) => {
+                        eprintln!("Error formatting file: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+
+                if check {
+                    // Check mode: exit with non-zero if not formatted
+                    if content != formatted {
+                        eprintln!("File {} is not formatted", path);
+                        std::process::exit(1);
+                    } else {
+                        println!("File {} is properly formatted", path);
+                        std::process::exit(0);
+                    }
+                } else if write {
+                    // Write mode: update the file
+                    match std::fs::write(&path, formatted) {
+                        Ok(_) => {
+                            println!("Formatted {}", path);
+                            std::process::exit(0);
+                        }
+                        Err(e) => {
+                            eprintln!("Error writing file: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    // Default: print to stdout
+                    print!("{}", formatted);
+                    std::process::exit(0);
+                }
+            }
+        }
+    }
 
     if let Some(path) = args.path {
         let content = std::fs::read_to_string(&path).unwrap();

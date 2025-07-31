@@ -2,6 +2,7 @@
 extern crate pest_derive;
 
 pub mod expressions;
+pub mod formatter;
 pub mod functions;
 pub mod heap;
 pub mod parser;

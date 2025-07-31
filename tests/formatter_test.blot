@@ -1,0 +1,16 @@
+// Test file for the formatter
+x=1+2*3
+y=[1,2,3,4,5]
+z={a:1,b:2,c:3}
+f=x=>x+1
+g=(a,b)=>a+b
+h=(a,b?)=>a+b??0
+result=if x>5 then "big" else "small"
+spread=[...y,6,7]
+obj={...z,d:4}
+chain=f(g(1,2))
+multiline=do {
+x=1
+y=2
+return x+y
+}
