@@ -8,6 +8,7 @@ use std::{
 };
 
 use crate::{
+    ast::Expr,
     functions::{get_built_in_function_id, get_built_in_function_ident},
     heap::{
         Heap, HeapPointer, HeapValue, IterablePointer, LambdaPointer, ListPointer, RecordPointer,
@@ -95,7 +96,7 @@ impl Display for LambdaArg {
 pub struct LambdaDef {
     pub name: Option<String>,
     pub args: Vec<LambdaArg>,
-    pub body: String,
+    pub body: Expr,
     pub scope: HashMap<String, Value>,
 }
 
@@ -335,7 +336,7 @@ impl SerializableValue {
                 Ok(SerializableValue::Lambda(SerializableLambdaDef {
                     name: lambda.name.clone(),
                     args: lambda.args.clone(),
-                    body: lambda.body.clone(),
+                    body: format!("{:?}", lambda.body),
                     scope: Some(
                         lambda
                             .scope
@@ -384,10 +385,19 @@ impl SerializableValue {
                     HashMap::new()
                 };
 
+                // For now, parse the body string back to AST
+                // In a real implementation, we'd want to serialize/deserialize the AST properly
+                let body_ast = crate::expressions::pairs_to_expr(
+                    crate::parser::get_pairs(&s_lambda.body)?
+                        .next()
+                        .unwrap()
+                        .into_inner(),
+                )?;
+
                 let lambda = LambdaDef {
                     name: s_lambda.name.clone(),
                     args: s_lambda.args.clone(),
-                    body: s_lambda.body.clone(),
+                    body: body_ast,
                     scope,
                 };
 
@@ -661,7 +671,7 @@ impl Value {
                         result.push_str(", ");
                     }
                 }
-                result.push_str(&format!(") => {}", lambda.body));
+                result.push_str(") => {...}"); // For now, just show ... for the body
                 result
             }
             Value::BuiltIn(id) => {

@@ -1,4 +1,5 @@
 use crate::{
+    ast::{BinaryOp, DoStatement, Expr, PostfixOp, RecordEntry, RecordKey, UnaryOp},
     functions::{
         get_built_in_function_def_by_ident, get_built_in_function_id, get_function_def,
         is_built_in_function,
@@ -380,35 +381,23 @@ pub fn evaluate_expression(
                     .collect::<Result<Vec<LambdaArg>>>()?;
 
                 let body = inner_pairs.next().unwrap();
-                let body_str = body.as_str().to_string();
+
+                // Parse the body to AST
+                let body_ast = pairs_to_expr(body.into_inner())?;
 
                 // Extract only the variables that are referenced in the body and present in the current scope
                 let mut captured_scope = HashMap::new();
                 let current_bindings = bindings.borrow();
 
-                let mut identifiers = Vec::new();
-                extract_identifiers(body.into_inner(), &mut identifiers);
+                let mut referenced_vars = Vec::new();
+                collect_free_variables(&body_ast, &mut referenced_vars, &mut HashSet::new());
 
                 // Create a set of unique identifiers to avoid capturing duplicates
-                let unique_identifiers: HashSet<String> = identifiers.into_iter().collect();
+                let unique_identifiers: HashSet<String> = referenced_vars.into_iter().collect();
 
                 // Only capture identifiers that exist in the current scope
                 for ident in unique_identifiers {
-                    if current_bindings.contains_key(&ident)
-                        && !is_built_in_function(&ident)
-                        && ident != "constants"
-                        && ident != "infinity"
-                        && ident != "if"
-                        && ident != "then"
-                        && ident != "else"
-                        && ident != "true"
-                        && ident != "false"
-                        && ident != "null"
-                        && ident != "inputs"
-                        && ident != "and"
-                        && ident != "or"
-                        && ident != "with"
-                    {
+                    if current_bindings.contains_key(&ident) && !is_built_in_function(&ident) {
                         captured_scope.insert(ident.clone(), current_bindings[&ident].clone());
                     }
                 }
@@ -416,7 +405,7 @@ pub fn evaluate_expression(
                 let lambda = heap.borrow_mut().insert_lambda(LambdaDef {
                     name: None,
                     args,
-                    body: body_str,
+                    body: body_ast,
                     scope: captured_scope,
                 });
 
@@ -643,7 +632,6 @@ pub fn evaluate_expression(
                     args,
                     Rc::clone(&heap),
                     Rc::clone(&bindings),
-                    None,
                     call_depth,
                 )
             }
@@ -807,7 +795,6 @@ pub fn evaluate_expression(
                                             vec![l.clone()],
                                             Rc::clone(&heap),
                                             Rc::clone(&bindings),
-                                            None,
                                             call_depth,
                                         )
                                 })
@@ -948,7 +935,6 @@ pub fn evaluate_expression(
                                     vec![list, rhs],
                                     Rc::clone(&heap),
                                     Rc::clone(&bindings),
-                                    None,
                                     call_depth,
                                 )?;
 
@@ -1019,7 +1005,6 @@ pub fn evaluate_expression(
                             vec![lhs],
                             Rc::clone(&heap),
                             Rc::clone(&bindings),
-                            None,
                             call_depth,
                         );
                     }
@@ -1313,15 +1298,28 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            result.as_lambda(&heap.borrow()).unwrap(),
-            &LambdaDef {
-                name: Some("f".to_string()),
-                args: vec![LambdaArg::Required("x".to_string())],
-                body: "x + 1".to_string(),
-                scope: HashMap::new(),
+        {
+            let heap_borrow = heap.borrow();
+            let lambda_def = result.as_lambda(&heap_borrow).unwrap();
+            assert_eq!(lambda_def.name, Some("f".to_string()));
+            assert_eq!(lambda_def.args, vec![LambdaArg::Required("x".to_string())]);
+            assert_eq!(lambda_def.scope, HashMap::new());
+            // The body should be a BinaryOp(Add) with Identifier("x") and Number(1)
+            match &lambda_def.body {
+                Expr::BinaryOp {
+                    op: BinaryOp::Add,
+                    left,
+                    right,
+                } => match (left.as_ref(), right.as_ref()) {
+                    (Expr::Identifier(x), Expr::Number(n)) => {
+                        assert_eq!(x, "x");
+                        assert_eq!(*n, 1.0);
+                    }
+                    _ => panic!("Expected Identifier('x') + Number(1)"),
+                },
+                _ => panic!("Expected BinaryOp(Add)"),
             }
-        );
+        }
         assert_eq!(
             bindings.borrow().get("f").unwrap(),
             &Value::Lambda(LambdaPointer::new(1))
@@ -1705,4 +1703,1163 @@ mod tests {
         let invert_result = parse_and_evaluate("!true", None, None).unwrap();
         assert_eq!(not_result, invert_result);
     }
+}
+
+// Evaluate an AST expression
+pub fn evaluate_ast(
+    expr: &Expr,
+    heap: Rc<RefCell<Heap>>,
+    bindings: Rc<RefCell<HashMap<String, Value>>>,
+    call_depth: usize,
+) -> Result<Value> {
+    match expr {
+        Expr::Number(n) => Ok(Number(*n)),
+        Expr::String(s) => Ok(heap.borrow_mut().insert_string(s.clone())),
+        Expr::Bool(b) => Ok(Bool(*b)),
+        Expr::Null => Ok(Value::Null),
+        Expr::Identifier(ident) => match ident.as_str() {
+            "infinity" => Ok(Number(f64::INFINITY)),
+            "constants" => Ok(Value::Record(RecordPointer::new(0))),
+            _ => bindings
+                .borrow()
+                .get(ident)
+                .copied()
+                .ok_or(anyhow!("unknown identifier: {}", ident)),
+        },
+        Expr::BuiltIn(id) => Ok(Value::BuiltIn(*id)),
+        Expr::List(exprs) => {
+            let values = exprs
+                .iter()
+                .map(|e| evaluate_ast(e, Rc::clone(&heap), Rc::clone(&bindings), call_depth))
+                .collect::<Result<Vec<Value>>>()?;
+
+            // Flatten spreads
+            let flattened = values
+                .into_iter()
+                .flat_map(|value| {
+                    value
+                        .reify(unsafe { heap.try_borrow_unguarded().unwrap() })
+                        .unwrap()
+                        .with_heap(Rc::clone(&heap))
+                        .into_iter()
+                })
+                .collect::<Vec<Value>>();
+
+            Ok(heap.borrow_mut().insert_list(flattened))
+        }
+        Expr::Record(entries) => {
+            let mut record = BTreeMap::new();
+
+            for entry in entries {
+                match &entry.key {
+                    RecordKey::Static(key) => {
+                        let value = evaluate_ast(
+                            &entry.value,
+                            Rc::clone(&heap),
+                            Rc::clone(&bindings),
+                            call_depth,
+                        )?;
+                        record.insert(key.clone(), value);
+                    }
+                    RecordKey::Dynamic(key_expr) => {
+                        let key_value = evaluate_ast(
+                            key_expr,
+                            Rc::clone(&heap),
+                            Rc::clone(&bindings),
+                            call_depth,
+                        )?;
+                        let key = key_value.as_string(&heap.borrow())?.to_string();
+                        let value = evaluate_ast(
+                            &entry.value,
+                            Rc::clone(&heap),
+                            Rc::clone(&bindings),
+                            call_depth,
+                        )?;
+                        record.insert(key, value);
+                    }
+                    RecordKey::Shorthand(ident) => {
+                        let value = bindings
+                            .borrow()
+                            .get(ident)
+                            .copied()
+                            .ok_or(anyhow!("unknown identifier: {}", ident))?;
+                        record.insert(ident.clone(), value);
+                    }
+                    RecordKey::Spread(spread_expr) => {
+                        let spread_value = evaluate_ast(
+                            spread_expr,
+                            Rc::clone(&heap),
+                            Rc::clone(&bindings),
+                            call_depth,
+                        )?;
+
+                        if let Spread(iterable) = spread_value {
+                            match iterable {
+                                IterablePointer::List(pointer) => {
+                                    let borrowed_heap = &heap.borrow();
+                                    pointer
+                                        .reify(borrowed_heap)
+                                        .as_list()?
+                                        .iter()
+                                        .enumerate()
+                                        .for_each(|(i, value)| {
+                                            record.insert(i.to_string(), *value);
+                                        });
+                                }
+                                IterablePointer::String(pointer) => {
+                                    let s = {
+                                        let borrowed_heap = &heap.borrow();
+                                        pointer.reify(borrowed_heap).as_string()?.to_string()
+                                    };
+
+                                    s.chars().enumerate().for_each(|(i, c)| {
+                                        record.insert(
+                                            i.to_string(),
+                                            heap.borrow_mut().insert_string(c.to_string()),
+                                        );
+                                    });
+                                }
+                                IterablePointer::Record(pointer) => {
+                                    let borrowed_heap = &heap.borrow();
+                                    let spread_record = pointer.reify(borrowed_heap).as_record()?;
+
+                                    for (k, v) in spread_record {
+                                        record.insert(k.clone(), *v);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Ok(heap.borrow_mut().insert_record(record))
+        }
+        Expr::Lambda { args, body } => {
+            // Capture variables used in the lambda body
+            let mut captured_scope = HashMap::new();
+            let mut referenced_vars = Vec::new();
+            collect_free_variables(body, &mut referenced_vars, &mut HashSet::new());
+
+            let current_bindings = bindings.borrow();
+            for var in referenced_vars {
+                if current_bindings.contains_key(&var) && !is_built_in_function(&var) {
+                    captured_scope.insert(var.clone(), current_bindings[&var].clone());
+                }
+            }
+
+            let lambda = heap.borrow_mut().insert_lambda(LambdaDef {
+                name: None,
+                args: args.clone(),
+                body: (**body).clone(),
+                scope: captured_scope,
+            });
+
+            Ok(lambda)
+        }
+        Expr::Assignment { ident, value } => {
+            if is_built_in_function(ident) {
+                return Err(anyhow!("cannot assign to built-in function: {}", ident));
+            }
+
+            if ident == "constants"
+                || ident == "if"
+                || ident == "then"
+                || ident == "else"
+                || ident == "true"
+                || ident == "false"
+                || ident == "null"
+                || ident == "inputs"
+                || ident == "and"
+                || ident == "or"
+                || ident == "with"
+            {
+                return Err(anyhow!("cannot assign to keyword: {}", ident));
+            }
+
+            let val = evaluate_ast(value, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
+
+            // Set lambda name if assigning a lambda
+            if let Value::Lambda(lambda_ptr) = val {
+                let mut borrowed_heap = heap.borrow_mut();
+                if let Some(HeapValue::Lambda(lambda_def)) =
+                    borrowed_heap.get_mut(lambda_ptr.index())
+                {
+                    lambda_def.name = Some(ident.clone());
+                }
+            }
+
+            bindings.borrow_mut().insert(ident.clone(), val);
+            Ok(val)
+        }
+        Expr::Conditional {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            let cond_val = evaluate_ast(
+                condition,
+                Rc::clone(&heap),
+                Rc::clone(&bindings),
+                call_depth,
+            )?;
+
+            if cond_val.as_bool()? {
+                evaluate_ast(then_expr, heap, bindings, call_depth)
+            } else {
+                evaluate_ast(else_expr, heap, bindings, call_depth)
+            }
+        }
+        Expr::DoBlock {
+            statements,
+            return_expr,
+        } => {
+            // Create new scope from current bindings
+            let new_bindings = bindings.borrow().clone();
+            let block_bindings = Rc::new(RefCell::new(new_bindings));
+
+            // Execute statements
+            for stmt in statements {
+                match stmt {
+                    DoStatement::Expression(expr) => {
+                        evaluate_ast(
+                            expr,
+                            Rc::clone(&heap),
+                            Rc::clone(&block_bindings),
+                            call_depth,
+                        )?;
+                    }
+                    DoStatement::Comment(_) => {} // Skip comments
+                }
+            }
+
+            // Return the final expression
+            evaluate_ast(return_expr, heap, block_bindings, call_depth)
+        }
+        Expr::Call { func, args } => {
+            let func_val = evaluate_ast(func, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
+            let arg_vals_raw = args
+                .iter()
+                .map(|arg| evaluate_ast(arg, Rc::clone(&heap), Rc::clone(&bindings), call_depth))
+                .collect::<Result<Vec<_>>>()?;
+
+            // Flatten any spread arguments
+            let arg_vals = arg_vals_raw
+                .into_iter()
+                .flat_map(|value| {
+                    value
+                        .reify(unsafe { heap.try_borrow_unguarded().unwrap() })
+                        .unwrap()
+                        .with_heap(Rc::clone(&heap))
+                        .into_iter()
+                })
+                .collect::<Vec<Value>>();
+
+            if !func_val.is_lambda() && !func_val.is_built_in() {
+                return Err(anyhow!(
+                    "can't call a non-function: {}",
+                    func_val.stringify(&heap.borrow())
+                ));
+            }
+
+            let def = {
+                let borrowed_heap = &heap.borrow();
+                get_function_def(&func_val, borrowed_heap).ok_or_else(|| {
+                    anyhow!("unknown function: {}", func_val.stringify(borrowed_heap))
+                })?
+            };
+
+            def.call(func_val, arg_vals, heap, bindings, call_depth)
+        }
+        Expr::Access { expr, index } => {
+            let val = evaluate_ast(expr, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
+            let idx_val = evaluate_ast(index, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
+
+            match val {
+                Value::Record(record) => {
+                    let borrowed_heap = &heap.borrow();
+                    let record = record.reify(borrowed_heap).as_record()?;
+                    let key = idx_val.as_string(borrowed_heap)?;
+                    Ok(record.get(key).copied().unwrap_or(Value::Null))
+                }
+                Value::List(list) => {
+                    let borrowed_heap = &heap.borrow();
+                    let list = list.reify(borrowed_heap).as_list()?;
+                    let index = usize::try_from(idx_val.as_number()? as u64)?;
+                    Ok(list.get(index).copied().unwrap_or(Value::Null))
+                }
+                Value::String(string) => {
+                    let string = string.reify(&heap.borrow()).as_string()?.to_string();
+                    let index = usize::try_from(idx_val.as_number()? as u64)?;
+
+                    Ok(string
+                        .chars()
+                        .nth(index)
+                        .map(|c| heap.borrow_mut().insert_string(c.to_string()))
+                        .unwrap_or(Value::Null))
+                }
+                _ => Err(anyhow!(
+                    "expected a record, list, string, but got a {}",
+                    val.get_type()
+                )),
+            }
+        }
+        Expr::DotAccess { expr, field } => {
+            let val = evaluate_ast(expr, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
+            let borrowed_heap = &heap.borrow();
+
+            match val {
+                Value::Record(record) => {
+                    let record = record.reify(borrowed_heap).as_record()?;
+                    Ok(record.get(field).copied().unwrap_or(Value::Null))
+                }
+                _ => Err(anyhow!("expected a record, but got a {}", val.get_type())),
+            }
+        }
+        Expr::BinaryOp { op, left, right } => {
+            evaluate_binary_op_ast(*op, left, right, heap, bindings, call_depth)
+        }
+        Expr::UnaryOp { op, expr } => {
+            let val = evaluate_ast(expr, heap, bindings, call_depth)?;
+
+            match op {
+                UnaryOp::Negate => Ok(Number(-val.as_number()?)),
+                UnaryOp::Not | UnaryOp::Invert => Ok(Bool(!val.as_bool()?)),
+            }
+        }
+        Expr::PostfixOp { op, expr } => {
+            let val = evaluate_ast(expr, heap, bindings, call_depth)?;
+
+            match op {
+                PostfixOp::Factorial => {
+                    let n = val.as_number()?;
+                    if n >= 0.0 && n == (n as u64) as f64 {
+                        Ok(Number(
+                            (1..(n as u64) + 1).map(|x| x as f64).product::<f64>(),
+                        ))
+                    } else {
+                        Err(anyhow!("factorial only works on non-negative integers"))
+                    }
+                }
+            }
+        }
+        Expr::Spread(expr) => {
+            let val = evaluate_ast(expr, heap, bindings, call_depth)?;
+
+            match val {
+                List(pointer) => Ok(Spread(IterablePointer::List(pointer))),
+                Value::String(pointer) => Ok(Spread(IterablePointer::String(pointer))),
+                Value::Record(pointer) => Ok(Spread(IterablePointer::Record(pointer))),
+                _ => Err(anyhow!("expected a list, record, or string")),
+            }
+        }
+    }
+}
+
+// Helper function to collect free variables in an expression
+fn collect_free_variables(expr: &Expr, vars: &mut Vec<String>, bound: &mut HashSet<String>) {
+    match expr {
+        Expr::Identifier(name) => {
+            if !bound.contains(name) && name != "infinity" && name != "constants" {
+                vars.push(name.clone());
+            }
+        }
+        Expr::Lambda { args, body } => {
+            let mut new_bound = bound.clone();
+            for arg in args {
+                new_bound.insert(arg.get_name().to_string());
+            }
+            collect_free_variables(body, vars, &mut new_bound);
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            collect_free_variables(left, vars, bound);
+            collect_free_variables(right, vars, bound);
+        }
+        Expr::UnaryOp { expr, .. } | Expr::PostfixOp { expr, .. } | Expr::Spread(expr) => {
+            collect_free_variables(expr, vars, bound);
+        }
+        Expr::Call { func, args } => {
+            collect_free_variables(func, vars, bound);
+            for arg in args {
+                collect_free_variables(arg, vars, bound);
+            }
+        }
+        Expr::Access { expr, index } => {
+            collect_free_variables(expr, vars, bound);
+            collect_free_variables(index, vars, bound);
+        }
+        Expr::DotAccess { expr, .. } => {
+            collect_free_variables(expr, vars, bound);
+        }
+        Expr::Conditional {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_free_variables(condition, vars, bound);
+            collect_free_variables(then_expr, vars, bound);
+            collect_free_variables(else_expr, vars, bound);
+        }
+        Expr::Assignment { value, .. } => {
+            collect_free_variables(value, vars, bound);
+        }
+        Expr::List(exprs) => {
+            for expr in exprs {
+                collect_free_variables(expr, vars, bound);
+            }
+        }
+        Expr::Record(entries) => {
+            for entry in entries {
+                match &entry.key {
+                    RecordKey::Dynamic(expr) | RecordKey::Spread(expr) => {
+                        collect_free_variables(expr, vars, bound);
+                    }
+                    _ => {}
+                }
+                if !matches!(entry.key, RecordKey::Shorthand(_) | RecordKey::Spread(_)) {
+                    collect_free_variables(&entry.value, vars, bound);
+                }
+            }
+        }
+        Expr::DoBlock {
+            statements,
+            return_expr,
+        } => {
+            for stmt in statements {
+                if let DoStatement::Expression(expr) = stmt {
+                    collect_free_variables(expr, vars, bound);
+                }
+            }
+            collect_free_variables(return_expr, vars, bound);
+        }
+        _ => {}
+    }
+}
+
+// Evaluate binary operations on AST
+fn evaluate_binary_op_ast(
+    op: BinaryOp,
+    left: &Expr,
+    right: &Expr,
+    heap: Rc<RefCell<Heap>>,
+    bindings: Rc<RefCell<HashMap<String, Value>>>,
+    call_depth: usize,
+) -> Result<Value> {
+    let lhs = evaluate_ast(left, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
+    let rhs = evaluate_ast(right, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
+
+    match (lhs, rhs) {
+        (Value::List(list_l), Value::List(list_r)) => {
+            let (l_vec, r_vec) = {
+                let borrowed_heap = &heap.borrow();
+                (
+                    list_l.reify(borrowed_heap).as_list()?.clone(),
+                    list_r.reify(borrowed_heap).as_list()?.clone(),
+                )
+            };
+
+            if l_vec.len() != r_vec.len() {
+                return Err(anyhow!(
+                    "left- and right-hand-side lists must be the same length"
+                ));
+            }
+
+            match op {
+                BinaryOp::Equal => Ok(Bool(l_vec.iter().zip(&r_vec).all(|(l, r)| l == r))),
+                BinaryOp::NotEqual => Ok(Bool(l_vec.iter().zip(&r_vec).all(|(l, r)| l != r))),
+                BinaryOp::Less => Ok(Bool(l_vec.iter().zip(&r_vec).all(|(l, r)| l < r))),
+                BinaryOp::LessEq => Ok(Bool(l_vec.iter().zip(&r_vec).all(|(l, r)| l <= r))),
+                BinaryOp::Greater => Ok(Bool(l_vec.iter().zip(&r_vec).all(|(l, r)| l > r))),
+                BinaryOp::GreaterEq => Ok(Bool(l_vec.iter().zip(&r_vec).all(|(l, r)| l >= r))),
+                BinaryOp::And | BinaryOp::NaturalAnd => {
+                    let mapped_list = l_vec
+                        .iter()
+                        .zip(&r_vec)
+                        .map(|(l, r)| Ok(Bool(l.as_bool()? && r.as_bool()?)))
+                        .collect::<Result<Vec<Value>>>()?;
+                    Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+                BinaryOp::Or | BinaryOp::NaturalOr => {
+                    let mapped_list = l_vec
+                        .iter()
+                        .zip(&r_vec)
+                        .map(|(l, r)| Ok(Bool(l.as_bool()? || r.as_bool()?)))
+                        .collect::<Result<Vec<Value>>>()?;
+                    Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+                BinaryOp::Add => {
+                    let mapped_list = l_vec
+                        .iter()
+                        .zip(&r_vec)
+                        .map(|(l, r)| match (l, r) {
+                            (Value::String(_), Value::String(_)) => {
+                                let (l_str, r_str) = {
+                                    (
+                                        l.as_string(&heap.borrow())?.to_string(),
+                                        r.as_string(&heap.borrow())?.to_string(),
+                                    )
+                                };
+                                Ok(heap
+                                    .borrow_mut()
+                                    .insert_string(format!("{}{}", l_str, r_str)))
+                            }
+                            (Value::Number(_), Value::Number(_)) => {
+                                Ok(Number(l.as_number()? + r.as_number()?))
+                            }
+                            _ => Err(anyhow!("can't add {} and {}", l.get_type(), r.get_type())),
+                        })
+                        .collect::<Result<Vec<Value>>>()?;
+                    Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+                BinaryOp::Subtract => {
+                    let mapped_list = l_vec
+                        .iter()
+                        .zip(&r_vec)
+                        .map(|(l, r)| Ok(Number(l.as_number()? - r.as_number()?)))
+                        .collect::<Result<Vec<Value>>>()?;
+                    Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+                BinaryOp::Multiply => {
+                    let mapped_list = l_vec
+                        .iter()
+                        .zip(&r_vec)
+                        .map(|(l, r)| Ok(Number(l.as_number()? * r.as_number()?)))
+                        .collect::<Result<Vec<Value>>>()?;
+                    Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+                BinaryOp::Divide => {
+                    let mapped_list = l_vec
+                        .iter()
+                        .zip(&r_vec)
+                        .map(|(l, r)| Ok(Number(l.as_number()? / r.as_number()?)))
+                        .collect::<Result<Vec<Value>>>()?;
+                    Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+                BinaryOp::Modulo => {
+                    let mapped_list = l_vec
+                        .iter()
+                        .zip(&r_vec)
+                        .map(|(l, r)| Ok(Number(l.as_number()? % r.as_number()?)))
+                        .collect::<Result<Vec<Value>>>()?;
+                    Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+                BinaryOp::Power => {
+                    let mapped_list = l_vec
+                        .iter()
+                        .zip(&r_vec)
+                        .map(|(l, r)| Ok(Number(l.as_number()?.powf(r.as_number()?))))
+                        .collect::<Result<Vec<Value>>>()?;
+                    Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+                BinaryOp::Coalesce => {
+                    let mapped_list = l_vec
+                        .iter()
+                        .zip(&r_vec)
+                        .map(|(l, r)| {
+                            if *l == Value::Null {
+                                Ok(r.clone())
+                            } else {
+                                Ok(l.clone())
+                            }
+                        })
+                        .collect::<Result<Vec<Value>>>()?;
+                    Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+                BinaryOp::With => {
+                    let mapped_list = l_vec
+                        .iter()
+                        .zip(&r_vec)
+                        .map(|(l, r)| {
+                            if !r.is_lambda() && !r.is_built_in() {
+                                return Err(anyhow!(
+                                    "right-hand iterable contains non-function {}",
+                                    r.stringify(&heap.borrow())
+                                ));
+                            }
+
+                            let def = {
+                                let borrowed_heap = &heap.borrow();
+                                get_function_def(r, borrowed_heap).ok_or_else(|| {
+                                    anyhow!("unknown function: {}", r.stringify(borrowed_heap))
+                                })?
+                            };
+
+                            def.call(
+                                r.clone(),
+                                vec![l.clone()],
+                                Rc::clone(&heap),
+                                Rc::clone(&bindings),
+                                call_depth,
+                            )
+                        })
+                        .collect::<Result<Vec<Value>>>()?;
+                    Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+            }
+        }
+        (Value::List(list), scalar) | (scalar, Value::List(list)) => {
+            let (l_vec, is_list_first) = {
+                let borrowed_heap = &heap.borrow();
+                if matches!(lhs, Value::List(_)) {
+                    (list.reify(borrowed_heap).as_list()?.clone(), true)
+                } else {
+                    (list.reify(borrowed_heap).as_list()?.clone(), false)
+                }
+            };
+
+            match op {
+                BinaryOp::Equal => {
+                    if is_list_first {
+                        Ok(Bool(l_vec.iter().all(|v| v == &scalar)))
+                    } else {
+                        Ok(Bool(l_vec.iter().all(|v| &scalar == v)))
+                    }
+                }
+                BinaryOp::NotEqual => {
+                    if is_list_first {
+                        Ok(Bool(l_vec.iter().all(|v| v != &scalar)))
+                    } else {
+                        Ok(Bool(l_vec.iter().all(|v| &scalar != v)))
+                    }
+                }
+                BinaryOp::Less => {
+                    if is_list_first {
+                        Ok(Bool(l_vec.iter().all(|v| v < &scalar)))
+                    } else {
+                        Ok(Bool(l_vec.iter().all(|v| &scalar < v)))
+                    }
+                }
+                BinaryOp::LessEq => {
+                    if is_list_first {
+                        Ok(Bool(l_vec.iter().all(|v| v <= &scalar)))
+                    } else {
+                        Ok(Bool(l_vec.iter().all(|v| &scalar <= v)))
+                    }
+                }
+                BinaryOp::Greater => {
+                    if is_list_first {
+                        Ok(Bool(l_vec.iter().all(|v| v > &scalar)))
+                    } else {
+                        Ok(Bool(l_vec.iter().all(|v| &scalar > v)))
+                    }
+                }
+                BinaryOp::GreaterEq => {
+                    if is_list_first {
+                        Ok(Bool(l_vec.iter().all(|v| v >= &scalar)))
+                    } else {
+                        Ok(Bool(l_vec.iter().all(|v| &scalar >= v)))
+                    }
+                }
+                BinaryOp::And | BinaryOp::NaturalAnd => {
+                    let mapped_list = if is_list_first {
+                        l_vec
+                            .iter()
+                            .map(|v| Ok(Bool(v.as_bool()? && scalar.as_bool()?)))
+                            .collect::<Result<Vec<Value>>>()?
+                    } else {
+                        l_vec
+                            .iter()
+                            .map(|v| Ok(Bool(scalar.as_bool()? && v.as_bool()?)))
+                            .collect::<Result<Vec<Value>>>()?
+                    };
+                    Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+                BinaryOp::Or | BinaryOp::NaturalOr => {
+                    let mapped_list = if is_list_first {
+                        l_vec
+                            .iter()
+                            .map(|v| Ok(Bool(v.as_bool()? || scalar.as_bool()?)))
+                            .collect::<Result<Vec<Value>>>()?
+                    } else {
+                        l_vec
+                            .iter()
+                            .map(|v| Ok(Bool(scalar.as_bool()? || v.as_bool()?)))
+                            .collect::<Result<Vec<Value>>>()?
+                    };
+                    Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+                BinaryOp::Add => {
+                    let mapped_list = if is_list_first {
+                        l_vec
+                            .iter()
+                            .map(|v| match (v, &scalar) {
+                                (Value::String(_), Value::String(_)) => {
+                                    let (v_str, s_str) = {
+                                        (
+                                            v.as_string(&heap.borrow())?.to_string(),
+                                            scalar.as_string(&heap.borrow())?.to_string(),
+                                        )
+                                    };
+                                    Ok(heap
+                                        .borrow_mut()
+                                        .insert_string(format!("{}{}", v_str, s_str)))
+                                }
+                                (Value::Number(_), Value::Number(_)) => {
+                                    Ok(Number(v.as_number()? + scalar.as_number()?))
+                                }
+                                _ => Err(anyhow!(
+                                    "can't add {} and {}",
+                                    v.get_type(),
+                                    scalar.get_type()
+                                )),
+                            })
+                            .collect::<Result<Vec<Value>>>()?
+                    } else {
+                        l_vec
+                            .iter()
+                            .map(|v| match (&scalar, v) {
+                                (Value::String(_), Value::String(_)) => {
+                                    let (s_str, v_str) = {
+                                        (
+                                            scalar.as_string(&heap.borrow())?.to_string(),
+                                            v.as_string(&heap.borrow())?.to_string(),
+                                        )
+                                    };
+                                    Ok(heap
+                                        .borrow_mut()
+                                        .insert_string(format!("{}{}", s_str, v_str)))
+                                }
+                                (Value::Number(_), Value::Number(_)) => {
+                                    Ok(Number(scalar.as_number()? + v.as_number()?))
+                                }
+                                _ => Err(anyhow!(
+                                    "can't add {} and {}",
+                                    scalar.get_type(),
+                                    v.get_type()
+                                )),
+                            })
+                            .collect::<Result<Vec<Value>>>()?
+                    };
+                    Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+                BinaryOp::Subtract => {
+                    let mapped_list = if is_list_first {
+                        l_vec
+                            .iter()
+                            .map(|v| Ok(Number(v.as_number()? - scalar.as_number()?)))
+                            .collect::<Result<Vec<Value>>>()?
+                    } else {
+                        l_vec
+                            .iter()
+                            .map(|v| Ok(Number(scalar.as_number()? - v.as_number()?)))
+                            .collect::<Result<Vec<Value>>>()?
+                    };
+                    Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+                BinaryOp::Multiply => {
+                    let mapped_list = l_vec
+                        .iter()
+                        .map(|v| Ok(Number(v.as_number()? * scalar.as_number()?)))
+                        .collect::<Result<Vec<Value>>>()?;
+                    Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+                BinaryOp::Divide => {
+                    let mapped_list = if is_list_first {
+                        l_vec
+                            .iter()
+                            .map(|v| Ok(Number(v.as_number()? / scalar.as_number()?)))
+                            .collect::<Result<Vec<Value>>>()?
+                    } else {
+                        l_vec
+                            .iter()
+                            .map(|v| Ok(Number(scalar.as_number()? / v.as_number()?)))
+                            .collect::<Result<Vec<Value>>>()?
+                    };
+                    Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+                BinaryOp::Modulo => {
+                    let mapped_list = if is_list_first {
+                        l_vec
+                            .iter()
+                            .map(|v| Ok(Number(v.as_number()? % scalar.as_number()?)))
+                            .collect::<Result<Vec<Value>>>()?
+                    } else {
+                        l_vec
+                            .iter()
+                            .map(|v| Ok(Number(scalar.as_number()? % v.as_number()?)))
+                            .collect::<Result<Vec<Value>>>()?
+                    };
+                    Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+                BinaryOp::Power => {
+                    let mapped_list = if is_list_first {
+                        l_vec
+                            .iter()
+                            .map(|v| Ok(Number(v.as_number()?.powf(scalar.as_number()?))))
+                            .collect::<Result<Vec<Value>>>()?
+                    } else {
+                        l_vec
+                            .iter()
+                            .map(|v| Ok(Number(scalar.as_number()?.powf(v.as_number()?))))
+                            .collect::<Result<Vec<Value>>>()?
+                    };
+                    Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+                BinaryOp::Coalesce => {
+                    let mapped_list = if is_list_first {
+                        l_vec
+                            .iter()
+                            .map(|v| {
+                                if *v == Value::Null {
+                                    Ok(scalar.clone())
+                                } else {
+                                    Ok(v.clone())
+                                }
+                            })
+                            .collect::<Result<Vec<Value>>>()?
+                    } else {
+                        l_vec
+                            .iter()
+                            .map(|v| {
+                                if scalar == Value::Null {
+                                    Ok(v.clone())
+                                } else {
+                                    Ok(scalar.clone())
+                                }
+                            })
+                            .collect::<Result<Vec<Value>>>()?
+                    };
+                    Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+                BinaryOp::With => {
+                    if is_list_first {
+                        if !scalar.is_callable() {
+                            return Err(anyhow!(
+                                "can't call a non-function: {}",
+                                scalar.stringify(&heap.borrow())
+                            ));
+                        }
+
+                        let list = heap.borrow_mut().insert_list(l_vec.clone());
+
+                        let call_result = get_built_in_function_def_by_ident("map").unwrap().call(
+                            scalar,
+                            vec![list, scalar],
+                            Rc::clone(&heap),
+                            Rc::clone(&bindings),
+                            call_depth,
+                        )?;
+
+                        let mapped_list = { call_result.as_list(&heap.borrow())?.clone() };
+
+                        Ok(heap.borrow_mut().insert_list(mapped_list))
+                    } else {
+                        return Err(anyhow!("with operator requires function on right side"));
+                    }
+                }
+            }
+        }
+        (lhs, rhs) => match op {
+            BinaryOp::Equal => Ok(Bool(lhs == rhs)),
+            BinaryOp::NotEqual => Ok(Bool(lhs != rhs)),
+            BinaryOp::Less => Ok(Bool(lhs < rhs)),
+            BinaryOp::LessEq => Ok(Bool(lhs <= rhs)),
+            BinaryOp::Greater => Ok(Bool(lhs > rhs)),
+            BinaryOp::GreaterEq => Ok(Bool(lhs >= rhs)),
+            BinaryOp::And | BinaryOp::NaturalAnd => Ok(Bool(lhs.as_bool()? && rhs.as_bool()?)),
+            BinaryOp::Or | BinaryOp::NaturalOr => Ok(Bool(lhs.as_bool()? || rhs.as_bool()?)),
+            BinaryOp::Add => {
+                if lhs.is_string() {
+                    let (l_str, r_str) = {
+                        (
+                            lhs.as_string(&heap.borrow())?.to_string(),
+                            rhs.as_string(&heap.borrow())?.to_string(),
+                        )
+                    };
+
+                    return Ok(heap
+                        .borrow_mut()
+                        .insert_string(format!("{}{}", l_str, r_str)));
+                }
+
+                Ok(Number(lhs.as_number()? + rhs.as_number()?))
+            }
+            BinaryOp::Subtract => Ok(Number(lhs.as_number()? - rhs.as_number()?)),
+            BinaryOp::Multiply => Ok(Number(lhs.as_number()? * rhs.as_number()?)),
+            BinaryOp::Divide => Ok(Number(lhs.as_number()? / rhs.as_number()?)),
+            BinaryOp::Modulo => Ok(Number(lhs.as_number()? % rhs.as_number()?)),
+            BinaryOp::Power => Ok(Number(lhs.as_number()?.powf(rhs.as_number()?))),
+            BinaryOp::Coalesce => {
+                if lhs == Value::Null {
+                    Ok(rhs)
+                } else {
+                    Ok(lhs)
+                }
+            }
+            BinaryOp::With => {
+                if !rhs.is_callable() {
+                    return Err(anyhow!(
+                        "can't call a non-function ({} is of type {})",
+                        rhs.stringify(&heap.borrow()),
+                        rhs.get_type()
+                    ));
+                }
+
+                let def = { get_function_def(&rhs, &heap.borrow()) };
+
+                if def.is_none() {
+                    return Err(anyhow!(
+                        "unknown function: {}",
+                        rhs.stringify(&heap.borrow())
+                    ));
+                }
+
+                return def.unwrap().call(
+                    rhs,
+                    vec![lhs],
+                    Rc::clone(&heap),
+                    Rc::clone(&bindings),
+                    call_depth,
+                );
+            }
+        },
+    }
+}
+
+// Convert Pest pairs to our AST
+pub fn pairs_to_expr(pairs: Pairs<Rule>) -> Result<Expr> {
+    PRATT
+        .map_primary(|primary| match primary.as_rule() {
+            Rule::number => Ok(Expr::Number(
+                primary
+                    .as_str()
+                    .replace("_", "")
+                    .parse::<f64>()
+                    .map_err(|e| anyhow::Error::from(e))?,
+            )),
+            Rule::list => {
+                let list_pairs = primary.into_inner();
+                let exprs = list_pairs
+                    .into_iter()
+                    .map(|pair| pairs_to_expr(pair.into_inner()))
+                    .collect::<Result<Vec<Expr>>>()?;
+                Ok(Expr::List(exprs))
+            }
+            Rule::record => {
+                let record_pairs = primary.into_inner();
+                let mut entries = Vec::new();
+
+                for pair in record_pairs {
+                    match pair.as_rule() {
+                        Rule::record_pair => {
+                            let mut inner_pairs = pair.into_inner();
+                            let key_pair = inner_pairs.next().unwrap();
+                            let key = match key_pair.as_rule() {
+                                Rule::record_key_static => {
+                                    let inner_key_pair = key_pair.into_inner().next().unwrap();
+                                    match inner_key_pair.as_rule() {
+                                        Rule::identifier => {
+                                            RecordKey::Static(inner_key_pair.as_str().to_string())
+                                        }
+                                        Rule::string => RecordKey::Static(
+                                            inner_key_pair.into_inner().as_str().to_string(),
+                                        ),
+                                        _ => unreachable!(),
+                                    }
+                                }
+                                Rule::record_key_dynamic => RecordKey::Dynamic(Box::new(
+                                    pairs_to_expr(key_pair.into_inner())?,
+                                )),
+                                _ => unreachable!(),
+                            };
+
+                            let value = pairs_to_expr(inner_pairs.next().unwrap().into_inner())?;
+                            entries.push(RecordEntry { key, value });
+                        }
+                        Rule::record_shorthand => {
+                            let ident = pair.into_inner().next().unwrap().as_str().to_string();
+                            entries.push(RecordEntry {
+                                key: RecordKey::Shorthand(ident),
+                                value: Expr::Null, // Will be resolved during evaluation
+                            });
+                        }
+                        Rule::spread_expression => {
+                            let spread_expr = pairs_to_expr(pair.into_inner())?;
+                            entries.push(RecordEntry {
+                                key: RecordKey::Spread(Box::new(spread_expr)),
+                                value: Expr::Null, // Will be resolved during evaluation
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+
+                Ok(Expr::Record(entries))
+            }
+            Rule::bool => {
+                let bool_str = primary.as_str();
+                match bool_str {
+                    "true" => Ok(Expr::Bool(true)),
+                    "false" => Ok(Expr::Bool(false)),
+                    _ => unreachable!(),
+                }
+            }
+            Rule::null => Ok(Expr::Null),
+            Rule::string => {
+                let contents = primary.into_inner().as_str().to_string();
+                Ok(Expr::String(contents))
+            }
+            Rule::assignment => {
+                let mut inner_pairs = primary.into_inner();
+                let ident = inner_pairs.next().unwrap().as_str().to_string();
+                let value = Box::new(pairs_to_expr(inner_pairs.next().unwrap().into_inner())?);
+                Ok(Expr::Assignment { ident, value })
+            }
+            Rule::lambda => {
+                let mut inner_pairs = primary.into_inner();
+                let arg_list = inner_pairs.next().unwrap();
+                let body_pairs = inner_pairs.next().unwrap();
+
+                let mut args = Vec::new();
+                for arg_pair in arg_list.into_inner() {
+                    match arg_pair.as_rule() {
+                        Rule::required_arg => {
+                            args.push(LambdaArg::Required(
+                                arg_pair.into_inner().as_str().to_string(),
+                            ));
+                        }
+                        Rule::optional_arg => {
+                            args.push(LambdaArg::Optional(
+                                arg_pair.into_inner().as_str().to_string(),
+                            ));
+                        }
+                        Rule::rest_arg => {
+                            args.push(LambdaArg::Rest(arg_pair.into_inner().as_str().to_string()));
+                        }
+                        _ => {}
+                    }
+                }
+
+                let body = Box::new(pairs_to_expr(body_pairs.into_inner())?);
+                Ok(Expr::Lambda { args, body })
+            }
+            Rule::conditional => {
+                let mut inner_pairs = primary.into_inner();
+                let condition = Box::new(pairs_to_expr(inner_pairs.next().unwrap().into_inner())?);
+                let then_expr = Box::new(pairs_to_expr(inner_pairs.next().unwrap().into_inner())?);
+                let else_expr = Box::new(pairs_to_expr(inner_pairs.next().unwrap().into_inner())?);
+                Ok(Expr::Conditional {
+                    condition,
+                    then_expr,
+                    else_expr,
+                })
+            }
+            Rule::do_block => {
+                let mut inner_pairs = primary.into_inner();
+                let mut statements = Vec::new();
+                let mut return_expr = Box::new(Expr::Null);
+
+                while let Some(pair) = inner_pairs.next() {
+                    match pair.as_rule() {
+                        Rule::do_statement => {
+                            if let Some(inner) = pair.into_inner().next() {
+                                if inner.as_rule() == Rule::expression {
+                                    statements.push(DoStatement::Expression(pairs_to_expr(
+                                        inner.into_inner(),
+                                    )?));
+                                } else if inner.as_rule() == Rule::comment {
+                                    statements
+                                        .push(DoStatement::Comment(inner.as_str().to_string()));
+                                }
+                            }
+                        }
+                        Rule::return_statement => {
+                            let return_expr_pair = pair.into_inner().next().unwrap();
+                            return_expr = Box::new(pairs_to_expr(return_expr_pair.into_inner())?);
+                        }
+                        _ => {}
+                    }
+                }
+
+                Ok(Expr::DoBlock {
+                    statements,
+                    return_expr,
+                })
+            }
+            Rule::identifier => {
+                let ident = primary.as_str();
+
+                // Check if it's a built-in function
+                if let Some(id) = get_built_in_function_id(ident) {
+                    Ok(Expr::BuiltIn(id))
+                } else {
+                    Ok(Expr::Identifier(ident.to_string()))
+                }
+            }
+            Rule::expression => pairs_to_expr(primary.into_inner()),
+            _ => unreachable!("{}", primary.as_str()),
+        })
+        .map_prefix(|op, rhs| match op.as_rule() {
+            Rule::negation => Ok(Expr::UnaryOp {
+                op: UnaryOp::Negate,
+                expr: Box::new(rhs?),
+            }),
+            Rule::spread_operator => Ok(Expr::Spread(Box::new(rhs?))),
+            Rule::invert | Rule::not => Ok(Expr::UnaryOp {
+                op: UnaryOp::Not,
+                expr: Box::new(rhs?),
+            }),
+            _ => unreachable!(),
+        })
+        .map_postfix(|lhs, op| match op.as_rule() {
+            Rule::factorial => Ok(Expr::PostfixOp {
+                op: PostfixOp::Factorial,
+                expr: Box::new(lhs?),
+            }),
+            Rule::access => {
+                let index_expr = pairs_to_expr(op.into_inner())?;
+                Ok(Expr::Access {
+                    expr: Box::new(lhs?),
+                    index: Box::new(index_expr),
+                })
+            }
+            Rule::dot_access => {
+                let field = op.into_inner().as_str().to_string();
+                Ok(Expr::DotAccess {
+                    expr: Box::new(lhs?),
+                    field,
+                })
+            }
+            Rule::call_list => {
+                let call_list = op.into_inner();
+                let args = call_list
+                    .into_iter()
+                    .map(|arg| pairs_to_expr(arg.into_inner()))
+                    .collect::<Result<Vec<Expr>>>()?;
+                Ok(Expr::Call {
+                    func: Box::new(lhs?),
+                    args,
+                })
+            }
+            _ => unreachable!(),
+        })
+        .map_infix(|lhs, op, rhs| {
+            let op = match op.as_rule() {
+                Rule::add => BinaryOp::Add,
+                Rule::subtract => BinaryOp::Subtract,
+                Rule::multiply => BinaryOp::Multiply,
+                Rule::divide => BinaryOp::Divide,
+                Rule::modulo => BinaryOp::Modulo,
+                Rule::power => BinaryOp::Power,
+                Rule::equal => BinaryOp::Equal,
+                Rule::not_equal => BinaryOp::NotEqual,
+                Rule::less => BinaryOp::Less,
+                Rule::less_eq => BinaryOp::LessEq,
+                Rule::greater => BinaryOp::Greater,
+                Rule::greater_eq => BinaryOp::GreaterEq,
+                Rule::and => BinaryOp::And,
+                Rule::natural_and => BinaryOp::NaturalAnd,
+                Rule::or => BinaryOp::Or,
+                Rule::natural_or => BinaryOp::NaturalOr,
+                Rule::with => BinaryOp::With,
+                Rule::coalesce => BinaryOp::Coalesce,
+                _ => unreachable!(),
+            };
+            Ok(Expr::BinaryOp {
+                op,
+                left: Box::new(lhs?),
+                right: Box::new(rhs?),
+            })
+        })
+        .parse(pairs)
 }
