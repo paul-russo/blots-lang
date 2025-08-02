@@ -46,14 +46,17 @@ impl Formatter {
         let config = FormatterConfig::default();
         Self::format_with_config(input, config)
     }
-    
+
     /// Format code while preserving comments
     pub fn format_preserving_comments(input: &str) -> Result<String> {
         let config = FormatterConfig::default();
         Self::format_with_config_preserving_comments(input, config)
     }
-    
-    pub fn format_with_config_preserving_comments(input: &str, config: FormatterConfig) -> Result<String> {
+
+    pub fn format_with_config_preserving_comments(
+        input: &str,
+        config: FormatterConfig,
+    ) -> Result<String> {
         // Track brace depth to avoid splitting inside blocks
         let lines: Vec<&str> = input.lines().collect();
         let mut result = Vec::new();
@@ -62,7 +65,7 @@ impl Formatter {
         let mut brace_depth: i32 = 0;
         let mut paren_depth: i32 = 0;
         let mut bracket_depth: i32 = 0;
-        
+
         for line in lines {
             // Count braces/brackets/parens (simple approach - doesn't handle strings/comments)
             for ch in line.chars() {
@@ -76,9 +79,9 @@ impl Formatter {
                     _ => {}
                 }
             }
-            
+
             let in_block = brace_depth > 0 || paren_depth > 0 || bracket_depth > 0;
-            
+
             if line.trim().is_empty() {
                 // Blank line
                 if in_code_section && !current_section.is_empty() && !in_block {
@@ -112,23 +115,23 @@ impl Formatter {
                 current_section.push(line);
             }
         }
-        
+
         // Don't forget the last section
         if !current_section.is_empty() {
             let section_text = current_section.join("\n");
             let formatted = Self::format_section(&section_text, &config)?;
             result.push(formatted);
         }
-        
+
         Ok(result.join("\n"))
     }
-    
+
     fn format_section(section: &str, config: &FormatterConfig) -> Result<String> {
         // Simple approach: preserve inline comments
         let comment_regex = Regex::new(r"(//.*)").unwrap();
         let mut code_lines = Vec::new();
         let mut inline_comments = Vec::new();
-        
+
         for line in section.lines() {
             if let Some(captures) = comment_regex.captures(line) {
                 let comment = captures.get(1).unwrap().as_str();
@@ -140,18 +143,18 @@ impl Formatter {
                 inline_comments.push(None);
             }
         }
-        
+
         // Format just the code
         let code_only = code_lines.join("\n");
         let formatted = Self::format_with_config(&code_only, config.clone())?;
         let formatted_lines: Vec<&str> = formatted.lines().collect();
-        
+
         // If the number of lines changed, we can't reliably map comments
         if formatted_lines.len() != code_lines.len() {
             // Just return the formatted code without inline comments
             return Ok(formatted);
         }
-        
+
         // Re-add inline comments
         let mut result = Vec::new();
         for (i, formatted_line) in formatted_lines.iter().enumerate() {
@@ -161,7 +164,7 @@ impl Formatter {
                 result.push(formatted_line.to_string());
             }
         }
-        
+
         Ok(result.join("\n"))
     }
 
@@ -453,7 +456,7 @@ impl Formatter {
             self.write("[]");
             return Ok(());
         }
-        
+
         // Check if we should format as multiline
         let mut test_formatter = self.clone();
         test_formatter.write("[");
@@ -467,16 +470,16 @@ impl Formatter {
             test_formatter.write(",");
         }
         test_formatter.write("]");
-        
+
         let would_be_length = test_formatter.current_line_length;
         let should_break = would_be_length > self.config.max_line_length;
-        
+
         if should_break && items.len() > 1 {
             // Format as multiline
             self.write("[");
             self.newline();
             self.increase_indent();
-            
+
             for (i, item) in items.iter().enumerate() {
                 self.indent();
                 self.format_spreadable_expression(item.clone())?;
@@ -485,7 +488,7 @@ impl Formatter {
                 }
                 self.newline();
             }
-            
+
             self.decrease_indent();
             self.indent();
             self.write("]");
@@ -498,7 +501,7 @@ impl Formatter {
                 }
                 self.format_spreadable_expression(item.clone())?;
             }
-            
+
             if self.config.trailing_comma && items.len() > 1 {
                 self.write(",");
             }
@@ -515,7 +518,7 @@ impl Formatter {
             self.write("{}");
             return Ok(());
         }
-        
+
         // Check if we should format as multiline
         let mut test_formatter = self.clone();
         test_formatter.write("{");
@@ -534,16 +537,16 @@ impl Formatter {
             test_formatter.write(",");
         }
         test_formatter.write("}");
-        
+
         let would_be_length = test_formatter.current_line_length;
         let should_break = would_be_length > self.config.max_line_length;
-        
+
         if should_break && items.len() > 1 {
             // Format as multiline
             self.write("{");
             self.newline();
             self.increase_indent();
-            
+
             for (i, item) in items.iter().enumerate() {
                 self.indent();
                 match item.as_rule() {
@@ -557,7 +560,7 @@ impl Formatter {
                 }
                 self.newline();
             }
-            
+
             self.decrease_indent();
             self.indent();
             self.write("}");
@@ -619,7 +622,7 @@ impl Formatter {
 
     fn format_call_list(&mut self, pair: Pair<Rule>) -> Result<()> {
         let args: Vec<_> = pair.into_inner().collect();
-        
+
         // Check if we should format as multiline
         let mut test_formatter = self.clone();
         test_formatter.write("(");
@@ -633,16 +636,16 @@ impl Formatter {
             test_formatter.write(",");
         }
         test_formatter.write(")");
-        
+
         let would_be_length = test_formatter.current_line_length;
         let should_break = would_be_length > self.config.max_line_length;
-        
+
         if should_break && args.len() > 1 {
             // Format as multiline
             self.write("(");
             self.newline();
             self.increase_indent();
-            
+
             for (i, arg) in args.iter().enumerate() {
                 self.indent();
                 self.format_spreadable_expression(arg.clone())?;
@@ -651,7 +654,7 @@ impl Formatter {
                 }
                 self.newline();
             }
-            
+
             self.decrease_indent();
             self.indent();
             self.write(")");
@@ -953,7 +956,7 @@ mod tests {
         let output = Formatter::format(input).unwrap();
         assert_eq!(output, "map(list, x => {a: x, b: x * 2,})");
     }
-    
+
     #[test]
     fn test_format_preserves_comments() {
         let input = r#"// Start comment
@@ -966,7 +969,7 @@ y = x * 3"#;
         assert!(output.contains("x = 1 + 2"));
         assert!(output.contains("y = x * 3"));
     }
-    
+
     #[test]
     fn test_format_preserves_inline_comments() {
         let input = "x = 1 + 2  // inline comment";
@@ -974,7 +977,7 @@ y = x * 3"#;
         assert!(output.contains("x = 1 + 2"));
         assert!(output.contains("// inline comment"));
     }
-    
+
     #[test]
     fn test_format_preserves_blank_lines() {
         let input = r#"x = 1
@@ -988,7 +991,7 @@ z = 3"#;
         assert_eq!(lines[1], "");
         assert_eq!(lines[3], "");
     }
-    
+
     #[test]
     fn test_format_preserves_comment_indentation() {
         let input = r#"// Top level comment

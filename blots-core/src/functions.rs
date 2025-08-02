@@ -1,12 +1,10 @@
 use crate::{
-    expressions::evaluate_expression,
+    expressions::evaluate_ast,
     heap::{Heap, HeapPointer, IterablePointer},
-    parser::{get_pairs, Rule},
     values::{FunctionArity, LambdaArg, LambdaDef, ReifiedValue, Value},
 };
 use anyhow::{anyhow, Result};
 use dyn_fmt::AsStrFormatExt;
-use pest::iterators::Pairs;
 use std::{cell::RefCell, cmp::Ordering, collections::HashMap, rc::Rc, sync::LazyLock};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -633,7 +631,6 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                     )
                 };
 
-                let parsed_body = def.get_parsed_body();
                 let takes_index = !def.check_arity(2).is_err();
                 let mut new_list = Vec::with_capacity(list.len());
 
@@ -647,7 +644,6 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                         },
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
-                        parsed_body.clone(),
                         call_depth,
                     )?);
                 }
@@ -671,7 +667,6 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                     )
                 };
 
-                let parsed_body = def.get_parsed_body();
                 let initial = args[2].clone();
 
                 let mut acc = initial;
@@ -685,7 +680,6 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                         },
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
-                        parsed_body.clone(),
                         call_depth,
                     )?;
                 }
@@ -709,7 +703,6 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                     )
                 };
 
-                let parsed_body = def.get_parsed_body();
                 let mut new_list = vec![];
                 for (i, item) in list.iter().enumerate() {
                     if def
@@ -722,7 +715,6 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                             },
                             Rc::clone(&heap),
                             Rc::clone(&bindings),
-                            parsed_body.clone(),
                             call_depth,
                         )?
                         .as_bool()?
@@ -750,8 +742,6 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                     )
                 };
 
-                let parsed_body = def.get_parsed_body();
-
                 for (i, item) in list.iter().enumerate() {
                     if !def
                         .call(
@@ -763,7 +753,6 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                             },
                             Rc::clone(&heap),
                             Rc::clone(&bindings),
-                            parsed_body.clone(),
                             call_depth,
                         )?
                         .as_bool()?
@@ -791,8 +780,6 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                     )
                 };
 
-                let parsed_body = def.get_parsed_body();
-
                 for (i, item) in list.iter().enumerate() {
                     if def
                         .call(
@@ -804,7 +791,6 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                             },
                             Rc::clone(&heap),
                             Rc::clone(&bindings),
-                            parsed_body.clone(),
                             call_depth,
                         )?
                         .as_bool()?
@@ -848,7 +834,6 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                     )
                 };
 
-                let parsed_body = def.get_parsed_body();
                 let mut err: Option<Result<Value, anyhow::Error>> = None;
 
                 list.sort_by(|a, b| {
@@ -857,7 +842,6 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                         vec![a.clone(), b.clone()],
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
-                        parsed_body.clone(),
                         call_depth,
                     );
 
@@ -1292,20 +1276,12 @@ impl<'a> FunctionDef<'a> {
         }
     }
 
-    pub fn get_parsed_body(&self) -> Option<Result<Pairs<Rule>, pest::error::Error<Rule>>> {
-        match self {
-            FunctionDef::BuiltIn(_) => None,
-            FunctionDef::Lambda(LambdaDef { body, .. }) => Some(get_pairs(body)),
-        }
-    }
-
     pub fn call(
         &self,
         this_value: Value,
         args: Vec<Value>,
         heap: Rc<RefCell<Heap>>,
         bindings: Rc<RefCell<HashMap<String, Value>>>,
-        parsed_body: Option<Result<Pairs<Rule>, pest::error::Error<Rule>>>,
         call_depth: usize,
     ) -> Result<Value> {
         #[cfg(not(target_arch = "wasm32"))]
@@ -1364,12 +1340,8 @@ impl<'a> FunctionDef<'a> {
                 #[cfg(not(target_arch = "wasm32"))]
                 let end_var_env = std::time::Instant::now();
 
-                let return_value = evaluate_expression(
-                    parsed_body
-                        .unwrap_or_else(|| get_pairs(body))?
-                        .next()
-                        .unwrap()
-                        .into_inner(),
+                let return_value = evaluate_ast(
+                    body,
                     Rc::clone(&heap),
                     Rc::new(RefCell::new(new_bindings)),
                     call_depth + 1,

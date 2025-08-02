@@ -149,6 +149,10 @@ macro_rules! define_pointer {
             pub fn new(index: usize) -> Self {
                 $name(index)
             }
+
+            pub fn index(&self) -> usize {
+                self.0
+            }
         }
 
         impl<'h> HeapPointer<'h> for $name {
