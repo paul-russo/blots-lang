@@ -1,6 +1,6 @@
 use anyhow::Result;
 use blots_core::{
-    expressions::evaluate_expression,
+    expressions::evaluate_pairs,
     formatter::Formatter,
     functions::get_built_in_function_idents,
     heap::{Heap, CONSTANTS},
@@ -88,7 +88,7 @@ pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
                     );
 
                     let value =
-                        evaluate_expression(inner_pairs, Rc::clone(&heap), Rc::clone(&bindings), 0)
+                        evaluate_pairs(inner_pairs, Rc::clone(&heap), Rc::clone(&bindings), 0)
                             .map_err(|error| {
                                 JsError::new(&format!("Evaluation error: {}", error))
                             })?;
