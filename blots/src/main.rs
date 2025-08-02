@@ -2,7 +2,7 @@ mod cli;
 mod commands;
 mod highlighter;
 
-use blots_core::expressions::evaluate_expression;
+use blots_core::expressions::evaluate_pairs;
 use blots_core::formatter::Formatter;
 use blots_core::functions::FUNCTION_CALLS;
 use blots_core::heap::Heap;
@@ -84,7 +84,7 @@ fn main() -> ! {
                 if let Some(inner_pair) = pair.into_inner().next() {
                     match inner_pair.as_rule() {
                         Rule::expression => {
-                            let result = evaluate_expression(
+                            let result = evaluate_pairs(
                                 inner_pair.into_inner(),
                                 Rc::clone(&heap),
                                 Rc::clone(&bindings),
@@ -229,7 +229,7 @@ fn main() -> ! {
                 if let Some(inner_pair) = pair.into_inner().next() {
                     match inner_pair.as_rule() {
                         Rule::expression => {
-                            let result = evaluate_expression(
+                            let result = evaluate_pairs(
                                 inner_pair.into_inner(),
                                 Rc::clone(&heap),
                                 Rc::clone(&bindings),
