@@ -1125,6 +1125,28 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
             },
         },
     );
+    map.insert(
+        "entries",
+        BuiltInFunctionDef {
+            name: String::from("entries"),
+            arity: FunctionArity::Exact(1),
+            body: |args, heap, _, _| {
+                let record = args[0].as_record(&heap.borrow())?.clone();
+                let entries = record
+                    .iter()
+                    .map(|(k, v)| {
+                        let entry = {
+                            let mut borrowed_heap = heap.borrow_mut();
+                            vec![borrowed_heap.insert_string(k.to_string()), *v]
+                        };
+                        heap.borrow_mut().insert_list(entry)
+                    })
+                    .collect();
+
+                Ok(heap.borrow_mut().insert_list(entries))
+            },
+        },
+    );
 
     #[cfg(not(target_arch = "wasm32"))]
         map.insert(
