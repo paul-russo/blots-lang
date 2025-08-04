@@ -336,7 +336,7 @@ impl SerializableValue {
                 Ok(SerializableValue::Lambda(SerializableLambdaDef {
                     name: lambda.name.clone(),
                     args: lambda.args.clone(),
-                    body: format!("{:?}", lambda.body),
+                    body: crate::ast_to_source::expr_to_source(&lambda.body),
                     scope: Some(
                         lambda
                             .scope
@@ -671,7 +671,8 @@ impl Value {
                         result.push_str(", ");
                     }
                 }
-                result.push_str(") => {...}"); // For now, just show ... for the body
+                result.push_str(") => ");
+                result.push_str(&crate::ast_to_source::expr_to_source(&lambda.body));
                 result
             }
             Value::BuiltIn(id) => {
