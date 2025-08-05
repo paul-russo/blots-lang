@@ -514,9 +514,26 @@ impl Value {
                 Ok(true)
             }
 
-            // Lambda comparison - for now, compare by reference (pointer equality)
-            // TODO: Consider structural equality or always false
-            (Value::Lambda(a), Value::Lambda(b)) => Ok(a == b),
+            // Lambda comparison - compare by structure (AST equality)
+            (Value::Lambda(a_ptr), Value::Lambda(b_ptr)) => {
+                let a_lambda = a_ptr.reify(heap).as_lambda()?;
+                let b_lambda = b_ptr.reify(heap).as_lambda()?;
+
+                // Compare argument lists
+                if a_lambda.args != b_lambda.args {
+                    return Ok(false);
+                }
+
+                // Compare AST bodies
+                if a_lambda.body != b_lambda.body {
+                    return Ok(false);
+                }
+
+                // Note: We don't compare scopes because two functions with the same
+                // definition but different closures would have different behavior
+                // For now, we only compare structure, not captured variables
+                Ok(true)
+            }
 
             // Built-in functions - compare by ID
             (Value::BuiltIn(a), Value::BuiltIn(b)) => Ok(a == b),
