@@ -219,7 +219,10 @@ pub fn evaluate_ast(
         }
         Expr::Assignment { ident, value } => {
             if is_built_in_function(ident) {
-                return Err(anyhow!("cannot assign to built-in function: {}", ident));
+                return Err(anyhow!(
+                    "{} is the name of a built-in function, and cannot be reassigned",
+                    ident
+                ));
             }
 
             if ident == "constants"
@@ -234,12 +237,15 @@ pub fn evaluate_ast(
                 || ident == "or"
                 || ident == "with"
             {
-                return Err(anyhow!("cannot assign to keyword: {}", ident));
+                return Err(anyhow!("{} is a keyword, and cannot be reassigned", ident));
             }
 
             // Check if the variable already exists (immutability check)
             if bindings.borrow().contains_key(ident) {
-                return Err(anyhow!("cannot reassign to immutable variable: {}", ident));
+                return Err(anyhow!(
+                    "{} is already defined, and cannot be reassigned",
+                    ident
+                ));
             }
 
             let val = evaluate_ast(value, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
@@ -1936,7 +1942,7 @@ mod tests {
         assert!(result2
             .unwrap_err()
             .to_string()
-            .contains("cannot reassign to immutable variable: x"));
+            .contains("x is already defined, and cannot be reassigned"));
 
         // Original value should remain unchanged
         let result3 = parse_and_evaluate("x", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)));
@@ -1996,7 +2002,7 @@ mod tests {
         assert!(result2
             .unwrap_err()
             .to_string()
-            .contains("cannot reassign to immutable variable: x"));
+            .contains("x is already defined, and cannot be reassigned"));
 
         // But new variables in do block should work
         let do_block2 = r#"do {
@@ -2063,11 +2069,11 @@ mod tests {
         assert!(result2
             .unwrap_err()
             .to_string()
-            .contains("cannot reassign to immutable variable: list"));
+            .contains("list is already defined, and cannot be reassigned"));
 
         // Record assignment
         let result3 = parse_and_evaluate(
-            "obj = {x: 1, y: 2}",
+            "rec = {x: 1, y: 2}",
             Some(Rc::clone(&heap)),
             Some(Rc::clone(&bindings)),
         );
@@ -2075,7 +2081,7 @@ mod tests {
 
         // Reassignment should fail
         let result4 = parse_and_evaluate(
-            "obj = {x: 3, y: 4}",
+            "rec = {x: 3, y: 4}",
             Some(Rc::clone(&heap)),
             Some(Rc::clone(&bindings)),
         );
@@ -2083,6 +2089,6 @@ mod tests {
         assert!(result4
             .unwrap_err()
             .to_string()
-            .contains("cannot reassign to immutable variable: obj"));
+            .contains("rec is already defined, and cannot be reassigned"));
     }
 }
