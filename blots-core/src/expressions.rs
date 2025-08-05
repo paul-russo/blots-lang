@@ -2319,7 +2319,7 @@ mod tests {
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(RefCell::new(HashMap::new()));
 
-        // Different lambdas with same body are not equal
+        // Lambdas with same structure are equal
         parse_and_evaluate(
             "f1 = (x) => x + 2",
             Some(Rc::clone(&heap)),
@@ -2338,7 +2338,7 @@ mod tests {
             Some(Rc::clone(&bindings)),
         )
         .unwrap();
-        assert_eq!(result, Value::Bool(false));
+        assert_eq!(result, Value::Bool(true));
 
         // Same lambda reference is equal to itself
         let result = parse_and_evaluate(
@@ -2363,6 +2363,51 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result, Value::Bool(true));
+
+        // Different bodies are not equal
+        parse_and_evaluate(
+            "f4 = (x) => x + 3",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        let result = parse_and_evaluate(
+            "f1 == f4",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        // Different parameter names are not equal
+        parse_and_evaluate(
+            "f5 = (y) => y + 2",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        let result = parse_and_evaluate(
+            "f1 == f5",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        // Different arities are not equal
+        parse_and_evaluate(
+            "f6 = (x, y) => x + y",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        let result = parse_and_evaluate(
+            "f1 == f6",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        assert_eq!(result, Value::Bool(false));
     }
 
     #[test]
