@@ -460,6 +460,123 @@ pub enum Value {
 }
 
 impl Value {
+    /// Compare two values for equality by their actual content, not by reference
+    pub fn equals(&self, other: &Value, heap: &Heap) -> Result<bool> {
+        match (self, other) {
+            // Primitive types - compare directly
+            (Value::Number(a), Value::Number(b)) => Ok(a == b),
+            (Value::Bool(a), Value::Bool(b)) => Ok(a == b),
+            (Value::Null, Value::Null) => Ok(true),
+
+            // String comparison - compare content
+            (Value::String(a_ptr), Value::String(b_ptr)) => {
+                let a_str = a_ptr.reify(heap).as_string()?;
+                let b_str = b_ptr.reify(heap).as_string()?;
+                Ok(a_str == b_str)
+            }
+
+            // List comparison - compare elements recursively
+            (Value::List(a_ptr), Value::List(b_ptr)) => {
+                let a_list = a_ptr.reify(heap).as_list()?;
+                let b_list = b_ptr.reify(heap).as_list()?;
+
+                if a_list.len() != b_list.len() {
+                    return Ok(false);
+                }
+
+                for (a_elem, b_elem) in a_list.iter().zip(b_list.iter()) {
+                    if !a_elem.equals(b_elem, heap)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+
+            // Record comparison - compare keys and values
+            (Value::Record(a_ptr), Value::Record(b_ptr)) => {
+                let a_record = a_ptr.reify(heap).as_record()?;
+                let b_record = b_ptr.reify(heap).as_record()?;
+
+                if a_record.len() != b_record.len() {
+                    return Ok(false);
+                }
+
+                for (key, a_value) in a_record.iter() {
+                    match b_record.get(key) {
+                        Some(b_value) => {
+                            if !a_value.equals(b_value, heap)? {
+                                return Ok(false);
+                            }
+                        }
+                        None => return Ok(false),
+                    }
+                }
+                Ok(true)
+            }
+
+            // Lambda comparison - for now, compare by reference (pointer equality)
+            // TODO: Consider structural equality or always false
+            (Value::Lambda(a), Value::Lambda(b)) => Ok(a == b),
+
+            // Built-in functions - compare by ID
+            (Value::BuiltIn(a), Value::BuiltIn(b)) => Ok(a == b),
+
+            // Spread values - compare the underlying iterable
+            (Value::Spread(a_ptr), Value::Spread(b_ptr)) => match (a_ptr, b_ptr) {
+                (IterablePointer::List(a), IterablePointer::List(b)) => {
+                    Value::List(*a).equals(&Value::List(*b), heap)
+                }
+                (IterablePointer::String(a), IterablePointer::String(b)) => {
+                    Value::String(*a).equals(&Value::String(*b), heap)
+                }
+                (IterablePointer::Record(a), IterablePointer::Record(b)) => {
+                    Value::Record(*a).equals(&Value::Record(*b), heap)
+                }
+                _ => Ok(false),
+            },
+
+            // Different types are never equal
+            _ => Ok(false),
+        }
+    }
+
+    /// Compare two values for ordering
+    pub fn compare(&self, other: &Value, heap: &Heap) -> Result<Option<std::cmp::Ordering>> {
+        match (self, other) {
+            // Numbers have natural ordering
+            (Value::Number(a), Value::Number(b)) => Ok(a.partial_cmp(b)),
+
+            // Booleans: false < true
+            (Value::Bool(a), Value::Bool(b)) => Ok(a.partial_cmp(b)),
+
+            // Strings compare lexicographically
+            (Value::String(a_ptr), Value::String(b_ptr)) => {
+                let a_str = a_ptr.reify(heap).as_string()?;
+                let b_str = b_ptr.reify(heap).as_string()?;
+                Ok(a_str.partial_cmp(b_str))
+            }
+
+            // Lists compare lexicographically
+            (Value::List(a_ptr), Value::List(b_ptr)) => {
+                let a_list = a_ptr.reify(heap).as_list()?;
+                let b_list = b_ptr.reify(heap).as_list()?;
+
+                for (a_elem, b_elem) in a_list.iter().zip(b_list.iter()) {
+                    match a_elem.compare(b_elem, heap)? {
+                        Some(std::cmp::Ordering::Equal) => continue,
+                        other => return Ok(other),
+                    }
+                }
+
+                // If all compared elements are equal, compare lengths
+                Ok(a_list.len().partial_cmp(&b_list.len()))
+            }
+
+            // Other types don't have a natural ordering
+            _ => Ok(None),
+        }
+    }
+
     pub fn get_type(&self) -> ValueType {
         match self {
             Value::Number(_) => ValueType::Number,
