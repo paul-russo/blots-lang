@@ -14,11 +14,9 @@ pub fn expr_to_source(expr: &Expr) -> String {
         Expr::Bool(b) => b.to_string(),
         Expr::Null => "null".to_string(),
         Expr::Identifier(name) => name.clone(),
-        Expr::BuiltIn(id) => {
-            crate::functions::get_built_in_function_ident(*id)
-                .unwrap_or("unknown")
-                .to_string()
-        }
+        Expr::BuiltIn(id) => crate::functions::get_built_in_function_ident(*id)
+            .unwrap_or("unknown")
+            .to_string(),
         Expr::List(items) => {
             let items_str: Vec<String> = items.iter().map(expr_to_source).collect();
             format!("[{}]", items_str.join(", "))
@@ -70,7 +68,12 @@ pub fn expr_to_source(expr: &Expr) -> String {
         Expr::DotAccess { expr, field } => format!("{}.{}", expr_to_source(expr), field),
         Expr::BinaryOp { op, left, right } => {
             let op_str = binary_op_to_source(op);
-            format!("{} {} {}", expr_to_source(left), op_str, expr_to_source(right))
+            format!(
+                "{} {} {}",
+                expr_to_source(left),
+                op_str,
+                expr_to_source(right)
+            )
         }
         Expr::UnaryOp { op, expr } => {
             let op_str = unary_op_to_source(op);
@@ -96,7 +99,11 @@ fn record_entry_to_source(entry: &RecordEntry) -> String {
     match &entry.key {
         RecordKey::Static(key) => format!("{}: {}", key, expr_to_source(&entry.value)),
         RecordKey::Dynamic(key_expr) => {
-            format!("[{}]: {}", expr_to_source(key_expr), expr_to_source(&entry.value))
+            format!(
+                "[{}]: {}",
+                expr_to_source(key_expr),
+                expr_to_source(&entry.value)
+            )
         }
         RecordKey::Shorthand(name) => name.clone(),
         RecordKey::Spread(expr) => expr_to_source(expr),

@@ -237,6 +237,11 @@ pub fn evaluate_ast(
                 return Err(anyhow!("cannot assign to keyword: {}", ident));
             }
 
+            // Check if the variable already exists (immutability check)
+            if bindings.borrow().contains_key(ident) {
+                return Err(anyhow!("cannot reassign to immutable variable: {}", ident));
+            }
+
             let val = evaluate_ast(value, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
 
             // Set lambda name if assigning a lambda
@@ -1911,5 +1916,173 @@ mod tests {
         let not_result = parse_and_evaluate("not true", None, None).unwrap();
         let invert_result = parse_and_evaluate("!true", None, None).unwrap();
         assert_eq!(not_result, invert_result);
+    }
+
+    #[test]
+    fn variable_immutability_prevents_reassignment() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // First assignment should succeed
+        let result1 =
+            parse_and_evaluate("x = 5", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)));
+        assert!(result1.is_ok());
+        assert_eq!(result1.unwrap(), Value::Number(5.0));
+
+        // Second assignment to same variable should fail
+        let result2 =
+            parse_and_evaluate("x = 10", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)));
+        assert!(result2.is_err());
+        assert!(result2
+            .unwrap_err()
+            .to_string()
+            .contains("cannot reassign to immutable variable: x"));
+
+        // Original value should remain unchanged
+        let result3 = parse_and_evaluate("x", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)));
+        assert!(result3.is_ok());
+        assert_eq!(result3.unwrap(), Value::Number(5.0));
+    }
+
+    #[test]
+    fn variable_immutability_allows_shadowing_in_nested_scopes() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // Assign x in outer scope
+        let result1 =
+            parse_and_evaluate("x = 5", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)));
+        assert!(result1.is_ok());
+
+        // Shadowing in lambda should work (creates new scope)
+        let result2 = parse_and_evaluate(
+            "f = (x) => x * 2",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        );
+        assert!(result2.is_ok());
+
+        // Call lambda with different value
+        let result3 =
+            parse_and_evaluate("f(10)", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)));
+        assert!(result3.is_ok());
+        assert_eq!(result3.unwrap(), Value::Number(20.0));
+
+        // Original x should be unchanged
+        let result4 = parse_and_evaluate("x", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)));
+        assert!(result4.is_ok());
+        assert_eq!(result4.unwrap(), Value::Number(5.0));
+    }
+
+    #[test]
+    fn variable_immutability_in_do_blocks() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // Assign x in outer scope
+        let result1 =
+            parse_and_evaluate("x = 5", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)));
+        assert!(result1.is_ok());
+
+        // Do block inherits outer scope, so reassigning x should fail
+        let do_block = r#"do {
+            x = 10
+            y = x * 2
+            return y
+        }"#;
+        let result2 =
+            parse_and_evaluate(do_block, Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)));
+        assert!(result2.is_err());
+        assert!(result2
+            .unwrap_err()
+            .to_string()
+            .contains("cannot reassign to immutable variable: x"));
+
+        // But new variables in do block should work
+        let do_block2 = r#"do {
+            z = x * 3
+            return z
+        }"#;
+        let result3 = parse_and_evaluate(
+            do_block2,
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        );
+        assert!(result3.is_ok());
+        assert_eq!(result3.unwrap(), Value::Number(15.0));
+
+        // Original x should be unchanged
+        let result4 = parse_and_evaluate("x", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)));
+        assert!(result4.is_ok());
+        assert_eq!(result4.unwrap(), Value::Number(5.0));
+    }
+
+    #[test]
+    fn variable_immutability_different_variables() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // Multiple different variables should work
+        let result1 =
+            parse_and_evaluate("x = 5", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)));
+        assert!(result1.is_ok());
+
+        let result2 =
+            parse_and_evaluate("y = 10", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)));
+        assert!(result2.is_ok());
+
+        let result3 = parse_and_evaluate(
+            "z = x + y",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        );
+        assert!(result3.is_ok());
+        assert_eq!(result3.unwrap(), Value::Number(15.0));
+    }
+
+    #[test]
+    fn variable_immutability_with_complex_types() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // List assignment
+        let result1 = parse_and_evaluate(
+            "list = [1, 2, 3]",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        );
+        assert!(result1.is_ok());
+
+        // Reassignment should fail
+        let result2 = parse_and_evaluate(
+            "list = [4, 5, 6]",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        );
+        assert!(result2.is_err());
+        assert!(result2
+            .unwrap_err()
+            .to_string()
+            .contains("cannot reassign to immutable variable: list"));
+
+        // Record assignment
+        let result3 = parse_and_evaluate(
+            "obj = {x: 1, y: 2}",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        );
+        assert!(result3.is_ok());
+
+        // Reassignment should fail
+        let result4 = parse_and_evaluate(
+            "obj = {x: 3, y: 4}",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        );
+        assert!(result4.is_err());
+        assert!(result4
+            .unwrap_err()
+            .to_string()
+            .contains("cannot reassign to immutable variable: obj"));
     }
 }
