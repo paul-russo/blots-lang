@@ -536,12 +536,88 @@ fn evaluate_binary_op_ast(
             }
 
             match op {
-                BinaryOp::Equal => Ok(Bool(l_vec.iter().zip(&r_vec).all(|(l, r)| l == r))),
-                BinaryOp::NotEqual => Ok(Bool(l_vec.iter().zip(&r_vec).all(|(l, r)| l != r))),
-                BinaryOp::Less => Ok(Bool(l_vec.iter().zip(&r_vec).all(|(l, r)| l < r))),
-                BinaryOp::LessEq => Ok(Bool(l_vec.iter().zip(&r_vec).all(|(l, r)| l <= r))),
-                BinaryOp::Greater => Ok(Bool(l_vec.iter().zip(&r_vec).all(|(l, r)| l > r))),
-                BinaryOp::GreaterEq => Ok(Bool(l_vec.iter().zip(&r_vec).all(|(l, r)| l >= r))),
+                BinaryOp::Equal => {
+                    let borrowed_heap = heap.borrow();
+                    let mut all_equal = true;
+                    for (l, r) in l_vec.iter().zip(&r_vec) {
+                        if !l.equals(r, &borrowed_heap)? {
+                            all_equal = false;
+                            break;
+                        }
+                    }
+                    Ok(Bool(all_equal))
+                }
+                BinaryOp::NotEqual => {
+                    let borrowed_heap = heap.borrow();
+                    let mut all_not_equal = true;
+                    for (l, r) in l_vec.iter().zip(&r_vec) {
+                        if l.equals(r, &borrowed_heap)? {
+                            all_not_equal = false;
+                            break;
+                        }
+                    }
+                    Ok(Bool(all_not_equal))
+                }
+                BinaryOp::Less => {
+                    let borrowed_heap = heap.borrow();
+                    let mut all_less = true;
+                    for (l, r) in l_vec.iter().zip(&r_vec) {
+                        match l.compare(r, &borrowed_heap)? {
+                            Some(std::cmp::Ordering::Less) => continue,
+                            _ => {
+                                all_less = false;
+                                break;
+                            }
+                        }
+                    }
+                    Ok(Bool(all_less))
+                }
+                BinaryOp::LessEq => {
+                    let borrowed_heap = heap.borrow();
+                    let mut all_less_eq = true;
+                    for (l, r) in l_vec.iter().zip(&r_vec) {
+                        match l.compare(r, &borrowed_heap)? {
+                            Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal) => {
+                                continue
+                            }
+                            _ => {
+                                all_less_eq = false;
+                                break;
+                            }
+                        }
+                    }
+                    Ok(Bool(all_less_eq))
+                }
+                BinaryOp::Greater => {
+                    let borrowed_heap = heap.borrow();
+                    let mut all_greater = true;
+                    for (l, r) in l_vec.iter().zip(&r_vec) {
+                        match l.compare(r, &borrowed_heap)? {
+                            Some(std::cmp::Ordering::Greater) => continue,
+                            _ => {
+                                all_greater = false;
+                                break;
+                            }
+                        }
+                    }
+                    Ok(Bool(all_greater))
+                }
+                BinaryOp::GreaterEq => {
+                    let borrowed_heap = heap.borrow();
+                    let mut all_greater_eq = true;
+                    for (l, r) in l_vec.iter().zip(&r_vec) {
+                        match l.compare(r, &borrowed_heap)? {
+                            Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal) => {
+                                continue
+                            }
+                            _ => {
+                                all_greater_eq = false;
+                                break;
+                            }
+                        }
+                    }
+                    Ok(Bool(all_greater_eq))
+                }
                 BinaryOp::And | BinaryOp::NaturalAnd => {
                     let mapped_list = l_vec
                         .iter()
@@ -680,46 +756,106 @@ fn evaluate_binary_op_ast(
 
             match op {
                 BinaryOp::Equal => {
-                    if is_list_first {
-                        Ok(Bool(l_vec.iter().all(|v| v == &scalar)))
-                    } else {
-                        Ok(Bool(l_vec.iter().all(|v| &scalar == v)))
+                    let borrowed_heap = heap.borrow();
+                    let mut all_equal = true;
+                    for v in l_vec.iter() {
+                        if !v.equals(&scalar, &borrowed_heap)? {
+                            all_equal = false;
+                            break;
+                        }
                     }
+                    Ok(Bool(all_equal))
                 }
                 BinaryOp::NotEqual => {
-                    if is_list_first {
-                        Ok(Bool(l_vec.iter().all(|v| v != &scalar)))
-                    } else {
-                        Ok(Bool(l_vec.iter().all(|v| &scalar != v)))
+                    let borrowed_heap = heap.borrow();
+                    let mut all_not_equal = true;
+                    for v in l_vec.iter() {
+                        if v.equals(&scalar, &borrowed_heap)? {
+                            all_not_equal = false;
+                            break;
+                        }
                     }
+                    Ok(Bool(all_not_equal))
                 }
                 BinaryOp::Less => {
-                    if is_list_first {
-                        Ok(Bool(l_vec.iter().all(|v| v < &scalar)))
-                    } else {
-                        Ok(Bool(l_vec.iter().all(|v| &scalar < v)))
+                    let borrowed_heap = heap.borrow();
+                    let mut all_less = true;
+                    for v in l_vec.iter() {
+                        let ordering = if is_list_first {
+                            v.compare(&scalar, &borrowed_heap)?
+                        } else {
+                            scalar.compare(v, &borrowed_heap)?
+                        };
+                        match ordering {
+                            Some(std::cmp::Ordering::Less) => continue,
+                            _ => {
+                                all_less = false;
+                                break;
+                            }
+                        }
                     }
+                    Ok(Bool(all_less))
                 }
                 BinaryOp::LessEq => {
-                    if is_list_first {
-                        Ok(Bool(l_vec.iter().all(|v| v <= &scalar)))
-                    } else {
-                        Ok(Bool(l_vec.iter().all(|v| &scalar <= v)))
+                    let borrowed_heap = heap.borrow();
+                    let mut all_less_eq = true;
+                    for v in l_vec.iter() {
+                        let ordering = if is_list_first {
+                            v.compare(&scalar, &borrowed_heap)?
+                        } else {
+                            scalar.compare(v, &borrowed_heap)?
+                        };
+                        match ordering {
+                            Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal) => {
+                                continue
+                            }
+                            _ => {
+                                all_less_eq = false;
+                                break;
+                            }
+                        }
                     }
+                    Ok(Bool(all_less_eq))
                 }
                 BinaryOp::Greater => {
-                    if is_list_first {
-                        Ok(Bool(l_vec.iter().all(|v| v > &scalar)))
-                    } else {
-                        Ok(Bool(l_vec.iter().all(|v| &scalar > v)))
+                    let borrowed_heap = heap.borrow();
+                    let mut all_greater = true;
+                    for v in l_vec.iter() {
+                        let ordering = if is_list_first {
+                            v.compare(&scalar, &borrowed_heap)?
+                        } else {
+                            scalar.compare(v, &borrowed_heap)?
+                        };
+                        match ordering {
+                            Some(std::cmp::Ordering::Greater) => continue,
+                            _ => {
+                                all_greater = false;
+                                break;
+                            }
+                        }
                     }
+                    Ok(Bool(all_greater))
                 }
                 BinaryOp::GreaterEq => {
-                    if is_list_first {
-                        Ok(Bool(l_vec.iter().all(|v| v >= &scalar)))
-                    } else {
-                        Ok(Bool(l_vec.iter().all(|v| &scalar >= v)))
+                    let borrowed_heap = heap.borrow();
+                    let mut all_greater_eq = true;
+                    for v in l_vec.iter() {
+                        let ordering = if is_list_first {
+                            v.compare(&scalar, &borrowed_heap)?
+                        } else {
+                            scalar.compare(v, &borrowed_heap)?
+                        };
+                        match ordering {
+                            Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal) => {
+                                continue
+                            }
+                            _ => {
+                                all_greater_eq = false;
+                                break;
+                            }
+                        }
                     }
+                    Ok(Bool(all_greater_eq))
                 }
                 BinaryOp::And | BinaryOp::NaturalAnd => {
                     let mapped_list = if is_list_first {
@@ -921,12 +1057,26 @@ fn evaluate_binary_op_ast(
             }
         }
         (lhs, rhs) => match op {
-            BinaryOp::Equal => Ok(Bool(lhs == rhs)),
-            BinaryOp::NotEqual => Ok(Bool(lhs != rhs)),
-            BinaryOp::Less => Ok(Bool(lhs < rhs)),
-            BinaryOp::LessEq => Ok(Bool(lhs <= rhs)),
-            BinaryOp::Greater => Ok(Bool(lhs > rhs)),
-            BinaryOp::GreaterEq => Ok(Bool(lhs >= rhs)),
+            BinaryOp::Equal => Ok(Bool(lhs.equals(&rhs, &heap.borrow())?)),
+            BinaryOp::NotEqual => Ok(Bool(!lhs.equals(&rhs, &heap.borrow())?)),
+            BinaryOp::Less => match lhs.compare(&rhs, &heap.borrow())? {
+                Some(std::cmp::Ordering::Less) => Ok(Bool(true)),
+                _ => Ok(Bool(false)),
+            },
+            BinaryOp::LessEq => match lhs.compare(&rhs, &heap.borrow())? {
+                Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal) => Ok(Bool(true)),
+                _ => Ok(Bool(false)),
+            },
+            BinaryOp::Greater => match lhs.compare(&rhs, &heap.borrow())? {
+                Some(std::cmp::Ordering::Greater) => Ok(Bool(true)),
+                _ => Ok(Bool(false)),
+            },
+            BinaryOp::GreaterEq => match lhs.compare(&rhs, &heap.borrow())? {
+                Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal) => {
+                    Ok(Bool(true))
+                }
+                _ => Ok(Bool(false)),
+            },
             BinaryOp::And | BinaryOp::NaturalAnd => Ok(Bool(lhs.as_bool()? && rhs.as_bool()?)),
             BinaryOp::Or | BinaryOp::NaturalOr => Ok(Bool(lhs.as_bool()? || rhs.as_bool()?)),
             BinaryOp::Add => {
@@ -2090,5 +2240,174 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("rec is already defined, and cannot be reassigned"));
+    }
+
+    #[test]
+    fn equality_comparison_numbers() {
+        let result = parse_and_evaluate("5e2 == 5e2", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result = parse_and_evaluate("42 == 42", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result = parse_and_evaluate("42 == 43", None, None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    #[test]
+    fn equality_comparison_strings() {
+        let result = parse_and_evaluate(r#""hey" == "hey""#, None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result = parse_and_evaluate(r#""hello" == "world""#, None, None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        let result = parse_and_evaluate(r#""" == """#, None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn equality_comparison_lists() {
+        let result = parse_and_evaluate("[1,2,3] == [1,2,3]", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result = parse_and_evaluate("[1,2,3] == [1,2,4]", None, None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        // Note: Lists of different lengths cannot be compared with broadcasting syntax
+        // They are compared directly as values
+
+        // String lists
+        let result = parse_and_evaluate(r#"["a", "b"] == ["a", "b"]"#, None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        // Nested lists
+        let result = parse_and_evaluate("[[1,2,3]] == [[1,2,3]]", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result =
+            parse_and_evaluate("[[1,2,3], [4,5]] == [[1,2,3], [4,5]]", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn equality_comparison_records() {
+        let result = parse_and_evaluate("{ hey: 1 } == { hey: 1 }", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result = parse_and_evaluate("{ hey: 1 } == { hey: 2 }", None, None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        let result = parse_and_evaluate("{ hey: 1 } == { hello: 1 }", None, None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        // Multiple fields
+        let result = parse_and_evaluate("{ a: 1, b: 2 } == { a: 1, b: 2 }", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        // Order shouldn't matter for records
+        let result = parse_and_evaluate("{ a: 1, b: 2 } == { b: 2, a: 1 }", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        // Nested records
+        let result = parse_and_evaluate("{ x: { y: 1 } } == { x: { y: 1 } }", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn equality_comparison_lambdas() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // Different lambdas with same body are not equal
+        parse_and_evaluate(
+            "f1 = (x) => x + 2",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        parse_and_evaluate(
+            "f2 = (x) => x + 2",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        let result = parse_and_evaluate(
+            "f1 == f2",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        // Same lambda reference is equal to itself
+        let result = parse_and_evaluate(
+            "f1 == f1",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        // Assigned lambda is equal
+        parse_and_evaluate(
+            "f3 = f1",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        let result = parse_and_evaluate(
+            "f1 == f3",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn equality_comparison_mixed_types() {
+        // Different types are never equal
+        let result = parse_and_evaluate("1 == \"1\"", None, None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        let result = parse_and_evaluate("true == 1", None, None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        // Note: [1] == 1 uses broadcasting and returns true (all elements equal the scalar)
+        let result = parse_and_evaluate("[1] == 1", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result = parse_and_evaluate("null == 0", None, None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    #[test]
+    fn comparison_operators_strings() {
+        // Lexicographic comparison
+        let result = parse_and_evaluate(r#""apple" < "banana""#, None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result = parse_and_evaluate(r#""zebra" > "apple""#, None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result = parse_and_evaluate(r#""hello" <= "hello""#, None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn comparison_operators_lists() {
+        // List comparisons use element-wise broadcasting
+        // [1, 2] < [2, 3] means [1 < 2, 2 < 3] = [true, true] => all true => true
+        let result = parse_and_evaluate("[1, 2] < [2, 3]", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        // [1, 2] < [1, 3] means [1 < 1, 2 < 3] = [false, true] => not all true => false
+        let result = parse_and_evaluate("[1, 2] < [1, 3]", None, None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        // [2, 1] > [1, 0] means [2 > 1, 1 > 0] = [true, true] => all true => true
+        let result = parse_and_evaluate("[2, 1] > [1, 0]", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
     }
 }
