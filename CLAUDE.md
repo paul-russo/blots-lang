@@ -87,3 +87,7 @@ See `tests/README.md` for detailed test documentation and usage examples.
 ## File Extensions
 
 Blots source files use the `.blot` extension. See `examples/` directory for sample programs demonstrating language features.
+
+## Formatting
+
+Before finishing a task, or committing code, make sure to run `cargo fmt`.
