@@ -185,8 +185,17 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
         "round",
         BuiltInFunctionDef {
             name: String::from("round"),
-            arity: FunctionArity::Exact(1),
-            body: |args, _, _, _| Ok(Value::Number(args[0].as_number()?.round())),
+            arity: FunctionArity::Between(1, 2),
+            body: |args, _, _, _| {
+                let num = args[0].as_number()?;
+                if args.len() == 1 {
+                    Ok(Value::Number(num.round()))
+                } else {
+                    let decimal_places = args[1].as_number()? as i32;
+                    let multiplier = 10_f64.powi(decimal_places);
+                    Ok(Value::Number((num * multiplier).round() / multiplier))
+                }
+            },
         },
     );
     map.insert(
@@ -1496,5 +1505,192 @@ mod tests {
         assert_eq!(list.len(), 7);
         assert_eq!(list[0], Value::Number(4.0));
         assert_eq!(list[6], Value::Number(10.0));
+    }
+
+    #[test]
+    fn test_round_function_single_arg() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let round_fn =
+            get_built_in_function_def(get_built_in_function_id("round").unwrap()).unwrap();
+
+        // Test basic rounding
+        let test_cases = vec![
+            (42.4, 42.0),
+            (42.5, 43.0),
+            (42.6, 43.0),
+            (-42.4, -42.0),
+            (-42.5, -43.0),
+            (-42.6, -43.0),
+            (0.0, 0.0),
+            (1.999, 2.0),
+            (-1.999, -2.0),
+        ];
+
+        for (input, expected) in test_cases {
+            let args = vec![Value::Number(input)];
+            let result = match &round_fn {
+                FunctionDef::BuiltIn(def) => {
+                    (def.body)(args, heap.clone(), bindings.clone(), 0).unwrap()
+                }
+                _ => panic!("Expected built-in function"),
+            };
+            assert_eq!(
+                result,
+                Value::Number(expected),
+                "round({}) should be {}",
+                input,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_round_function_with_decimal_places() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let round_fn =
+            get_built_in_function_def(get_built_in_function_id("round").unwrap()).unwrap();
+
+        // Test rounding to decimal places
+        let test_cases = vec![
+            (42.4543, 0.0, 42.0),
+            (42.4543, 1.0, 42.5),
+            (42.4543, 2.0, 42.45),
+            (42.4543, 3.0, 42.454),
+            (42.4543, 4.0, 42.4543),
+            (3.14159, 4.0, 3.1416),
+            (0.005, 2.0, 0.01),
+            (0.995, 2.0, 1.0),
+            // Note: 9.995 has floating point representation issues
+            // In binary, it's actually slightly less than 9.995
+            (9.995, 2.0, 9.99),
+            (-9.995, 2.0, -9.99),
+        ];
+
+        for (input, places, expected) in test_cases {
+            let args = vec![Value::Number(input), Value::Number(places)];
+            let result = match &round_fn {
+                FunctionDef::BuiltIn(def) => {
+                    (def.body)(args, heap.clone(), bindings.clone(), 0).unwrap()
+                }
+                _ => panic!("Expected built-in function"),
+            };
+
+            // Use approximate comparison for floating point
+            if let Value::Number(result_num) = result {
+                assert!(
+                    (result_num - expected).abs() < 1e-10,
+                    "round({}, {}) = {} should be close to {}",
+                    input,
+                    places,
+                    result_num,
+                    expected
+                );
+            } else {
+                panic!("Expected number result");
+            }
+        }
+    }
+
+    #[test]
+    fn test_round_function_negative_decimal_places() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let round_fn =
+            get_built_in_function_def(get_built_in_function_id("round").unwrap()).unwrap();
+
+        // Test rounding to tens, hundreds, etc.
+        let test_cases = vec![
+            (1234.567, -1.0, 1230.0),
+            (1234.567, -2.0, 1200.0),
+            (1234.567, -3.0, 1000.0),
+            (1234.567, -4.0, 0.0),
+            (5678.9, -1.0, 5680.0),
+            (5678.9, -2.0, 5700.0),
+            (5678.9, -3.0, 6000.0),
+            (-1234.567, -1.0, -1230.0),
+            (-1234.567, -2.0, -1200.0),
+            (1500.0, -3.0, 2000.0),
+            (-1500.0, -3.0, -2000.0),
+        ];
+
+        for (input, places, expected) in test_cases {
+            let args = vec![Value::Number(input), Value::Number(places)];
+            let result = match &round_fn {
+                FunctionDef::BuiltIn(def) => {
+                    (def.body)(args, heap.clone(), bindings.clone(), 0).unwrap()
+                }
+                _ => panic!("Expected built-in function"),
+            };
+            assert_eq!(
+                result,
+                Value::Number(expected),
+                "round({}, {}) should be {}",
+                input,
+                places,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_round_function_edge_cases() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let round_fn =
+            get_built_in_function_def(get_built_in_function_id("round").unwrap()).unwrap();
+
+        // Test edge cases
+        let test_cases = vec![
+            (f64::INFINITY, 0.0, f64::INFINITY),
+            (f64::NEG_INFINITY, 0.0, f64::NEG_INFINITY),
+            (0.0, 5.0, 0.0),
+            (-0.0, 5.0, -0.0),
+            (1e-10, 5.0, 0.0),
+            (1e-10, 15.0, 1e-10),
+        ];
+
+        for (input, places, expected) in test_cases {
+            let args = vec![Value::Number(input), Value::Number(places)];
+            let result = match &round_fn {
+                FunctionDef::BuiltIn(def) => {
+                    (def.body)(args, heap.clone(), bindings.clone(), 0).unwrap()
+                }
+                _ => panic!("Expected built-in function"),
+            };
+
+            if let Value::Number(result_num) = result {
+                if expected.is_infinite() {
+                    assert!(
+                        result_num.is_infinite()
+                            && result_num.is_sign_positive() == expected.is_sign_positive(),
+                        "round({}, {}) should be {}",
+                        input,
+                        places,
+                        expected
+                    );
+                } else if expected == 0.0 || expected == -0.0 {
+                    assert!(
+                        result_num.abs() < 1e-10,
+                        "round({}, {}) = {} should be close to 0",
+                        input,
+                        places,
+                        result_num
+                    );
+                } else {
+                    assert!(
+                        (result_num - expected).abs() < 1e-15,
+                        "round({}, {}) = {} should be close to {}",
+                        input,
+                        places,
+                        result_num,
+                        expected
+                    );
+                }
+            } else {
+                panic!("Expected number result");
+            }
+        }
     }
 }
