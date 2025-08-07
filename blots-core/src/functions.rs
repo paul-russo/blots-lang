@@ -403,10 +403,15 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
         "range",
         BuiltInFunctionDef {
             name: String::from("range"),
-            arity: FunctionArity::Exact(1),
+            arity: FunctionArity::Between(1, 2),
             body: |args, heap, _, _| {
-                let n = args[0].as_number()? as i64;
-                let values = (0..n).map(|e| Value::Number(e as f64)).collect();
+                let (start, end) = if args.len() == 1 {
+                    (0, args[0].as_number()? as i64)
+                } else {
+                    (args[0].as_number()? as i64, args[1].as_number()? as i64)
+                };
+
+                let values = (start..=end).map(|e| Value::Number(e as f64)).collect();
                 let list = heap.borrow_mut().insert_list(values);
 
                 Ok(list)
@@ -1435,5 +1440,61 @@ pub fn get_function_def<'h>(value: &Value, heap: &'h Heap) -> Option<FunctionDef
         )),
         Value::BuiltIn(id) => Some(get_built_in_function_def(*id)?),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    #[test]
+    fn test_range_function() {
+        // Test single argument
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let range_fn =
+            get_built_in_function_def(get_built_in_function_id("range").unwrap()).unwrap();
+
+        // Test range(4)
+        let args = vec![Value::Number(4.0)];
+        let result = match range_fn {
+            FunctionDef::BuiltIn(def) => {
+                (def.body)(args, heap.clone(), bindings.clone(), 0).unwrap()
+            }
+            _ => panic!("Expected built-in function"),
+        };
+
+        let heap_borrow = heap.borrow();
+        let list = result.as_list(&heap_borrow).unwrap();
+        assert_eq!(list.len(), 5);
+        assert_eq!(list[0], Value::Number(0.0));
+        assert_eq!(list[4], Value::Number(4.0));
+    }
+
+    #[test]
+    fn test_range_function_two_args() {
+        // Test two arguments
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let range_fn =
+            get_built_in_function_def(get_built_in_function_id("range").unwrap()).unwrap();
+
+        // Test range(4, 10)
+        let args = vec![Value::Number(4.0), Value::Number(10.0)];
+        let result = match range_fn {
+            FunctionDef::BuiltIn(def) => {
+                (def.body)(args, heap.clone(), bindings.clone(), 0).unwrap()
+            }
+            _ => panic!("Expected built-in function"),
+        };
+
+        let heap_borrow = heap.borrow();
+        let list = result.as_list(&heap_borrow).unwrap();
+        assert_eq!(list.len(), 7);
+        assert_eq!(list[0], Value::Number(4.0));
+        assert_eq!(list[6], Value::Number(10.0));
     }
 }
