@@ -44,7 +44,7 @@ static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
         .op(Op::prefix(Rule::negation)
             | Op::prefix(Rule::spread_operator)
             | Op::prefix(Rule::invert)
-            | Op::prefix(Rule::not))
+            | Op::prefix(Rule::natural_not))
         .op(Op::postfix(Rule::factorial))
         .op(Op::postfix(Rule::access)
             | Op::postfix(Rule::dot_access)
@@ -1316,7 +1316,7 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> Result<Expr> {
                 expr: Box::new(rhs?),
             }),
             Rule::spread_operator => Ok(Expr::Spread(Box::new(rhs?))),
-            Rule::invert | Rule::not => Ok(Expr::UnaryOp {
+            Rule::invert | Rule::natural_not => Ok(Expr::UnaryOp {
                 op: UnaryOp::Not,
                 expr: Box::new(rhs?),
             }),

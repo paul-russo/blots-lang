@@ -323,7 +323,7 @@ impl Formatter {
             }
             Rule::negation => self.write("-"),
             Rule::invert => self.write("!"),
-            Rule::not => self.write("not "),
+            Rule::natural_not => self.write("not "),
             Rule::factorial => self.write("!"),
             Rule::access => {
                 self.write("[");

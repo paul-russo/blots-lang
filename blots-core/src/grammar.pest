@@ -47,12 +47,14 @@ with             =  { "with" }
 
 infix_usage = _{ (WHITESPACE | NEWLINE)+ ~ natural_infix_op ~ WHITESPACE+ | (WHITESPACE | NEWLINE)* ~ infix_op ~ WHITESPACE* }
 
-prefix_op = _{ negation | invert | not }
+prefix_op = _{ negation | invert }
 negation  =  { "-" }
 invert    =  { "!" }
-not       =  { "not" }
 
-prefix_usage = _{ not ~ WHITESPACE+ | prefix_op }
+natural_prefix_op = _{ natural_not }
+natural_not       =  { "not" }
+
+prefix_usage = _{ natural_prefix_op ~ WHITESPACE+ | prefix_op }
 
 postfix_op = _{ factorial | access | call_list | dot_access }
 factorial  =  { "!" }
