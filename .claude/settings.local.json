@@ -15,7 +15,8 @@
       "Bash(wasm-pack test:*)",
       "Bash(mv:*)",
       "Bash(cat:*)",
-      "Bash(cargo fmt:*)"
+      "Bash(cargo fmt:*)",
+      "Bash(cargo doc:*)"
     ],
     "deny": []
   }

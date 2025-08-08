@@ -961,6 +961,21 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
         },
     );
     map.insert(
+        "trim",
+        BuiltInFunctionDef {
+            name: String::from("trim"),
+            arity: FunctionArity::Exact(1),
+            body: |args, heap, _, _| {
+                let string = {
+                    let borrowed_heap = heap.borrow();
+                    args[0].as_string(&borrowed_heap)?.trim().to_string()
+                };
+
+                Ok(heap.borrow_mut().insert_string(string))
+            },
+        },
+    );
+    map.insert(
         "typeof",
         BuiltInFunctionDef {
             name: String::from("typeof"),
