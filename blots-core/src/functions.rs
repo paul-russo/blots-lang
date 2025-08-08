@@ -619,13 +619,22 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                     args[0].as_list(borrowed_heap)?.clone()
                 };
                 let mut unique_list = vec![];
+                let borrowed_heap = heap.borrow();
 
                 for item in list {
-                    if !unique_list.contains(&item) {
+                    let mut is_duplicate = false;
+                    for existing in &unique_list {
+                        if item.equals(existing, &borrowed_heap)? {
+                            is_duplicate = true;
+                            break;
+                        }
+                    }
+                    if !is_duplicate {
                         unique_list.push(item);
                     }
                 }
 
+                drop(borrowed_heap);
                 Ok(heap.borrow_mut().insert_list(unique_list))
             },
         },
