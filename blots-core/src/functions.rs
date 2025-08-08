@@ -827,8 +827,13 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                     let borrowed_heap = &heap.borrow();
                     args[0].as_list(borrowed_heap)?.clone()
                 };
-                list.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
+                let borrowed_heap = heap.borrow();
+                list.sort_by(|a, b| {
+                    a.compare(b, &borrowed_heap)
+                        .unwrap_or(None)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                drop(borrowed_heap);
                 Ok(heap.borrow_mut().insert_list(list))
             },
         },
