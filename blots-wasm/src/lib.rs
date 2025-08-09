@@ -1,7 +1,6 @@
 use anyhow::Result;
 use blots_core::{
     expressions::evaluate_pairs,
-    formatter::Formatter,
     functions::get_built_in_function_idents,
     heap::{Heap, CONSTANTS},
     parser::{get_pairs, get_tokens, Rule, Token},
@@ -168,10 +167,4 @@ pub fn get_constants() -> Result<JsValue, JsError> {
     map.insert(String::from("constants"), constants);
 
     Ok(serde_wasm_bindgen::to_value(&map)?)
-}
-
-#[wasm_bindgen]
-pub fn format(code: &str) -> Result<String, JsError> {
-    Formatter::format_preserving_comments(code)
-        .map_err(|e| JsError::new(&format!("Formatting error: {}", e)))
 }
