@@ -16,7 +16,10 @@
       "Bash(mv:*)",
       "Bash(cat:*)",
       "Bash(cargo fmt:*)",
-      "Bash(cargo doc:*)"
+      "Bash(cargo doc:*)",
+      "Bash(twiggy top:*)",
+      "Bash(twiggy:*)",
+      "Bash(wasm2wat:*)"
     ],
     "deny": []
   }
