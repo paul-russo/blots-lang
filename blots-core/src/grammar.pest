@@ -45,7 +45,7 @@ natural_and      =  { "and" }
 natural_or       =  { "or" }
 with             =  { "with" }
 
-infix_usage = _{ (WHITESPACE | NEWLINE)+ ~ natural_infix_op ~ WHITESPACE+ | (WHITESPACE | NEWLINE)* ~ infix_op ~ WHITESPACE* }
+infix_usage = _{ (WHITESPACE | NEWLINE)+ ~ natural_infix_op ~ WHITESPACE+ | (WHITESPACE | NEWLINE)* ~ infix_op ~ (WHITESPACE | NEWLINE)* }
 
 prefix_op = _{ negation | invert }
 negation  =  { "-" }
