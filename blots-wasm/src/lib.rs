@@ -21,23 +21,44 @@ struct EvaluationResult {
     outputs: HashSet<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EvaluateOptions {
+    #[serde(default)]
+    inline: bool,
+}
+
 #[wasm_bindgen]
-pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
+pub fn evaluate(expr: &str, inputs_js: JsValue, options_js: JsValue) -> Result<JsValue, JsError> {
     let heap = Rc::new(RefCell::new(Heap::new()));
     let inputs_given: BTreeMap<String, SerializableValue> =
         serde_wasm_bindgen::from_value(inputs_js)?;
 
-    let inputs = inputs_given
+    let options: EvaluateOptions = if options_js.is_undefined() || options_js.is_null() {
+        EvaluateOptions { inline: false }
+    } else {
+        serde_wasm_bindgen::from_value(options_js)?
+    };
+
+    let inputs: BTreeMap<String, _> = inputs_given
         .into_iter()
         .map(|(key, value)| (key, value.to_value(&mut heap.borrow_mut()).unwrap()))
         .collect();
 
     let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+    // Add inputs record
     {
         bindings.borrow_mut().insert(
             String::from("inputs"),
-            heap.borrow_mut().insert_record(inputs),
+            heap.borrow_mut().insert_record(inputs.clone()),
         );
+    }
+
+    // If inline mode is enabled, inject all input values directly into the bindings
+    if options.inline {
+        for (key, value) in inputs {
+            bindings.borrow_mut().insert(key, value);
+        }
     }
 
     let expr_owned = String::from(expr);
