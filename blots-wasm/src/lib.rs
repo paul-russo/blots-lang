@@ -189,3 +189,105 @@ pub fn get_constants() -> Result<JsValue, JsError> {
 
     Ok(serde_wasm_bindgen::to_value(&map)?)
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum ExpressionResult {
+    Value { value: SerializableValue },
+    Error { error: String },
+}
+
+#[wasm_bindgen]
+pub fn evaluateInlineExpressions(
+    expressions_js: JsValue,
+    inputs_js: JsValue,
+) -> Result<JsValue, JsError> {
+    let expressions: Vec<String> = serde_wasm_bindgen::from_value(expressions_js)?;
+    let inputs_given: BTreeMap<String, SerializableValue> =
+        serde_wasm_bindgen::from_value(inputs_js)?;
+
+    let mut results = Vec::new();
+
+    for expr in expressions {
+        let result = evaluate_single_inline_expression(&expr, &inputs_given);
+        results.push(result);
+    }
+
+    Ok(serde_wasm_bindgen::to_value(&results)?)
+}
+
+fn evaluate_single_inline_expression(
+    expr: &str,
+    inputs_given: &BTreeMap<String, SerializableValue>,
+) -> ExpressionResult {
+    let heap = Rc::new(RefCell::new(Heap::new()));
+
+    // Convert inputs to Values
+    let inputs: BTreeMap<String, _> = inputs_given
+        .iter()
+        .map(|(key, value)| (key.clone(), value.to_value(&mut heap.borrow_mut()).unwrap()))
+        .collect();
+
+    let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+    // Add inputs record
+    {
+        bindings.borrow_mut().insert(
+            String::from("inputs"),
+            heap.borrow_mut().insert_record(inputs.clone()),
+        );
+    }
+
+    // Inject all input values directly into bindings for inline access
+    for (key, value) in inputs {
+        bindings.borrow_mut().insert(key, value);
+    }
+
+    // Parse the expression
+    let expr_string = expr.to_string();
+    let pairs = match get_pairs(&expr_string) {
+        Ok(pairs) => pairs,
+        Err(e) => {
+            return ExpressionResult::Error {
+                error: format!("Parsing error: {}", e),
+            }
+        }
+    };
+
+    // Find and evaluate the first statement/expression
+    for pair in pairs {
+        match pair.as_rule() {
+            Rule::statement => {
+                if let Some(inner_pair) = pair.into_inner().next() {
+                    let inner_pairs = inner_pair.into_inner();
+
+                    match evaluate_pairs(inner_pairs, Rc::clone(&heap), Rc::clone(&bindings), 0) {
+                        Ok(value) => match value.to_serializable_value(&heap.borrow()) {
+                            Ok(serializable) => {
+                                return ExpressionResult::Value {
+                                    value: serializable,
+                                }
+                            }
+                            Err(e) => {
+                                return ExpressionResult::Error {
+                                    error: format!("Serialization error: {}", e),
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            return ExpressionResult::Error {
+                                error: format!("Evaluation error: {}", e),
+                            }
+                        }
+                    }
+                }
+            }
+            Rule::EOI => continue,
+            _ => continue,
+        }
+    }
+
+    ExpressionResult::Error {
+        error: "No expression found".to_string(),
+    }
+}
