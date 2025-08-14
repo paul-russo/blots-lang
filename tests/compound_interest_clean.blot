@@ -5,7 +5,7 @@ principal = inputs.principal
 compounding_frequency = 1  // compounded annually
 years = range(inputs.years)
 
-// Create a more readable output with year-value pairs
+// Create a more readable output |> year-value pairs
 output timeseries_with_years = map(years, t => do {
   poorValue = compound_interest(
     principal,

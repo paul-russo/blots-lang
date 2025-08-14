@@ -20,7 +20,7 @@ optional_arg  =  { identifier ~ "?" }
 rest_arg      =  { "..." ~ identifier }
 
 identifier      = @{ !(reserved_word ~ !identifier_rest) ~ (ASCII_ALPHA | "_")+ ~ identifier_rest* }
-reserved_word   = _{ "if" | "then" | "else" | "true" | "false" | "null" | "and" | "or" | "not" | "with" | "do" | "return" | "output" }
+reserved_word   = _{ "if" | "then" | "else" | "true" | "false" | "null" | "and" | "or" | "not" | "do" | "return" | "output" }
 identifier_rest = _{ ASCII_ALPHA+ | ASCII_DIGIT+ | "_"+ }
 
 infix_op   = _{ add | subtract | multiply | divide | modulo | power | equal | not_equal | less_eq | less | greater_eq | greater | and | or | coalesce }
@@ -40,10 +40,10 @@ and        =  { "&&" }
 or         =  { "||" }
 coalesce   =  { "??" }
 
-natural_infix_op = _{ natural_and | natural_or | with }
+natural_infix_op = _{ natural_and | natural_or | pipe }
 natural_and      =  { "and" }
 natural_or       =  { "or" }
-with             =  { "with" }
+pipe             =  { "|>" }
 
 infix_usage = _{ (WHITESPACE | NEWLINE)+ ~ natural_infix_op ~ WHITESPACE+ | (WHITESPACE | NEWLINE)* ~ infix_op ~ (WHITESPACE | NEWLINE)* }
 

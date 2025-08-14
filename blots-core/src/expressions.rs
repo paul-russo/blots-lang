@@ -29,7 +29,7 @@ static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
             | Op::infix(Rule::natural_and, Assoc::Left)
             | Op::infix(Rule::or, Assoc::Left)
             | Op::infix(Rule::natural_or, Assoc::Left)
-            | Op::infix(Rule::with, Assoc::Left))
+            | Op::infix(Rule::pipe, Assoc::Left))
         .op(Op::infix(Rule::equal, Assoc::Left)
             | Op::infix(Rule::not_equal, Assoc::Left)
             | Op::infix(Rule::less, Assoc::Left)
@@ -712,7 +712,7 @@ fn evaluate_binary_op_ast(
                         .collect::<Result<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
-                BinaryOp::With => {
+                BinaryOp::Pipe => {
                     let mapped_list = l_vec
                         .iter()
                         .zip(&r_vec)
@@ -1028,7 +1028,7 @@ fn evaluate_binary_op_ast(
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
-                BinaryOp::With => {
+                BinaryOp::Pipe => {
                     if is_list_first {
                         if !scalar.is_callable() {
                             return Err(anyhow!(
@@ -1107,7 +1107,7 @@ fn evaluate_binary_op_ast(
                     Ok(lhs)
                 }
             }
-            BinaryOp::With => {
+            BinaryOp::Pipe => {
                 if !rhs.is_callable() {
                     return Err(anyhow!(
                         "can't call a non-function ({} is of type {})",
@@ -1372,7 +1372,7 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> Result<Expr> {
                 Rule::natural_and => BinaryOp::NaturalAnd,
                 Rule::or => BinaryOp::Or,
                 Rule::natural_or => BinaryOp::NaturalOr,
-                Rule::with => BinaryOp::With,
+                Rule::pipe => BinaryOp::Pipe,
                 Rule::coalesce => BinaryOp::Coalesce,
                 _ => unreachable!(),
             };
@@ -1890,8 +1890,7 @@ mod tests {
     fn list_with_operator() {
         let heap = Rc::new(RefCell::new(Heap::new()));
         let result =
-            parse_and_evaluate("[1, 2, 3] with (x => x * x)", Some(Rc::clone(&heap)), None)
-                .unwrap();
+            parse_and_evaluate("[1, 2, 3] |> (x => x * x)", Some(Rc::clone(&heap)), None).unwrap();
         let expected = vec![Value::Number(1.0), Value::Number(4.0), Value::Number(9.0)];
         assert_eq!(result.as_list(&heap.borrow()).unwrap(), &expected);
     }
@@ -1900,7 +1899,7 @@ mod tests {
     fn list_with_builtin_function() {
         let heap = Rc::new(RefCell::new(Heap::new()));
         let result =
-            parse_and_evaluate("[4, 9, 16] with sqrt", Some(Rc::clone(&heap)), None).unwrap();
+            parse_and_evaluate("[4, 9, 16] |> sqrt", Some(Rc::clone(&heap)), None).unwrap();
         let expected = vec![Value::Number(2.0), Value::Number(3.0), Value::Number(4.0)];
         assert_eq!(result.as_list(&heap.borrow()).unwrap(), &expected);
     }

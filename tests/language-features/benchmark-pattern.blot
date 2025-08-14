@@ -1,15 +1,15 @@
-// Test the pattern from the benchmark with new syntax
+// Test the pattern from the benchmark |> new syntax
 my_factorial = n => if n <= 1 then 1 else n * my_factorial(n - 1)
 
-// Using list with operator
-factorials = range(5) with (i => my_factorial(i))
+// Using list |> operator
+factorials = range(5) |> (i => my_factorial(i))
 print("Factorials: {}", factorials)
 
-// Also test with built-in factorial
-builtin_factorials = range(5) with (i => factorial(i))
+// Also test |> built-in factorial
+builtin_factorials = range(5) |> (i => factorial(i))
 print("Built-in factorials: {}", builtin_factorials)
 
-// Test with explicit array
+// Test |> explicit array
 test_points = [[0, 0], [1, 1], [2, 2]]
-results = test_points with (point => point[0] + point[1])
+results = test_points |> (point => point[0] + point[1])
 print("Point sums: {}", results)

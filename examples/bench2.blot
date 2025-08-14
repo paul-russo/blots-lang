@@ -9,14 +9,14 @@ result2 = map(range(10000), x => x + 2)
 end2 = time_now()
 
 start3 = time_now()
-result3 = range(10000) with f
+result3 = range(10000) |> f
 end3 = time_now()
 
 start4 = time_now()
-result4 = range(10000) with x => x + 2
+result4 = range(10000) |> x => x + 2
 end4 = time_now()
 
 print("map - named: {}s", end1 - start1)
 print("map - anonymous: {}s", end2 - start2)
-print("list with named: {}s", end3 - start3)
-print("list with anonymous: {}s", end4 - start4)
+print("list |> named: {}s", end3 - start3)
+print("list |> anonymous: {}s", end4 - start4)

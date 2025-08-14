@@ -2,10 +2,10 @@
 x = 1
 y = 2
 
-// Second section with blank line above
+// Second section |> blank line above
 a = 3
 b = 4
 
 
-// Third section with two blank lines above
+// Third section |> two blank lines above
 result = x + y + a + b
