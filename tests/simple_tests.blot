@@ -1,7 +1,7 @@
 // Simple function call
 a = func(1, 2, 3)
 
-// Function call with record
+// Function call |> record
 b = func({a: 1, b: 2})
 
 // Lambda returning number
