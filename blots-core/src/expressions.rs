@@ -235,7 +235,6 @@ pub fn evaluate_ast(
                 || ident == "inputs"
                 || ident == "and"
                 || ident == "or"
-                || ident == "with"
             {
                 return Err(anyhow!("{} is a keyword, and cannot be reassigned", ident));
             }
@@ -1051,7 +1050,9 @@ fn evaluate_binary_op_ast(
 
                         Ok(heap.borrow_mut().insert_list(mapped_list))
                     } else {
-                        return Err(anyhow!("with operator requires function on right side"));
+                        return Err(anyhow!(
+                            "pipe operator '|>' requires function on right side"
+                        ));
                     }
                 }
             }
