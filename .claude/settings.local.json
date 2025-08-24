@@ -19,7 +19,8 @@
       "Bash(cargo doc:*)",
       "Bash(twiggy top:*)",
       "Bash(twiggy:*)",
-      "Bash(wasm2wat:*)"
+      "Bash(wasm2wat:*)",
+      "Bash(sed:*)"
     ],
     "deny": []
   }

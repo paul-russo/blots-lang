@@ -1,3 +1,4 @@
+use crate::functions::BuiltInFunction;
 use crate::values::LambdaArg;
 use serde::{Deserialize, Serialize};
 
@@ -11,7 +12,7 @@ pub enum Expr {
 
     // Variables and functions
     Identifier(String),
-    BuiltIn(usize), // Built-in function ID
+    BuiltIn(BuiltInFunction), // Built-in function
 
     // Collections
     List(Vec<Expr>),

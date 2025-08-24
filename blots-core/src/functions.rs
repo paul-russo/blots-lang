@@ -17,176 +17,306 @@ use crate::stats::FunctionCallStats;
 pub static FUNCTION_CALLS: LazyLock<Mutex<Vec<FunctionCallStats>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 
-#[derive(Debug)]
-pub struct BuiltInFunctionDef {
-    pub name: String,
-    pub arity: FunctionArity,
-    pub body: fn(
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub enum BuiltInFunction {
+    // Math functions
+    Sqrt,
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Log,
+    Log10,
+    Exp,
+    Abs,
+    Floor,
+    Ceil,
+    Round,
+    Trunc,
+
+    // Aggregate functions
+    Min,
+    Max,
+    Avg,
+    Sum,
+    Prod,
+    Median,
+    Percentile,
+
+    // List functions
+    Range,
+    Len,
+    Head,
+    Tail,
+    Slice,
+    Concat,
+    Dot,
+    Unique,
+    Sort,
+    SortBy,
+    Reverse,
+
+    // Higher-order functions
+    Map,
+    Reduce,
+    Filter,
+    Every,
+    Some,
+
+    // String functions
+    Split,
+    Join,
+    Replace,
+    Trim,
+    Uppercase,
+    Lowercase,
+    ToString,
+    ToNumber,
+    Includes,
+    Format,
+
+    // Type functions
+    Typeof,
+    Arity,
+
+    // Record functions
+    Keys,
+    Values,
+    Entries,
+
+    // Platform-specific functions
+    #[cfg(not(target_arch = "wasm32"))]
+    Print,
+    #[cfg(not(target_arch = "wasm32"))]
+    TimeNow,
+}
+
+#[derive(Debug, Clone)]
+pub enum FunctionDef {
+    BuiltIn(BuiltInFunction),
+    Lambda(LambdaDef),
+}
+
+impl BuiltInFunction {
+    pub fn from_ident(ident: &str) -> Option<Self> {
+        match ident {
+            "sqrt" => Some(Self::Sqrt),
+            "sin" => Some(Self::Sin),
+            "cos" => Some(Self::Cos),
+            "tan" => Some(Self::Tan),
+            "asin" => Some(Self::Asin),
+            "acos" => Some(Self::Acos),
+            "atan" => Some(Self::Atan),
+            "log" => Some(Self::Log),
+            "log10" => Some(Self::Log10),
+            "exp" => Some(Self::Exp),
+            "abs" => Some(Self::Abs),
+            "floor" => Some(Self::Floor),
+            "ceil" => Some(Self::Ceil),
+            "round" => Some(Self::Round),
+            "trunc" => Some(Self::Trunc),
+            "min" => Some(Self::Min),
+            "max" => Some(Self::Max),
+            "avg" => Some(Self::Avg),
+            "sum" => Some(Self::Sum),
+            "prod" => Some(Self::Prod),
+            "median" => Some(Self::Median),
+            "percentile" => Some(Self::Percentile),
+            "range" => Some(Self::Range),
+            "len" => Some(Self::Len),
+            "head" => Some(Self::Head),
+            "tail" => Some(Self::Tail),
+            "slice" => Some(Self::Slice),
+            "concat" => Some(Self::Concat),
+            "dot" => Some(Self::Dot),
+            "unique" => Some(Self::Unique),
+            "sort" => Some(Self::Sort),
+            "sort_by" => Some(Self::SortBy),
+            "reverse" => Some(Self::Reverse),
+            "map" => Some(Self::Map),
+            "reduce" => Some(Self::Reduce),
+            "filter" => Some(Self::Filter),
+            "every" => Some(Self::Every),
+            "some" => Some(Self::Some),
+            "split" => Some(Self::Split),
+            "join" => Some(Self::Join),
+            "replace" => Some(Self::Replace),
+            "trim" => Some(Self::Trim),
+            "uppercase" => Some(Self::Uppercase),
+            "lowercase" => Some(Self::Lowercase),
+            "to_string" => Some(Self::ToString),
+            "to_number" => Some(Self::ToNumber),
+            "includes" => Some(Self::Includes),
+            "format" => Some(Self::Format),
+            "typeof" => Some(Self::Typeof),
+            "arity" => Some(Self::Arity),
+            "keys" => Some(Self::Keys),
+            "values" => Some(Self::Values),
+            "entries" => Some(Self::Entries),
+            #[cfg(not(target_arch = "wasm32"))]
+            "print" => Some(Self::Print),
+            #[cfg(not(target_arch = "wasm32"))]
+            "time_now" => Some(Self::TimeNow),
+            _ => None,
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Sqrt => "sqrt",
+            Self::Sin => "sin",
+            Self::Cos => "cos",
+            Self::Tan => "tan",
+            Self::Asin => "asin",
+            Self::Acos => "acos",
+            Self::Atan => "atan",
+            Self::Log => "log",
+            Self::Log10 => "log10",
+            Self::Exp => "exp",
+            Self::Abs => "abs",
+            Self::Floor => "floor",
+            Self::Ceil => "ceil",
+            Self::Round => "round",
+            Self::Trunc => "trunc",
+            Self::Min => "min",
+            Self::Max => "max",
+            Self::Avg => "avg",
+            Self::Sum => "sum",
+            Self::Prod => "prod",
+            Self::Median => "median",
+            Self::Percentile => "percentile",
+            Self::Range => "range",
+            Self::Len => "len",
+            Self::Head => "head",
+            Self::Tail => "tail",
+            Self::Slice => "slice",
+            Self::Concat => "concat",
+            Self::Dot => "dot",
+            Self::Unique => "unique",
+            Self::Sort => "sort",
+            Self::SortBy => "sort_by",
+            Self::Reverse => "reverse",
+            Self::Map => "map",
+            Self::Reduce => "reduce",
+            Self::Filter => "filter",
+            Self::Every => "every",
+            Self::Some => "some",
+            Self::Split => "split",
+            Self::Join => "join",
+            Self::Replace => "replace",
+            Self::Trim => "trim",
+            Self::Uppercase => "uppercase",
+            Self::Lowercase => "lowercase",
+            Self::ToString => "to_string",
+            Self::ToNumber => "to_number",
+            Self::Includes => "includes",
+            Self::Format => "format",
+            Self::Typeof => "typeof",
+            Self::Arity => "arity",
+            Self::Keys => "keys",
+            Self::Values => "values",
+            Self::Entries => "entries",
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Print => "print",
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::TimeNow => "time_now",
+        }
+    }
+
+    pub fn arity(&self) -> FunctionArity {
+        match self {
+            // Math functions - single argument
+            Self::Sqrt
+            | Self::Sin
+            | Self::Cos
+            | Self::Tan
+            | Self::Asin
+            | Self::Acos
+            | Self::Atan
+            | Self::Log
+            | Self::Log10
+            | Self::Exp
+            | Self::Abs
+            | Self::Floor
+            | Self::Ceil
+            | Self::Trunc => FunctionArity::Exact(1),
+
+            // Round can take 1 or 2 arguments
+            Self::Round => FunctionArity::Between(1, 2),
+
+            // Aggregate functions
+            Self::Min | Self::Max | Self::Avg | Self::Sum | Self::Prod | Self::Median => {
+                FunctionArity::AtLeast(1)
+            }
+
+            // Range can take 1 or 2 arguments
+            Self::Range => FunctionArity::Between(1, 2),
+
+            // List functions
+            Self::Len | Self::Head | Self::Tail | Self::Unique | Self::Sort | Self::Reverse => {
+                FunctionArity::Exact(1)
+            }
+            Self::Slice => FunctionArity::Exact(3),
+            Self::Concat => FunctionArity::AtLeast(2),
+            Self::Dot | Self::Percentile => FunctionArity::Exact(2),
+
+            // Higher-order functions
+            Self::Map | Self::Filter | Self::Every | Self::Some | Self::SortBy => {
+                FunctionArity::Exact(2)
+            }
+            Self::Reduce => FunctionArity::Exact(3),
+
+            // String functions
+            Self::Split | Self::Join | Self::Includes => FunctionArity::Exact(2),
+            Self::Replace => FunctionArity::Exact(3),
+            Self::Trim | Self::Uppercase | Self::Lowercase | Self::ToString | Self::ToNumber => {
+                FunctionArity::Exact(1)
+            }
+            Self::Format => FunctionArity::AtLeast(1),
+
+            // Type functions
+            Self::Typeof | Self::Arity => FunctionArity::Exact(1),
+
+            // Record functions
+            Self::Keys | Self::Values | Self::Entries => FunctionArity::Exact(1),
+
+            // Platform-specific functions
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Print => FunctionArity::AtLeast(1),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::TimeNow => FunctionArity::Exact(0),
+        }
+    }
+
+    pub fn call(
+        &self,
         args: Vec<Value>,
         heap: Rc<RefCell<Heap>>,
         bindings: Rc<RefCell<HashMap<String, Value>>>,
         call_depth: usize,
-    ) -> Result<Value>,
-}
+    ) -> Result<Value> {
+        match self {
+            // Math functions
+            Self::Sqrt => Ok(Value::Number(args[0].as_number()?.sqrt())),
+            Self::Sin => Ok(Value::Number(args[0].as_number()?.sin())),
+            Self::Cos => Ok(Value::Number(args[0].as_number()?.cos())),
+            Self::Tan => Ok(Value::Number(args[0].as_number()?.tan())),
+            Self::Asin => Ok(Value::Number(args[0].as_number()?.asin())),
+            Self::Acos => Ok(Value::Number(args[0].as_number()?.acos())),
+            Self::Atan => Ok(Value::Number(args[0].as_number()?.atan())),
+            Self::Log => Ok(Value::Number(args[0].as_number()?.ln())),
+            Self::Log10 => Ok(Value::Number(args[0].as_number()?.log10())),
+            Self::Exp => Ok(Value::Number(args[0].as_number()?.exp())),
+            Self::Abs => Ok(Value::Number(args[0].as_number()?.abs())),
+            Self::Floor => Ok(Value::Number(args[0].as_number()?.floor())),
+            Self::Ceil => Ok(Value::Number(args[0].as_number()?.ceil())),
+            Self::Trunc => Ok(Value::Number(args[0].as_number()?.trunc())),
 
-#[derive(Debug, Clone)]
-pub enum FunctionDef<'a> {
-    BuiltIn(&'a BuiltInFunctionDef),
-    Lambda(LambdaDef),
-}
-
-pub struct BuiltInFunctionDefs<'a> {
-    pub map: HashMap<&'a str, BuiltInFunctionDef>,
-    pub idents_to_ids: HashMap<&'a str, usize>,
-    pub idents: Vec<&'a str>,
-}
-
-impl<'a> BuiltInFunctionDefs<'a> {
-    pub fn new() -> Self {
-        Self {
-            map: HashMap::new(),
-            idents_to_ids: HashMap::new(),
-            idents: Vec::new(),
-        }
-    }
-
-    pub fn insert(&mut self, ident: &'a str, def: BuiltInFunctionDef) {
-        let id = self.idents.len();
-        self.map.insert(ident, def);
-        self.idents_to_ids.insert(ident, id);
-        self.idents.push(ident);
-    }
-
-    pub fn get(&self, ident: &str) -> Option<&BuiltInFunctionDef> {
-        self.map.get(ident)
-    }
-
-    pub fn get_ident(&self, id: usize) -> Option<&str> {
-        self.idents.get(id).copied()
-    }
-
-    pub fn get_id(&self, ident: &str) -> Option<usize> {
-        self.idents_to_ids.get(ident).copied()
-    }
-
-    pub fn get_idents(&self) -> Vec<&str> {
-        self.idents.clone()
-    }
-}
-
-static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| {
-    let mut map = BuiltInFunctionDefs::new();
-
-    map.insert(
-        "sqrt",
-        BuiltInFunctionDef {
-            name: String::from("sqrt"),
-            arity: FunctionArity::Exact(1),
-            body: |args, _, _, _| Ok(Value::Number(args[0].as_number()?.sqrt())),
-        },
-    );
-    map.insert(
-        "sin",
-        BuiltInFunctionDef {
-            name: String::from("sin"),
-            arity: FunctionArity::Exact(1),
-            body: |args, _, _, _| Ok(Value::Number(args[0].as_number()?.sin())),
-        },
-    );
-    map.insert(
-        "cos",
-        BuiltInFunctionDef {
-            name: String::from("cos"),
-            arity: FunctionArity::Exact(1),
-            body: |args, _, _, _| Ok(Value::Number(args[0].as_number()?.cos())),
-        },
-    );
-    map.insert(
-        "tan",
-        BuiltInFunctionDef {
-            name: String::from("tan"),
-            arity: FunctionArity::Exact(1),
-            body: |args, _, _, _| Ok(Value::Number(args[0].as_number()?.tan())),
-        },
-    );
-    map.insert(
-        "asin",
-        BuiltInFunctionDef {
-            name: String::from("asin"),
-            arity: FunctionArity::Exact(1),
-            body: |args, _, _, _| Ok(Value::Number(args[0].as_number()?.asin())),
-        },
-    );
-    map.insert(
-        "acos",
-        BuiltInFunctionDef {
-            name: String::from("acos"),
-            arity: FunctionArity::Exact(1),
-            body: |args, _, _, _| Ok(Value::Number(args[0].as_number()?.acos())),
-        },
-    );
-    map.insert(
-        "atan",
-        BuiltInFunctionDef {
-            name: String::from("atan"),
-            arity: FunctionArity::Exact(1),
-            body: |args, _, _, _| Ok(Value::Number(args[0].as_number()?.atan())),
-        },
-    );
-    map.insert(
-        "log",
-        BuiltInFunctionDef {
-            name: String::from("log"),
-            arity: FunctionArity::Exact(1),
-            body: |args, _, _, _| Ok(Value::Number(args[0].as_number()?.ln())),
-        },
-    );
-    map.insert(
-        "log10",
-        BuiltInFunctionDef {
-            name: String::from("log10"),
-            arity: FunctionArity::Exact(1),
-            body: |args, _, _, _| Ok(Value::Number(args[0].as_number()?.log10())),
-        },
-    );
-    map.insert(
-        "exp",
-        BuiltInFunctionDef {
-            name: String::from("exp"),
-            arity: FunctionArity::Exact(1),
-            body: |args, _, _, _| Ok(Value::Number(args[0].as_number()?.exp())),
-        },
-    );
-    map.insert(
-        "abs",
-        BuiltInFunctionDef {
-            name: String::from("abs"),
-            arity: FunctionArity::Exact(1),
-            body: |args, _, _, _| Ok(Value::Number(args[0].as_number()?.abs())),
-        },
-    );
-    map.insert(
-        "floor",
-        BuiltInFunctionDef {
-            name: String::from("floor"),
-            arity: FunctionArity::Exact(1),
-            body: |args, _, _, _| Ok(Value::Number(args[0].as_number()?.floor())),
-        },
-    );
-    map.insert(
-        "ceil",
-        BuiltInFunctionDef {
-            name: String::from("ceil"),
-            arity: FunctionArity::Exact(1),
-            body: |args, _, _, _| Ok(Value::Number(args[0].as_number()?.ceil())),
-        },
-    );
-    map.insert(
-        "round",
-        BuiltInFunctionDef {
-            name: String::from("round"),
-            arity: FunctionArity::Between(1, 2),
-            body: |args, _, _, _| {
+            Self::Round => {
                 let num = args[0].as_number()?;
                 if args.len() == 1 {
                     Ok(Value::Number(num.round()))
@@ -195,23 +325,10 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                     let multiplier = 10_f64.powi(decimal_places);
                     Ok(Value::Number((num * multiplier).round() / multiplier))
                 }
-            },
-        },
-    );
-    map.insert(
-        "trunc",
-        BuiltInFunctionDef {
-            name: String::from("trunc"),
-            arity: FunctionArity::Exact(1),
-            body: |args, _, _, _| Ok(Value::Number(args[0].as_number()?.trunc())),
-        },
-    );
-    map.insert(
-        "min",
-        BuiltInFunctionDef {
-            name: String::from("min"),
-            arity: FunctionArity::AtLeast(1),
-            body: |args, heap, _, _| {
+            }
+
+            // Aggregate functions
+            Self::Min => {
                 let nums = if args.len() == 1 {
                     // Check if single argument is a list
                     match &args[0] {
@@ -237,15 +354,9 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                 Ok(Value::Number(
                     nums.iter().copied().fold(f64::INFINITY, f64::min),
                 ))
-            },
-        },
-    );
-    map.insert(
-        "max",
-        BuiltInFunctionDef {
-            name: String::from("max"),
-            arity: FunctionArity::AtLeast(1),
-            body: |args, heap, _, _| {
+            }
+
+            Self::Max => {
                 let nums = if args.len() == 1 {
                     // Check if single argument is a list
                     match &args[0] {
@@ -271,17 +382,10 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                 Ok(Value::Number(
                     nums.iter().copied().fold(f64::NEG_INFINITY, f64::max),
                 ))
-            },
-        },
-    );
-    map.insert(
-        "avg",
-        BuiltInFunctionDef {
-            name: String::from("avg"),
-            arity: FunctionArity::AtLeast(1),
-            body: |args, heap, _, _| {
+            }
+
+            Self::Avg => {
                 let nums = if args.len() == 1 {
-                    // Check if single argument is a list
                     match &args[0] {
                         Value::List(_) => {
                             let borrowed_heap = heap.borrow();
@@ -297,23 +401,14 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                         .map(|a| a.as_number())
                         .collect::<Result<Vec<f64>>>()?
                 };
-
                 if nums.is_empty() {
                     return Err(anyhow!("avg requires at least one number"));
                 }
-
                 Ok(Value::Number(nums.iter().sum::<f64>() / nums.len() as f64))
-            },
-        },
-    );
-    map.insert(
-        "sum",
-        BuiltInFunctionDef {
-            name: String::from("sum"),
-            arity: FunctionArity::AtLeast(1),
-            body: |args, heap, _, _| {
+            }
+
+            Self::Prod => {
                 let nums = if args.len() == 1 {
-                    // Check if single argument is a list
                     match &args[0] {
                         Value::List(_) => {
                             let borrowed_heap = heap.borrow();
@@ -329,55 +424,51 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                         .map(|a| a.as_number())
                         .collect::<Result<Vec<f64>>>()?
                 };
-
-                if nums.is_empty() {
-                    return Err(anyhow!("sum requires at least one number"));
-                }
-
-                Ok(Value::Number(nums.iter().sum()))
-            },
-        },
-    );
-    map.insert(
-        "prod",
-        BuiltInFunctionDef {
-            name: String::from("prod"),
-            arity: FunctionArity::AtLeast(1),
-            body: |args, heap, _, _| {
-                let nums = if args.len() == 1 {
-                    // Check if single argument is a list
-                    match &args[0] {
-                        Value::List(_) => {
-                            let borrowed_heap = heap.borrow();
-                            let list = args[0].as_list(&borrowed_heap)?;
-                            list.iter()
-                                .map(|a| a.as_number())
-                                .collect::<Result<Vec<f64>>>()?
-                        }
-                        _ => vec![args[0].as_number()?],
-                    }
-                } else {
-                    args.iter()
-                        .map(|a| a.as_number())
-                        .collect::<Result<Vec<f64>>>()?
-                };
-
                 if nums.is_empty() {
                     return Err(anyhow!("prod requires at least one number"));
                 }
-
                 Ok(Value::Number(nums.iter().product()))
-            },
-        },
-    );
-    map.insert(
-        "median",
-        BuiltInFunctionDef {
-            name: String::from("median"),
-            arity: FunctionArity::AtLeast(1),
-            body: |args, heap, _, _| {
+            }
+
+            Self::Range => {
+                let (start, end) = if args.len() == 1 {
+                    (0, args[0].as_number()? as i64)
+                } else {
+                    (args[0].as_number()? as i64, args[1].as_number()? as i64)
+                };
+
+                let values = (start..=end).map(|e| Value::Number(e as f64)).collect();
+                let list = heap.borrow_mut().insert_list(values);
+
+                Ok(list)
+            }
+
+            Self::Sum => {
+                let nums = if args.len() == 1 {
+                    match &args[0] {
+                        Value::List(_) => {
+                            let borrowed_heap = heap.borrow();
+                            let list = args[0].as_list(&borrowed_heap)?;
+                            list.iter()
+                                .map(|a| a.as_number())
+                                .collect::<Result<Vec<f64>>>()?
+                        }
+                        _ => vec![args[0].as_number()?],
+                    }
+                } else {
+                    args.iter()
+                        .map(|a| a.as_number())
+                        .collect::<Result<Vec<f64>>>()?
+                };
+                if nums.is_empty() {
+                    return Err(anyhow!("sum requires at least one number"));
+                }
+                Ok(Value::Number(nums.iter().sum()))
+            }
+
+            // Remaining aggregate functions
+            Self::Median => {
                 let mut nums = if args.len() == 1 {
-                    // Check if single argument is a list
                     match &args[0] {
                         Value::List(_) => {
                             let borrowed_heap = heap.borrow();
@@ -405,34 +496,30 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                 } else {
                     Ok(Value::Number(nums[len / 2]))
                 }
-            },
-        },
-    );
-    map.insert(
-        "range",
-        BuiltInFunctionDef {
-            name: String::from("range"),
-            arity: FunctionArity::Between(1, 2),
-            body: |args, heap, _, _| {
-                let (start, end) = if args.len() == 1 {
-                    (0, args[0].as_number()? as i64)
-                } else {
-                    (args[0].as_number()? as i64, args[1].as_number()? as i64)
-                };
+            }
 
-                let values = (start..=end).map(|e| Value::Number(e as f64)).collect();
-                let list = heap.borrow_mut().insert_list(values);
+            Self::Percentile => {
+                let p = args[1].as_number()?;
+                let heap = &heap.borrow();
+                let list = args[0].as_list(heap)?;
 
-                Ok(list)
-            },
-        },
-    );
-    map.insert(
-        "len",
-        BuiltInFunctionDef {
-            name: String::from("len"),
-            arity: FunctionArity::Exact(1),
-            body: |args, heap, _, _| match &args[0] {
+                if p < 0.0 || p > 100.0 {
+                    return Err(anyhow!("percentile must be between 0 and 100"));
+                }
+
+                let mut nums = list
+                    .iter()
+                    .map(|a| a.as_number())
+                    .collect::<Result<Vec<f64>>>()?;
+
+                nums.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let index = (p / 100.0 * (nums.len() - 1) as f64).round() as usize;
+
+                Ok(Value::Number(nums[index]))
+            }
+
+            // List functions
+            Self::Len => match &args[0] {
                 Value::List(l) => Ok(Value::Number(
                     l.reify(&heap.borrow()).as_list()?.len() as f64
                 )),
@@ -441,14 +528,8 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                 )),
                 _ => Err(anyhow!("argument must be a list or string")),
             },
-        },
-    );
-    map.insert(
-        "head",
-        BuiltInFunctionDef {
-            name: String::from("head"),
-            arity: FunctionArity::Exact(1),
-            body: |args, heap, _, _| match &args[0] {
+
+            Self::Head => match &args[0] {
                 Value::List(p) => Ok(p
                     .reify(&heap.borrow())
                     .as_list()?
@@ -468,14 +549,8 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                 }
                 _ => Err(anyhow!("argument must be a list or string")),
             },
-        },
-    );
-    map.insert(
-        "tail",
-        BuiltInFunctionDef {
-            name: String::from("tail"),
-            arity: FunctionArity::Exact(1),
-            body: |args, heap, _, _| match &args[0] {
+
+            Self::Tail => match &args[0] {
                 Value::List(p) => {
                     let val = {
                         p.reify(&heap.borrow())
@@ -500,14 +575,8 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                 }
                 _ => Err(anyhow!("argument must be a list or string")),
             },
-        },
-    );
-    map.insert(
-        "slice",
-        BuiltInFunctionDef {
-            name: String::from("slice"),
-            arity: FunctionArity::Exact(3),
-            body: |args, heap, _, _| {
+
+            Self::Slice => {
                 let start = args[1].as_number()? as usize;
                 let end = args[2].as_number()? as usize;
 
@@ -536,15 +605,9 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                     }
                     _ => Err(anyhow!("argument must be a list or string")),
                 }
-            },
-        },
-    );
-    map.insert(
-        "concat",
-        BuiltInFunctionDef {
-            name: String::from("concat"),
-            arity: FunctionArity::AtLeast(2),
-            body: |args, heap, _, _| {
+            }
+
+            Self::Concat => {
                 let mut list = vec![];
 
                 for arg in args {
@@ -570,15 +633,9 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                 }
 
                 Ok(heap.borrow_mut().insert_list(list))
-            },
-        },
-    );
-    map.insert(
-        "dot",
-        BuiltInFunctionDef {
-            name: String::from("dot"),
-            arity: FunctionArity::Exact(2),
-            body: |args, heap, _, _| {
+            }
+
+            Self::Dot => {
                 let (a, b) = {
                     let borrowed_heap = &heap.borrow();
                     (
@@ -605,15 +662,9 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                         .iter()
                         .sum(),
                 ))
-            },
-        },
-    );
-    map.insert(
-        "unique",
-        BuiltInFunctionDef {
-            name: String::from("unique"),
-            arity: FunctionArity::Exact(1),
-            body: |args, heap, _, _| {
+            }
+
+            Self::Unique => {
                 let list = {
                     let borrowed_heap = &heap.borrow();
                     args[0].as_list(borrowed_heap)?.clone()
@@ -636,202 +687,9 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
 
                 drop(borrowed_heap);
                 Ok(heap.borrow_mut().insert_list(unique_list))
-            },
-        },
-    );
-    map.insert(
-        "map",
-        BuiltInFunctionDef {
-            name: String::from("map"),
-            arity: FunctionArity::Exact(2),
-            body: |args, heap, bindings, call_depth| {
-                let (list, def) = {
-                    let borrowed_heap = &heap.borrow();
-                    (
-                        args[0].as_list(borrowed_heap)?.clone(),
-                        get_function_def(&args[1], borrowed_heap)
-                            .ok_or(anyhow!("expected the second argument to be a function"))?,
-                    )
-                };
+            }
 
-                let takes_index = !def.check_arity(2).is_err();
-                let mut new_list = Vec::with_capacity(list.len());
-
-                for (i, item) in list.iter().enumerate() {
-                    new_list.push(def.call(
-                        args[1],
-                        if takes_index {
-                            vec![*item, Value::Number(i as f64)]
-                        } else {
-                            vec![*item]
-                        },
-                        Rc::clone(&heap),
-                        Rc::clone(&bindings),
-                        call_depth,
-                    )?);
-                }
-
-                Ok(heap.borrow_mut().insert_list(new_list))
-            },
-        },
-    );
-    map.insert(
-        "reduce",
-        BuiltInFunctionDef {
-            name: String::from("reduce"),
-            arity: FunctionArity::Exact(3),
-            body: |args, heap, bindings, call_depth| {
-                let (list, def) = {
-                    let borrowed_heap = &heap.borrow();
-                    (
-                        args[0].as_list(borrowed_heap)?.clone(),
-                        get_function_def(&args[1], borrowed_heap)
-                            .ok_or(anyhow!("expected the second argument to be a function"))?,
-                    )
-                };
-
-                let initial = args[2].clone();
-
-                let mut acc = initial;
-                for (i, item) in list.iter().enumerate() {
-                    acc = def.call(
-                        args[1],
-                        if !def.check_arity(3).is_err() {
-                            vec![acc, item.clone(), Value::Number(i as f64)]
-                        } else {
-                            vec![acc, item.clone()]
-                        },
-                        Rc::clone(&heap),
-                        Rc::clone(&bindings),
-                        call_depth,
-                    )?;
-                }
-
-                Ok(acc)
-            },
-        },
-    );
-    map.insert(
-        "filter",
-        BuiltInFunctionDef {
-            name: String::from("filter"),
-            arity: FunctionArity::Exact(2),
-            body: |args, heap, bindings, call_depth| {
-                let (list, def) = {
-                    let borrowed_heap = &heap.borrow();
-                    (
-                        args[0].as_list(borrowed_heap)?.clone(),
-                        get_function_def(&args[1], borrowed_heap)
-                            .ok_or(anyhow!("expected the second argument to be a function"))?,
-                    )
-                };
-
-                let mut new_list = vec![];
-                for (i, item) in list.iter().enumerate() {
-                    if def
-                        .call(
-                            args[1],
-                            if !def.check_arity(2).is_err() {
-                                vec![item.clone(), Value::Number(i as f64)]
-                            } else {
-                                vec![item.clone()]
-                            },
-                            Rc::clone(&heap),
-                            Rc::clone(&bindings),
-                            call_depth,
-                        )?
-                        .as_bool()?
-                    {
-                        new_list.push(item.clone());
-                    }
-                }
-
-                Ok(heap.borrow_mut().insert_list(new_list))
-            },
-        },
-    );
-    map.insert(
-        "every",
-        BuiltInFunctionDef {
-            name: String::from("every"),
-            arity: FunctionArity::Exact(2),
-            body: |args, heap, bindings, call_depth| {
-                let (list, def) = {
-                    let borrowed_heap = &heap.borrow();
-                    (
-                        args[0].as_list(borrowed_heap)?.clone(),
-                        get_function_def(&args[1], borrowed_heap)
-                            .ok_or(anyhow!("expected the second argument to be a function"))?,
-                    )
-                };
-
-                for (i, item) in list.iter().enumerate() {
-                    if !def
-                        .call(
-                            args[1],
-                            if !def.check_arity(2).is_err() {
-                                vec![item.clone(), Value::Number(i as f64)]
-                            } else {
-                                vec![item.clone()]
-                            },
-                            Rc::clone(&heap),
-                            Rc::clone(&bindings),
-                            call_depth,
-                        )?
-                        .as_bool()?
-                    {
-                        return Ok(Value::Bool(false));
-                    }
-                }
-
-                Ok(Value::Bool(true))
-            },
-        },
-    );
-    map.insert(
-        "some",
-        BuiltInFunctionDef {
-            name: String::from("some"),
-            arity: FunctionArity::Exact(2),
-            body: |args, heap, bindings, call_depth| {
-                let (list, def) = {
-                    let borrowed_heap = &heap.borrow();
-                    (
-                        args[0].as_list(borrowed_heap)?.clone(),
-                        get_function_def(&args[1], borrowed_heap)
-                            .ok_or(anyhow!("expected the second argument to be a function"))?,
-                    )
-                };
-
-                for (i, item) in list.iter().enumerate() {
-                    if def
-                        .call(
-                            args[1],
-                            if !def.check_arity(2).is_err() {
-                                vec![item.clone(), Value::Number(i as f64)]
-                            } else {
-                                vec![item.clone()]
-                            },
-                            Rc::clone(&heap),
-                            Rc::clone(&bindings),
-                            call_depth,
-                        )?
-                        .as_bool()?
-                    {
-                        return Ok(Value::Bool(true));
-                    }
-                }
-
-                Ok(Value::Bool(false))
-            },
-        },
-    );
-    map.insert(
-        "sort",
-        BuiltInFunctionDef {
-            name: String::from("sort"),
-            arity: FunctionArity::Exact(1),
-            body: |args, heap, _, _| {
+            Self::Sort => {
                 let mut list = {
                     let borrowed_heap = &heap.borrow();
                     args[0].as_list(borrowed_heap)?.clone()
@@ -844,81 +702,16 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                 });
                 drop(borrowed_heap);
                 Ok(heap.borrow_mut().insert_list(list))
-            },
-        },
-    );
-    map.insert(
-        "sort_by",
-        BuiltInFunctionDef {
-            name: String::from("sort_by"),
-            arity: FunctionArity::Exact(2),
-            body: |args, heap, bindings, call_depth| {
-                let (mut list, def) = {
-                    let borrowed_heap = &heap.borrow();
-                    (
-                        args[0].as_list(borrowed_heap)?.clone(),
-                        get_function_def(&args[1], borrowed_heap)
-                            .ok_or(anyhow!("expected the second argument to be a function"))?,
-                    )
-                };
+            }
 
-                let mut err: Option<Result<Value, anyhow::Error>> = None;
-
-                list.sort_by(|a, b| {
-                    let call_result = def.call(
-                        args[1],
-                        vec![a.clone(), b.clone()],
-                        Rc::clone(&heap),
-                        Rc::clone(&bindings),
-                        call_depth,
-                    );
-
-                    if let Err(e) = call_result {
-                        if err.is_none() {
-                            err = Some(Err(e));
-                        }
-
-                        return Ordering::Equal;
-                    }
-
-                    let number_result = call_result.unwrap().as_number();
-                    if let Err(e) = number_result {
-                        if err.is_none() {
-                            err = Some(Err(e));
-                        }
-
-                        return Ordering::Equal;
-                    }
-
-                    match number_result.unwrap() {
-                        n if n.is_sign_positive() => Ordering::Greater,
-                        n if n.is_sign_negative() => Ordering::Less,
-                        _ => Ordering::Equal,
-                    }
-                });
-
-                err.unwrap_or(Ok(heap.borrow_mut().insert_list(list)))
-            },
-        },
-    );
-    map.insert(
-        "reverse",
-        BuiltInFunctionDef {
-            name: String::from("reverse"),
-            arity: FunctionArity::Exact(1),
-            body: |args, heap, _, _| {
+            Self::Reverse => {
                 let mut list = { args[0].as_list(&heap.borrow())?.clone() };
                 list.reverse();
                 Ok(heap.borrow_mut().insert_list(list))
-            },
-        },
-    );
-    map.insert(
-        "split",
-        BuiltInFunctionDef {
-            name: String::from("split"),
-            arity: FunctionArity::Exact(2),
-            body: |args, heap, _, _| {
+            }
+
+            // String functions
+            Self::Split => {
                 let (s, delimeter) = {
                     let borrowed_heap = &heap.borrow();
                     (
@@ -933,15 +726,9 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                     .collect();
 
                 Ok(heap.borrow_mut().insert_list(list))
-            },
-        },
-    );
-    map.insert(
-        "join",
-        BuiltInFunctionDef {
-            name: String::from("join"),
-            arity: FunctionArity::Exact(2),
-            body: |args, heap, _, _| {
+            }
+
+            Self::Join => {
                 let joined_string = {
                     let borrowed_heap = &heap.borrow();
                     let delimeter = args[1].as_string(borrowed_heap)?;
@@ -953,15 +740,9 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                 };
 
                 Ok(heap.borrow_mut().insert_string(joined_string))
-            },
-        },
-    );
-    map.insert(
-        "replace",
-        BuiltInFunctionDef {
-            name: String::from("replace"),
-            arity: FunctionArity::Exact(3),
-            body: |args, heap, _, _| {
+            }
+
+            Self::Replace => {
                 let string = {
                     let borrowed_heap = heap.borrow();
                     let old = args[1].as_string(&borrowed_heap)?.to_string();
@@ -971,125 +752,35 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                 };
 
                 Ok(heap.borrow_mut().insert_string(string))
-            },
-        },
-    );
-    map.insert(
-        "trim",
-        BuiltInFunctionDef {
-            name: String::from("trim"),
-            arity: FunctionArity::Exact(1),
-            body: |args, heap, _, _| {
+            }
+
+            Self::Trim => {
                 let string = {
                     let borrowed_heap = heap.borrow();
                     args[0].as_string(&borrowed_heap)?.trim().to_string()
                 };
 
                 Ok(heap.borrow_mut().insert_string(string))
-            },
-        },
-    );
-    map.insert(
-        "typeof",
-        BuiltInFunctionDef {
-            name: String::from("typeof"),
-            arity: FunctionArity::Exact(1),
-            body: |args, heap, _, _| {
-                Ok(heap
-                    .borrow_mut()
-                    .insert_string(args[0].get_type().to_string()))
-            },
-        },
-    );
-    map.insert(
-        "percentile",
-        BuiltInFunctionDef {
-            name: String::from("percentile"),
-            arity: FunctionArity::Exact(2),
-            body: |args, heap, _, _| {
-                let p = args[1].as_number()?;
-                let heap = &heap.borrow();
-                let list = args[0].as_list(heap)?;
+            }
 
-                if p < 0.0 || p > 100.0 {
-                    return Err(anyhow!("percentile must be between 0 and 100"));
-                }
-
-                let mut nums = list
-                    .iter()
-                    .map(|a| a.as_number())
-                    .collect::<Result<Vec<f64>>>()?;
-
-                nums.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                let index = (p / 100.0 * (nums.len() - 1) as f64).round() as usize;
-
-                Ok(Value::Number(nums[index]))
-            },
-        },
-    );
-    map.insert(
-        "uppercase",
-        BuiltInFunctionDef {
-            name: String::from("uppercase"),
-            arity: FunctionArity::Exact(1),
-            body: |args, heap, _, _| {
+            Self::Uppercase => {
                 let string = args[0].as_string(&heap.borrow())?.to_uppercase();
                 Ok(heap.borrow_mut().insert_string(string))
-            },
-        },
-    );
-    map.insert(
-        "lowercase",
-        BuiltInFunctionDef {
-            name: String::from("lowercase"),
-            arity: FunctionArity::Exact(1),
-            body: |args, heap, _, _| {
+            }
+
+            Self::Lowercase => {
                 let string = args[0].as_string(&heap.borrow())?.to_lowercase();
                 Ok(heap.borrow_mut().insert_string(string))
-            },
-        },
-    );
-    map.insert(
-        "to_string",
-        BuiltInFunctionDef {
-            name: String::from("to_string"),
-            arity: FunctionArity::Exact(1),
-            body: |args, heap, _, _| {
+            }
+
+            Self::ToString => {
                 let string = args[0].stringify(&heap.borrow());
                 Ok(heap.borrow_mut().insert_string(string))
-            },
-        },
-    );
-    map.insert(
-        "to_number",
-        BuiltInFunctionDef {
-            name: String::from("to_number"),
-            arity: FunctionArity::Exact(1),
-            body: |args, heap, _, _| Ok(Value::Number(args[0].as_string(&heap.borrow())?.parse()?)),
-        },
-    );
-    map.insert(
-        "arity",
-        BuiltInFunctionDef {
-            name: String::from("arity"),
-            arity: FunctionArity::Exact(1),
-            body: |args, heap, _, _| {
-                Ok(Value::Number(
-                    match args[0].as_lambda(&heap.borrow())?.get_arity() {
-                        FunctionArity::Exact(n) => n as f64,
-                        FunctionArity::AtLeast(n) => n as f64,
-                        FunctionArity::Between(min, _max) => min as f64,
-                    },
-                ))
-            },
-        },
-    );
-    map.insert(
-        "includes",
-        BuiltInFunctionDef {
-            name: String::from("includes"),
-            arity: FunctionArity::Exact(2),
-            body: |args, heap, _, _| {
+            }
+
+            Self::ToNumber => Ok(Value::Number(args[0].as_string(&heap.borrow())?.parse()?)),
+
+            Self::Includes => {
                 let needle = {
                     let borrowed_heap = &heap.borrow();
                     args[1].as_string(borrowed_heap)?.to_string()
@@ -1104,16 +795,9 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                     ReifiedValue::String(s, _) => Ok(Value::Bool(s.contains(&needle))),
                     _ => Err(anyhow!("second argument must be a list or string")),
                 }
-            },
-        },
-    );
+            }
 
-    map.insert(
-        "format",
-        BuiltInFunctionDef {
-            name: String::from("format"),
-            arity: FunctionArity::AtLeast(1),
-            body: |args, heap, _, _| {
+            Self::Format => {
                 let format_str = {
                     let borrowed_heap = &heap.borrow();
                     args[0]
@@ -1133,15 +817,23 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                 Ok(heap
                     .borrow_mut()
                     .insert_string(format_str.format(format_args)))
-            },
-        },
-    );
-    map.insert(
-        "keys",
-        BuiltInFunctionDef {
-            name: String::from("keys"),
-            arity: FunctionArity::Exact(1),
-            body: |args, heap, _, _| {
+            }
+
+            // Type functions
+            Self::Typeof => Ok(heap
+                .borrow_mut()
+                .insert_string(args[0].get_type().to_string())),
+
+            Self::Arity => Ok(Value::Number(
+                match args[0].as_lambda(&heap.borrow())?.get_arity() {
+                    FunctionArity::Exact(n) => n as f64,
+                    FunctionArity::AtLeast(n) => n as f64,
+                    FunctionArity::Between(min, _max) => min as f64,
+                },
+            )),
+
+            // Record functions
+            Self::Keys => {
                 let record = args[0].as_record(&heap.borrow())?.clone();
                 let keys = {
                     let key_strings = record.keys().cloned().collect::<Vec<String>>();
@@ -1152,28 +844,16 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                 };
 
                 Ok(heap.borrow_mut().insert_list(keys))
-            },
-        },
-    );
-    map.insert(
-        "values",
-        BuiltInFunctionDef {
-            name: String::from("values"),
-            arity: FunctionArity::Exact(1),
-            body: |args, heap, _, _| {
+            }
+
+            Self::Values => {
                 let record = args[0].as_record(&heap.borrow())?.clone();
                 let values = record.values().cloned().collect();
 
                 Ok(heap.borrow_mut().insert_list(values))
-            },
-        },
-    );
-    map.insert(
-        "entries",
-        BuiltInFunctionDef {
-            name: String::from("entries"),
-            arity: FunctionArity::Exact(1),
-            body: |args, heap, _, _| {
+            }
+
+            Self::Entries => {
                 let record = args[0].as_record(&heap.borrow())?.clone();
                 let entries = record
                     .iter()
@@ -1187,64 +867,285 @@ static BUILT_IN_FUNCTION_DEFS: LazyLock<BuiltInFunctionDefs> = LazyLock::new(|| 
                     .collect();
 
                 Ok(heap.borrow_mut().insert_list(entries))
-            },
-        },
-    );
+            }
 
-    #[cfg(not(target_arch = "wasm32"))]
-        map.insert(
-            "print",
-            BuiltInFunctionDef {
-                name: String::from("print"),
-                arity: FunctionArity::AtLeast(1),
-                body: |args, heap, _, _| {
+            // Platform-specific functions
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Print => {
+                let borrowed_heap = &heap.borrow();
+
+                let output = if args.len() == 1 {
+                    args[0].stringify(borrowed_heap)
+                } else {
+                    let format_str = args[0].as_string(borrowed_heap).map_err(|_| {
+                        anyhow!("first argument must be a formatting string if multiple arguments are given")
+                    })?;
+                    let format_args = &args[1..]
+                        .into_iter()
+                        .map(|v| v.stringify(borrowed_heap))
+                        .collect::<Vec<String>>();
+                    format_str.format(format_args)
+                };
+
+                println!("{}", output);
+
+                Ok(Value::Null)
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::TimeNow => Ok(Value::Number(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs_f64(),
+            )),
+
+            // Higher-order functions
+            Self::Map => {
+                let func = &args[1];
+                let list = {
                     let borrowed_heap = &heap.borrow();
+                    let list = args[0].as_list(borrowed_heap)?.clone();
+                    let func_def = get_function_def(func, borrowed_heap)
+                        .ok_or_else(|| anyhow!("second argument must be a function"))?;
+                    drop(func_def);
+                    list
+                };
 
-                    let output = if args.len() == 1 {
-                        args[0].stringify(borrowed_heap)
-                    } else {
-                        let format_str = args[0].as_string(borrowed_heap).map_err(|_| {
-                            anyhow!("first argument must be a formatting string if multiple arguments are given")
-                        })?;
-                        let format_args = &args[1..].into_iter().map(|v| v.stringify(borrowed_heap)).collect::<Vec<String>>();
-                        format_str.format(format_args)
-                    };
+                let mut mapped_list = vec![];
+                for item in list {
+                    let func_def = get_function_def(func, &heap.borrow())
+                        .ok_or_else(|| anyhow!("second argument must be a function"))?;
+                    let result = func_def.call(
+                        Value::Null,
+                        vec![item],
+                        Rc::clone(&heap),
+                        Rc::clone(&bindings),
+                        call_depth + 1,
+                    )?;
+                    mapped_list.push(result);
+                }
 
-                    println!("{}", output);
+                Ok(heap.borrow_mut().insert_list(mapped_list))
+            }
 
-                    Ok(Value::Null)
-                },
-            },
-        );
+            Self::Filter => {
+                let func = &args[1];
+                let list = {
+                    let borrowed_heap = &heap.borrow();
+                    args[0].as_list(borrowed_heap)?.clone()
+                };
 
-    #[cfg(not(target_arch = "wasm32"))]
-    map.insert(
-        "time_now",
-        BuiltInFunctionDef {
-            name: String::from("time_now"),
-            arity: FunctionArity::Exact(0),
-            body: |_, _, _, _| {
-                Ok(Value::Number(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs_f64(),
-                ))
-            },
-        },
-    );
+                let mut filtered_list = vec![];
+                for item in list {
+                    let func_def = get_function_def(func, &heap.borrow())
+                        .ok_or_else(|| anyhow!("second argument must be a function"))?;
+                    let result = func_def.call(
+                        Value::Null,
+                        vec![item],
+                        Rc::clone(&heap),
+                        Rc::clone(&bindings),
+                        call_depth + 1,
+                    )?;
+                    if result.as_bool()? {
+                        filtered_list.push(item);
+                    }
+                }
 
-    map
-});
+                Ok(heap.borrow_mut().insert_list(filtered_list))
+            }
 
-static BUILT_IN_FUNCTION_IDENTS: LazyLock<Vec<&str>> =
-    LazyLock::new(|| BUILT_IN_FUNCTION_DEFS.get_idents());
+            Self::Reduce => {
+                let func = &args[1];
+                let initial = args[2];
+                let list = {
+                    let borrowed_heap = &heap.borrow();
+                    args[0].as_list(borrowed_heap)?.clone()
+                };
 
-impl<'a> FunctionDef<'a> {
+                let mut accumulator = initial;
+                for item in list {
+                    let func_def = get_function_def(func, &heap.borrow())
+                        .ok_or_else(|| anyhow!("second argument must be a function"))?;
+                    accumulator = func_def.call(
+                        Value::Null,
+                        vec![accumulator, item],
+                        Rc::clone(&heap),
+                        Rc::clone(&bindings),
+                        call_depth + 1,
+                    )?;
+                }
+
+                Ok(accumulator)
+            }
+
+            Self::Every => {
+                let func = &args[1];
+                let list = {
+                    let borrowed_heap = &heap.borrow();
+                    args[0].as_list(borrowed_heap)?.clone()
+                };
+
+                for item in list {
+                    let func_def = get_function_def(func, &heap.borrow())
+                        .ok_or_else(|| anyhow!("second argument must be a function"))?;
+                    let result = func_def.call(
+                        Value::Null,
+                        vec![item],
+                        Rc::clone(&heap),
+                        Rc::clone(&bindings),
+                        call_depth + 1,
+                    )?;
+                    if !result.as_bool()? {
+                        return Ok(Value::Bool(false));
+                    }
+                }
+
+                Ok(Value::Bool(true))
+            }
+
+            Self::Some => {
+                let func = &args[1];
+                let list = {
+                    let borrowed_heap = &heap.borrow();
+                    args[0].as_list(borrowed_heap)?.clone()
+                };
+
+                for item in list {
+                    let func_def = get_function_def(func, &heap.borrow())
+                        .ok_or_else(|| anyhow!("second argument must be a function"))?;
+                    let result = func_def.call(
+                        Value::Null,
+                        vec![item],
+                        Rc::clone(&heap),
+                        Rc::clone(&bindings),
+                        call_depth + 1,
+                    )?;
+                    if result.as_bool()? {
+                        return Ok(Value::Bool(true));
+                    }
+                }
+
+                Ok(Value::Bool(false))
+            }
+
+            Self::SortBy => {
+                let func = &args[1];
+                let mut list = {
+                    let borrowed_heap = &heap.borrow();
+                    args[0].as_list(borrowed_heap)?.clone()
+                };
+
+                list.sort_by(|a, b| {
+                    let func_def_a = get_function_def(func, &heap.borrow());
+                    let func_def_b = get_function_def(func, &heap.borrow());
+
+                    match (func_def_a, func_def_b) {
+                        (Some(fd_a), Some(fd_b)) => {
+                            let result_a = fd_a.call(
+                                Value::Null,
+                                vec![*a],
+                                Rc::clone(&heap),
+                                Rc::clone(&bindings),
+                                call_depth + 1,
+                            );
+                            let result_b = fd_b.call(
+                                Value::Null,
+                                vec![*b],
+                                Rc::clone(&heap),
+                                Rc::clone(&bindings),
+                                call_depth + 1,
+                            );
+
+                            match (result_a, result_b) {
+                                (Ok(val_a), Ok(val_b)) => val_a
+                                    .compare(&val_b, &heap.borrow())
+                                    .unwrap_or(None)
+                                    .unwrap_or(std::cmp::Ordering::Equal),
+                                _ => std::cmp::Ordering::Equal,
+                            }
+                        }
+                        _ => std::cmp::Ordering::Equal,
+                    }
+                });
+
+                Ok(heap.borrow_mut().insert_list(list))
+            }
+        }
+    }
+
+    pub fn all() -> Vec<Self> {
+        vec![
+            Self::Sqrt,
+            Self::Sin,
+            Self::Cos,
+            Self::Tan,
+            Self::Asin,
+            Self::Acos,
+            Self::Atan,
+            Self::Log,
+            Self::Log10,
+            Self::Exp,
+            Self::Abs,
+            Self::Floor,
+            Self::Ceil,
+            Self::Round,
+            Self::Trunc,
+            Self::Min,
+            Self::Max,
+            Self::Avg,
+            Self::Sum,
+            Self::Prod,
+            Self::Median,
+            Self::Percentile,
+            Self::Range,
+            Self::Len,
+            Self::Head,
+            Self::Tail,
+            Self::Slice,
+            Self::Concat,
+            Self::Dot,
+            Self::Unique,
+            Self::Sort,
+            Self::SortBy,
+            Self::Reverse,
+            Self::Map,
+            Self::Reduce,
+            Self::Filter,
+            Self::Every,
+            Self::Some,
+            Self::Split,
+            Self::Join,
+            Self::Replace,
+            Self::Trim,
+            Self::Uppercase,
+            Self::Lowercase,
+            Self::ToString,
+            Self::ToNumber,
+            Self::Includes,
+            Self::Format,
+            Self::Typeof,
+            Self::Arity,
+            Self::Keys,
+            Self::Values,
+            Self::Entries,
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Print,
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::TimeNow,
+        ]
+    }
+
+    pub fn all_names() -> Vec<&'static str> {
+        Self::all().iter().map(|f| f.name()).collect()
+    }
+}
+
+impl FunctionDef {
     pub fn get_name(&self) -> String {
         match self {
-            FunctionDef::BuiltIn(BuiltInFunctionDef { name, .. }) => {
-                format!("built-in function \"{}\"", name)
+            FunctionDef::BuiltIn(built_in) => {
+                format!("built-in function \"{}\"", built_in.name())
             }
             FunctionDef::Lambda(LambdaDef { name, .. }) => name
                 .clone()
@@ -1256,9 +1157,9 @@ impl<'a> FunctionDef<'a> {
 
     pub fn check_arity(&self, arg_count: usize) -> Result<()> {
         match self {
-            FunctionDef::BuiltIn(BuiltInFunctionDef { arity, .. }) => match arity {
+            FunctionDef::BuiltIn(built_in) => match built_in.arity() {
                 FunctionArity::Exact(expected) => {
-                    if arg_count == *expected {
+                    if arg_count == expected {
                         Ok(())
                     } else {
                         Err(anyhow!(
@@ -1270,7 +1171,7 @@ impl<'a> FunctionDef<'a> {
                     }
                 }
                 FunctionArity::AtLeast(expected) => {
-                    if arg_count >= *expected {
+                    if arg_count >= expected {
                         Ok(())
                     } else {
                         Err(anyhow!(
@@ -1282,7 +1183,7 @@ impl<'a> FunctionDef<'a> {
                     }
                 }
                 FunctionArity::Between(min, max) => {
-                    if arg_count >= *min && arg_count <= *max {
+                    if arg_count >= min && arg_count <= max {
                         Ok(())
                     } else {
                         Err(anyhow!(
@@ -1424,8 +1325,9 @@ impl<'a> FunctionDef<'a> {
 
                 return return_value;
             }
-            FunctionDef::BuiltIn(BuiltInFunctionDef { body, .. }) => {
-                let return_value = body(args, heap, bindings, call_depth + 1)
+            FunctionDef::BuiltIn(built_in) => {
+                let return_value = built_in
+                    .call(args, heap, bindings, call_depth + 1)
                     .map_err(|error| anyhow!("in {}: {}", self.get_name(), error));
 
                 #[cfg(not(target_arch = "wasm32"))]
@@ -1444,39 +1346,23 @@ impl<'a> FunctionDef<'a> {
 }
 
 pub fn is_built_in_function(ident: &str) -> bool {
-    BUILT_IN_FUNCTION_DEFS.get_id(ident).is_some()
+    BuiltInFunction::from_ident(ident).is_some()
 }
 
-pub fn get_built_in_function_def(id: usize) -> Option<FunctionDef<'static>> {
-    BUILT_IN_FUNCTION_DEFS
-        .get(BUILT_IN_FUNCTION_IDENTS[id])
-        .map(|def| FunctionDef::BuiltIn(def))
-}
-
-pub fn get_built_in_function_def_by_ident(ident: &str) -> Option<FunctionDef<'static>> {
-    BUILT_IN_FUNCTION_DEFS
-        .get(ident)
-        .map(|def| FunctionDef::BuiltIn(def))
-}
-
-pub fn get_built_in_function_id(ident: &str) -> Option<usize> {
-    BUILT_IN_FUNCTION_DEFS.get_id(ident)
-}
-
-pub fn get_built_in_function_ident(id: usize) -> Option<&'static str> {
-    BUILT_IN_FUNCTION_DEFS.get_ident(id)
+pub fn get_built_in_function_def_by_ident(ident: &str) -> Option<FunctionDef> {
+    BuiltInFunction::from_ident(ident).map(|built_in| FunctionDef::BuiltIn(built_in))
 }
 
 pub fn get_built_in_function_idents() -> Vec<&'static str> {
-    BUILT_IN_FUNCTION_IDENTS.iter().copied().collect()
+    BuiltInFunction::all_names()
 }
 
-pub fn get_function_def<'h>(value: &Value, heap: &'h Heap) -> Option<FunctionDef<'static>> {
+pub fn get_function_def<'h>(value: &Value, heap: &'h Heap) -> Option<FunctionDef> {
     match value {
         Value::Lambda(pointer) => Some(FunctionDef::Lambda(
             pointer.reify(heap).as_lambda().ok()?.clone(),
         )),
-        Value::BuiltIn(id) => Some(get_built_in_function_def(*id)?),
+        Value::BuiltIn(built_in) => Some(FunctionDef::BuiltIn(*built_in)),
         _ => None,
     }
 }
@@ -1493,17 +1379,13 @@ mod tests {
         // Test single argument
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(RefCell::new(HashMap::new()));
-        let range_fn =
-            get_built_in_function_def(get_built_in_function_id("range").unwrap()).unwrap();
+        let range_fn = BuiltInFunction::Range;
 
         // Test range(4)
         let args = vec![Value::Number(4.0)];
-        let result = match range_fn {
-            FunctionDef::BuiltIn(def) => {
-                (def.body)(args, heap.clone(), bindings.clone(), 0).unwrap()
-            }
-            _ => panic!("Expected built-in function"),
-        };
+        let result = range_fn
+            .call(args, heap.clone(), bindings.clone(), 0)
+            .unwrap();
 
         let heap_borrow = heap.borrow();
         let list = result.as_list(&heap_borrow).unwrap();
@@ -1517,17 +1399,13 @@ mod tests {
         // Test two arguments
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(RefCell::new(HashMap::new()));
-        let range_fn =
-            get_built_in_function_def(get_built_in_function_id("range").unwrap()).unwrap();
+        let range_fn = BuiltInFunction::Range;
 
         // Test range(4, 10)
         let args = vec![Value::Number(4.0), Value::Number(10.0)];
-        let result = match range_fn {
-            FunctionDef::BuiltIn(def) => {
-                (def.body)(args, heap.clone(), bindings.clone(), 0).unwrap()
-            }
-            _ => panic!("Expected built-in function"),
-        };
+        let result = range_fn
+            .call(args, heap.clone(), bindings.clone(), 0)
+            .unwrap();
 
         let heap_borrow = heap.borrow();
         let list = result.as_list(&heap_borrow).unwrap();
@@ -1540,8 +1418,7 @@ mod tests {
     fn test_round_function_single_arg() {
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(RefCell::new(HashMap::new()));
-        let round_fn =
-            get_built_in_function_def(get_built_in_function_id("round").unwrap()).unwrap();
+        let round_fn = BuiltInFunction::Round;
 
         // Test basic rounding
         let test_cases = vec![
@@ -1558,12 +1435,9 @@ mod tests {
 
         for (input, expected) in test_cases {
             let args = vec![Value::Number(input)];
-            let result = match &round_fn {
-                FunctionDef::BuiltIn(def) => {
-                    (def.body)(args, heap.clone(), bindings.clone(), 0).unwrap()
-                }
-                _ => panic!("Expected built-in function"),
-            };
+            let result = round_fn
+                .call(args, heap.clone(), bindings.clone(), 0)
+                .unwrap();
             assert_eq!(
                 result,
                 Value::Number(expected),
@@ -1578,8 +1452,7 @@ mod tests {
     fn test_round_function_with_decimal_places() {
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(RefCell::new(HashMap::new()));
-        let round_fn =
-            get_built_in_function_def(get_built_in_function_id("round").unwrap()).unwrap();
+        let round_fn = BuiltInFunction::Round;
 
         // Test rounding to decimal places
         let test_cases = vec![
@@ -1599,12 +1472,9 @@ mod tests {
 
         for (input, places, expected) in test_cases {
             let args = vec![Value::Number(input), Value::Number(places)];
-            let result = match &round_fn {
-                FunctionDef::BuiltIn(def) => {
-                    (def.body)(args, heap.clone(), bindings.clone(), 0).unwrap()
-                }
-                _ => panic!("Expected built-in function"),
-            };
+            let result = round_fn
+                .call(args, heap.clone(), bindings.clone(), 0)
+                .unwrap();
 
             // Use approximate comparison for floating point
             if let Value::Number(result_num) = result {
@@ -1626,8 +1496,7 @@ mod tests {
     fn test_round_function_negative_decimal_places() {
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(RefCell::new(HashMap::new()));
-        let round_fn =
-            get_built_in_function_def(get_built_in_function_id("round").unwrap()).unwrap();
+        let round_fn = BuiltInFunction::Round;
 
         // Test rounding to tens, hundreds, etc.
         let test_cases = vec![
@@ -1646,12 +1515,9 @@ mod tests {
 
         for (input, places, expected) in test_cases {
             let args = vec![Value::Number(input), Value::Number(places)];
-            let result = match &round_fn {
-                FunctionDef::BuiltIn(def) => {
-                    (def.body)(args, heap.clone(), bindings.clone(), 0).unwrap()
-                }
-                _ => panic!("Expected built-in function"),
-            };
+            let result = round_fn
+                .call(args, heap.clone(), bindings.clone(), 0)
+                .unwrap();
             assert_eq!(
                 result,
                 Value::Number(expected),
@@ -1667,8 +1533,7 @@ mod tests {
     fn test_round_function_edge_cases() {
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(RefCell::new(HashMap::new()));
-        let round_fn =
-            get_built_in_function_def(get_built_in_function_id("round").unwrap()).unwrap();
+        let round_fn = BuiltInFunction::Round;
 
         // Test edge cases
         let test_cases = vec![
@@ -1682,12 +1547,9 @@ mod tests {
 
         for (input, places, expected) in test_cases {
             let args = vec![Value::Number(input), Value::Number(places)];
-            let result = match &round_fn {
-                FunctionDef::BuiltIn(def) => {
-                    (def.body)(args, heap.clone(), bindings.clone(), 0).unwrap()
-                }
-                _ => panic!("Expected built-in function"),
-            };
+            let result = round_fn
+                .call(args, heap.clone(), bindings.clone(), 0)
+                .unwrap();
 
             if let Value::Number(result_num) = result {
                 if expected.is_infinite() {
