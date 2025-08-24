@@ -14,9 +14,7 @@ pub fn expr_to_source(expr: &Expr) -> String {
         Expr::Bool(b) => b.to_string(),
         Expr::Null => "null".to_string(),
         Expr::Identifier(name) => name.clone(),
-        Expr::BuiltIn(id) => crate::functions::get_built_in_function_ident(*id)
-            .unwrap_or("unknown")
-            .to_string(),
+        Expr::BuiltIn(built_in) => built_in.name().to_string(),
         Expr::List(items) => {
             let items_str: Vec<String> = items.iter().map(expr_to_source).collect();
             format!("[{}]", items_str.join(", "))

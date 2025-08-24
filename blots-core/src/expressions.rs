@@ -1,8 +1,7 @@
 use crate::{
     ast::{BinaryOp, DoStatement, Expr, PostfixOp, RecordEntry, RecordKey, UnaryOp},
     functions::{
-        get_built_in_function_def_by_ident, get_built_in_function_id, get_function_def,
-        is_built_in_function,
+        get_built_in_function_def_by_ident, get_function_def, is_built_in_function, BuiltInFunction,
     },
     heap::{Heap, HeapPointer, HeapValue, IterablePointer, RecordPointer},
     parser::Rule,
@@ -86,7 +85,7 @@ pub fn evaluate_ast(
                 .copied()
                 .ok_or(anyhow!("unknown identifier: {}", ident)),
         },
-        Expr::BuiltIn(id) => Ok(Value::BuiltIn(*id)),
+        Expr::BuiltIn(built_in) => Ok(Value::BuiltIn(*built_in)),
         Expr::List(exprs) => {
             let values = exprs
                 .iter()
@@ -1302,8 +1301,8 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> Result<Expr> {
                 let ident = primary.as_str();
 
                 // Check if it's a built-in function
-                if let Some(id) = get_built_in_function_id(ident) {
-                    Ok(Expr::BuiltIn(id))
+                if let Some(built_in) = BuiltInFunction::from_ident(ident) {
+                    Ok(Expr::BuiltIn(built_in))
                 } else {
                     Ok(Expr::Identifier(ident.to_string()))
                 }

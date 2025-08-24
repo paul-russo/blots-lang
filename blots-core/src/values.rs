@@ -9,7 +9,7 @@ use std::{
 
 use crate::{
     ast::Expr,
-    functions::{get_built_in_function_id, get_built_in_function_ident},
+    functions::BuiltInFunction,
     heap::{
         Heap, HeapPointer, HeapValue, IterablePointer, LambdaPointer, ListPointer, RecordPointer,
         StringPointer,
@@ -261,7 +261,7 @@ pub enum ReifiedValue<'h> {
     /// A spread value is "spread" into its container when it is used in a list, record, or function call. (internal only)
     Spread(ReifiedIterableValue<'h>, IterablePointer),
     /// A built-in function is a function that is implemented in Rust.
-    BuiltIn(usize),
+    BuiltIn(BuiltInFunction),
 }
 
 impl<'h> ReifiedValue<'h> {
@@ -347,9 +347,7 @@ impl SerializableValue {
                     ),
                 }))
             }
-            Value::BuiltIn(id) => Ok(SerializableValue::BuiltIn(
-                get_built_in_function_ident(*id).unwrap().to_string(),
-            )),
+            Value::BuiltIn(built_in) => Ok(SerializableValue::BuiltIn(built_in.name().to_string())),
             Value::Spread(_) => Err(anyhow!("cannot serialize a spread value")),
         }
     }
@@ -403,9 +401,9 @@ impl SerializableValue {
 
                 Ok(heap.insert_lambda(lambda))
             }
-            SerializableValue::BuiltIn(ident) => get_built_in_function_id(ident)
+            SerializableValue::BuiltIn(ident) => BuiltInFunction::from_ident(ident)
                 .ok_or(anyhow!("built-in function with ident {} not found", ident))
-                .map(|id| Value::BuiltIn(id)),
+                .map(|built_in| Value::BuiltIn(built_in)),
         }
     }
 }
@@ -456,7 +454,7 @@ pub enum Value {
     /// A spread value is "spread" into its container when it is used in a list, record, or function call. (internal only)
     Spread(IterablePointer),
     /// A built-in function is a function that is implemented in Rust.
-    BuiltIn(usize),
+    BuiltIn(BuiltInFunction),
 }
 
 impl Value {
@@ -695,8 +693,7 @@ impl Value {
 
     pub fn as_built_in(&self) -> Result<&str> {
         match self {
-            Value::BuiltIn(id) => get_built_in_function_ident(*id)
-                .ok_or(anyhow!("built-in function with ID {} not found", id)),
+            Value::BuiltIn(built_in) => Ok(built_in.name()),
             _ => Err(anyhow!(
                 "expected a built-in function, but got a {}",
                 self.get_type()
@@ -809,8 +806,8 @@ impl Value {
                 result.push_str(&crate::ast_to_source::expr_to_source(&lambda.body));
                 result
             }
-            Value::BuiltIn(id) => {
-                format!("{} (built-in)", get_built_in_function_ident(*id).unwrap())
+            Value::BuiltIn(built_in) => {
+                format!("{} (built-in)", built_in.name())
             }
             Value::Spread(p) => match p {
                 IterablePointer::List(l) => {
@@ -852,11 +849,7 @@ impl Display for Value {
             Value::Lambda(p) => write!(f, "{}", p),
             Value::String(p) => write!(f, "{}", p),
             Value::Null => write!(f, "null"),
-            Value::BuiltIn(id) => write!(
-                f,
-                "{} (built-in)",
-                get_built_in_function_ident(*id).unwrap()
-            ),
+            Value::BuiltIn(built_in) => write!(f, "{} (built-in)", built_in.name()),
             Value::Record(p) => write!(f, "{}", p),
         }
     }
