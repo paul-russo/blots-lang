@@ -12,7 +12,6 @@ pub struct BlotsHighlighter {
     operator_regex: Regex,
     string_regex: Regex,
     number_regex: Regex,
-    identifier_regex: Regex,
 }
 
 impl BlotsHighlighter {
@@ -32,9 +31,6 @@ impl BlotsHighlighter {
 
             // Numbers: including decimals and scientific notation
             number_regex: Regex::new(r"\b\d+(\.\d+)?([eE][+-]?\d+)?\b").unwrap(),
-
-            // Identifiers: variable names (this will be applied last, after other patterns)
-            identifier_regex: Regex::new(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b").unwrap(),
         }
     }
 
@@ -97,7 +93,6 @@ impl BlotsHighlighter {
                 HighlightType::Operator => text.fg(Color::Cyan).to_string(),          // Cyan
                 HighlightType::String => text.fg(Color::Green).to_string(),           // Green
                 HighlightType::Number => text.fg(Color::Yellow).to_string(),          // Yellow
-                HighlightType::Identifier => text.to_string(), // Default color
             };
             highlighted.push_str(&colored_text);
             last_end = end;
@@ -135,7 +130,6 @@ enum HighlightType {
     Operator,
     String,
     Number,
-    Identifier,
 }
 
 impl Highlighter for BlotsHighlighter {

@@ -177,7 +177,7 @@ enum ExpressionResult {
 }
 
 #[wasm_bindgen]
-pub fn evaluateInlineExpressions(
+pub fn evaluate_inline_expressions(
     expressions_js: JsValue,
     inputs_js: JsValue,
 ) -> Result<JsValue, JsError> {
