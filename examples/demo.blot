@@ -15,7 +15,7 @@ sum_nums = reduce(numbers, (acc, x) => acc + x, 0)  // 15
 greeting = "Hello"
 name = "World"
 message = greeting + " " + name + "!"
-upper_msg = to_uppercase(message)
+upper_msg = uppercase(message)
 words = split(message, " ")
 joined = join(words, "-")
 

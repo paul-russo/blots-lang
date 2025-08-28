@@ -5,7 +5,7 @@ use crate::{
 };
 use anyhow::{anyhow, Result};
 use dyn_fmt::AsStrFormatExt;
-use std::{cell::RefCell, cmp::Ordering, collections::HashMap, rc::Rc, sync::LazyLock};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::LazyLock};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Mutex;
@@ -437,7 +437,7 @@ impl BuiltInFunction {
                     (args[0].as_number()? as i64, args[1].as_number()? as i64)
                 };
 
-                let values = (start..=end).map(|e| Value::Number(e as f64)).collect();
+                let values = (start..end).map(|e| Value::Number(e as f64)).collect();
                 let list = heap.borrow_mut().insert_list(values);
 
                 Ok(list)
@@ -1381,7 +1381,7 @@ mod tests {
         let bindings = Rc::new(RefCell::new(HashMap::new()));
         let range_fn = BuiltInFunction::Range;
 
-        // Test range(4)
+        // Test range(4) - exclusive, so [0, 1, 2, 3]
         let args = vec![Value::Number(4.0)];
         let result = range_fn
             .call(args, heap.clone(), bindings.clone(), 0)
@@ -1389,9 +1389,9 @@ mod tests {
 
         let heap_borrow = heap.borrow();
         let list = result.as_list(&heap_borrow).unwrap();
-        assert_eq!(list.len(), 5);
+        assert_eq!(list.len(), 4);
         assert_eq!(list[0], Value::Number(0.0));
-        assert_eq!(list[4], Value::Number(4.0));
+        assert_eq!(list[3], Value::Number(3.0));
     }
 
     #[test]
@@ -1401,7 +1401,7 @@ mod tests {
         let bindings = Rc::new(RefCell::new(HashMap::new()));
         let range_fn = BuiltInFunction::Range;
 
-        // Test range(4, 10)
+        // Test range(4, 10) - exclusive, so [4, 5, 6, 7, 8, 9]
         let args = vec![Value::Number(4.0), Value::Number(10.0)];
         let result = range_fn
             .call(args, heap.clone(), bindings.clone(), 0)
@@ -1409,9 +1409,9 @@ mod tests {
 
         let heap_borrow = heap.borrow();
         let list = result.as_list(&heap_borrow).unwrap();
-        assert_eq!(list.len(), 7);
+        assert_eq!(list.len(), 6);
         assert_eq!(list[0], Value::Number(4.0));
-        assert_eq!(list[6], Value::Number(10.0));
+        assert_eq!(list[5], Value::Number(9.0));
     }
 
     #[test]
