@@ -44,6 +44,8 @@ jobs:
             ${{ runner.os }}-cargo-
       
       - name: Run tests
+        env:
+          RUSTFLAGS: "-A warnings"
         run: cargo test --workspace
       
       - name: Build WASM package
