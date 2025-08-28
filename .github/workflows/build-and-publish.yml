@@ -1,0 +1,93 @@
+name: Build and Publish WASM Package
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+      
+      - name: Install wasm-pack
+        run: |
+          curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      
+      - name: Cache cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      
+      - name: Run tests
+        run: cargo test --workspace
+      
+      - name: Build WASM package
+        run: |
+          cd blots-wasm
+          wasm-pack build --target bundler --out-dir pkg
+      
+      - name: Prepare package for publishing
+        run: |
+          cd blots-wasm/pkg
+          # Ensure package.json has proper formatting
+          if [ -f package.json ]; then
+            echo "Package.json found, verifying contents..."
+            cat package.json
+          fi
+      
+      - name: Check if version already exists (main branch only)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        id: version_check
+        run: |
+          cd blots-wasm/pkg
+          PACKAGE_NAME=$(node -p "require('./package.json').name")
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          
+          # Check if version exists on npm
+          if npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version 2>/dev/null; then
+            echo "Version ${PACKAGE_VERSION} already exists on npm"
+            echo "skip_publish=true" >> $GITHUB_OUTPUT
+          else
+            echo "Version ${PACKAGE_VERSION} does not exist, will publish"
+            echo "skip_publish=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Publish to npm (main branch only)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && steps.version_check.outputs.skip_publish != 'true'
+        run: |
+          cd blots-wasm/pkg
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      
+      - name: Upload WASM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: blots-wasm-package
+          path: blots-wasm/pkg/
+          retention-days: 7
