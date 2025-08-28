@@ -54,14 +54,33 @@ jobs:
         run: |
           cd blots-wasm
           wasm-pack build --target bundler --out-dir pkg
+          # Copy LICENSE file to the package
+          cp ../LICENSE pkg/LICENSE
 
       - name: Prepare package for publishing
         run: |
           cd blots-wasm/pkg
+          # Update package.json to include LICENSE in files array and add license field
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            if (!pkg.files.includes('LICENSE')) {
+              pkg.files.push('LICENSE');
+            }
+            pkg.license = 'MIT';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
           # Ensure package.json has proper formatting
           if [ -f package.json ]; then
             echo "Package.json found, verifying contents..."
             cat package.json
+          fi
+          # Verify LICENSE was copied
+          if [ -f LICENSE ]; then
+            echo "LICENSE file included in package"
+          else
+            echo "Warning: LICENSE file missing from package"
+            exit 1
           fi
 
       - name: Check if version already exists (main branch only)
