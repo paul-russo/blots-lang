@@ -71,7 +71,7 @@ impl HeapValue {
         }
     }
 
-    pub fn as_iterable(&self) -> Result<ReifiedIterableValue> {
+    pub fn as_iterable(&self) -> Result<ReifiedIterableValue<'_>> {
         match self {
             HeapValue::List(list) => Ok(ReifiedIterableValue::List(list)),
             HeapValue::String(string) => Ok(ReifiedIterableValue::String(string)),
