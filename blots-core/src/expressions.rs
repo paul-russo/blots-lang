@@ -11,13 +11,14 @@ use crate::{
     },
 };
 use anyhow::{anyhow, Result};
+use indexmap::IndexMap;
 use pest::{
     iterators::Pairs,
     pratt_parser::{Assoc, Op, PrattParser},
 };
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     rc::Rc,
     sync::LazyLock,
 };
@@ -107,7 +108,7 @@ pub fn evaluate_ast(
             Ok(heap.borrow_mut().insert_list(flattened))
         }
         Expr::Record(entries) => {
-            let mut record = BTreeMap::new();
+            let mut record = IndexMap::new();
 
             for entry in entries {
                 match &entry.key {

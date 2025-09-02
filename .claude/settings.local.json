@@ -20,7 +20,8 @@
       "Bash(twiggy top:*)",
       "Bash(twiggy:*)",
       "Bash(wasm2wat:*)",
-      "Bash(sed:*)"
+      "Bash(sed:*)",
+      "Read(/Users/paul/src/**)"
     ],
     "deny": []
   }

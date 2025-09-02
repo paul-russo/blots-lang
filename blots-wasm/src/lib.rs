@@ -6,10 +6,11 @@ use blots_core::{
     parser::{get_pairs, get_tokens, Rule, Token},
     values::SerializableValue,
 };
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     rc::Rc,
 };
 use wasm_bindgen::prelude::*;
@@ -24,7 +25,7 @@ struct EvaluationResult {
 #[wasm_bindgen]
 pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
     let heap = Rc::new(RefCell::new(Heap::new()));
-    let inputs_given: BTreeMap<String, SerializableValue> =
+    let inputs_given: IndexMap<String, SerializableValue> =
         serde_wasm_bindgen::from_value(inputs_js)?;
 
     let inputs = inputs_given
@@ -111,11 +112,15 @@ pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
         .map(|(k, v)| (k.clone(), v.to_serializable_value(&heap.borrow()).unwrap()))
         .collect();
 
-    Ok(serde_wasm_bindgen::to_value(&EvaluationResult {
+    // Use json_compatible serializer to ensure Records are serialized as JSON objects
+    // instead of JavaScript Maps
+    let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+    Ok(EvaluationResult {
         values: values_serializable,
         bindings: bindings_serializable,
         outputs,
-    })?)
+    }
+    .serialize(&serializer)?)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -143,14 +148,16 @@ pub fn tokenize(input: &str) -> Result<JsValue, JsError> {
         })
         .collect();
 
-    Ok(serde_wasm_bindgen::to_value(&tokens)?)
+    // Use json_compatible serializer for consistency
+    let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+    Ok(tokens.serialize(&serializer)?)
 }
 
 #[wasm_bindgen]
 pub fn get_built_in_function_names() -> Result<JsValue, JsError> {
-    Ok(serde_wasm_bindgen::to_value(
-        &get_built_in_function_idents(),
-    )?)
+    // Use json_compatible serializer for consistency
+    let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+    Ok(get_built_in_function_idents().serialize(&serializer)?)
 }
 
 #[wasm_bindgen]
@@ -166,7 +173,9 @@ pub fn get_constants() -> Result<JsValue, JsError> {
 
     map.insert(String::from("constants"), constants);
 
-    Ok(serde_wasm_bindgen::to_value(&map)?)
+    // Use json_compatible serializer to ensure Records are serialized as JSON objects
+    let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+    Ok(map.serialize(&serializer)?)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -182,7 +191,7 @@ pub fn evaluate_inline_expressions(
     inputs_js: JsValue,
 ) -> Result<JsValue, JsError> {
     let expressions: Vec<String> = serde_wasm_bindgen::from_value(expressions_js)?;
-    let inputs_given: BTreeMap<String, SerializableValue> =
+    let inputs_given: IndexMap<String, SerializableValue> =
         serde_wasm_bindgen::from_value(inputs_js)?;
 
     let mut results = Vec::new();
@@ -192,17 +201,19 @@ pub fn evaluate_inline_expressions(
         results.push(result);
     }
 
-    Ok(serde_wasm_bindgen::to_value(&results)?)
+    // Use json_compatible serializer to ensure Records are serialized as JSON objects
+    let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+    Ok(results.serialize(&serializer)?)
 }
 
 fn evaluate_single_inline_expression(
     expr: &str,
-    inputs_given: &BTreeMap<String, SerializableValue>,
+    inputs_given: &IndexMap<String, SerializableValue>,
 ) -> ExpressionResult {
     let heap = Rc::new(RefCell::new(Heap::new()));
 
     // Convert inputs to Values
-    let inputs: BTreeMap<String, _> = inputs_given
+    let inputs: IndexMap<String, _> = inputs_given
         .iter()
         .map(|(key, value)| (key.clone(), value.to_value(&mut heap.borrow_mut()).unwrap()))
         .collect();
