@@ -1,11 +1,7 @@
 use anyhow::{anyhow, Result};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::{
-    cell::RefCell,
-    collections::{BTreeMap, HashMap},
-    fmt::Display,
-    rc::Rc,
-};
+use std::{cell::RefCell, collections::HashMap, fmt::Display, rc::Rc};
 
 use crate::{
     ast::Expr,
@@ -132,12 +128,12 @@ impl PartialOrd for LambdaDef {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SerializableLambdaDef {
     pub name: Option<String>,
     pub args: Vec<LambdaArg>,
     pub body: String,
-    pub scope: Option<BTreeMap<String, SerializableValue>>,
+    pub scope: Option<IndexMap<String, SerializableValue>>,
 }
 
 pub struct WithHeap<'h, T> {
@@ -145,14 +141,14 @@ pub struct WithHeap<'h, T> {
     pub heap: Rc<RefCell<Heap>>,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub enum ReifiedIterableValue<'h> {
     List(&'h Vec<Value>),
     String(&'h String),
-    Record(&'h BTreeMap<String, Value>),
+    Record(&'h IndexMap<String, Value>),
 }
 
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ReifiedIterableValueType {
     List,
     String,
@@ -242,7 +238,7 @@ impl Display for ValueType {
 }
 
 /// A value, after it has been "reified" (borrowed) from a pointer.
-#[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub enum ReifiedValue<'h> {
     /// A number is a floating-point value.
     Number(f64),
@@ -255,7 +251,7 @@ pub enum ReifiedValue<'h> {
     /// A string is a sequence of characters.
     String(&'h str, StringPointer),
     /// A record is a collection of key-value pairs.
-    Record(&'h BTreeMap<String, Value>, RecordPointer),
+    Record(&'h IndexMap<String, Value>, RecordPointer),
     /// A lambda is a function definition.
     Lambda(&'h LambdaDef, LambdaPointer),
     /// A spread value is "spread" into its container when it is used in a list, record, or function call. (internal only)
@@ -286,21 +282,21 @@ impl From<ReifiedValue<'_>> for Value {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SerializableIterableValue {
     List(Vec<SerializableValue>),
     String(String),
-    Record(BTreeMap<String, SerializableValue>),
+    Record(IndexMap<String, SerializableValue>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SerializableValue {
     Number(f64),
     Bool(bool),
     Null,
     List(Vec<SerializableValue>),
     String(String),
-    Record(BTreeMap<String, SerializableValue>),
+    Record(IndexMap<String, SerializableValue>),
     Lambda(SerializableLambdaDef),
     BuiltIn(String),
 }
@@ -328,7 +324,7 @@ impl SerializableValue {
                 let serialized_record = record
                     .iter()
                     .map(|(k, v)| Ok((k.to_string(), SerializableValue::from_value(v, heap)?)))
-                    .collect::<Result<BTreeMap<String, SerializableValue>>>()?;
+                    .collect::<Result<IndexMap<String, SerializableValue>>>()?;
                 Ok(SerializableValue::Record(serialized_record))
             }
             Value::Lambda(p) => {
@@ -343,7 +339,7 @@ impl SerializableValue {
                             .clone()
                             .into_iter()
                             .map(|(k, v)| SerializableValue::from_value(&v, heap).map(|sv| (k, sv)))
-                            .collect::<Result<BTreeMap<String, SerializableValue>>>()?,
+                            .collect::<Result<IndexMap<String, SerializableValue>>>()?,
                     ),
                 }))
             }
@@ -370,7 +366,7 @@ impl SerializableValue {
                 let deserialized_record = record
                     .iter()
                     .map(|(k, v)| Ok((k.to_string(), SerializableValue::to_value(v, heap)?)))
-                    .collect::<Result<BTreeMap<String, Value>>>()?;
+                    .collect::<Result<IndexMap<String, Value>>>()?;
                 Ok(heap.insert_record(deserialized_record))
             }
             SerializableValue::Lambda(s_lambda) => {
@@ -701,7 +697,7 @@ impl Value {
         }
     }
 
-    pub fn as_record<'h>(&self, heap: &'h Heap) -> Result<&'h BTreeMap<String, Value>> {
+    pub fn as_record<'h>(&self, heap: &'h Heap) -> Result<&'h IndexMap<String, Value>> {
         match self {
             Value::Record(r) => r.reify(heap).as_record(),
             _ => Err(anyhow!("expected a record, but got a {}", self.get_type())),

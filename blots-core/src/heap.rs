@@ -1,12 +1,12 @@
 use crate::values::{LambdaDef, PrimitiveValue, ReifiedIterableValue, Value};
 use anyhow::{anyhow, Result};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
 use std::sync::LazyLock;
 
-pub static CONSTANTS: LazyLock<BTreeMap<String, PrimitiveValue>> = LazyLock::new(|| {
-    let mut constants = BTreeMap::new();
+pub static CONSTANTS: LazyLock<IndexMap<String, PrimitiveValue>> = LazyLock::new(|| {
+    let mut constants = IndexMap::new();
     constants.insert(
         String::from("pi"),
         PrimitiveValue::Number(core::f64::consts::PI),
@@ -29,7 +29,7 @@ pub static CONSTANTS: LazyLock<BTreeMap<String, PrimitiveValue>> = LazyLock::new
 pub enum HeapValue {
     List(Vec<Value>),
     String(String),
-    Record(BTreeMap<String, Value>),
+    Record(IndexMap<String, Value>),
     Lambda(LambdaDef),
 }
 
@@ -57,7 +57,7 @@ impl HeapValue {
         }
     }
 
-    pub fn as_record(&self) -> Result<&BTreeMap<String, Value>> {
+    pub fn as_record(&self) -> Result<&IndexMap<String, Value>> {
         match self {
             HeapValue::Record(record) => Ok(record),
             _ => Err(anyhow!("expected a list, but got a {}", self.get_type())),
@@ -117,7 +117,7 @@ impl Heap {
         Value::String(StringPointer::new(self.insert(HeapValue::String(string))))
     }
 
-    pub fn insert_record(&mut self, record: BTreeMap<String, Value>) -> Value {
+    pub fn insert_record(&mut self, record: IndexMap<String, Value>) -> Value {
         Value::Record(RecordPointer::new(self.insert(HeapValue::Record(record))))
     }
 
