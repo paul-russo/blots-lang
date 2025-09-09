@@ -18,6 +18,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
 use std::rc::Rc;
+use std::sync::LazyLock;
+
+static ARGS: LazyLock<Args> = LazyLock::new(|| Args::parse());
 
 /// Parse JSON string into an IndexMap of Values
 fn parse_json_inputs(
@@ -84,15 +87,66 @@ fn write_outputs(outputs: &IndexMap<String, SerializableValue>, output_path: Opt
 }
 
 fn main() -> ! {
-    let args = Args::parse();
-
     // Save output path for REPL mode (before args is moved)
-    let output_path = args.output.clone();
+    let output_path = ARGS.output.clone();
 
-    // Handle subcommands (currently none)
+    // Check if stdin is piped or interactive
+    let is_piped = !io::stdin().is_terminal();
+    let should_parse_piped_inputs = is_piped && !ARGS.evaluate;
+
+    // Track if we've consumed piped input and need to reopen stdin
+    let mut stdin_consumed = false;
+
+    // Set up our memory
+    let heap = Rc::new(RefCell::new(Heap::new()));
+    let bindings = Rc::new(RefCell::new(HashMap::new()));
+    let mut outputs: IndexMap<String, SerializableValue> = IndexMap::new();
+
+    // Collect inputs
+    // Parse inputs from stdin and/or -i flag
+    let mut inputs_map: IndexMap<String, Value> = IndexMap::new();
+
+    // First, read from stdin if available (piped inputs)
+    let mut stdin_content = String::new();
+    if should_parse_piped_inputs {
+        let _ = io::stdin().read_to_string(&mut stdin_content);
+        stdin_consumed = true;
+
+        if !stdin_content.trim().is_empty() {
+            match parse_json_inputs(&stdin_content, &heap, "stdin") {
+                Ok(map) => inputs_map = map,
+                Err(e) => {
+                    eprintln!("{}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+
+    // Then, apply -i flag inputs (which override piped inputs)
+    if let Some(inputs_str) = &ARGS.inputs {
+        match parse_json_inputs(inputs_str, &heap, "--inputs") {
+            Ok(map) => {
+                // Merge with existing inputs (--inputs overrides stdin)
+                for (k, v) in map {
+                    inputs_map.insert(k, v);
+                }
+            }
+            Err(e) => {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let inputs_record = { heap.borrow_mut().insert_record(inputs_map) };
+
+    bindings
+        .borrow_mut()
+        .insert("inputs".to_string(), inputs_record);
 
     // Check if we should evaluate from stdin with -e flag
-    if args.evaluate && args.path.is_none() {
+    if ARGS.evaluate && ARGS.path.is_none() {
         // Read stdin as Blots source code
         if io::stdin().is_terminal() {
             eprintln!("Error: --evaluate requires piped input");
@@ -103,12 +157,9 @@ fn main() -> ! {
         io::stdin().read_to_string(&mut content).unwrap();
 
         let pairs = get_pairs(&content).unwrap();
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
-        let heap = Rc::new(RefCell::new(Heap::new()));
-        let mut outputs: IndexMap<String, SerializableValue> = IndexMap::new();
 
         // Parse inputs from -i flag if provided
-        let inputs_map = if let Some(inputs_str) = &args.inputs {
+        let _inputs_map = if let Some(inputs_str) = &ARGS.inputs {
             match parse_json_inputs(inputs_str, &heap, "--inputs") {
                 Ok(map) => map,
                 Err(e) => {
@@ -119,12 +170,6 @@ fn main() -> ! {
         } else {
             IndexMap::new()
         };
-
-        let inputs_record = heap.borrow_mut().insert_record(inputs_map);
-
-        bindings
-            .borrow_mut()
-            .insert("inputs".to_string(), inputs_record);
 
         // Process the code (same as file mode)
         pairs.for_each(|pair| match pair.as_rule() {
@@ -207,59 +252,14 @@ fn main() -> ! {
         });
 
         // Output the collected outputs
-        write_outputs(&outputs, args.output.as_ref());
+        write_outputs(&outputs, ARGS.output.as_ref());
 
         std::process::exit(0);
     }
 
-    if let Some(path) = args.path {
+    if let Some(path) = &ARGS.path {
         let content = std::fs::read_to_string(&path).unwrap();
         let pairs = get_pairs(&content).unwrap();
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
-        let heap = Rc::new(RefCell::new(Heap::new()));
-        let mut outputs: IndexMap<String, SerializableValue> = IndexMap::new();
-
-        // Parse inputs from stdin and/or -i flag
-        let mut inputs_map: IndexMap<String, Value> = IndexMap::new();
-
-        // First, read from stdin if available (piped inputs)
-        let mut stdin_content = String::new();
-        if !io::stdin().is_terminal() {
-            let _ = io::stdin().read_to_string(&mut stdin_content);
-
-            if !stdin_content.trim().is_empty() {
-                match parse_json_inputs(&stdin_content, &heap, "stdin") {
-                    Ok(map) => inputs_map = map,
-                    Err(e) => {
-                        eprintln!("{}", e);
-                        std::process::exit(1);
-                    }
-                }
-            }
-        }
-
-        // Then, apply -i flag inputs (which override piped inputs)
-        if let Some(inputs_str) = &args.inputs {
-            match parse_json_inputs(inputs_str, &heap, "--inputs") {
-                Ok(map) => {
-                    // Merge with existing inputs (--inputs overrides stdin)
-                    for (k, v) in map {
-                        inputs_map.insert(k, v);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("{}", e);
-                    std::process::exit(1);
-                }
-            }
-        }
-
-        let inputs_record = heap.borrow_mut().insert_record(inputs_map);
-
-        // Add inputs to bindings
-        bindings
-            .borrow_mut()
-            .insert("inputs".to_string(), inputs_record);
 
         pairs.for_each(|pair| match pair.as_rule() {
             Rule::statement => {
@@ -347,23 +347,37 @@ fn main() -> ! {
         });
 
         // Output the collected outputs
-        write_outputs(&outputs, args.output.as_ref());
+        write_outputs(&outputs, ARGS.output.as_ref());
 
         std::process::exit(0);
     }
 
-    // REPL mode requires an interactive terminal
-    if !io::stdin().is_terminal() {
-        eprintln!("Error: REPL mode requires an interactive terminal.");
-        eprintln!("To process JSON input, use: echo '{{}}' | blots file.blot");
+    // REPL mode
+
+    // Check if stdin was consumed (piped input) - if so, we can't start an interactive REPL
+    if stdin_consumed {
+        eprintln!("Error: Cannot start Interactive Mode after reading piped input.");
+        eprintln!();
+        eprintln!("When piping JSON data, you must also specify what to do with it, by specifying a .blot file to run:");
+        eprintln!("    echo '{{\"x\": 42}}' | blots myfile.blot");
+        eprintln!();
+        eprintln!("If you want to provide inputs that you can use in an interactive session, you can use the -i flag:");
+        eprintln!("    blots -i '{{\"x\": 42, \"y\": \"hello\"}}'");
+        eprintln!();
+        eprintln!(
+            "You can also pipe Blots code with --evaluate. This can be combined with the -i flag:"
+        );
+        eprintln!("    echo -e 'output result = inputs.x + inputs.y' | blots --evaluate -i '{{\"x\": 42, \"y\": \"hello\"}}'");
+
+        // If outputs were collected, write them before exiting
+        if !outputs.is_empty() || output_path.is_some() {
+            write_outputs(&outputs, output_path.as_ref());
+        }
+
         std::process::exit(1);
     }
 
-    let heap = Rc::new(RefCell::new(Heap::new()));
-    let bindings = Rc::new(RefCell::new(HashMap::new()));
-    let mut outputs: IndexMap<String, SerializableValue> = IndexMap::new();
-
-    // In REPL mode, inputs is always an empty record
+    // In REPL mode, inputs is always an empty record (since stdin wasn't consumed)
     let inputs_record = heap.borrow_mut().insert_record(IndexMap::new());
 
     // Add inputs to bindings
@@ -371,24 +385,20 @@ fn main() -> ! {
         .borrow_mut()
         .insert("inputs".to_string(), inputs_record);
 
-    // At this point we know stdin is a terminal
-    let is_piped = false;
-
-    // Initialize rustyline editor for command history (only if not piped)
+    // Initialize rustyline editor for command history
     let highlighter = BlotsHighlighter::new();
-    let mut rl: Option<Editor<BlotsHighlighter, rustyline::history::DefaultHistory>> = if !is_piped
-    {
+    let mut rl: Option<Editor<BlotsHighlighter, rustyline::history::DefaultHistory>> =
         match Editor::with_config(rustyline::Config::builder().build()) {
             Ok(mut editor) => {
                 // Set up syntax highlighting
                 editor.set_helper(Some(BlotsHighlighter::new()));
                 Some(editor)
             }
-            Err(_) => None, // Fall back to basic input if rustyline fails
-        }
-    } else {
-        None
-    };
+            Err(e) => {
+                eprintln!("Error: Failed to initialize interactive editor: {}", e);
+                std::process::exit(1);
+            }
+        };
 
     let mut accumulated_input = String::new();
     let mut continuation = false;
@@ -401,8 +411,8 @@ fn main() -> ! {
                 Ok(input) => {
                     input + "\n" // Add newline to match read_line behavior
                 }
-                Err(_) => {
-                    // User pressed Ctrl+C or EOF - print outputs and exit
+                Err(rustyline::error::ReadlineError::Eof) => {
+                    // EOF - print outputs and exit gracefully
                     if outputs.is_empty() && output_path.is_none() {
                         println!("{{}}");
                     } else {
@@ -410,25 +420,38 @@ fn main() -> ! {
                     }
                     std::process::exit(0);
                 }
+                Err(rustyline::error::ReadlineError::Interrupted) => {
+                    // Ctrl+C - print outputs and exit
+                    if outputs.is_empty() && output_path.is_none() {
+                        println!("{{}}");
+                    } else {
+                        write_outputs(&outputs, output_path.as_ref());
+                    }
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("Error: Failed to read line: {}", e);
+                    if stdin_consumed {
+                        eprintln!(
+                            "This may be because the terminal is not accessible after piped input."
+                        );
+                        eprintln!("Try using the -i flag instead: blots -i '{{\"x\": 42}}'");
+                    }
+                    std::process::exit(1);
+                }
             }
         } else {
-            // Fall back to basic stdin for piped input
+            // Fall back to basic stdin (should not happen if /dev/tty worked)
             let mut line = String::new();
             let bytes_read = std::io::stdin().read_line(&mut line).unwrap();
 
-            // If piped input and we've reached EOF, exit
-            if is_piped && bytes_read == 0 {
+            // If we've reached EOF, exit
+            if bytes_read == 0 {
                 // Print outputs before exiting
-                if !outputs.is_empty() {
-                    let json_outputs: IndexMap<String, serde_json::Value> = outputs
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.to_json()))
-                        .collect();
-                    if let Ok(json) = serde_json::to_string(&json_outputs) {
-                        println!("{}", json);
-                    }
-                } else {
+                if outputs.is_empty() && output_path.is_none() {
                     println!("{{}}");
+                } else {
+                    write_outputs(&outputs, output_path.as_ref());
                 }
                 std::process::exit(0);
             }
@@ -500,11 +523,7 @@ fn main() -> ! {
                                 Ok(value) => {
                                     let value_str = value.stringify(&heap.borrow());
 
-                                    if !is_piped {
-                                        println!("{}", highlighter.highlight_result(&value_str));
-                                    } else {
-                                        println!("= {}", value_str);
-                                    }
+                                    println!("{}", highlighter.highlight_result(&value_str));
                                 }
                                 Err(error) => println!("[evaluation error] {}", error),
                             }
@@ -533,10 +552,8 @@ fn main() -> ! {
                                             {
                                                 outputs
                                                     .insert(identifier.to_string(), serializable);
-                                                // Show confirmation in REPL
-                                                if !is_piped {
-                                                    println!("[output '{}' recorded]", identifier);
-                                                }
+
+                                                println!("[output '{}' recorded]", identifier);
                                             }
                                         }
                                         break;
@@ -554,19 +571,13 @@ fn main() -> ! {
                                                         serializable,
                                                     );
                                                     // Show value and confirmation in REPL
-                                                    if !is_piped {
-                                                        let value_str =
-                                                            value.stringify(&heap.borrow());
-                                                        println!(
-                                                            "{}",
-                                                            highlighter
-                                                                .highlight_result(&value_str)
-                                                        );
-                                                        println!(
-                                                            "[output '{}' recorded]",
-                                                            identifier
-                                                        );
-                                                    }
+
+                                                    let value_str = value.stringify(&heap.borrow());
+                                                    println!(
+                                                        "{}",
+                                                        highlighter.highlight_result(&value_str)
+                                                    );
+                                                    println!("[output '{}' recorded]", identifier);
                                                 }
                                             }
                                         }
