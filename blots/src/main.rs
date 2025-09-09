@@ -3,19 +3,46 @@ mod commands;
 mod highlighter;
 
 use blots_core::expressions::evaluate_pairs;
-use blots_core::functions::FUNCTION_CALLS;
 use blots_core::heap::Heap;
 use blots_core::parser::{get_pairs, Rule};
+use blots_core::values::SerializableValue;
 use clap::Parser;
 use cli::Args;
 use commands::{exec_command, is_command};
 use highlighter::BlotsHighlighter;
+use indexmap::IndexMap;
 use rustyline::Editor;
+use serde_json;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::rc::Rc;
-use std::time::Duration;
+
+// Convert SerializableValue to clean JSON
+fn to_json_value(value: &SerializableValue) -> serde_json::Value {
+    match value {
+        SerializableValue::Number(n) => serde_json::Value::Number(
+            serde_json::Number::from_f64(*n).unwrap_or_else(|| serde_json::Number::from(0)),
+        ),
+        SerializableValue::Bool(b) => serde_json::Value::Bool(*b),
+        SerializableValue::Null => serde_json::Value::Null,
+        SerializableValue::String(s) => serde_json::Value::String(s.clone()),
+        SerializableValue::List(items) => {
+            serde_json::Value::Array(items.iter().map(to_json_value).collect())
+        }
+        SerializableValue::Record(fields) => {
+            let map: serde_json::Map<String, serde_json::Value> = fields
+                .iter()
+                .map(|(k, v)| (k.clone(), to_json_value(v)))
+                .collect();
+            serde_json::Value::Object(map)
+        }
+        SerializableValue::Lambda(_) => serde_json::Value::String("<function>".to_string()),
+        SerializableValue::BuiltIn(name) => {
+            serde_json::Value::String(format!("<builtin: {}>", name))
+        }
+    }
+}
 
 fn main() -> ! {
     let args = Args::parse();
@@ -24,11 +51,10 @@ fn main() -> ! {
 
     if let Some(path) = args.path {
         let content = std::fs::read_to_string(&path).unwrap();
-
-        println!("Reading from file: {}", path);
         let pairs = get_pairs(&content).unwrap();
         let bindings = Rc::new(RefCell::new(HashMap::new()));
         let heap = Rc::new(RefCell::new(Heap::new()));
+        let mut outputs: IndexMap<String, SerializableValue> = IndexMap::new();
 
         pairs.for_each(|pair| match pair.as_rule() {
             Rule::statement => {
@@ -51,8 +77,60 @@ fn main() -> ! {
                             }
                         }
                         Rule::output_declaration => {
-                            // Output declarations are ignored in the CLI
-                            // They're only meaningful in the Blots application
+                            // The output_declaration contains the entire "output x" or "output x = expr"
+                            // We need to evaluate it like a regular expression/assignment but track the output
+                            let inner_pairs_clone = inner_pair.clone().into_inner();
+
+                            // Evaluate the entire output declaration
+                            let result = evaluate_pairs(
+                                inner_pair.clone().into_inner(),
+                                Rc::clone(&heap),
+                                Rc::clone(&bindings),
+                                0,
+                            );
+
+                            // Extract the output name from the declaration
+                            for pair in inner_pairs_clone {
+                                match pair.as_rule() {
+                                    Rule::identifier => {
+                                        // output x - reference existing binding
+                                        let identifier = pair.as_str();
+                                        if let Some(value) = bindings.borrow().get(identifier) {
+                                            if let Ok(serializable) =
+                                                value.to_serializable_value(&heap.borrow())
+                                            {
+                                                outputs
+                                                    .insert(identifier.to_string(), serializable);
+                                            }
+                                        }
+                                        break;
+                                    }
+                                    Rule::assignment => {
+                                        // output x = expr - get the identifier from the assignment
+                                        if let Some(ident_pair) = pair.into_inner().next() {
+                                            let identifier = ident_pair.as_str();
+                                            if let Ok(value) = &result {
+                                                if let Ok(serializable) =
+                                                    value.to_serializable_value(&heap.borrow())
+                                                {
+                                                    outputs.insert(
+                                                        identifier.to_string(),
+                                                        serializable,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+
+                            // Check for errors in evaluation
+                            if let Err(error) = result {
+                                println!("[evaluation error] {}", error);
+                                std::process::exit(1);
+                            }
                         }
                         Rule::comment => {} // Ignore comments
                         _ => unreachable!("unexpected rule: {:?}", inner_pair.as_rule()),
@@ -63,26 +141,14 @@ fn main() -> ! {
             rule => unreachable!("unexpected rule: {:?}", rule),
         });
 
-        println!("---------------------------------------------");
-        println!(
-            "PARSE_COUNT: {}",
-            blots_core::parser::CALL_COUNT.load(std::sync::atomic::Ordering::Acquire)
-        );
-        let elapsed_ms = Duration::from_micros(
-            blots_core::parser::TOTAL_PARSE_TIME.load(std::sync::atomic::Ordering::Acquire) as u64,
-        )
-        .as_millis();
-        println!("TOTAL_PARSE_TIME: {}ms", elapsed_ms);
-
-        println!(
-            "Total function calls: {}",
-            FUNCTION_CALLS.lock().unwrap().len()
-        );
-        println!(
-            "Total function call time: {}ms",
-            FUNCTION_CALLS.lock().unwrap().iter().fold(0.0, |acc, s| acc
-                + ((s.end - s.start).as_secs_f64() * 1_000.0))
-        );
+        // Output the collected outputs as JSON (empty object if no outputs)
+        let json_outputs: IndexMap<String, serde_json::Value> = outputs
+            .iter()
+            .map(|(k, v)| (k.clone(), to_json_value(v)))
+            .collect();
+        if let Ok(json) = serde_json::to_string(&json_outputs) {
+            println!("{}", json);
+        }
 
         std::process::exit(0);
     }
