@@ -8,7 +8,7 @@ use blots_core::parser::{get_pairs, Rule};
 use blots_core::values::{SerializableValue, Value};
 use clap::Parser;
 use cli::Args;
-use commands::{exec_command, is_command};
+use commands::{exec_command, is_command, CommandResult};
 use highlighter::BlotsHighlighter;
 use indexmap::IndexMap;
 use rustyline::Editor;
@@ -173,11 +173,27 @@ fn main() -> ! {
         std::process::exit(0);
     }
 
+    // REPL mode requires an interactive terminal
+    if !io::stdin().is_terminal() {
+        eprintln!("Error: REPL mode requires an interactive terminal.");
+        eprintln!("To process JSON input, use: echo '{{}}' | blots file.blot");
+        std::process::exit(1);
+    }
+
     let heap = Rc::new(RefCell::new(Heap::new()));
     let bindings = Rc::new(RefCell::new(HashMap::new()));
+    let mut outputs: IndexMap<String, SerializableValue> = IndexMap::new();
 
-    // Check if stdin is being piped (not a terminal)
-    let is_piped = !IsTerminal::is_terminal(&std::io::stdin());
+    // In REPL mode, inputs is always an empty record
+    let inputs_record = heap.borrow_mut().insert_record(IndexMap::new());
+
+    // Add inputs to bindings
+    bindings
+        .borrow_mut()
+        .insert("inputs".to_string(), inputs_record);
+
+    // At this point we know stdin is a terminal
+    let is_piped = false;
 
     // Initialize rustyline editor for command history (only if not piped)
     let highlighter = BlotsHighlighter::new();
@@ -207,7 +223,19 @@ fn main() -> ! {
                     input + "\n" // Add newline to match read_line behavior
                 }
                 Err(_) => {
-                    std::process::exit(0); // User pressed Ctrl+C or EOF
+                    // User pressed Ctrl+C or EOF - print outputs and exit
+                    if !outputs.is_empty() {
+                        let json_outputs: IndexMap<String, serde_json::Value> = outputs
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.to_json()))
+                            .collect();
+                        if let Ok(json) = serde_json::to_string(&json_outputs) {
+                            println!("{}", json);
+                        }
+                    } else {
+                        println!("{{}}");
+                    }
+                    std::process::exit(0);
                 }
             }
         } else {
@@ -217,6 +245,18 @@ fn main() -> ! {
 
             // If piped input and we've reached EOF, exit
             if is_piped && bytes_read == 0 {
+                // Print outputs before exiting
+                if !outputs.is_empty() {
+                    let json_outputs: IndexMap<String, serde_json::Value> = outputs
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.to_json()))
+                        .collect();
+                    if let Ok(json) = serde_json::to_string(&json_outputs) {
+                        println!("{}", json);
+                    }
+                } else {
+                    println!("{{}}");
+                }
                 std::process::exit(0);
             }
 
@@ -225,8 +265,24 @@ fn main() -> ! {
 
         // Check for commands only on first line
         if !continuation && is_command(&line.trim()) {
-            exec_command(&line.trim());
-            continue;
+            match exec_command(&line.trim()) {
+                CommandResult::Quit => {
+                    // Print outputs before exiting
+                    if !outputs.is_empty() {
+                        let json_outputs: IndexMap<String, serde_json::Value> = outputs
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.to_json()))
+                            .collect();
+                        if let Ok(json) = serde_json::to_string(&json_outputs) {
+                            println!("{}", json);
+                        }
+                    } else {
+                        println!("{{}}");
+                    }
+                    std::process::exit(0);
+                }
+                CommandResult::Continue => continue,
+            }
         }
 
         // Accumulate the input
@@ -286,6 +342,79 @@ fn main() -> ! {
                                 Err(error) => println!("[evaluation error] {}", error),
                             }
                         }
+                        Rule::output_declaration => {
+                            // Handle output declarations in REPL
+                            let inner_pairs_clone = inner_pair.clone().into_inner();
+
+                            // Evaluate the entire output declaration
+                            let result = evaluate_pairs(
+                                inner_pair.clone().into_inner(),
+                                Rc::clone(&heap),
+                                Rc::clone(&bindings),
+                                0,
+                            );
+
+                            // Extract the output name from the declaration
+                            for pair in inner_pairs_clone {
+                                match pair.as_rule() {
+                                    Rule::identifier => {
+                                        // output x - reference existing binding
+                                        let identifier = pair.as_str();
+                                        if let Some(value) = bindings.borrow().get(identifier) {
+                                            if let Ok(serializable) =
+                                                value.to_serializable_value(&heap.borrow())
+                                            {
+                                                outputs
+                                                    .insert(identifier.to_string(), serializable);
+                                                // Show confirmation in REPL
+                                                if !is_piped {
+                                                    println!("[output '{}' recorded]", identifier);
+                                                }
+                                            }
+                                        }
+                                        break;
+                                    }
+                                    Rule::assignment => {
+                                        // output x = expr - get the identifier from the assignment
+                                        if let Some(ident_pair) = pair.into_inner().next() {
+                                            let identifier = ident_pair.as_str();
+                                            if let Ok(value) = &result {
+                                                if let Ok(serializable) =
+                                                    value.to_serializable_value(&heap.borrow())
+                                                {
+                                                    outputs.insert(
+                                                        identifier.to_string(),
+                                                        serializable,
+                                                    );
+                                                    // Show value and confirmation in REPL
+                                                    if !is_piped {
+                                                        let value_str =
+                                                            value.stringify(&heap.borrow());
+                                                        println!(
+                                                            "{}",
+                                                            highlighter
+                                                                .highlight_result(&value_str)
+                                                        );
+                                                        println!(
+                                                            "[output '{}' recorded]",
+                                                            identifier
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+
+                            // Check for errors in evaluation
+                            if let Err(error) = result {
+                                println!("[evaluation error] {}", error);
+                            }
+                        }
+                        Rule::comment => {} // Ignore comments
                         _ => unreachable!("unexpected rule: {:?}", inner_pair.as_rule()),
                     }
                 }

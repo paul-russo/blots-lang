@@ -1,16 +1,20 @@
+pub enum CommandResult {
+    Continue,
+    Quit,
+}
+
 pub fn is_command(input: &str) -> bool {
     match input {
-        "quit" | "help" => true,
+        "quit" | "exit" | "help" => true,
         _ => false,
     }
 }
 
-/// Executes the given command.
-pub fn exec_command(cmd: &str) {
+/// Executes the given command and returns whether to continue or quit.
+pub fn exec_command(cmd: &str) -> CommandResult {
     match cmd {
         "quit" | "exit" => {
-            println!("bye!");
-            std::process::exit(0);
+            return CommandResult::Quit;
         }
         "help" => {
             println!("Blots - A Calculator Language");
@@ -55,7 +59,8 @@ pub fn exec_command(cmd: &str) {
             println!("  ...   x => x * 2");
             println!("  ... )");
             println!("  = [2, 4, 6]");
+            CommandResult::Continue
         }
-        _ => unreachable!(),
+        _ => CommandResult::Continue,
     }
 }
