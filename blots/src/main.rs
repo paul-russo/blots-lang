@@ -5,7 +5,7 @@ mod highlighter;
 use blots_core::expressions::evaluate_pairs;
 use blots_core::heap::Heap;
 use blots_core::parser::{get_pairs, Rule};
-use blots_core::values::SerializableValue;
+use blots_core::values::{SerializableValue, Value};
 use clap::Parser;
 use cli::Args;
 use commands::{exec_command, is_command};
@@ -15,34 +15,8 @@ use rustyline::Editor;
 use serde_json;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::IsTerminal;
+use std::io::{self, IsTerminal, Read};
 use std::rc::Rc;
-
-// Convert SerializableValue to clean JSON
-fn to_json_value(value: &SerializableValue) -> serde_json::Value {
-    match value {
-        SerializableValue::Number(n) => serde_json::Value::Number(
-            serde_json::Number::from_f64(*n).unwrap_or_else(|| serde_json::Number::from(0)),
-        ),
-        SerializableValue::Bool(b) => serde_json::Value::Bool(*b),
-        SerializableValue::Null => serde_json::Value::Null,
-        SerializableValue::String(s) => serde_json::Value::String(s.clone()),
-        SerializableValue::List(items) => {
-            serde_json::Value::Array(items.iter().map(to_json_value).collect())
-        }
-        SerializableValue::Record(fields) => {
-            let map: serde_json::Map<String, serde_json::Value> = fields
-                .iter()
-                .map(|(k, v)| (k.clone(), to_json_value(v)))
-                .collect();
-            serde_json::Value::Object(map)
-        }
-        SerializableValue::Lambda(_) => serde_json::Value::String("<function>".to_string()),
-        SerializableValue::BuiltIn(name) => {
-            serde_json::Value::String(format!("<builtin: {}>", name))
-        }
-    }
-}
 
 fn main() -> ! {
     let args = Args::parse();
@@ -55,6 +29,52 @@ fn main() -> ! {
         let bindings = Rc::new(RefCell::new(HashMap::new()));
         let heap = Rc::new(RefCell::new(Heap::new()));
         let mut outputs: IndexMap<String, SerializableValue> = IndexMap::new();
+
+        // Read stdin for inputs if available
+        let mut stdin_content = String::new();
+        if !io::stdin().is_terminal() {
+            // Try to read from stdin (non-blocking check)
+            let _ = io::stdin().read_to_string(&mut stdin_content);
+        }
+
+        // Parse inputs from stdin or create empty record
+        let inputs_record = if !stdin_content.trim().is_empty() {
+            match serde_json::from_str::<serde_json::Value>(&stdin_content) {
+                Ok(json_value) => {
+                    // Convert JSON object to IndexMap of Values
+                    if let serde_json::Value::Object(obj) = json_value {
+                        let mut inputs_map: IndexMap<String, Value> = IndexMap::new();
+                        for (k, v) in obj.iter() {
+                            let serializable = SerializableValue::from_json(v);
+                            if let Ok(val) = serializable.to_value(&mut heap.borrow_mut()) {
+                                inputs_map.insert(k.clone(), val);
+                            }
+                        }
+                        heap.borrow_mut().insert_record(inputs_map)
+                    } else {
+                        // If not an object, wrap in a record with "value" key
+                        let mut map = IndexMap::new();
+                        let serializable = SerializableValue::from_json(&json_value);
+                        if let Ok(val) = serializable.to_value(&mut heap.borrow_mut()) {
+                            map.insert("value".to_string(), val);
+                        }
+                        heap.borrow_mut().insert_record(map)
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[input error] Failed to parse JSON from stdin: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            // No stdin input, create empty record
+            heap.borrow_mut().insert_record(IndexMap::new())
+        };
+
+        // Add inputs to bindings
+        bindings
+            .borrow_mut()
+            .insert("inputs".to_string(), inputs_record);
 
         pairs.for_each(|pair| match pair.as_rule() {
             Rule::statement => {
@@ -144,7 +164,7 @@ fn main() -> ! {
         // Output the collected outputs as JSON (empty object if no outputs)
         let json_outputs: IndexMap<String, serde_json::Value> = outputs
             .iter()
-            .map(|(k, v)| (k.clone(), to_json_value(v)))
+            .map(|(k, v)| (k.clone(), v.to_json()))
             .collect();
         if let Ok(json) = serde_json::to_string(&json_outputs) {
             println!("{}", json);
