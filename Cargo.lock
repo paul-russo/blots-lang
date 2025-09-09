@@ -94,8 +94,10 @@ dependencies = [
  "anyhow",
  "blots-core",
  "clap",
+ "indexmap",
  "regex",
  "rustyline",
+ "serde_json",
  "yansi",
 ]
 
