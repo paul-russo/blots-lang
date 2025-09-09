@@ -887,7 +887,8 @@ impl BuiltInFunction {
                     format_str.format(format_args)
                 };
 
-                println!("{}", output);
+                // Print to stderr, to not pollute stdout
+                eprintln!("{}", output);
 
                 Ok(Value::Null)
             }
