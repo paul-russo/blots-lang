@@ -18,6 +18,40 @@ use std::collections::HashMap;
 use std::io::{self, IsTerminal, Read};
 use std::rc::Rc;
 
+/// Parse JSON string into an IndexMap of Values
+fn parse_json_inputs(
+    json_str: &str,
+    heap: &RefCell<Heap>,
+    source: &str,
+) -> Result<IndexMap<String, Value>, String> {
+    match serde_json::from_str::<serde_json::Value>(json_str) {
+        Ok(json_value) => {
+            let mut inputs_map: IndexMap<String, Value> = IndexMap::new();
+
+            if let serde_json::Value::Object(obj) = json_value {
+                for (k, v) in obj.iter() {
+                    let serializable = SerializableValue::from_json(v);
+                    if let Ok(val) = serializable.to_value(&mut heap.borrow_mut()) {
+                        inputs_map.insert(k.clone(), val);
+                    }
+                }
+            } else {
+                // If not an object, wrap in a record with "value" key
+                let serializable = SerializableValue::from_json(&json_value);
+                if let Ok(val) = serializable.to_value(&mut heap.borrow_mut()) {
+                    inputs_map.insert("value".to_string(), val);
+                }
+            }
+
+            Ok(inputs_map)
+        }
+        Err(e) => Err(format!(
+            "[input error] Failed to parse JSON from {}: {}",
+            source, e
+        )),
+    }
+}
+
 fn main() -> ! {
     let args = Args::parse();
 
@@ -39,8 +73,21 @@ fn main() -> ! {
         let heap = Rc::new(RefCell::new(Heap::new()));
         let mut outputs: IndexMap<String, SerializableValue> = IndexMap::new();
 
-        // With -e flag, inputs is always empty
-        let inputs_record = heap.borrow_mut().insert_record(IndexMap::new());
+        // Parse inputs from -i flag if provided
+        let inputs_map = if let Some(inputs_str) = &args.inputs {
+            match parse_json_inputs(inputs_str, &heap, "--inputs") {
+                Ok(map) => map,
+                Err(e) => {
+                    eprintln!("{}", e);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            IndexMap::new()
+        };
+
+        let inputs_record = heap.borrow_mut().insert_record(inputs_map);
+
         bindings
             .borrow_mut()
             .insert("inputs".to_string(), inputs_record);
@@ -144,46 +191,42 @@ fn main() -> ! {
         let heap = Rc::new(RefCell::new(Heap::new()));
         let mut outputs: IndexMap<String, SerializableValue> = IndexMap::new();
 
-        // Read stdin for inputs if available
+        // Parse inputs from stdin and/or -i flag
+        let mut inputs_map: IndexMap<String, Value> = IndexMap::new();
+
+        // First, read from stdin if available (piped inputs)
         let mut stdin_content = String::new();
         if !io::stdin().is_terminal() {
-            // Try to read from stdin as JSON inputs (non-blocking check)
             let _ = io::stdin().read_to_string(&mut stdin_content);
+
+            if !stdin_content.trim().is_empty() {
+                match parse_json_inputs(&stdin_content, &heap, "stdin") {
+                    Ok(map) => inputs_map = map,
+                    Err(e) => {
+                        eprintln!("{}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
         }
 
-        // Parse inputs from stdin or create empty record
-        let inputs_record = if !stdin_content.trim().is_empty() {
-            match serde_json::from_str::<serde_json::Value>(&stdin_content) {
-                Ok(json_value) => {
-                    // Convert JSON object to IndexMap of Values
-                    if let serde_json::Value::Object(obj) = json_value {
-                        let mut inputs_map: IndexMap<String, Value> = IndexMap::new();
-                        for (k, v) in obj.iter() {
-                            let serializable = SerializableValue::from_json(v);
-                            if let Ok(val) = serializable.to_value(&mut heap.borrow_mut()) {
-                                inputs_map.insert(k.clone(), val);
-                            }
-                        }
-                        heap.borrow_mut().insert_record(inputs_map)
-                    } else {
-                        // If not an object, wrap in a record with "value" key
-                        let mut map = IndexMap::new();
-                        let serializable = SerializableValue::from_json(&json_value);
-                        if let Ok(val) = serializable.to_value(&mut heap.borrow_mut()) {
-                            map.insert("value".to_string(), val);
-                        }
-                        heap.borrow_mut().insert_record(map)
+        // Then, apply -i flag inputs (which override piped inputs)
+        if let Some(inputs_str) = &args.inputs {
+            match parse_json_inputs(inputs_str, &heap, "--inputs") {
+                Ok(map) => {
+                    // Merge with existing inputs (--inputs overrides stdin)
+                    for (k, v) in map {
+                        inputs_map.insert(k, v);
                     }
                 }
                 Err(e) => {
-                    eprintln!("[input error] Failed to parse JSON from stdin: {}", e);
+                    eprintln!("{}", e);
                     std::process::exit(1);
                 }
             }
-        } else {
-            // No stdin input, create empty record
-            heap.borrow_mut().insert_record(IndexMap::new())
-        };
+        }
+
+        let inputs_record = heap.borrow_mut().insert_record(inputs_map);
 
         // Add inputs to bindings
         bindings
