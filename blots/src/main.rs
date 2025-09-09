@@ -23,6 +23,120 @@ fn main() -> ! {
 
     // Handle subcommands (currently none)
 
+    // Check if we should evaluate from stdin with -e flag
+    if args.evaluate && args.path.is_none() {
+        // Read stdin as Blots source code
+        if io::stdin().is_terminal() {
+            eprintln!("Error: --evaluate requires piped input");
+            std::process::exit(1);
+        }
+
+        let mut content = String::new();
+        io::stdin().read_to_string(&mut content).unwrap();
+
+        let pairs = get_pairs(&content).unwrap();
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let mut outputs: IndexMap<String, SerializableValue> = IndexMap::new();
+
+        // With -e flag, inputs is always empty
+        let inputs_record = heap.borrow_mut().insert_record(IndexMap::new());
+        bindings
+            .borrow_mut()
+            .insert("inputs".to_string(), inputs_record);
+
+        // Process the code (same as file mode)
+        pairs.for_each(|pair| match pair.as_rule() {
+            Rule::statement => {
+                if let Some(inner_pair) = pair.into_inner().next() {
+                    match inner_pair.as_rule() {
+                        Rule::expression => {
+                            let result = evaluate_pairs(
+                                inner_pair.into_inner(),
+                                Rc::clone(&heap),
+                                Rc::clone(&bindings),
+                                0,
+                            );
+
+                            match result {
+                                Err(error) => {
+                                    println!("[evaluation error] {}", error);
+                                    std::process::exit(1);
+                                }
+                                _ => {}
+                            }
+                        }
+                        Rule::output_declaration => {
+                            // Same output handling as file mode
+                            let inner_pairs_clone = inner_pair.clone().into_inner();
+
+                            let result = evaluate_pairs(
+                                inner_pair.clone().into_inner(),
+                                Rc::clone(&heap),
+                                Rc::clone(&bindings),
+                                0,
+                            );
+
+                            for pair in inner_pairs_clone {
+                                match pair.as_rule() {
+                                    Rule::identifier => {
+                                        let identifier = pair.as_str();
+                                        if let Some(value) = bindings.borrow().get(identifier) {
+                                            if let Ok(serializable) =
+                                                value.to_serializable_value(&heap.borrow())
+                                            {
+                                                outputs
+                                                    .insert(identifier.to_string(), serializable);
+                                            }
+                                        }
+                                        break;
+                                    }
+                                    Rule::assignment => {
+                                        if let Some(ident_pair) = pair.into_inner().next() {
+                                            let identifier = ident_pair.as_str();
+                                            if let Ok(value) = &result {
+                                                if let Ok(serializable) =
+                                                    value.to_serializable_value(&heap.borrow())
+                                                {
+                                                    outputs.insert(
+                                                        identifier.to_string(),
+                                                        serializable,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+
+                            if let Err(error) = result {
+                                println!("[evaluation error] {}", error);
+                                std::process::exit(1);
+                            }
+                        }
+                        Rule::comment => {}
+                        _ => unreachable!("unexpected rule: {:?}", inner_pair.as_rule()),
+                    }
+                }
+            }
+            Rule::EOI => {}
+            rule => unreachable!("unexpected rule: {:?}", rule),
+        });
+
+        // Output the collected outputs as JSON
+        let json_outputs: IndexMap<String, serde_json::Value> = outputs
+            .iter()
+            .map(|(k, v)| (k.clone(), v.to_json()))
+            .collect();
+        if let Ok(json) = serde_json::to_string(&json_outputs) {
+            println!("{}", json);
+        }
+
+        std::process::exit(0);
+    }
+
     if let Some(path) = args.path {
         let content = std::fs::read_to_string(&path).unwrap();
         let pairs = get_pairs(&content).unwrap();
@@ -33,7 +147,7 @@ fn main() -> ! {
         // Read stdin for inputs if available
         let mut stdin_content = String::new();
         if !io::stdin().is_terminal() {
-            // Try to read from stdin (non-blocking check)
+            // Try to read from stdin as JSON inputs (non-blocking check)
             let _ = io::stdin().read_to_string(&mut stdin_content);
         }
 
