@@ -302,6 +302,52 @@ pub enum SerializableValue {
 }
 
 impl SerializableValue {
+    /// Convert from serde_json::Value to SerializableValue
+    pub fn from_json(value: &serde_json::Value) -> SerializableValue {
+        match value {
+            serde_json::Value::Number(n) => SerializableValue::Number(n.as_f64().unwrap_or(0.0)),
+            serde_json::Value::Bool(b) => SerializableValue::Bool(*b),
+            serde_json::Value::Null => SerializableValue::Null,
+            serde_json::Value::String(s) => SerializableValue::String(s.clone()),
+            serde_json::Value::Array(arr) => {
+                SerializableValue::List(arr.iter().map(Self::from_json).collect())
+            }
+            serde_json::Value::Object(obj) => {
+                let map: IndexMap<String, SerializableValue> = obj
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Self::from_json(v)))
+                    .collect();
+                SerializableValue::Record(map)
+            }
+        }
+    }
+
+    /// Convert SerializableValue to clean serde_json::Value
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            SerializableValue::Number(n) => serde_json::Value::Number(
+                serde_json::Number::from_f64(*n).unwrap_or_else(|| serde_json::Number::from(0)),
+            ),
+            SerializableValue::Bool(b) => serde_json::Value::Bool(*b),
+            SerializableValue::Null => serde_json::Value::Null,
+            SerializableValue::String(s) => serde_json::Value::String(s.clone()),
+            SerializableValue::List(items) => {
+                serde_json::Value::Array(items.iter().map(|v| v.to_json()).collect())
+            }
+            SerializableValue::Record(fields) => {
+                let map: serde_json::Map<String, serde_json::Value> = fields
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.to_json()))
+                    .collect();
+                serde_json::Value::Object(map)
+            }
+            SerializableValue::Lambda(_) => serde_json::Value::String("<function>".to_string()),
+            SerializableValue::BuiltIn(name) => {
+                serde_json::Value::String(format!("<builtin: {}>", name))
+            }
+        }
+    }
+
     pub fn from_value<'h>(value: &Value, heap: &'h Heap) -> Result<SerializableValue> {
         match value {
             Value::Number(n) => Ok(SerializableValue::Number(*n)),
