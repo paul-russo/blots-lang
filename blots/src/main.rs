@@ -15,7 +15,8 @@ use rustyline::Editor;
 use serde_json;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::{self, IsTerminal, Read};
+use std::fs;
+use std::io::{self, IsTerminal, Read, Write};
 use std::rc::Rc;
 
 /// Parse JSON string into an IndexMap of Values
@@ -52,8 +53,41 @@ fn parse_json_inputs(
     }
 }
 
+/// Write outputs to file or stdout
+fn write_outputs(outputs: &IndexMap<String, SerializableValue>, output_path: Option<&String>) {
+    let json_outputs: IndexMap<String, serde_json::Value> = outputs
+        .iter()
+        .map(|(k, v)| (k.clone(), v.to_json()))
+        .collect();
+
+    if let Ok(json) = serde_json::to_string(&json_outputs) {
+        if let Some(path) = output_path {
+            // Write to file
+            match fs::File::create(path) {
+                Ok(mut file) => {
+                    if let Err(e) = file.write_all(json.as_bytes()) {
+                        eprintln!("[output error] Failed to write to file {}: {}", path, e);
+                        std::process::exit(1);
+                    }
+                    eprintln!("Output saved to {}", path);
+                }
+                Err(e) => {
+                    eprintln!("[output error] Failed to create file {}: {}", path, e);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            // Write to stdout
+            println!("{}", json);
+        }
+    }
+}
+
 fn main() -> ! {
     let args = Args::parse();
+
+    // Save output path for REPL mode (before args is moved)
+    let output_path = args.output.clone();
 
     // Handle subcommands (currently none)
 
@@ -172,14 +206,8 @@ fn main() -> ! {
             rule => unreachable!("unexpected rule: {:?}", rule),
         });
 
-        // Output the collected outputs as JSON
-        let json_outputs: IndexMap<String, serde_json::Value> = outputs
-            .iter()
-            .map(|(k, v)| (k.clone(), v.to_json()))
-            .collect();
-        if let Ok(json) = serde_json::to_string(&json_outputs) {
-            println!("{}", json);
-        }
+        // Output the collected outputs
+        write_outputs(&outputs, args.output.as_ref());
 
         std::process::exit(0);
     }
@@ -318,14 +346,8 @@ fn main() -> ! {
             rule => unreachable!("unexpected rule: {:?}", rule),
         });
 
-        // Output the collected outputs as JSON (empty object if no outputs)
-        let json_outputs: IndexMap<String, serde_json::Value> = outputs
-            .iter()
-            .map(|(k, v)| (k.clone(), v.to_json()))
-            .collect();
-        if let Ok(json) = serde_json::to_string(&json_outputs) {
-            println!("{}", json);
-        }
+        // Output the collected outputs
+        write_outputs(&outputs, args.output.as_ref());
 
         std::process::exit(0);
     }
@@ -381,16 +403,10 @@ fn main() -> ! {
                 }
                 Err(_) => {
                     // User pressed Ctrl+C or EOF - print outputs and exit
-                    if !outputs.is_empty() {
-                        let json_outputs: IndexMap<String, serde_json::Value> = outputs
-                            .iter()
-                            .map(|(k, v)| (k.clone(), v.to_json()))
-                            .collect();
-                        if let Ok(json) = serde_json::to_string(&json_outputs) {
-                            println!("{}", json);
-                        }
-                    } else {
+                    if outputs.is_empty() && output_path.is_none() {
                         println!("{{}}");
+                    } else {
+                        write_outputs(&outputs, output_path.as_ref());
                     }
                     std::process::exit(0);
                 }
@@ -425,16 +441,10 @@ fn main() -> ! {
             match exec_command(&line.trim()) {
                 CommandResult::Quit => {
                     // Print outputs before exiting
-                    if !outputs.is_empty() {
-                        let json_outputs: IndexMap<String, serde_json::Value> = outputs
-                            .iter()
-                            .map(|(k, v)| (k.clone(), v.to_json()))
-                            .collect();
-                        if let Ok(json) = serde_json::to_string(&json_outputs) {
-                            println!("{}", json);
-                        }
-                    } else {
+                    if outputs.is_empty() && output_path.is_none() {
                         println!("{{}}");
+                    } else {
+                        write_outputs(&outputs, output_path.as_ref());
                     }
                     std::process::exit(0);
                 }
