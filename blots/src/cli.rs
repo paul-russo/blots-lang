@@ -5,4 +5,8 @@ use clap::Parser;
 pub struct Args {
     /// Path to a source file to run
     pub path: Option<String>,
+
+    /// Evaluate stdin as Blots source code instead of JSON inputs
+    #[arg(short, long)]
+    pub evaluate: bool,
 }
