@@ -27,6 +27,7 @@ fn parse_json_inputs(
     json_str: &str,
     heap: &RefCell<Heap>,
     source: &str,
+    unnamed_counter: &mut usize,
 ) -> Result<IndexMap<String, Value>, String> {
     match serde_json::from_str::<serde_json::Value>(json_str) {
         Ok(json_value) => {
@@ -40,10 +41,16 @@ fn parse_json_inputs(
                     }
                 }
             } else {
-                // If not an object, wrap in a record with "value" key
+                // If not an object, wrap in a record with a unique key
                 let serializable = SerializableValue::from_json(&json_value);
                 if let Ok(val) = serializable.to_value(&mut heap.borrow_mut()) {
-                    inputs_map.insert("value".to_string(), val);
+                    let key = if *unnamed_counter == 0 {
+                        "value".to_string()
+                    } else {
+                        format!("value_{}", *unnamed_counter + 1)
+                    };
+                    *unnamed_counter += 1;
+                    inputs_map.insert(key, val);
                 }
             }
 
@@ -105,6 +112,7 @@ fn main() -> ! {
     // Collect inputs
     // Parse inputs from stdin and/or -i flag
     let mut inputs_map: IndexMap<String, Value> = IndexMap::new();
+    let mut unnamed_counter: usize = 0;
 
     // First, read from stdin if available (piped inputs)
     let mut stdin_content = String::new();
@@ -113,7 +121,7 @@ fn main() -> ! {
         stdin_consumed = true;
 
         if !stdin_content.trim().is_empty() {
-            match parse_json_inputs(&stdin_content, &heap, "stdin") {
+            match parse_json_inputs(&stdin_content, &heap, "stdin", &mut unnamed_counter) {
                 Ok(map) => inputs_map = map,
                 Err(e) => {
                     eprintln!("{}", e);
@@ -124,10 +132,11 @@ fn main() -> ! {
     }
 
     // Then, apply -i flag inputs (which override piped inputs)
-    if let Some(inputs_str) = &ARGS.inputs {
-        match parse_json_inputs(inputs_str, &heap, "--inputs") {
+    // Process each -i flag in order, with later ones overriding earlier ones
+    for (index, inputs_str) in ARGS.inputs.iter().enumerate() {
+        match parse_json_inputs(inputs_str, &heap, &format!("--inputs #{}", index + 1), &mut unnamed_counter) {
             Ok(map) => {
-                // Merge with existing inputs (--inputs overrides stdin)
+                // Merge with existing inputs (later --inputs override earlier ones)
                 for (k, v) in map {
                     inputs_map.insert(k, v);
                 }
@@ -157,19 +166,6 @@ fn main() -> ! {
         io::stdin().read_to_string(&mut content).unwrap();
 
         let pairs = get_pairs(&content).unwrap();
-
-        // Parse inputs from -i flag if provided
-        let _inputs_map = if let Some(inputs_str) = &ARGS.inputs {
-            match parse_json_inputs(inputs_str, &heap, "--inputs") {
-                Ok(map) => map,
-                Err(e) => {
-                    eprintln!("{}", e);
-                    std::process::exit(1);
-                }
-            }
-        } else {
-            IndexMap::new()
-        };
 
         // Process the code (same as file mode)
         pairs.for_each(|pair| match pair.as_rule() {
@@ -376,14 +372,6 @@ fn main() -> ! {
 
         std::process::exit(1);
     }
-
-    // In REPL mode, inputs is always an empty record (since stdin wasn't consumed)
-    let inputs_record = heap.borrow_mut().insert_record(IndexMap::new());
-
-    // Add inputs to bindings
-    bindings
-        .borrow_mut()
-        .insert("inputs".to_string(), inputs_record);
 
     // Initialize rustyline editor for command history
     let highlighter = BlotsHighlighter::new();

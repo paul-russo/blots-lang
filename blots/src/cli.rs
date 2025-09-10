@@ -11,9 +11,9 @@ pub struct Args {
     #[arg(short, long, group = "source")]
     pub evaluate: bool,
 
-    /// JSON object to use as inputs (can be combined with piped inputs)
-    #[arg(short, long)]
-    pub inputs: Option<String>,
+    /// JSON object to use as inputs (can be combined with piped inputs, can be specified multiple times)
+    #[arg(short, long, action = clap::ArgAction::Append)]
+    pub inputs: Vec<String>,
 
     /// Path to write output JSON file
     #[arg(short, long)]
