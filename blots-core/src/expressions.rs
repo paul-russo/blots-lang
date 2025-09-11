@@ -239,9 +239,28 @@ pub fn evaluate_ast(
             // Capture variables used in the lambda body
             let mut captured_scope = HashMap::new();
             let mut referenced_vars = Vec::new();
-            collect_free_variables(body, &mut referenced_vars, &mut HashSet::new());
+            let mut bound_vars = HashSet::new();
+
+            // Add lambda arguments to bound variables
+            for arg in args {
+                bound_vars.insert(arg.get_name().to_string());
+            }
+
+            collect_free_variables(body, &mut referenced_vars, &mut bound_vars);
 
             let current_bindings = bindings.borrow();
+
+            // Check for unbound variables
+            for var in &referenced_vars {
+                if !current_bindings.contains_key(var) && !is_built_in_function(var) {
+                    return Err(anyhow!(
+                        "name \"{}\" must be bound to a value when the function is defined",
+                        var
+                    ));
+                }
+            }
+
+            // Capture bound variables
             for var in referenced_vars {
                 if current_bindings.contains_key(&var) && !is_built_in_function(&var) {
                     captured_scope.insert(var.clone(), current_bindings[&var].clone());
@@ -2501,5 +2520,185 @@ mod tests {
         // [2, 1] > [1, 0] means [2 > 1, 1 > 0] = [true, true] => all true => true
         let result = parse_and_evaluate("[2, 1] > [1, 0]", None, None).unwrap();
         assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn early_binding_unbound_variable_fails() {
+        // Should fail - unbound variable y
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let result = parse_and_evaluate("f = x => x + y", Some(heap), Some(bindings));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("name \"y\" must be bound to a value when the function is defined"));
+    }
+
+    #[test]
+    fn early_binding_bound_variable_succeeds() {
+        // Should succeed - y is bound before function definition
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // First bind y
+        let _ = parse_and_evaluate("y = 5", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
+            .unwrap();
+
+        // Then define function that uses y
+        let result = parse_and_evaluate(
+            "g = x => x + y",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        );
+        assert!(result.is_ok());
+
+        // Verify the function works
+        let call_result = parse_and_evaluate("g(2)", Some(heap), Some(bindings)).unwrap();
+        assert_eq!(call_result, Value::Number(7.0));
+    }
+
+    #[test]
+    fn early_binding_builtin_function_succeeds() {
+        // Should succeed - using built-in functions
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let result = parse_and_evaluate(
+            "h = x => sin(x)",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        );
+        assert!(result.is_ok());
+
+        // Verify the function works
+        let call_result = parse_and_evaluate("h(0)", Some(heap), Some(bindings)).unwrap();
+        assert_eq!(call_result, Value::Number(0.0));
+    }
+
+    #[test]
+    fn early_binding_nested_function_unbound_fails() {
+        // Should fail - nested function with unbound variable z
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let result = parse_and_evaluate(
+            "outer = x => do { inner = y => y + z; return inner(x) }",
+            Some(heap),
+            Some(bindings),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("name \"z\" must be bound to a value when the function is defined"));
+    }
+
+    #[test]
+    fn early_binding_all_variables_bound() {
+        // Should succeed - all variables bound
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // Bind a and b
+        let _ = parse_and_evaluate("a = 10", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
+            .unwrap();
+        let _ = parse_and_evaluate("b = 20", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
+            .unwrap();
+
+        // Define function using a and b
+        let result = parse_and_evaluate(
+            "func = x => (x + a) * b",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        );
+        assert!(result.is_ok());
+
+        // Verify the function works
+        let call_result = parse_and_evaluate("func(5)", Some(heap), Some(bindings)).unwrap();
+        assert_eq!(call_result, Value::Number(300.0));
+    }
+
+    #[test]
+    fn early_binding_parameter_shadows_outer() {
+        // Should succeed - lambda parameter shadows outer variable
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // Bind outer x
+        let _ = parse_and_evaluate(
+            "x = 100",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+
+        // Define function with parameter x that shadows outer x
+        let result = parse_and_evaluate(
+            "shadow = x => x * 2",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        );
+        assert!(result.is_ok());
+
+        // Verify the function uses parameter, not outer variable
+        let call_result = parse_and_evaluate("shadow(5)", Some(heap), Some(bindings)).unwrap();
+        assert_eq!(call_result, Value::Number(10.0));
+    }
+
+    #[test]
+    fn early_binding_do_block_scope() {
+        // Should succeed - variable bound in do block before function definition
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        let result = parse_and_evaluate(
+            "later_func = do { c = 30; f = x => x + c; return f(10) }",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        );
+        assert!(result.is_ok());
+
+        // Verify the result
+        let later_func_result =
+            parse_and_evaluate("later_func", Some(heap), Some(bindings)).unwrap();
+        assert_eq!(later_func_result, Value::Number(40.0));
+    }
+
+    #[test]
+    fn early_binding_multiple_unbound_variables() {
+        // Should fail with first unbound variable
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let result = parse_and_evaluate("f = x => x + y + z", Some(heap), Some(bindings));
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        // Should mention at least one of the unbound variables
+        assert!(error_msg.contains("must be bound to a value when the function is defined"));
+        assert!(error_msg.contains("\"y\"") || error_msg.contains("\"z\""));
+    }
+
+    #[test]
+    fn early_binding_with_optional_args() {
+        // Should fail - unbound variable in function with optional args
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let result = parse_and_evaluate("f = (x, y?) => x + z", Some(heap), Some(bindings));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("name \"z\" must be bound to a value when the function is defined"));
+    }
+
+    #[test]
+    fn early_binding_with_rest_args() {
+        // Should fail - unbound variable in function with rest args
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let result = parse_and_evaluate("f = (x, ...rest) => x + y", Some(heap), Some(bindings));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("name \"y\" must be bound to a value when the function is defined"));
     }
 }
