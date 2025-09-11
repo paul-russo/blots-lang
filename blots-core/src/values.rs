@@ -803,18 +803,36 @@ impl Value {
         }
     }
 
-    /// Stringify the value. Returns the same thing as the Display trait impl, except for
+    /// Stringify the value. Returns the same thing as stringify, except for
     /// Value::String, which is returned without wrapping quotes. Use this for string
-    /// concatenation, formatting, etc.
-    pub fn stringify<'h>(&self, heap: &'h Heap) -> String {
+    /// concatenation, formatting, etc. Don't use this for displaying values to the user.
+    pub fn stringify_internal<'h>(&self, heap: &'h Heap) -> String {
+        self.stringify(heap, false)
+    }
+
+    pub fn stringify_external<'h>(&self, heap: &'h Heap) -> String {
+        self.stringify(heap, true)
+    }
+
+    fn stringify<'h>(&self, heap: &'h Heap, wrap_strings: bool) -> String {
         match self {
-            Value::String(p) => p.reify(heap).as_string().map(|s| format!("{}", s)).unwrap(),
+            Value::String(p) => p
+                .reify(heap)
+                .as_string()
+                .map(|s| {
+                    if wrap_strings {
+                        format!("\"{}\"", s)
+                    } else {
+                        format!("{}", s)
+                    }
+                })
+                .unwrap(),
             Value::List(p) => {
                 let mut result = String::from("[");
                 let list = p.reify(heap).as_list().unwrap();
 
                 for (i, value) in list.iter().enumerate() {
-                    result.push_str(&value.stringify(heap));
+                    result.push_str(&value.stringify(heap, wrap_strings));
                     if i < list.len() - 1 {
                         result.push_str(", ");
                     }
@@ -827,7 +845,7 @@ impl Value {
                 let record = p.reify(heap).as_record().unwrap();
 
                 for (i, (key, value)) in record.iter().enumerate() {
-                    result.push_str(&format!("{}: {}", key, value.stringify(heap)));
+                    result.push_str(&format!("{}: {}", key, value.stringify(heap, wrap_strings)));
                     if i < record.len() - 1 {
                         result.push_str(", ");
                     }
@@ -855,7 +873,12 @@ impl Value {
                 IterablePointer::List(l) => {
                     let list = l.reify(heap).as_list().unwrap();
                     let mut result = String::from("...");
-                    result.push_str(&list.iter().map(|v| v.stringify(heap)).collect::<String>());
+                    result.push_str(
+                        &list
+                            .iter()
+                            .map(|v| v.stringify(heap, wrap_strings))
+                            .collect::<String>(),
+                    );
                     result
                 }
                 IterablePointer::String(s) => {
@@ -867,7 +890,11 @@ impl Value {
                     let mut result = String::from("...");
                     result.push_str("{");
                     for (i, (key, value)) in record.iter().enumerate() {
-                        result.push_str(&format!("{}: {}", key, value.stringify(heap)));
+                        result.push_str(&format!(
+                            "{}: {}",
+                            key,
+                            value.stringify(heap, wrap_strings)
+                        ));
                         if i < record.len() - 1 {
                             result.push_str(", ");
                         }

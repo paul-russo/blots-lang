@@ -66,6 +66,44 @@ pub fn evaluate_pairs(
 }
 
 // Evaluate an AST expression
+/// Helper function to flatten spread values into a vector
+fn flatten_spread_value(
+    spread_ptr: &IterablePointer,
+    heap: &Rc<RefCell<Heap>>,
+) -> Result<Vec<Value>> {
+    match spread_ptr {
+        IterablePointer::List(list_ptr) => {
+            let borrowed_heap = heap.borrow();
+            Ok(list_ptr.reify(&borrowed_heap).as_list()?.clone())
+        }
+        IterablePointer::String(string_ptr) => {
+            let string = {
+                let borrowed_heap = heap.borrow();
+                string_ptr.reify(&borrowed_heap).as_string()?.to_string()
+            };
+            // Convert string to list of character values
+            Ok(string
+                .chars()
+                .map(|c| heap.borrow_mut().insert_string(c.to_string()))
+                .collect())
+        }
+        IterablePointer::Record(record_ptr) => {
+            let entries = {
+                let borrowed_heap = heap.borrow();
+                record_ptr.reify(&borrowed_heap).as_record()?.clone()
+            };
+            // Convert record to list of [key, value] pairs
+            Ok(entries
+                .into_iter()
+                .map(|(k, v)| {
+                    let key = heap.borrow_mut().insert_string(k);
+                    heap.borrow_mut().insert_list(vec![key, v])
+                })
+                .collect())
+        }
+    }
+}
+
 pub fn evaluate_ast(
     expr: &Expr,
     heap: Rc<RefCell<Heap>>,
@@ -100,38 +138,7 @@ pub fn evaluate_ast(
             for value in values {
                 match value {
                     Value::Spread(spread_ptr) => {
-                        // Handle spread values by extracting their contents
-                        let spread_values = match spread_ptr {
-                            IterablePointer::List(list_ptr) => {
-                                let borrowed_heap = heap.borrow();
-                                list_ptr.reify(&borrowed_heap).as_list()?.clone()
-                            }
-                            IterablePointer::String(string_ptr) => {
-                                let string = {
-                                    let borrowed_heap = heap.borrow();
-                                    string_ptr.reify(&borrowed_heap).as_string()?.to_string()
-                                };
-                                // Convert string to list of character values
-                                string
-                                    .chars()
-                                    .map(|c| heap.borrow_mut().insert_string(c.to_string()))
-                                    .collect()
-                            }
-                            IterablePointer::Record(record_ptr) => {
-                                let entries = {
-                                    let borrowed_heap = heap.borrow();
-                                    record_ptr.reify(&borrowed_heap).as_record()?.clone()
-                                };
-                                // Convert record to list of [key, value] pairs
-                                entries
-                                    .into_iter()
-                                    .map(|(k, v)| {
-                                        let key = heap.borrow_mut().insert_string(k);
-                                        heap.borrow_mut().insert_list(vec![key, v])
-                                    })
-                                    .collect()
-                            }
-                        };
+                        let spread_values = flatten_spread_value(&spread_ptr, &heap)?;
                         flattened.extend(spread_values);
                     }
                     _ => flattened.push(value),
@@ -352,38 +359,7 @@ pub fn evaluate_ast(
             for value in arg_vals_raw {
                 match value {
                     Value::Spread(spread_ptr) => {
-                        // Handle spread values by extracting their contents
-                        let spread_values = match spread_ptr {
-                            IterablePointer::List(list_ptr) => {
-                                let borrowed_heap = heap.borrow();
-                                list_ptr.reify(&borrowed_heap).as_list()?.clone()
-                            }
-                            IterablePointer::String(string_ptr) => {
-                                let string = {
-                                    let borrowed_heap = heap.borrow();
-                                    string_ptr.reify(&borrowed_heap).as_string()?.to_string()
-                                };
-                                // Convert string to list of character values
-                                string
-                                    .chars()
-                                    .map(|c| heap.borrow_mut().insert_string(c.to_string()))
-                                    .collect()
-                            }
-                            IterablePointer::Record(record_ptr) => {
-                                let entries = {
-                                    let borrowed_heap = heap.borrow();
-                                    record_ptr.reify(&borrowed_heap).as_record()?.clone()
-                                };
-                                // Convert record to list of [key, value] pairs
-                                entries
-                                    .into_iter()
-                                    .map(|(k, v)| {
-                                        let key = heap.borrow_mut().insert_string(k);
-                                        heap.borrow_mut().insert_list(vec![key, v])
-                                    })
-                                    .collect()
-                            }
-                        };
+                        let spread_values = flatten_spread_value(&spread_ptr, &heap)?;
                         arg_vals.extend(spread_values);
                     }
                     _ => arg_vals.push(value),
@@ -393,14 +369,17 @@ pub fn evaluate_ast(
             if !func_val.is_lambda() && !func_val.is_built_in() {
                 return Err(anyhow!(
                     "can't call a non-function: {}",
-                    func_val.stringify(&heap.borrow())
+                    func_val.stringify_internal(&heap.borrow())
                 ));
             }
 
             let def = {
                 let borrowed_heap = &heap.borrow();
                 get_function_def(&func_val, borrowed_heap).ok_or_else(|| {
-                    anyhow!("unknown function: {}", func_val.stringify(borrowed_heap))
+                    anyhow!(
+                        "unknown function: {}",
+                        func_val.stringify_internal(borrowed_heap)
+                    )
                 })?
             };
 
@@ -784,14 +763,17 @@ fn evaluate_binary_op_ast(
                             if !r.is_lambda() && !r.is_built_in() {
                                 return Err(anyhow!(
                                     "right-hand iterable contains non-function {}",
-                                    r.stringify(&heap.borrow())
+                                    r.stringify_internal(&heap.borrow())
                                 ));
                             }
 
                             let def = {
                                 let borrowed_heap = &heap.borrow();
                                 get_function_def(r, borrowed_heap).ok_or_else(|| {
-                                    anyhow!("unknown function: {}", r.stringify(borrowed_heap))
+                                    anyhow!(
+                                        "unknown function: {}",
+                                        r.stringify_internal(borrowed_heap)
+                                    )
                                 })?
                             };
 
@@ -1097,7 +1079,7 @@ fn evaluate_binary_op_ast(
                         if !scalar.is_callable() {
                             return Err(anyhow!(
                                 "can't call a non-function: {}",
-                                scalar.stringify(&heap.borrow())
+                                scalar.stringify_internal(&heap.borrow())
                             ));
                         }
 
@@ -1177,7 +1159,7 @@ fn evaluate_binary_op_ast(
                 if !rhs.is_callable() {
                     return Err(anyhow!(
                         "can't call a non-function ({} is of type {})",
-                        rhs.stringify(&heap.borrow()),
+                        rhs.stringify_internal(&heap.borrow()),
                         rhs.get_type()
                     ));
                 }
@@ -1187,7 +1169,7 @@ fn evaluate_binary_op_ast(
                 if def.is_none() {
                     return Err(anyhow!(
                         "unknown function: {}",
-                        rhs.stringify(&heap.borrow())
+                        rhs.stringify_internal(&heap.borrow())
                     ));
                 }
 
