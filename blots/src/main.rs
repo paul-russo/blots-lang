@@ -4,11 +4,11 @@ mod highlighter;
 
 use blots_core::expressions::evaluate_pairs;
 use blots_core::heap::Heap;
-use blots_core::parser::{get_pairs, Rule};
+use blots_core::parser::{Rule, get_pairs};
 use blots_core::values::{SerializableValue, Value};
 use clap::Parser;
 use cli::Args;
-use commands::{exec_command, is_command, CommandResult};
+use commands::{CommandResult, exec_command, is_command};
 use highlighter::BlotsHighlighter;
 use indexmap::IndexMap;
 use rustyline::Editor;
@@ -359,16 +359,22 @@ fn main() -> ! {
     if stdin_consumed {
         eprintln!("Error: Cannot start Interactive Mode after reading piped input.");
         eprintln!();
-        eprintln!("When piping JSON data, you must also specify what to do with it, by specifying a .blot file to run:");
+        eprintln!(
+            "When piping JSON data, you must also specify what to do with it, by specifying a .blot file to run:"
+        );
         eprintln!("    echo '{{\"x\": 42}}' | blots myfile.blot");
         eprintln!();
-        eprintln!("If you want to provide inputs that you can use in an interactive session, you can use the -i flag:");
+        eprintln!(
+            "If you want to provide inputs that you can use in an interactive session, you can use the -i flag:"
+        );
         eprintln!("    blots -i '{{\"x\": 42, \"y\": \"hello\"}}'");
         eprintln!();
         eprintln!(
             "You can also pipe Blots code with --evaluate. This can be combined with the -i flag:"
         );
-        eprintln!("    echo -e 'output result = inputs.x + inputs.y' | blots --evaluate -i '{{\"x\": 42, \"y\": \"hello\"}}'");
+        eprintln!(
+            "    echo -e 'output result = inputs.x + inputs.y' | blots --evaluate -i '{{\"x\": 42, \"y\": \"hello\"}}'"
+        );
 
         // If outputs were collected, write them before exiting
         if !outputs.is_empty() || output_path.is_some() {

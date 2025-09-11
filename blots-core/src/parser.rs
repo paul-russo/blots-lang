@@ -1,5 +1,5 @@
 pub use pest::Token;
-use pest::{iterators::Pairs, Parser};
+use pest::{Parser, iterators::Pairs};
 
 #[derive(Parser)]
 #[grammar = "grammar.pest"]

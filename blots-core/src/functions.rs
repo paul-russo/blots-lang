@@ -3,7 +3,7 @@ use crate::{
     heap::{Heap, HeapPointer, IterablePointer},
     values::{FunctionArity, LambdaArg, LambdaDef, ReifiedValue, Value},
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use dyn_fmt::AsStrFormatExt;
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::LazyLock};
 
