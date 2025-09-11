@@ -514,7 +514,7 @@ fn main() -> ! {
 
                             match result {
                                 Ok(value) => {
-                                    let value_str = value.stringify(&heap.borrow());
+                                    let value_str = value.stringify_external(&heap.borrow());
 
                                     println!("{}", highlighter.highlight_result(&value_str));
                                 }
@@ -565,7 +565,8 @@ fn main() -> ! {
                                                     );
 
                                                     // Show value and confirmation in REPL
-                                                    let value_str = value.stringify(&heap.borrow());
+                                                    let value_str =
+                                                        value.stringify_external(&heap.borrow());
                                                     println!(
                                                         "{}",
                                                         highlighter.highlight_result(&value_str)

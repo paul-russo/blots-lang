@@ -755,7 +755,7 @@ impl BuiltInFunction {
                     let delimeter = args[1].as_string(borrowed_heap)?;
                     let list = args[0].as_list(borrowed_heap)?;
                     list.iter()
-                        .map(|v| v.stringify(borrowed_heap))
+                        .map(|v| v.stringify_internal(borrowed_heap))
                         .collect::<Vec<String>>()
                         .join(&delimeter)
                 };
@@ -795,7 +795,7 @@ impl BuiltInFunction {
             }
 
             Self::ToString => {
-                let string = args[0].stringify(&heap.borrow());
+                let string = args[0].stringify_internal(&heap.borrow());
                 Ok(heap.borrow_mut().insert_string(string))
             }
 
@@ -831,7 +831,7 @@ impl BuiltInFunction {
                     let borrowed_heap = &heap.borrow();
                     &args[1..]
                         .into_iter()
-                        .map(|v| v.stringify(borrowed_heap))
+                        .map(|v| v.stringify_internal(borrowed_heap))
                         .collect::<Vec<String>>()
                 };
 
@@ -845,13 +845,19 @@ impl BuiltInFunction {
                 .borrow_mut()
                 .insert_string(args[0].get_type().to_string())),
 
-            Self::Arity => Ok(Value::Number(
-                match args[0].as_lambda(&heap.borrow())?.get_arity() {
+            Self::Arity => {
+                let arity = match args[0] {
+                    Value::Lambda(p) => p.reify(&heap.borrow()).as_lambda()?.get_arity(),
+                    Value::BuiltIn(built_in) => built_in.arity(),
+                    _ => return Err(anyhow!("argument must be a function or built-in function")),
+                };
+
+                Ok(Value::Number(match arity {
                     FunctionArity::Exact(n) => n as f64,
                     FunctionArity::AtLeast(n) => n as f64,
                     FunctionArity::Between(min, _max) => min as f64,
-                },
-            )),
+                }))
+            }
 
             // Record functions
             Self::Keys => {
@@ -896,14 +902,14 @@ impl BuiltInFunction {
                 let borrowed_heap = &heap.borrow();
 
                 let output = if args.len() == 1 {
-                    args[0].stringify(borrowed_heap)
+                    args[0].stringify_internal(borrowed_heap)
                 } else {
                     let format_str = args[0].as_string(borrowed_heap).map_err(|_| {
                         anyhow!("first argument must be a formatting string if multiple arguments are given")
                     })?;
                     let format_args = &args[1..]
                         .into_iter()
-                        .map(|v| v.stringify(borrowed_heap))
+                        .map(|v| v.stringify_internal(borrowed_heap))
                         .collect::<Vec<String>>();
                     format_str.format(format_args)
                 };
