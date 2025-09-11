@@ -35,85 +35,6 @@ Coming soon.
 - **Special**: `??` (null-coalesce), `...` (spread)
 - **Conditional**: `if cond then expr else expr`
 
-### Built-in Functions
-
-#### Math Functions
-- `sqrt(x)` - returns the square root of x
-- `sin(x)` - returns the sine of x (in radians)
-- `cos(x)` - returns the cosine of x (in radians)
-- `tan(x)` - returns the tangent of x (in radians)
-- `asin(x)` - returns the arcsine of x (in radians)
-- `acos(x)` - returns the arccosine of x (in radians)
-- `atan(x)` - returns the arctangent of x (in radians)
-- `log(x)` - returns the natural logarithm of x
-- `log10(x)` - returns the base-10 logarithm of x
-- `exp(x)` - returns _e_ raised to the power of x
-- `abs(x)` - returns the absolute value of x
-- `floor(x)` - returns the largest integer less than or equal to x (e.g. `2.7` becomes `2` and `-2.7` becomes `3`)
-- `ceil(x)` - returns the smallest integer greater than or equal to x (e.g. `2.1` becomes `3`)
-- `round(x)` - returns x rounded to the nearest integer (e.g. `2.7` becomes `3`)
-- `trunc(x)` - returns the integer part of x (removes fractional part) (e.g. `2.7` becomes `2` and `-2.7` becomes `-2`)
-
-#### Aggregate Functions
-- `min(list)` - returns the minimum given value from a list
-- `max(list)` - returns the maximum value from a list
-- `avg(list)` - returns the average (mean) of values in a list
-- `sum(list)` - returns the sum of all values in a list
-- `prod(list)` - returns the product of all values in a list
-- `median(list)` - returns the median value from a list
-- `percentile(list, p)` - returns the percentile value at position p (0-100) from a list
-
-#### List Functions
-- `range(n)` - returns `[0, 1, ..., n-1]`
-- `range(start, end)` - returns `[start, start+1, ..., end-1]`
-- `len(list)` - returns the length of a list
-- `head(list)` - returns the first element of a list
-- `tail(list)` - returns all but the first element of a list
-- `slice(list, start, end)` - returns a sublist from start (inclusive) to end (exclusive) indices
-- `concat(list1, list2, ...)` - concatenates multiple lists
-- `dot(list1, list2)` - returns the dot product of two lists
-- `unique(list)` - returns unique elements from a list
-- `sort(list)` - returns a sorted copy of the list (ascending)
-- `sort_by(list, fn)` - sorts a list using a comparison function
-- `reverse(list)` - returns a reversed copy of the list
-
-#### Higher-Order Functions
-- `map(list, fn)` - applies a function to each element of a list
-- `reduce(list, fn, initial)` - reduces a list to a single value using a function
-- `filter(list, fn)` - returns elements where the function returns true
-- `every(list, fn)` - returns true if all elements satisfy the predicate
-- `some(list, fn)` - returns true if any element satisfies the predicate
-
-#### String Functions
-- `split(string, delimiter)` - splits a string into a list
-- `join(list, delimiter)` - joins a list into a string
-- `replace(string, search, replacement)` - replaces occurrences in a string
-- `trim(string)` - removes leading and trailing whitespace
-- `uppercase(string)` - converts string to uppercase
-- `lowercase(string)` - converts string to lowercase
-- `to_string(value)` - converts a value to its string representation
-- `to_number(string)` - converts a string to a number
-- `includes(string, substring)` - checks if string contains substring
-- `format(string, ...values)` - formats a string with placeholder values (e.g. `format("answer: {}", 42))
-
-#### Type Functions
-- `typeof(value)` - returns the type of a value ("number", "string", "boolean", "null", "list", "record", "built-in function", or "function")
-- `arity(fn)` - returns the minimum number of parameters a function expects
-
-#### Record Functions
-- `keys(record)` - returns a list of all keys in a record
-- `values(record)` - returns a list of all values in a record
-- `entries(record)` - returns a list of [key, value] pairs from a record
-
-
-### Constants
-
-Access mathematical constants via `constants.*`:
-- `constants.pi`: The mathematical constant _π_.
-- `constants.e`: The mathematical constant _e_.
-- `constants.max_value`: The maximum value that can be represented as a 64-bit floating point number.
-- `constants.min_value`: The minimum non-zero value that can be represented as a 64-bit floating point number.
-
 ### Bindings
 
 There are no mutable variables in Blots. Instead, values are _bound_ to a _name_. Once created, a _binding_ cannot be mutated; it's the same for the life of the program. This property makes Blots code more "pure": it is difficult to construct an expression in Blots that can return a different result for the same inputs. This also means that functions can be losslessly serialized and `output` from programs.
@@ -199,3 +120,81 @@ Comments start with `//`, and run until the end of the line:
 // This is a comment
 x = 42 // This is also a comment
 ```
+
+### Built-in Functions
+
+#### Math Functions
+- `sqrt(x)` - returns the square root of x
+- `sin(x)` - returns the sine of x (in radians)
+- `cos(x)` - returns the cosine of x (in radians)
+- `tan(x)` - returns the tangent of x (in radians)
+- `asin(x)` - returns the arcsine of x (in radians)
+- `acos(x)` - returns the arccosine of x (in radians)
+- `atan(x)` - returns the arctangent of x (in radians)
+- `log(x)` - returns the natural logarithm of x
+- `log10(x)` - returns the base-10 logarithm of x
+- `exp(x)` - returns _e_ raised to the power of x
+- `abs(x)` - returns the absolute value of x
+- `floor(x)` - returns the largest integer less than or equal to x (e.g. `2.7` becomes `2` and `-2.7` becomes `3`)
+- `ceil(x)` - returns the smallest integer greater than or equal to x (e.g. `2.1` becomes `3`)
+- `round(x)` - returns x rounded to the nearest integer (e.g. `2.7` becomes `3`)
+- `trunc(x)` - returns the integer part of x (removes fractional part) (e.g. `2.7` becomes `2` and `-2.7` becomes `-2`)
+
+#### Aggregate Functions
+- `min(list)` - returns the minimum given value from a list
+- `max(list)` - returns the maximum value from a list
+- `avg(list)` - returns the average (mean) of values in a list
+- `sum(list)` - returns the sum of all values in a list
+- `prod(list)` - returns the product of all values in a list
+- `median(list)` - returns the median value from a list
+- `percentile(list, p)` - returns the percentile value at position p (0-100) from a list
+
+#### List Functions
+- `range(n)` - returns `[0, 1, ..., n-1]`
+- `range(start, end)` - returns `[start, start+1, ..., end-1]`
+- `len(list)` - returns the length of a list
+- `head(list)` - returns the first element of a list
+- `tail(list)` - returns all but the first element of a list
+- `slice(list, start, end)` - returns a sublist from start (inclusive) to end (exclusive) indices
+- `concat(list1, list2, ...)` - concatenates multiple lists
+- `dot(list1, list2)` - returns the dot product of two lists
+- `unique(list)` - returns unique elements from a list
+- `sort(list)` - returns a sorted copy of the list (ascending)
+- `sort_by(list, fn)` - sorts a list using a comparison function
+- `reverse(list)` - returns a reversed copy of the list
+
+#### Higher-Order Functions
+- `map(list, fn)` - applies a function to each element of a list
+- `reduce(list, fn, initial)` - reduces a list to a single value using a function
+- `filter(list, fn)` - returns elements where the function returns true
+- `every(list, fn)` - returns true if all elements satisfy the predicate
+- `some(list, fn)` - returns true if any element satisfies the predicate
+
+#### String Functions
+- `split(string, delimiter)` - splits a string into a list
+- `join(list, delimiter)` - joins a list into a string
+- `replace(string, search, replacement)` - replaces occurrences in a string
+- `trim(string)` - removes leading and trailing whitespace
+- `uppercase(string)` - converts string to uppercase
+- `lowercase(string)` - converts string to lowercase
+- `to_string(value)` - converts a value to its string representation
+- `to_number(string)` - converts a string to a number
+- `includes(string, substring)` - checks if string contains substring
+- `format(string, ...values)` - formats a string with placeholder values (e.g. `format("answer: {}", 42))
+
+#### Type Functions
+- `typeof(value)` - returns the type of a value ("number", "string", "boolean", "null", "list", "record", "built-in function", or "function")
+- `arity(fn)` - returns the minimum number of parameters a function expects
+
+#### Record Functions
+- `keys(record)` - returns a list of all keys in a record
+- `values(record)` - returns a list of all values in a record
+- `entries(record)` - returns a list of [key, value] pairs from a record
+
+### Constants
+
+Access mathematical constants via `constants.*`:
+- `constants.pi`: The mathematical constant _π_.
+- `constants.e`: The mathematical constant _e_.
+- `constants.max_value`: The maximum value that can be represented as a 64-bit floating point number.
+- `constants.min_value`: The minimum non-zero value that can be represented as a 64-bit floating point number.
