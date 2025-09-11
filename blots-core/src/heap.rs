@@ -132,6 +132,12 @@ impl Heap {
     }
 }
 
+impl Default for Heap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub trait HeapPointer<'h> {
     fn reify(&self, heap: &'h Heap) -> &'h HeapValue;
     fn reify_mut(&self, heap: &'h mut Heap) -> &'h mut HeapValue;
