@@ -12,7 +12,6 @@ use commands::{CommandResult, exec_command, is_command};
 use highlighter::BlotsHighlighter;
 use indexmap::IndexMap;
 use rustyline::Editor;
-use serde_json;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
@@ -20,7 +19,7 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::rc::Rc;
 use std::sync::LazyLock;
 
-static ARGS: LazyLock<Args> = LazyLock::new(|| Args::parse());
+static ARGS: LazyLock<Args> = LazyLock::new(Args::parse);
 
 /// Parse JSON string into an IndexMap of Values
 fn parse_json_inputs(
@@ -185,12 +184,9 @@ fn main() -> ! {
                                 0,
                             );
 
-                            match result {
-                                Err(error) => {
-                                    println!("[evaluation error] {}", error);
-                                    std::process::exit(1);
-                                }
-                                _ => {}
+                            if let Err(error) = result {
+                                println!("[evaluation error] {}", error);
+                                std::process::exit(1);
                             }
                         }
                         Rule::output_declaration => {
@@ -208,28 +204,23 @@ fn main() -> ! {
                                 match pair.as_rule() {
                                     Rule::identifier => {
                                         let identifier = pair.as_str();
-                                        if let Some(value) = bindings.borrow().get(identifier) {
-                                            if let Ok(serializable) =
+                                        if let Some(value) = bindings.borrow().get(identifier)
+                                            && let Ok(serializable) =
                                                 value.to_serializable_value(&heap.borrow())
-                                            {
-                                                outputs
-                                                    .insert(identifier.to_string(), serializable);
-                                            }
+                                        {
+                                            outputs.insert(identifier.to_string(), serializable);
                                         }
                                         break;
                                     }
                                     Rule::assignment => {
                                         if let Some(ident_pair) = pair.into_inner().next() {
                                             let identifier = ident_pair.as_str();
-                                            if let Ok(value) = &result {
-                                                if let Ok(serializable) =
+                                            if let Ok(value) = &result
+                                                && let Ok(serializable) =
                                                     value.to_serializable_value(&heap.borrow())
-                                                {
-                                                    outputs.insert(
-                                                        identifier.to_string(),
-                                                        serializable,
-                                                    );
-                                                }
+                                            {
+                                                outputs
+                                                    .insert(identifier.to_string(), serializable);
                                             }
                                         }
                                         break;
@@ -259,7 +250,7 @@ fn main() -> ! {
     }
 
     if let Some(path) = &ARGS.path {
-        let content = std::fs::read_to_string(&path).unwrap();
+        let content = std::fs::read_to_string(path).unwrap();
         let pairs = get_pairs(&content).unwrap();
 
         pairs.for_each(|pair| match pair.as_rule() {
@@ -274,12 +265,9 @@ fn main() -> ! {
                                 0,
                             );
 
-                            match result {
-                                Err(error) => {
-                                    println!("[evaluation error] {}", error);
-                                    std::process::exit(1);
-                                }
-                                _ => {}
+                            if let Err(error) = result {
+                                println!("[evaluation error] {}", error);
+                                std::process::exit(1);
                             }
                         }
                         Rule::output_declaration => {
@@ -301,13 +289,11 @@ fn main() -> ! {
                                     Rule::identifier => {
                                         // output x - reference existing binding
                                         let identifier = pair.as_str();
-                                        if let Some(value) = bindings.borrow().get(identifier) {
-                                            if let Ok(serializable) =
+                                        if let Some(value) = bindings.borrow().get(identifier)
+                                            && let Ok(serializable) =
                                                 value.to_serializable_value(&heap.borrow())
-                                            {
-                                                outputs
-                                                    .insert(identifier.to_string(), serializable);
-                                            }
+                                        {
+                                            outputs.insert(identifier.to_string(), serializable);
                                         }
                                         break;
                                     }
@@ -315,15 +301,12 @@ fn main() -> ! {
                                         // output x = expr - get the identifier from the assignment
                                         if let Some(ident_pair) = pair.into_inner().next() {
                                             let identifier = ident_pair.as_str();
-                                            if let Ok(value) = &result {
-                                                if let Ok(serializable) =
+                                            if let Ok(value) = &result
+                                                && let Ok(serializable) =
                                                     value.to_serializable_value(&heap.borrow())
-                                                {
-                                                    outputs.insert(
-                                                        identifier.to_string(),
-                                                        serializable,
-                                                    );
-                                                }
+                                            {
+                                                outputs
+                                                    .insert(identifier.to_string(), serializable);
                                             }
                                         }
                                         break;
@@ -459,8 +442,8 @@ fn main() -> ! {
         };
 
         // Check for commands only on first line
-        if !continuation && is_command(&line.trim()) {
-            match exec_command(&line.trim()) {
+        if !continuation && is_command(line.trim()) {
+            match exec_command(line.trim()) {
                 CommandResult::Quit => {
                     // Print outputs before exiting
                     if outputs.is_empty() && output_path.is_none() {
@@ -500,10 +483,10 @@ fn main() -> ! {
         };
 
         // Add to history if using rustyline
-        if let Some(ref mut editor) = rl {
-            if !accumulated_input.trim().is_empty() {
-                let _ = editor.add_history_entry(accumulated_input.trim());
-            }
+        if let Some(ref mut editor) = rl
+            && !accumulated_input.trim().is_empty()
+        {
+            let _ = editor.add_history_entry(accumulated_input.trim());
         }
 
         pairs.for_each(|pair| match pair.as_rule() {
@@ -545,15 +528,13 @@ fn main() -> ! {
                                     Rule::identifier => {
                                         // output x - reference existing binding
                                         let identifier = pair.as_str();
-                                        if let Some(value) = bindings.borrow().get(identifier) {
-                                            if let Ok(serializable) =
+                                        if let Some(value) = bindings.borrow().get(identifier)
+                                            && let Ok(serializable) =
                                                 value.to_serializable_value(&heap.borrow())
-                                            {
-                                                outputs
-                                                    .insert(identifier.to_string(), serializable);
+                                        {
+                                            outputs.insert(identifier.to_string(), serializable);
 
-                                                println!("[output '{}' recorded]", identifier);
-                                            }
+                                            println!("[output '{}' recorded]", identifier);
                                         }
                                         break;
                                     }
@@ -561,24 +542,21 @@ fn main() -> ! {
                                         // output x = expr - get the identifier from the assignment
                                         if let Some(ident_pair) = pair.into_inner().next() {
                                             let identifier = ident_pair.as_str();
-                                            if let Ok(value) = &result {
-                                                if let Ok(serializable) =
+                                            if let Ok(value) = &result
+                                                && let Ok(serializable) =
                                                     value.to_serializable_value(&heap.borrow())
-                                                {
-                                                    outputs.insert(
-                                                        identifier.to_string(),
-                                                        serializable,
-                                                    );
+                                            {
+                                                outputs
+                                                    .insert(identifier.to_string(), serializable);
 
-                                                    // Show value and confirmation in REPL
-                                                    let value_str =
-                                                        value.stringify_external(&heap.borrow());
-                                                    println!(
-                                                        "{}",
-                                                        highlighter.highlight_result(&value_str)
-                                                    );
-                                                    println!("[output '{}' recorded]", identifier);
-                                                }
+                                                // Show value and confirmation in REPL
+                                                let value_str =
+                                                    value.stringify_external(&heap.borrow());
+                                                println!(
+                                                    "{}",
+                                                    highlighter.highlight_result(&value_str)
+                                                );
+                                                println!("[output '{}' recorded]", identifier);
                                             }
                                         }
                                         break;

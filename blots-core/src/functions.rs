@@ -441,7 +441,7 @@ impl BuiltInFunction {
                     return Err(anyhow!("range requires start to be less than end"));
                 }
 
-                if !f64::is_finite(start as f64) || !f64::is_finite(end as f64) {
+                if !f64::is_finite(start) || !f64::is_finite(end) {
                     return Err(anyhow!("range requires finite numbers"));
                 }
 
@@ -524,7 +524,7 @@ impl BuiltInFunction {
                 let heap = &heap.borrow();
                 let list = args[0].as_list(heap)?;
 
-                if p < 0.0 || p > 100.0 {
+                if !(0.0..=100.0).contains(&p) {
                     return Err(anyhow!("percentile must be between 0 and 100"));
                 }
 
@@ -757,7 +757,7 @@ impl BuiltInFunction {
                     list.iter()
                         .map(|v| v.stringify_internal(borrowed_heap))
                         .collect::<Vec<String>>()
-                        .join(&delimeter)
+                        .join(delimeter)
                 };
 
                 Ok(heap.borrow_mut().insert_string(joined_string))
@@ -810,8 +810,7 @@ impl BuiltInFunction {
                 match &args[0].reify(&heap.borrow())? {
                     ReifiedValue::List(l, _) => Ok(Value::Bool(
                         (*l).iter()
-                            .find(|v| v.as_string(&heap.borrow()).unwrap().eq(&needle))
-                            .is_some(),
+                            .any(|v| v.as_string(&heap.borrow()).unwrap().eq(&needle)),
                     )),
                     ReifiedValue::String(s, _) => Ok(Value::Bool(s.contains(&needle))),
                     _ => Err(anyhow!("second argument must be a list or string")),
@@ -830,7 +829,7 @@ impl BuiltInFunction {
                 let format_args = {
                     let borrowed_heap = &heap.borrow();
                     &args[1..]
-                        .into_iter()
+                        .iter()
                         .map(|v| v.stringify_internal(borrowed_heap))
                         .collect::<Vec<String>>()
                 };
@@ -908,7 +907,7 @@ impl BuiltInFunction {
                         anyhow!("first argument must be a formatting string if multiple arguments are given")
                     })?;
                     let format_args = &args[1..]
-                        .into_iter()
+                        .iter()
                         .map(|v| v.stringify_internal(borrowed_heap))
                         .collect::<Vec<String>>();
                     format_str.format(format_args)
@@ -1307,13 +1306,13 @@ impl FunctionDef {
                 }
 
                 if let Some(inputs) = bindings.borrow().get("inputs") {
-                    new_bindings.insert(String::from("inputs"), inputs.clone());
+                    new_bindings.insert(String::from("inputs"), *inputs);
                 }
 
                 for (idx, expected_arg) in expected_args.iter().enumerate() {
                     match expected_arg {
                         LambdaArg::Required(arg_name) => {
-                            new_bindings.insert(arg_name.clone(), args[idx].clone());
+                            new_bindings.insert(arg_name.clone(), args[idx]);
                         }
                         LambdaArg::Optional(arg_name) => {
                             new_bindings.insert(
@@ -1351,7 +1350,7 @@ impl FunctionDef {
                     end_var_env: Some(end_var_env),
                 });
 
-                return return_value;
+                return_value
             }
             FunctionDef::BuiltIn(built_in) => {
                 let return_value = built_in
@@ -1367,7 +1366,7 @@ impl FunctionDef {
                     end_var_env: None,
                 });
 
-                return return_value;
+                return_value
             }
         }
     }
@@ -1378,14 +1377,14 @@ pub fn is_built_in_function(ident: &str) -> bool {
 }
 
 pub fn get_built_in_function_def_by_ident(ident: &str) -> Option<FunctionDef> {
-    BuiltInFunction::from_ident(ident).map(|built_in| FunctionDef::BuiltIn(built_in))
+    BuiltInFunction::from_ident(ident).map(FunctionDef::BuiltIn)
 }
 
 pub fn get_built_in_function_idents() -> Vec<&'static str> {
     BuiltInFunction::all_names()
 }
 
-pub fn get_function_def<'h>(value: &Value, heap: &'h Heap) -> Option<FunctionDef> {
+pub fn get_function_def(value: &Value, heap: &Heap) -> Option<FunctionDef> {
     match value {
         Value::Lambda(pointer) => Some(FunctionDef::Lambda(
             pointer.reify(heap).as_lambda().ok()?.clone(),
@@ -1489,7 +1488,7 @@ mod tests {
             (42.4543, 2.0, 42.45),
             (42.4543, 3.0, 42.454),
             (42.4543, 4.0, 42.4543),
-            (3.14159, 4.0, 3.1416),
+            (4.14159, 4.0, 4.1416),
             (0.005, 2.0, 0.01),
             (0.995, 2.0, 1.0),
             // Note: 9.995 has floating point representation issues

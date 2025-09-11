@@ -348,7 +348,7 @@ impl SerializableValue {
         }
     }
 
-    pub fn from_value<'h>(value: &Value, heap: &'h Heap) -> Result<SerializableValue> {
+    pub fn from_value(value: &Value, heap: &Heap) -> Result<SerializableValue> {
         match value {
             Value::Number(n) => Ok(SerializableValue::Number(*n)),
             Value::Bool(b) => Ok(SerializableValue::Bool(*b)),
@@ -394,7 +394,7 @@ impl SerializableValue {
         }
     }
 
-    pub fn to_value<'h>(&self, heap: &'h mut Heap) -> Result<Value> {
+    pub fn to_value(&self, heap: &mut Heap) -> Result<Value> {
         match self {
             SerializableValue::Number(n) => Ok(Value::Number(*n)),
             SerializableValue::Bool(b) => Ok(Value::Bool(*b)),
@@ -445,7 +445,7 @@ impl SerializableValue {
             }
             SerializableValue::BuiltIn(ident) => BuiltInFunction::from_ident(ident)
                 .ok_or(anyhow!("built-in function with ident {} not found", ident))
-                .map(|built_in| Value::BuiltIn(built_in)),
+                .map(Value::BuiltIn),
         }
     }
 }
@@ -457,9 +457,9 @@ pub enum PrimitiveValue {
     Null,
 }
 
-impl Into<Value> for PrimitiveValue {
-    fn into(self) -> Value {
-        match self {
+impl From<PrimitiveValue> for Value {
+    fn from(val: PrimitiveValue) -> Self {
+        match val {
             PrimitiveValue::Number(n) => Value::Number(n),
             PrimitiveValue::Bool(b) => Value::Bool(b),
             PrimitiveValue::Null => Value::Null,
@@ -467,9 +467,9 @@ impl Into<Value> for PrimitiveValue {
     }
 }
 
-impl Into<SerializableValue> for PrimitiveValue {
-    fn into(self) -> SerializableValue {
-        match self {
+impl From<PrimitiveValue> for SerializableValue {
+    fn from(val: PrimitiveValue) -> Self {
+        match val {
             PrimitiveValue::Number(n) => SerializableValue::Number(n),
             PrimitiveValue::Bool(b) => SerializableValue::Bool(b),
             PrimitiveValue::Null => SerializableValue::Null,
@@ -785,7 +785,7 @@ impl Value {
         }
     }
 
-    pub fn to_serializable_value<'h>(&self, heap: &'h Heap) -> Result<SerializableValue> {
+    pub fn to_serializable_value(&self, heap: &Heap) -> Result<SerializableValue> {
         SerializableValue::from_value(self, heap)
     }
 
@@ -806,15 +806,15 @@ impl Value {
     /// Stringify the value. Returns the same thing as stringify, except for
     /// Value::String, which is returned without wrapping quotes. Use this for string
     /// concatenation, formatting, etc. Don't use this for displaying values to the user.
-    pub fn stringify_internal<'h>(&self, heap: &'h Heap) -> String {
+    pub fn stringify_internal(&self, heap: &Heap) -> String {
         self.stringify(heap, false)
     }
 
-    pub fn stringify_external<'h>(&self, heap: &'h Heap) -> String {
+    pub fn stringify_external(&self, heap: &Heap) -> String {
         self.stringify(heap, true)
     }
 
-    fn stringify<'h>(&self, heap: &'h Heap, wrap_strings: bool) -> String {
+    fn stringify(&self, heap: &Heap, wrap_strings: bool) -> String {
         match self {
             Value::String(p) => p
                 .reify(heap)
@@ -823,7 +823,7 @@ impl Value {
                     if wrap_strings {
                         format!("\"{}\"", s)
                     } else {
-                        format!("{}", s)
+                        s.to_string()
                     }
                 })
                 .unwrap(),
@@ -837,7 +837,7 @@ impl Value {
                         result.push_str(", ");
                     }
                 }
-                result.push_str("]");
+                result.push(']');
                 result
             }
             Value::Record(p) => {
@@ -850,7 +850,7 @@ impl Value {
                         result.push_str(", ");
                     }
                 }
-                result.push_str("}");
+                result.push('}');
                 result
             }
             Value::Lambda(p) => {
@@ -888,7 +888,7 @@ impl Value {
                 IterablePointer::Record(r) => {
                     let record = r.reify(heap).as_record().unwrap();
                     let mut result = String::from("...");
-                    result.push_str("{");
+                    result.push('{');
                     for (i, (key, value)) in record.iter().enumerate() {
                         result.push_str(&format!(
                             "{}: {}",
@@ -899,7 +899,7 @@ impl Value {
                             result.push_str(", ");
                         }
                     }
-                    result.push_str("}");
+                    result.push('}');
                     result
                 }
             },

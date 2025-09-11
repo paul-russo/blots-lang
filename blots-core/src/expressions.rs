@@ -263,7 +263,7 @@ pub fn evaluate_ast(
             // Capture bound variables
             for var in referenced_vars {
                 if current_bindings.contains_key(&var) && !is_built_in_function(&var) {
-                    captured_scope.insert(var.clone(), current_bindings[&var].clone());
+                    captured_scope.insert(var.clone(), current_bindings[&var]);
                 }
             }
 
@@ -775,13 +775,7 @@ fn evaluate_binary_op_ast(
                     let mapped_list = l_vec
                         .iter()
                         .zip(&r_vec)
-                        .map(|(l, r)| {
-                            if *l == Value::Null {
-                                Ok(r.clone())
-                            } else {
-                                Ok(l.clone())
-                            }
-                        })
+                        .map(|(l, r)| if *l == Value::Null { Ok(*r) } else { Ok(*l) })
                         .collect::<Result<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
@@ -808,8 +802,8 @@ fn evaluate_binary_op_ast(
                             };
 
                             def.call(
-                                r.clone(),
-                                vec![l.clone()],
+                                *r,
+                                vec![*l],
                                 Rc::clone(&heap),
                                 Rc::clone(&bindings),
                                 call_depth,
@@ -1084,9 +1078,9 @@ fn evaluate_binary_op_ast(
                             .iter()
                             .map(|v| {
                                 if *v == Value::Null {
-                                    Ok(scalar.clone())
+                                    Ok(scalar)
                                 } else {
-                                    Ok(v.clone())
+                                    Ok(*v)
                                 }
                             })
                             .collect::<Result<Vec<Value>>>()?
@@ -1095,9 +1089,9 @@ fn evaluate_binary_op_ast(
                             .iter()
                             .map(|v| {
                                 if scalar == Value::Null {
-                                    Ok(v.clone())
+                                    Ok(*v)
                                 } else {
-                                    Ok(scalar.clone())
+                                    Ok(scalar)
                                 }
                             })
                             .collect::<Result<Vec<Value>>>()?
@@ -1127,9 +1121,9 @@ fn evaluate_binary_op_ast(
 
                         Ok(heap.borrow_mut().insert_list(mapped_list))
                     } else {
-                        return Err(anyhow!(
+                        Err(anyhow!(
                             "pipe operator '|>' requires function on right side"
-                        ));
+                        ))
                     }
                 }
             }
@@ -1203,13 +1197,13 @@ fn evaluate_binary_op_ast(
                     ));
                 }
 
-                return def.unwrap().call(
+                def.unwrap().call(
                     rhs,
                     vec![lhs],
                     Rc::clone(&heap),
                     Rc::clone(&bindings),
                     call_depth,
-                );
+                )
             }
         },
     }
@@ -1224,7 +1218,7 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> Result<Expr> {
                     .as_str()
                     .replace("_", "")
                     .parse::<f64>()
-                    .map_err(|e| anyhow::Error::from(e))?,
+                    .map_err(anyhow::Error::from)?,
             )),
             Rule::list => {
                 let list_pairs = primary.into_inner();
@@ -1344,11 +1338,11 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> Result<Expr> {
                 })
             }
             Rule::do_block => {
-                let mut inner_pairs = primary.into_inner();
+                let inner_pairs = primary.into_inner();
                 let mut statements = Vec::new();
                 let mut return_expr = Box::new(Expr::Null);
 
-                while let Some(pair) = inner_pairs.next() {
+                for pair in inner_pairs {
                     match pair.as_rule() {
                         Rule::do_statement => {
                             if let Some(inner) = pair.into_inner().next() {

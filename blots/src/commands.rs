@@ -4,18 +4,13 @@ pub enum CommandResult {
 }
 
 pub fn is_command(input: &str) -> bool {
-    match input {
-        "quit" | "exit" | "help" => true,
-        _ => false,
-    }
+    matches!(input, "quit" | "exit" | "help")
 }
 
 /// Executes the given command and returns whether to continue or quit.
 pub fn exec_command(cmd: &str) -> CommandResult {
     match cmd {
-        "quit" | "exit" => {
-            return CommandResult::Quit;
-        }
+        "quit" | "exit" => CommandResult::Quit,
         "help" => {
             println!("Blots - A Calculator Language");
             println!("=========================================");
