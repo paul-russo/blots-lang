@@ -134,7 +134,12 @@ fn main() -> ! {
     // Then, apply -i flag inputs (which override piped inputs)
     // Process each -i flag in order, with later ones overriding earlier ones
     for (index, inputs_str) in ARGS.inputs.iter().enumerate() {
-        match parse_json_inputs(inputs_str, &heap, &format!("--inputs #{}", index + 1), &mut unnamed_counter) {
+        match parse_json_inputs(
+            inputs_str,
+            &heap,
+            &format!("--inputs #{}", index + 1),
+            &mut unnamed_counter,
+        ) {
             Ok(map) => {
                 // Merge with existing inputs (later --inputs override earlier ones)
                 for (k, v) in map {
@@ -558,8 +563,8 @@ fn main() -> ! {
                                                         identifier.to_string(),
                                                         serializable,
                                                     );
-                                                    // Show value and confirmation in REPL
 
+                                                    // Show value and confirmation in REPL
                                                     let value_str = value.stringify(&heap.borrow());
                                                     println!(
                                                         "{}",

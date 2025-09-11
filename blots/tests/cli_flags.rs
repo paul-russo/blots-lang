@@ -262,3 +262,133 @@ fn test_output_with_nullish_coalescing() {
     assert!(stdout.contains(r#""x":10.0"#));
     assert!(stdout.contains(r#""y":"default""#));
 }
+
+#[test]
+fn test_multiple_inputs_flags() {
+    // Test multiple -i flags merging together
+    let mut file = NamedTempFile::new().unwrap();
+    writeln!(file, "output all = inputs").unwrap();
+
+    // Test with multiple -i flags
+    let (stdout, _, success) = run_blots(
+        &[
+            file.path().to_str().unwrap(),
+            "-i",
+            r#"{"x": 5}"#,
+            "-i",
+            r#"{"y": 10}"#,
+            "-i",
+            r#"{"x": 20, "z": 30}"#,
+        ],
+        None,
+    );
+
+    assert!(success);
+    // Later -i flags should override earlier ones for same keys
+    assert!(stdout.contains(r#""x":20.0"#));
+    assert!(stdout.contains(r#""y":10.0"#));
+    assert!(stdout.contains(r#""z":30.0"#));
+}
+
+#[test]
+fn test_multiple_inputs_unnamed_values() {
+    // Test multiple unnamed values (arrays, primitives) get unique keys
+    let mut file = NamedTempFile::new().unwrap();
+    writeln!(file, "output all = inputs").unwrap();
+
+    // Test with multiple unnamed inputs
+    let (stdout, _, success) = run_blots(
+        &[
+            file.path().to_str().unwrap(),
+            "-i",
+            "[1, 2, 3]",
+            "-i",
+            "[4, 5, 6]",
+            "-i",
+            "42",
+        ],
+        None,
+    );
+
+    assert!(success);
+    // First unnamed gets "value", subsequent ones get "value_2", "value_3", etc.
+    assert!(stdout.contains(r#""value":[1.0,2.0,3.0]"#));
+    assert!(stdout.contains(r#""value_2":[4.0,5.0,6.0]"#));
+    assert!(stdout.contains(r#""value_3":42.0"#));
+}
+
+#[test]
+fn test_mixed_named_and_unnamed_inputs() {
+    // Test mixing named (objects) and unnamed inputs
+    let mut file = NamedTempFile::new().unwrap();
+    writeln!(file, "output all = inputs").unwrap();
+
+    // Test with mix of object and non-object inputs
+    let (stdout, _, success) = run_blots(
+        &[
+            file.path().to_str().unwrap(),
+            "-i",
+            r#"{"x": 10}"#,
+            "-i",
+            "[1, 2, 3]",
+            "-i",
+            r#"{"y": 20}"#,
+            "-i",
+            r#""hello""#,
+        ],
+        None,
+    );
+
+    assert!(success);
+    assert!(stdout.contains(r#""x":10.0"#));
+    assert!(stdout.contains(r#""y":20.0"#));
+    assert!(stdout.contains(r#""value":[1.0,2.0,3.0]"#));
+    assert!(stdout.contains(r#""value_2":"hello""#));
+}
+
+#[test]
+fn test_multiple_inputs_with_evaluate_flag() {
+    // Test multiple -i flags with --evaluate
+    let (stdout, _, success) = run_blots(
+        &[
+            "-e",
+            "-i",
+            r#"{"a": 1}"#,
+            "-i",
+            "[10, 20]",
+            "-i",
+            r#"{"b": 2}"#,
+        ],
+        Some("output result = inputs"),
+    );
+
+    assert!(success);
+    assert!(stdout.contains(r#""a":1.0"#));
+    assert!(stdout.contains(r#""b":2.0"#));
+    assert!(stdout.contains(r#""value":[10.0,20.0]"#));
+}
+
+#[test]
+fn test_piped_and_multiple_flags_inputs() {
+    // Test piped inputs combined with multiple -i flags
+    let mut file = NamedTempFile::new().unwrap();
+    writeln!(file, "output all = inputs").unwrap();
+
+    // Pipe in an array, then add more inputs via flags
+    let (stdout, _, success) = run_blots(
+        &[
+            file.path().to_str().unwrap(),
+            "-i",
+            r#"{"x": 100}"#,
+            "-i",
+            "[7, 8, 9]",
+        ],
+        Some("[1, 2, 3]"),
+    );
+
+    assert!(success);
+    // Piped array gets "value", flag array gets "value_2"
+    assert!(stdout.contains(r#""value":[1.0,2.0,3.0]"#));
+    assert!(stdout.contains(r#""value_2":[7.0,8.0,9.0]"#));
+    assert!(stdout.contains(r#""x":100.0"#));
+}

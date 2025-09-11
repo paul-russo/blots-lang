@@ -431,13 +431,34 @@ impl BuiltInFunction {
             }
 
             Self::Range => {
-                let (start, end) = if args.len() == 1 {
-                    (0, args[0].as_number()? as i64)
-                } else {
-                    (args[0].as_number()? as i64, args[1].as_number()? as i64)
+                let (start, end) = match args[..] {
+                    [Value::Number(start)] => (0.0, start),
+                    [Value::Number(start), Value::Number(end)] => (start, end),
+                    _ => return Err(anyhow!("range requires 1 or 2 numbers")),
                 };
 
-                let values = (start..end).map(|e| Value::Number(e as f64)).collect();
+                if start >= end {
+                    return Err(anyhow!("range requires start to be less than end"));
+                }
+
+                if !f64::is_finite(start as f64) || !f64::is_finite(end as f64) {
+                    return Err(anyhow!("range requires finite numbers"));
+                }
+
+                let start_i64 = start as i64;
+                let end_i64 = end as i64;
+                let length = end_i64 - start_i64;
+
+                if length > u32::MAX as i64 {
+                    return Err(anyhow!(
+                        "list would be longer than the maximum length of {}",
+                        u32::MAX
+                    ));
+                }
+
+                let values = (start_i64..end_i64)
+                    .map(|e| Value::Number(e as f64))
+                    .collect();
                 let list = heap.borrow_mut().insert_list(values);
 
                 Ok(list)
