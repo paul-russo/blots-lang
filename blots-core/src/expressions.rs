@@ -79,6 +79,7 @@ pub fn evaluate_ast(
         Expr::Null => Ok(Value::Null),
         Expr::Identifier(ident) => match ident.as_str() {
             "infinity" => Ok(Number(f64::INFINITY)),
+            "inf" => Ok(Number(f64::INFINITY)),
             "constants" => Ok(Value::Record(RecordPointer::new(0))),
             _ => bindings
                 .borrow()
@@ -94,16 +95,48 @@ pub fn evaluate_ast(
                 .collect::<Result<Vec<Value>>>()?;
 
             // Flatten spreads
-            let flattened = values
-                .into_iter()
-                .flat_map(|value| {
-                    value
-                        .reify(unsafe { heap.try_borrow_unguarded().unwrap() })
-                        .unwrap()
-                        .with_heap(Rc::clone(&heap))
-                        .into_iter()
-                })
-                .collect::<Vec<Value>>();
+            let mut flattened = Vec::new();
+
+            for value in values {
+                match value {
+                    Value::Spread(spread_ptr) => {
+                        // Handle spread values by extracting their contents
+                        let spread_values = match spread_ptr {
+                            IterablePointer::List(list_ptr) => {
+                                let borrowed_heap = heap.borrow();
+                                list_ptr.reify(&borrowed_heap).as_list()?.clone()
+                            }
+                            IterablePointer::String(string_ptr) => {
+                                let string = {
+                                    let borrowed_heap = heap.borrow();
+                                    string_ptr.reify(&borrowed_heap).as_string()?.to_string()
+                                };
+                                // Convert string to list of character values
+                                string
+                                    .chars()
+                                    .map(|c| heap.borrow_mut().insert_string(c.to_string()))
+                                    .collect()
+                            }
+                            IterablePointer::Record(record_ptr) => {
+                                let entries = {
+                                    let borrowed_heap = heap.borrow();
+                                    record_ptr.reify(&borrowed_heap).as_record()?.clone()
+                                };
+                                // Convert record to list of [key, value] pairs
+                                entries
+                                    .into_iter()
+                                    .map(|(k, v)| {
+                                        let key = heap.borrow_mut().insert_string(k);
+                                        heap.borrow_mut().insert_list(vec![key, v])
+                                    })
+                                    .collect()
+                            }
+                        };
+                        flattened.extend(spread_values);
+                    }
+                    _ => flattened.push(value),
+                }
+            }
 
             Ok(heap.borrow_mut().insert_list(flattened))
         }
@@ -314,16 +347,48 @@ pub fn evaluate_ast(
                 .collect::<Result<Vec<_>>>()?;
 
             // Flatten any spread arguments
-            let arg_vals = arg_vals_raw
-                .into_iter()
-                .flat_map(|value| {
-                    value
-                        .reify(unsafe { heap.try_borrow_unguarded().unwrap() })
-                        .unwrap()
-                        .with_heap(Rc::clone(&heap))
-                        .into_iter()
-                })
-                .collect::<Vec<Value>>();
+            let mut arg_vals = Vec::new();
+
+            for value in arg_vals_raw {
+                match value {
+                    Value::Spread(spread_ptr) => {
+                        // Handle spread values by extracting their contents
+                        let spread_values = match spread_ptr {
+                            IterablePointer::List(list_ptr) => {
+                                let borrowed_heap = heap.borrow();
+                                list_ptr.reify(&borrowed_heap).as_list()?.clone()
+                            }
+                            IterablePointer::String(string_ptr) => {
+                                let string = {
+                                    let borrowed_heap = heap.borrow();
+                                    string_ptr.reify(&borrowed_heap).as_string()?.to_string()
+                                };
+                                // Convert string to list of character values
+                                string
+                                    .chars()
+                                    .map(|c| heap.borrow_mut().insert_string(c.to_string()))
+                                    .collect()
+                            }
+                            IterablePointer::Record(record_ptr) => {
+                                let entries = {
+                                    let borrowed_heap = heap.borrow();
+                                    record_ptr.reify(&borrowed_heap).as_record()?.clone()
+                                };
+                                // Convert record to list of [key, value] pairs
+                                entries
+                                    .into_iter()
+                                    .map(|(k, v)| {
+                                        let key = heap.borrow_mut().insert_string(k);
+                                        heap.borrow_mut().insert_list(vec![key, v])
+                                    })
+                                    .collect()
+                            }
+                        };
+                        arg_vals.extend(spread_values);
+                    }
+                    _ => arg_vals.push(value),
+                }
+            }
 
             if !func_val.is_lambda() && !func_val.is_built_in() {
                 return Err(anyhow!(
@@ -430,7 +495,7 @@ pub fn evaluate_ast(
 fn collect_free_variables(expr: &Expr, vars: &mut Vec<String>, bound: &mut HashSet<String>) {
     match expr {
         Expr::Identifier(name) => {
-            if !bound.contains(name) && name != "infinity" && name != "constants" {
+            if !bound.contains(name) && name != "infinity" && name != "inf" && name != "constants" {
                 vars.push(name.clone());
             }
         }

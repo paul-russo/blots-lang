@@ -15,13 +15,11 @@ pub static CONSTANTS: LazyLock<IndexMap<String, PrimitiveValue>> = LazyLock::new
         String::from("e"),
         PrimitiveValue::Number(core::f64::consts::E),
     );
+    constants.insert(String::from("max_value"), PrimitiveValue::Number(f64::MAX));
     constants.insert(
-        String::from("infinity"),
-        PrimitiveValue::Number(f64::INFINITY),
+        String::from("min_value"),
+        PrimitiveValue::Number(f64::MIN_POSITIVE),
     );
-    constants.insert(String::from("inf"), PrimitiveValue::Number(f64::INFINITY));
-    constants.insert(String::from("max"), PrimitiveValue::Number(f64::MAX));
-    constants.insert(String::from("min"), PrimitiveValue::Number(f64::MIN));
     constants
 });
 

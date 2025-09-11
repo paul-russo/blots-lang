@@ -228,7 +228,7 @@ impl Display for ValueType {
             ValueType::List => write!(f, "list"),
             ValueType::Spread => write!(f, "spread"),
             ValueType::Bool => write!(f, "boolean"),
-            ValueType::Lambda => write!(f, "lambda"),
+            ValueType::Lambda => write!(f, "function"),
             ValueType::BuiltIn => write!(f, "built-in function"),
             ValueType::String => write!(f, "string"),
             ValueType::Record => write!(f, "record"),
