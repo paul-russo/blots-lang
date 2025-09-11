@@ -1,7 +1,7 @@
 use regex::Regex;
 use rustyline::{
-    completion::Completer, highlight::Highlighter, hint::Hinter, validate::Validator, Context,
-    Helper,
+    Context, Helper, completion::Completer, highlight::Highlighter, hint::Hinter,
+    validate::Validator,
 };
 use yansi::{Color, Paint};
 

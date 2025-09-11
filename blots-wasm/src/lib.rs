@@ -2,8 +2,8 @@ use anyhow::Result;
 use blots_core::{
     expressions::evaluate_pairs,
     functions::get_built_in_function_idents,
-    heap::{Heap, CONSTANTS},
-    parser::{get_pairs, get_tokens, Rule, Token},
+    heap::{CONSTANTS, Heap},
+    parser::{Rule, Token, get_pairs, get_tokens},
     values::SerializableValue,
 };
 use indexmap::IndexMap;
@@ -240,7 +240,7 @@ fn evaluate_single_inline_expression(
         Err(e) => {
             return ExpressionResult::Error {
                 error: format!("Parsing error: {}", e),
-            }
+            };
         }
     };
 
@@ -256,18 +256,18 @@ fn evaluate_single_inline_expression(
                             Ok(serializable) => {
                                 return ExpressionResult::Value {
                                     value: serializable,
-                                }
+                                };
                             }
                             Err(e) => {
                                 return ExpressionResult::Error {
                                     error: format!("Serialization error: {}", e),
-                                }
+                                };
                             }
                         },
                         Err(e) => {
                             return ExpressionResult::Error {
                                 error: format!("Evaluation error: {}", e),
-                            }
+                            };
                         }
                     }
                 }

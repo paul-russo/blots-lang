@@ -1,7 +1,7 @@
 use crate::{
     ast::{BinaryOp, DoStatement, Expr, PostfixOp, RecordEntry, RecordKey, UnaryOp},
     functions::{
-        get_built_in_function_def_by_ident, get_function_def, is_built_in_function, BuiltInFunction,
+        BuiltInFunction, get_built_in_function_def_by_ident, get_function_def, is_built_in_function,
     },
     heap::{Heap, HeapPointer, HeapValue, IterablePointer, RecordPointer},
     parser::Rule,
@@ -10,7 +10,7 @@ use crate::{
         Value::{self, Bool, List, Number, Spread},
     },
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use indexmap::IndexMap;
 use pest::{
     iterators::Pairs,
@@ -640,7 +640,7 @@ fn evaluate_binary_op_ast(
                     for (l, r) in l_vec.iter().zip(&r_vec) {
                         match l.compare(r, &borrowed_heap)? {
                             Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal) => {
-                                continue
+                                continue;
                             }
                             _ => {
                                 all_less_eq = false;
@@ -670,7 +670,7 @@ fn evaluate_binary_op_ast(
                     for (l, r) in l_vec.iter().zip(&r_vec) {
                         match l.compare(r, &borrowed_heap)? {
                             Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal) => {
-                                continue
+                                continue;
                             }
                             _ => {
                                 all_greater_eq = false;
@@ -872,7 +872,7 @@ fn evaluate_binary_op_ast(
                         };
                         match ordering {
                             Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal) => {
-                                continue
+                                continue;
                             }
                             _ => {
                                 all_less_eq = false;
@@ -912,7 +912,7 @@ fn evaluate_binary_op_ast(
                         };
                         match ordering {
                             Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal) => {
-                                continue
+                                continue;
                             }
                             _ => {
                                 all_greater_eq = false;
@@ -1894,10 +1894,12 @@ mod tests {
     fn list_elementwise_different_lengths_error() {
         let result = parse_and_evaluate("[1, 2, 3] + [4, 5]", None, None);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("left- and right-hand-side lists must be the same length"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("left- and right-hand-side lists must be the same length")
+        );
     }
 
     // Broadcast operations tests
@@ -2155,10 +2157,12 @@ mod tests {
         let result2 =
             parse_and_evaluate("x = 10", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)));
         assert!(result2.is_err());
-        assert!(result2
-            .unwrap_err()
-            .to_string()
-            .contains("x is already defined, and cannot be reassigned"));
+        assert!(
+            result2
+                .unwrap_err()
+                .to_string()
+                .contains("x is already defined, and cannot be reassigned")
+        );
 
         // Original value should remain unchanged
         let result3 = parse_and_evaluate("x", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)));
@@ -2215,10 +2219,12 @@ mod tests {
         let result2 =
             parse_and_evaluate(do_block, Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)));
         assert!(result2.is_err());
-        assert!(result2
-            .unwrap_err()
-            .to_string()
-            .contains("x is already defined, and cannot be reassigned"));
+        assert!(
+            result2
+                .unwrap_err()
+                .to_string()
+                .contains("x is already defined, and cannot be reassigned")
+        );
 
         // But new variables in do block should work
         let do_block2 = r#"do {
@@ -2282,10 +2288,12 @@ mod tests {
             Some(Rc::clone(&bindings)),
         );
         assert!(result2.is_err());
-        assert!(result2
-            .unwrap_err()
-            .to_string()
-            .contains("list is already defined, and cannot be reassigned"));
+        assert!(
+            result2
+                .unwrap_err()
+                .to_string()
+                .contains("list is already defined, and cannot be reassigned")
+        );
 
         // Record assignment
         let result3 = parse_and_evaluate(
@@ -2302,10 +2310,12 @@ mod tests {
             Some(Rc::clone(&bindings)),
         );
         assert!(result4.is_err());
-        assert!(result4
-            .unwrap_err()
-            .to_string()
-            .contains("rec is already defined, and cannot be reassigned"));
+        assert!(
+            result4
+                .unwrap_err()
+                .to_string()
+                .contains("rec is already defined, and cannot be reassigned")
+        );
     }
 
     #[test]
@@ -2529,10 +2539,12 @@ mod tests {
         let bindings = Rc::new(RefCell::new(HashMap::new()));
         let result = parse_and_evaluate("f = x => x + y", Some(heap), Some(bindings));
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("name \"y\" must be bound to a value when the function is defined"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("name \"y\" must be bound to a value when the function is defined")
+        );
     }
 
     #[test]
@@ -2586,10 +2598,12 @@ mod tests {
             Some(bindings),
         );
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("name \"z\" must be bound to a value when the function is defined"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("name \"z\" must be bound to a value when the function is defined")
+        );
     }
 
     #[test]
@@ -2683,10 +2697,12 @@ mod tests {
         let bindings = Rc::new(RefCell::new(HashMap::new()));
         let result = parse_and_evaluate("f = (x, y?) => x + z", Some(heap), Some(bindings));
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("name \"z\" must be bound to a value when the function is defined"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("name \"z\" must be bound to a value when the function is defined")
+        );
     }
 
     #[test]
@@ -2696,9 +2712,11 @@ mod tests {
         let bindings = Rc::new(RefCell::new(HashMap::new()));
         let result = parse_and_evaluate("f = (x, ...rest) => x + y", Some(heap), Some(bindings));
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("name \"y\" must be bound to a value when the function is defined"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("name \"y\" must be bound to a value when the function is defined")
+        );
     }
 }
