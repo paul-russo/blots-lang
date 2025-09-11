@@ -558,12 +558,23 @@ fn collect_free_variables(expr: &Expr, vars: &mut Vec<String>, bound: &mut HashS
             statements,
             return_expr,
         } => {
+            // Create a new scope for the do block
+            let mut block_bound = bound.clone();
+
             for stmt in statements {
                 if let DoStatement::Expression(expr) = stmt {
-                    collect_free_variables(expr, vars, bound);
+                    // Check if this is an assignment and add the variable to block scope
+                    if let Expr::Assignment { ident, value } = expr {
+                        // First collect free variables from the value
+                        collect_free_variables(value, vars, &mut block_bound);
+                        // Then add the assigned variable to the block's bound set
+                        block_bound.insert(ident.clone());
+                    } else {
+                        collect_free_variables(expr, vars, &mut block_bound);
+                    }
                 }
             }
-            collect_free_variables(return_expr, vars, bound);
+            collect_free_variables(return_expr, vars, &mut block_bound);
         }
         _ => {}
     }
@@ -2659,8 +2670,27 @@ mod tests {
     }
 
     #[test]
-    fn early_binding_do_block_scope() {
-        // Should succeed - variable bound in do block before function definition
+    fn early_binding_do_block_internal_binding() {
+        // Should succeed - variable bound inside lambda's do block
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // Define function with do block that binds y internally
+        let result = parse_and_evaluate(
+            "f = x => do { y = 5; return x + y }",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        );
+        assert!(result.is_ok());
+
+        // Verify the function works
+        let call_result = parse_and_evaluate("f(10)", Some(heap), Some(bindings)).unwrap();
+        assert_eq!(call_result, Value::Number(15.0));
+    }
+
+    #[test]
+    fn early_binding_do_block_nested_scope() {
+        // Should succeed - variable bound in do block before inner function definition
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(RefCell::new(HashMap::new()));
 
@@ -2675,6 +2705,44 @@ mod tests {
         let later_func_result =
             parse_and_evaluate("later_func", Some(heap), Some(bindings)).unwrap();
         assert_eq!(later_func_result, Value::Number(40.0));
+    }
+
+    #[test]
+    fn early_binding_do_block_forward_reference_fails() {
+        // Should fail - using variable before it's defined in do block
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        let result = parse_and_evaluate(
+            "g = x => do { f = y => y + z; z = 10; return f(x) }",
+            Some(heap),
+            Some(bindings),
+        );
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("name \"z\" must be bound to a value when the function is defined")
+        );
+    }
+
+    #[test]
+    fn early_binding_do_block_multiple_assignments() {
+        // Should succeed - multiple assignments in do block
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        let result = parse_and_evaluate(
+            "calc = x => do { a = 2; b = 3; c = 4; return x * a + b * c }",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        );
+        assert!(result.is_ok());
+
+        // Verify the function works: 5 * 2 + 3 * 4 = 10 + 12 = 22
+        let call_result = parse_and_evaluate("calc(5)", Some(heap), Some(bindings)).unwrap();
+        assert_eq!(call_result, Value::Number(22.0));
     }
 
     #[test]
