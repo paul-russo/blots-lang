@@ -69,7 +69,8 @@ fi
 print_info "Release plan:"
 print_info "- Update workspace version to $VERSION in Cargo.toml"
 print_info "- Update blots-core dependency version to $VERSION"
-print_info "- Commit changes with message 'Release v$VERSION'"
+print_info "- Run cargo check to update Cargo.lock with new version"
+print_info "- Commit changes (Cargo.toml + Cargo.lock) with message 'Release v$VERSION'"
 print_info "- Create and push git tag 'v$VERSION'"
 print_info "- Push changes to branch '$CURRENT_BRANCH'"
 if [ "$PUBLISH_TO_CRATES_IO" = true ]; then
@@ -114,8 +115,8 @@ else
     exit 1
 fi
 
-# Run cargo check to ensure everything still compiles
-print_info "Running cargo check to verify compilation..."
+# Run cargo check to ensure everything still compiles and update Cargo.lock
+print_info "Running cargo check to verify compilation and update Cargo.lock..."
 if ! cargo check --quiet; then
     print_error "Cargo check failed. Please fix compilation errors before releasing."
     exit 1
@@ -123,9 +124,9 @@ fi
 
 print_info "✓ All packages compile successfully"
 
-# Commit the changes
+# Commit the changes (including Cargo.lock)
 print_info "Committing version updates..."
-git add "$WORKSPACE_CARGO"
+git add "$WORKSPACE_CARGO" Cargo.lock
 git commit -m "Release v$VERSION"
 
 # Create and push tag
@@ -238,6 +239,7 @@ print_info "GitHub Actions should now be triggered by the new tag."
 print_info ""
 print_info "Summary:"
 print_info "- Updated workspace version to $VERSION"
+print_info "- Updated Cargo.lock with new version"
 print_info "- Committed changes with message 'Release v$VERSION'"
 print_info "- Created and pushed tag '$TAG_NAME'"
 print_info "- Pushed changes to branch '$CURRENT_BRANCH'"
