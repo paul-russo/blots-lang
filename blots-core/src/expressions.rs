@@ -280,7 +280,7 @@ pub fn evaluate_ast(
             let current_bindings = bindings.borrow();
             for var in referenced_vars {
                 if current_bindings.contains_key(&var) && !is_built_in_function(&var) {
-                    captured_scope.insert(var.clone(), current_bindings[&var].clone());
+                    captured_scope.insert(var.clone(), current_bindings[&var]);
                 }
             }
 
@@ -629,8 +629,7 @@ pub fn validate_portable_value(
                 // 3. Self-reference (for recursion) - if the lambda has a name
                 // 4. Currently bound in the environment (for late-bound functions)
                 for var in &free_vars {
-                    let is_self_reference =
-                        lambda_def.name.as_ref().map_or(false, |name| name == var);
+                    let is_self_reference = lambda_def.name.as_ref() == Some(var);
 
                     if !lambda_def.scope.contains_key(var)
                         && !is_built_in_function(var)
