@@ -181,12 +181,6 @@ if [ "$PUBLISH_TO_CRATES_IO" = true ]; then
                 
                 # Track this crate as successfully published
                 PUBLISHED_CRATES+=("$crate")
-                
-                # Wait a bit to allow crates.io to process the package
-                if [ "$crate" != "blots-wasm" ]; then  # Don't wait after the last one
-                    print_info "Waiting 30 seconds for crates.io to process $crate..."
-                    sleep 30
-                fi
             else
                 print_error "Failed to publish $crate"
                 yank_published_crates
