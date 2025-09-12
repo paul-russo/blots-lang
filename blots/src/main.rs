@@ -132,11 +132,20 @@ fn evaluate_source(
                             match pair.as_rule() {
                                 Rule::identifier => {
                                     let identifier = pair.as_str();
-                                    if let Some(value) = bindings.borrow().get(identifier)
-                                        && let Ok(serializable) =
+                                    if let Some(value) = bindings.borrow().get(identifier) {
+                                        // Validate that the value is portable
+                                        if let Err(e) = validate_portable_value(
+                                            value,
+                                            &heap.borrow(),
+                                            &bindings.borrow(),
+                                        ) {
+                                            eprintln!("[output error] {}", e);
+                                            std::process::exit(1);
+                                        } else if let Ok(serializable) =
                                             value.to_serializable_value(&heap.borrow())
-                                    {
-                                        outputs.insert(identifier.to_string(), serializable);
+                                        {
+                                            outputs.insert(identifier.to_string(), serializable);
+                                        }
                                     }
                                     break;
                                 }
@@ -150,6 +159,7 @@ fn evaluate_source(
                                                 &bindings.borrow(),
                                             ) {
                                                 eprintln!("[output error] {}", e);
+                                                std::process::exit(1);
                                             } else if let Ok(serializable) =
                                                 value.to_serializable_value(&heap.borrow())
                                             {
