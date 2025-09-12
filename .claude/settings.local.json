@@ -21,7 +21,15 @@
       "Bash(twiggy:*)",
       "Bash(wasm2wat:*)",
       "Bash(sed:*)",
-      "Read(/Users/paul/src/**)"
+      "Read(/Users/paul/src/**)",
+      "WebFetch(domain:crates.io)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "Bash(cargo ws list:*)",
+      "Bash(cargo ws changed:*)",
+      "Bash(cargo ws version:*)",
+      "Bash(cargo ws publish:*)",
+      "Bash(cargo ws exec cargo tree:*)"
     ],
     "deny": []
   }
