@@ -2,7 +2,7 @@
 name = "blots-core"
 description = "Core library for Blots, a small, simple, expression-oriented programming language."
 readme = 'README.md'
-license-file = "LICENSE"
+
 # Inherit common fields from workspace
 version.workspace = true
 edition.workspace = true
@@ -10,6 +10,8 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
+license.workspace = true
+
 
 [dependencies]
 anyhow = "1.0.86"
