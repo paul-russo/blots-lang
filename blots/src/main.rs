@@ -6,7 +6,8 @@ use blots_core::expressions::{evaluate_pairs, validate_portable_value};
 use blots_core::heap::Heap;
 use blots_core::parser::{Rule, get_pairs};
 use blots_core::values::{SerializableValue, Value};
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use clap_complete::{Shell, generate, shells::*};
 use cli::Args;
 use commands::{CommandResult, exec_command, is_command};
 use highlighter::BlotsHighlighter;
@@ -192,6 +193,24 @@ fn evaluate_source(
 }
 
 fn main() -> ! {
+    // Handle shell completion generation
+    if let Some(shell) = &ARGS.generate_completions {
+        let mut cmd = cli::Args::command();
+        let name = "blots";
+        match shell {
+            Shell::Bash => generate(Bash, &mut cmd, name, &mut io::stdout()),
+            Shell::Zsh => generate(Zsh, &mut cmd, name, &mut io::stdout()),
+            Shell::Fish => generate(Fish, &mut cmd, name, &mut io::stdout()),
+            Shell::PowerShell => generate(PowerShell, &mut cmd, name, &mut io::stdout()),
+            Shell::Elvish => generate(Elvish, &mut cmd, name, &mut io::stdout()),
+            _ => {
+                eprintln!("Unsupported shell: {}", shell);
+                std::process::exit(1);
+            }
+        }
+        std::process::exit(0);
+    }
+
     // Save output path for REPL mode (before args is moved)
     let output_path = ARGS.output.clone();
 

@@ -1,4 +1,5 @@
 use clap::Parser;
+use clap_complete::Shell;
 
 #[derive(Parser, Debug)]
 #[command(version, about, about = Some("A small expression-oriented programming language."))]
@@ -18,4 +19,8 @@ pub struct Args {
     /// Path to write output JSON file
     #[arg(short, long)]
     pub output: Option<String>,
+
+    /// Generate shell completions for the specified shell
+    #[arg(long, value_name = "SHELL")]
+    pub generate_completions: Option<Shell>,
 }
