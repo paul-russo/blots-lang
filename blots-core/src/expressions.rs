@@ -239,31 +239,12 @@ pub fn evaluate_ast(
             // Capture variables used in the lambda body
             let mut captured_scope = HashMap::new();
             let mut referenced_vars = Vec::new();
-            let mut bound_vars = HashSet::new();
-
-            // Add lambda arguments to bound variables
-            for arg in args {
-                bound_vars.insert(arg.get_name().to_string());
-            }
-
-            collect_free_variables(body, &mut referenced_vars, &mut bound_vars);
+            collect_free_variables(body, &mut referenced_vars, &mut HashSet::new());
 
             let current_bindings = bindings.borrow();
-
-            // Check for unbound variables
-            for var in &referenced_vars {
-                if !current_bindings.contains_key(var) && !is_built_in_function(var) {
-                    return Err(anyhow!(
-                        "name \"{}\" must be bound to a value when the function is defined",
-                        var
-                    ));
-                }
-            }
-
-            // Capture bound variables
             for var in referenced_vars {
                 if current_bindings.contains_key(&var) && !is_built_in_function(&var) {
-                    captured_scope.insert(var.clone(), current_bindings[&var]);
+                    captured_scope.insert(var.clone(), current_bindings[&var].clone());
                 }
             }
 
@@ -577,6 +558,76 @@ fn collect_free_variables(expr: &Expr, vars: &mut Vec<String>, bound: &mut HashS
             collect_free_variables(return_expr, vars, &mut block_bound);
         }
         _ => {}
+    }
+}
+
+// Validate that a value (especially lambdas) is portable for output
+pub fn validate_portable_value(
+    value: &Value,
+    heap: &Heap,
+    bindings: &HashMap<String, Value>,
+) -> Result<()> {
+    match value {
+        Value::Lambda(lambda_ptr) => {
+            // Get the lambda definition
+            if let Some(HeapValue::Lambda(lambda_def)) = heap.get(lambda_ptr.index()) {
+                // Collect free variables from the lambda body
+                let mut free_vars = Vec::new();
+                let mut bound_vars = HashSet::new();
+
+                // Add lambda arguments to bound variables
+                for arg in &lambda_def.args {
+                    bound_vars.insert(arg.get_name().to_string());
+                }
+
+                // Also add variables from the captured scope as bound
+                for key in lambda_def.scope.keys() {
+                    bound_vars.insert(key.clone());
+                }
+
+                collect_free_variables(&lambda_def.body, &mut free_vars, &mut bound_vars);
+
+                // Check that all free variables are either:
+                // 1. In the captured scope (already captured when function was defined)
+                // 2. Built-in functions
+                // 3. Self-reference (for recursion) - if the lambda has a name
+                // 4. Currently bound in the environment (for late-bound functions)
+                for var in &free_vars {
+                    let is_self_reference =
+                        lambda_def.name.as_ref().map_or(false, |name| name == var);
+
+                    if !lambda_def.scope.contains_key(var)
+                        && !is_built_in_function(var)
+                        && !is_self_reference
+                        && !bindings.contains_key(var)
+                    {
+                        return Err(anyhow!(
+                            "Function contains unbound variable \"{}\". Output functions must be self-contained.",
+                            var
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        }
+        Value::List(list_ptr) => {
+            // Recursively validate list elements
+            let list = list_ptr.reify(heap).as_list()?;
+            for item in list {
+                validate_portable_value(item, heap, bindings)?;
+            }
+            Ok(())
+        }
+        Value::Record(record_ptr) => {
+            // Recursively validate record values
+            let record = record_ptr.reify(heap).as_record()?;
+            for value in record.values() {
+                validate_portable_value(value, heap, bindings)?;
+            }
+            Ok(())
+        }
+        // Other value types are always portable
+        _ => Ok(()),
     }
 }
 
@@ -2538,18 +2589,13 @@ mod tests {
     }
 
     #[test]
-    fn early_binding_unbound_variable_fails() {
-        // Should fail - unbound variable y
+    fn late_binding_unbound_variable_succeeds() {
+        // Functions now use late binding - definition succeeds
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(RefCell::new(HashMap::new()));
         let result = parse_and_evaluate("f = x => x + y", Some(heap), Some(bindings));
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("name \"y\" must be bound to a value when the function is defined")
-        );
+        // Definition should succeed (error only on call if y not bound)
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -2593,22 +2639,26 @@ mod tests {
     }
 
     #[test]
-    fn early_binding_nested_function_unbound_fails() {
-        // Should fail - nested function with unbound variable z
+    fn late_binding_nested_function_succeeds() {
+        // Should succeed with late binding - nested function can reference z defined later
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(RefCell::new(HashMap::new()));
+        
+        // Define outer function with nested inner that references z
         let result = parse_and_evaluate(
             "outer = x => do { inner = y => y + z; return inner(x) }",
-            Some(heap),
-            Some(bindings),
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
         );
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("name \"z\" must be bound to a value when the function is defined")
-        );
+        assert!(result.is_ok());
+        
+        // Define z
+        let _ = parse_and_evaluate("z = 100", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
+            .unwrap();
+        
+        // Call outer(5) should work: 5 + 100 = 105
+        let call_result = parse_and_evaluate("outer(5)", Some(heap), Some(bindings)).unwrap();
+        assert_eq!(call_result, Value::Number(105.0));
     }
 
     #[test]
@@ -2702,23 +2752,21 @@ mod tests {
     }
 
     #[test]
-    fn early_binding_do_block_forward_reference_fails() {
-        // Should fail - using variable before it's defined in do block
+    fn late_binding_do_block_forward_reference_succeeds() {
+        // Should succeed with late binding - do block variables are available
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(RefCell::new(HashMap::new()));
 
         let result = parse_and_evaluate(
             "g = x => do { f = y => y + z; z = 10; return f(x) }",
-            Some(heap),
-            Some(bindings),
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
         );
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("name \"z\" must be bound to a value when the function is defined")
-        );
+        assert!(result.is_ok());
+        
+        // Call g(5) should work: 5 + 10 = 15
+        let call_result = parse_and_evaluate("g(5)", Some(heap), Some(bindings)).unwrap();
+        assert_eq!(call_result, Value::Number(15.0));
     }
 
     #[test]
@@ -2740,45 +2788,160 @@ mod tests {
     }
 
     #[test]
-    fn early_binding_multiple_unbound_variables() {
-        // Should fail with first unbound variable
+    fn late_binding_multiple_unbound_variables_succeeds() {
+        // Should succeed with late binding - function can reference y and z defined later
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(RefCell::new(HashMap::new()));
-        let result = parse_and_evaluate("f = x => x + y + z", Some(heap), Some(bindings));
-        assert!(result.is_err());
-        let error_msg = result.unwrap_err().to_string();
-        // Should mention at least one of the unbound variables
-        assert!(error_msg.contains("must be bound to a value when the function is defined"));
-        assert!(error_msg.contains("\"y\"") || error_msg.contains("\"z\""));
+        
+        let result = parse_and_evaluate("f = x => x + y + z", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)));
+        assert!(result.is_ok());
+        
+        // Define y and z
+        let _ = parse_and_evaluate("y = 10", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
+            .unwrap();
+        let _ = parse_and_evaluate("z = 20", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
+            .unwrap();
+        
+        // Call f(5) should work: 5 + 10 + 20 = 35
+        let call_result = parse_and_evaluate("f(5)", Some(heap), Some(bindings)).unwrap();
+        assert_eq!(call_result, Value::Number(35.0));
     }
 
     #[test]
-    fn early_binding_with_optional_args() {
-        // Should fail - unbound variable in function with optional args
+    fn late_binding_with_optional_args_succeeds() {
+        // Should succeed with late binding - function with optional args can reference z defined later
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(RefCell::new(HashMap::new()));
-        let result = parse_and_evaluate("f = (x, y?) => x + z", Some(heap), Some(bindings));
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("name \"z\" must be bound to a value when the function is defined")
-        );
+        
+        let result = parse_and_evaluate("f = (x, y?) => x + z", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)));
+        assert!(result.is_ok());
+        
+        // Define z
+        let _ = parse_and_evaluate("z = 100", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
+            .unwrap();
+        
+        // Call f(5) should work: 5 + 100 = 105
+        let call_result = parse_and_evaluate("f(5)", Some(heap), Some(bindings)).unwrap();
+        assert_eq!(call_result, Value::Number(105.0));
     }
 
     #[test]
-    fn early_binding_with_rest_args() {
-        // Should fail - unbound variable in function with rest args
+    fn late_binding_with_rest_args_succeeds() {
+        // Should succeed with late binding - function with rest args can reference y defined later
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(RefCell::new(HashMap::new()));
-        let result = parse_and_evaluate("f = (x, ...rest) => x + y", Some(heap), Some(bindings));
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("name \"y\" must be bound to a value when the function is defined")
+        
+        let result = parse_and_evaluate("f = (x, ...rest) => x + y", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)));
+        assert!(result.is_ok());
+        
+        // Define y
+        let _ = parse_and_evaluate("y = 50", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
+            .unwrap();
+        
+        // Call f(5) should work: 5 + 50 = 55
+        let call_result = parse_and_evaluate("f(5)", Some(heap), Some(bindings)).unwrap();
+        assert_eq!(call_result, Value::Number(55.0));
+    }
+
+    #[test]
+    fn recursion_self_reference_allowed() {
+        // Should succeed - recursive functions can reference themselves
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // Define recursive factorial
+        let result = parse_and_evaluate(
+            "factorial = n => if n <= 1 then 1 else n * factorial(n - 1)",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
         );
+        assert!(result.is_ok());
+
+        // Test it works
+        let call_result = parse_and_evaluate("factorial(5)", Some(heap), Some(bindings)).unwrap();
+        assert_eq!(call_result, Value::Number(120.0));
+    }
+
+    #[test]
+    fn recursion_fibonacci() {
+        // Should succeed - another recursive function example
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // Define recursive fibonacci
+        let result = parse_and_evaluate(
+            "fib = n => if n <= 1 then n else fib(n - 1) + fib(n - 2)",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        );
+        assert!(result.is_ok());
+
+        // Test it works - fib(6) = 8
+        let call_result = parse_and_evaluate("fib(6)", Some(heap), Some(bindings)).unwrap();
+        assert_eq!(call_result, Value::Number(8.0));
+    }
+
+    #[test]
+    fn recursion_in_do_block() {
+        // Should succeed - recursion defined in do block
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        let result = parse_and_evaluate(
+            "result = do { factorial = n => if n <= 1 then 1 else n * factorial(n - 1); return factorial(4) }",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        );
+        assert!(result.is_ok());
+
+        // Verify the result
+        let result_val = parse_and_evaluate("result", Some(heap), Some(bindings)).unwrap();
+        assert_eq!(result_val, Value::Number(24.0));
+    }
+
+    #[test]
+    fn mutual_recursion_succeeds() {
+        // Should succeed with late binding - mutual recursion now works
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // Define isEven that references isOdd
+        let result = parse_and_evaluate(
+            "isEven = n => if n == 0 then true else isOdd(n - 1)",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        );
+        assert!(result.is_ok());
+        
+        // Define isOdd that references isEven
+        let _ = parse_and_evaluate(
+            "isOdd = n => if n == 0 then false else isEven(n - 1)",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        ).unwrap();
+        
+        // Test mutual recursion
+        let result1 = parse_and_evaluate("isEven(4)", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
+        assert_eq!(result1, Value::Bool(true));
+        
+        let result2 = parse_and_evaluate("isEven(5)", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
+        assert_eq!(result2, Value::Bool(false));
+        
+        let result3 = parse_and_evaluate("isOdd(3)", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
+        assert_eq!(result3, Value::Bool(true));
+        
+        let result4 = parse_and_evaluate("isOdd(6)", Some(heap), Some(bindings)).unwrap();
+        assert_eq!(result4, Value::Bool(false));
+    }
+
+    #[test]
+    fn recursion_only_for_lambdas() {
+        // Non-lambda assignments should not get special treatment
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // This should fail because x is not bound
+        let result = parse_and_evaluate("y = x + 1", Some(heap), Some(bindings));
+        assert!(result.is_err());
     }
 }
