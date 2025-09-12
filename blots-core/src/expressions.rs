@@ -104,6 +104,42 @@ fn flatten_spread_value(
     }
 }
 
+// Helper function for evaluating expressions inside do blocks with shadowing allowed
+fn evaluate_do_block_expr(
+    expr: &Expr,
+    heap: Rc<RefCell<Heap>>,
+    bindings: Rc<RefCell<HashMap<String, Value>>>,
+    call_depth: usize,
+) -> Result<Value> {
+    // For assignments in do blocks, skip the immutability check
+    if let Expr::Assignment { ident, value } = expr {
+        // Still check for keywords
+        if matches!(
+            ident.as_str(),
+            "return" | "if" | "then" | "else" | "do" | "true" | "false" | "null" | "output"
+        ) {
+            return Err(anyhow!("{} is a keyword, and cannot be reassigned", ident));
+        }
+
+        // Evaluate the value (allow shadowing - no check for existing binding)
+        let val = evaluate_ast(value, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
+
+        // Set lambda name if assigning a lambda
+        if let Value::Lambda(lambda_ptr) = val {
+            let mut borrowed_heap = heap.borrow_mut();
+            if let Some(HeapValue::Lambda(lambda_def)) = borrowed_heap.get_mut(lambda_ptr.index()) {
+                lambda_def.name = Some(ident.clone());
+            }
+        }
+
+        bindings.borrow_mut().insert(ident.clone(), val);
+        return Ok(val);
+    }
+
+    // For all other expressions, use the regular evaluate_ast
+    evaluate_ast(expr, heap, bindings, call_depth)
+}
+
 pub fn evaluate_ast(
     expr: &Expr,
     heap: Rc<RefCell<Heap>>,
@@ -328,11 +364,11 @@ pub fn evaluate_ast(
             let new_bindings = bindings.borrow().clone();
             let block_bindings = Rc::new(RefCell::new(new_bindings));
 
-            // Execute statements
+            // Execute statements with shadowing allowed
             for stmt in statements {
                 match stmt {
                     DoStatement::Expression(expr) => {
-                        evaluate_ast(
+                        evaluate_do_block_expr(
                             expr,
                             Rc::clone(&heap),
                             Rc::clone(&block_bindings),
@@ -344,7 +380,7 @@ pub fn evaluate_ast(
             }
 
             // Return the final expression
-            evaluate_ast(return_expr, heap, block_bindings, call_depth)
+            evaluate_do_block_expr(return_expr, heap, block_bindings, call_depth)
         }
         Expr::Call { func, args } => {
             let func_val = evaluate_ast(func, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
@@ -2266,7 +2302,7 @@ mod tests {
             parse_and_evaluate("x = 5", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)));
         assert!(result1.is_ok());
 
-        // Do block inherits outer scope, so reassigning x should fail
+        // Do blocks can now shadow outer variables (changed behavior)
         let do_block = r#"do {
             x = 10
             y = x * 2
@@ -2274,13 +2310,8 @@ mod tests {
         }"#;
         let result2 =
             parse_and_evaluate(do_block, Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)));
-        assert!(result2.is_err());
-        assert!(
-            result2
-                .unwrap_err()
-                .to_string()
-                .contains("x is already defined, and cannot be reassigned")
-        );
+        assert!(result2.is_ok());
+        assert_eq!(result2.unwrap(), Value::Number(20.0)); // 10 * 2 = 20
 
         // But new variables in do block should work
         let do_block2 = r#"do {
@@ -2643,7 +2674,7 @@ mod tests {
         // Should succeed with late binding - nested function can reference z defined later
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(RefCell::new(HashMap::new()));
-        
+
         // Define outer function with nested inner that references z
         let result = parse_and_evaluate(
             "outer = x => do { inner = y => y + z; return inner(x) }",
@@ -2651,11 +2682,15 @@ mod tests {
             Some(Rc::clone(&bindings)),
         );
         assert!(result.is_ok());
-        
+
         // Define z
-        let _ = parse_and_evaluate("z = 100", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
-            .unwrap();
-        
+        let _ = parse_and_evaluate(
+            "z = 100",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+
         // Call outer(5) should work: 5 + 100 = 105
         let call_result = parse_and_evaluate("outer(5)", Some(heap), Some(bindings)).unwrap();
         assert_eq!(call_result, Value::Number(105.0));
@@ -2763,7 +2798,7 @@ mod tests {
             Some(Rc::clone(&bindings)),
         );
         assert!(result.is_ok());
-        
+
         // Call g(5) should work: 5 + 10 = 15
         let call_result = parse_and_evaluate("g(5)", Some(heap), Some(bindings)).unwrap();
         assert_eq!(call_result, Value::Number(15.0));
@@ -2792,16 +2827,20 @@ mod tests {
         // Should succeed with late binding - function can reference y and z defined later
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(RefCell::new(HashMap::new()));
-        
-        let result = parse_and_evaluate("f = x => x + y + z", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)));
+
+        let result = parse_and_evaluate(
+            "f = x => x + y + z",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        );
         assert!(result.is_ok());
-        
+
         // Define y and z
         let _ = parse_and_evaluate("y = 10", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
             .unwrap();
         let _ = parse_and_evaluate("z = 20", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
             .unwrap();
-        
+
         // Call f(5) should work: 5 + 10 + 20 = 35
         let call_result = parse_and_evaluate("f(5)", Some(heap), Some(bindings)).unwrap();
         assert_eq!(call_result, Value::Number(35.0));
@@ -2812,14 +2851,22 @@ mod tests {
         // Should succeed with late binding - function with optional args can reference z defined later
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(RefCell::new(HashMap::new()));
-        
-        let result = parse_and_evaluate("f = (x, y?) => x + z", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)));
+
+        let result = parse_and_evaluate(
+            "f = (x, y?) => x + z",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        );
         assert!(result.is_ok());
-        
+
         // Define z
-        let _ = parse_and_evaluate("z = 100", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
-            .unwrap();
-        
+        let _ = parse_and_evaluate(
+            "z = 100",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+
         // Call f(5) should work: 5 + 100 = 105
         let call_result = parse_and_evaluate("f(5)", Some(heap), Some(bindings)).unwrap();
         assert_eq!(call_result, Value::Number(105.0));
@@ -2830,14 +2877,18 @@ mod tests {
         // Should succeed with late binding - function with rest args can reference y defined later
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(RefCell::new(HashMap::new()));
-        
-        let result = parse_and_evaluate("f = (x, ...rest) => x + y", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)));
+
+        let result = parse_and_evaluate(
+            "f = (x, ...rest) => x + y",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        );
         assert!(result.is_ok());
-        
+
         // Define y
         let _ = parse_and_evaluate("y = 50", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
             .unwrap();
-        
+
         // Call f(5) should work: 5 + 50 = 55
         let call_result = parse_and_evaluate("f(5)", Some(heap), Some(bindings)).unwrap();
         assert_eq!(call_result, Value::Number(55.0));
@@ -2912,24 +2963,40 @@ mod tests {
             Some(Rc::clone(&bindings)),
         );
         assert!(result.is_ok());
-        
+
         // Define isOdd that references isEven
         let _ = parse_and_evaluate(
             "isOdd = n => if n == 0 then false else isEven(n - 1)",
             Some(Rc::clone(&heap)),
             Some(Rc::clone(&bindings)),
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         // Test mutual recursion
-        let result1 = parse_and_evaluate("isEven(4)", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
+        let result1 = parse_and_evaluate(
+            "isEven(4)",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
         assert_eq!(result1, Value::Bool(true));
-        
-        let result2 = parse_and_evaluate("isEven(5)", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
+
+        let result2 = parse_and_evaluate(
+            "isEven(5)",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
         assert_eq!(result2, Value::Bool(false));
-        
-        let result3 = parse_and_evaluate("isOdd(3)", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
+
+        let result3 = parse_and_evaluate(
+            "isOdd(3)",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
         assert_eq!(result3, Value::Bool(true));
-        
+
         let result4 = parse_and_evaluate("isOdd(6)", Some(heap), Some(bindings)).unwrap();
         assert_eq!(result4, Value::Bool(false));
     }
