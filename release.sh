@@ -23,18 +23,18 @@ print_error() {
 
 # Check if version argument is provided
 if [ $# -eq 0 ]; then
-    print_error "Usage: $0 <version> [--publish]"
+    print_error "Usage: $0 <version> [--no-publish]"
     print_error "Example: $0 0.3.1"
-    print_error "Example: $0 0.3.1 --publish  # Also publish to crates.io"
+    print_error "Example: $0 0.3.1 --no-publish  # Skip publishing to crates.io"
     exit 1
 fi
 
 VERSION=$1
-PUBLISH_TO_CRATES_IO=false
+PUBLISH_TO_CRATES_IO=true
 
-# Check for --publish flag
-if [ "$2" == "--publish" ]; then
-    PUBLISH_TO_CRATES_IO=true
+# Check for --no-publish flag
+if [ "$2" == "--no-publish" ]; then
+    PUBLISH_TO_CRATES_IO=false
 fi
 
 # Validate version format (basic semver check)
@@ -75,6 +75,8 @@ print_info "- Push changes to branch '$CURRENT_BRANCH'"
 if [ "$PUBLISH_TO_CRATES_IO" = true ]; then
     print_info "- Publish all crates to crates.io in dependency order (all-or-nothing)"
     print_info "  If any crate fails to publish, all successfully published crates will be yanked"
+else
+    print_info "- Skip publishing to crates.io (--no-publish flag specified)"
 fi
 print_info ""
 print_warning "This will trigger a GitHub Actions build. Continue? (y/N)"
@@ -185,7 +187,7 @@ if [ "$PUBLISH_TO_CRATES_IO" = true ]; then
                 print_error "Failed to publish $crate"
                 yank_published_crates
                 print_error "All successfully published crates have been yanked to maintain consistency."
-                print_error "You can retry the full release with: $0 $VERSION --publish"
+                print_error "You can retry the full release with: $0 $VERSION"
                 exit 1
             fi
         done
@@ -205,4 +207,6 @@ print_info "- Created and pushed tag '$TAG_NAME'"
 print_info "- Pushed changes to branch '$CURRENT_BRANCH'"
 if [ "$PUBLISH_TO_CRATES_IO" = true ]; then
     print_info "- Published all crates to crates.io successfully"
+else
+    print_info "- Skipped publishing to crates.io (--no-publish flag specified)"
 fi
