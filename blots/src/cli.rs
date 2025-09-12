@@ -20,7 +20,7 @@ pub struct Args {
     #[arg(short, long)]
     pub output: Option<String>,
 
-    /// Generate shell completions for the specified shell
+    /// Generate shell completions for the specified shell.
     #[arg(long, value_name = "SHELL")]
-    pub generate_completions: Option<Shell>,
+    pub completions: Option<Shell>,
 }

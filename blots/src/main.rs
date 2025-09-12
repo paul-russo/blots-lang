@@ -194,7 +194,7 @@ fn evaluate_source(
 
 fn main() -> ! {
     // Handle shell completion generation
-    if let Some(shell) = &ARGS.generate_completions {
+    if let Some(shell) = &ARGS.completions {
         let mut cmd = cli::Args::command();
         let name = "blots";
         match shell {
