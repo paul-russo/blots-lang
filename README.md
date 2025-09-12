@@ -1,6 +1,6 @@
 # Blots
 
-Blots is a small, dynamic, functional, expression-oriented programming language designed to be quick to learn, easy to use, and to produce code that's readable yet reasonably compact. Blots is intended for quick calculations and data transformation. The Blots interpreter is written in safe Rust.
+Blots is a small, dynamic, functional, expression-oriented programming language designed to be quick to learn, easy to use, and to produce code that's readable yet reasonably compact. Blots is intended for quick calculations and data transformation.
 
 ## Installation
 

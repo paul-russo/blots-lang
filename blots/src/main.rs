@@ -92,6 +92,95 @@ fn write_outputs(outputs: &IndexMap<String, SerializableValue>, output_path: Opt
     }
 }
 
+/// Evaluate Blots source code and collect outputs
+fn evaluate_source(
+    source: &str,
+    heap: &Rc<RefCell<Heap>>,
+    bindings: &Rc<RefCell<HashMap<String, Value>>>,
+    outputs: &mut IndexMap<String, SerializableValue>,
+) -> Result<(), String> {
+    let pairs = get_pairs(source).map_err(|e| format!("Parse error: {}", e))?;
+
+    pairs.for_each(|pair| match pair.as_rule() {
+        Rule::statement => {
+            if let Some(inner_pair) = pair.into_inner().next() {
+                match inner_pair.as_rule() {
+                    Rule::expression => {
+                        let result = evaluate_pairs(
+                            inner_pair.into_inner(),
+                            Rc::clone(heap),
+                            Rc::clone(bindings),
+                            0,
+                        );
+
+                        if let Err(error) = result {
+                            println!("[evaluation error] {}", error);
+                            std::process::exit(1);
+                        }
+                    }
+                    Rule::output_declaration => {
+                        let inner_pairs_clone = inner_pair.clone().into_inner();
+
+                        let result = evaluate_pairs(
+                            inner_pair.clone().into_inner(),
+                            Rc::clone(heap),
+                            Rc::clone(bindings),
+                            0,
+                        );
+
+                        for pair in inner_pairs_clone {
+                            match pair.as_rule() {
+                                Rule::identifier => {
+                                    let identifier = pair.as_str();
+                                    if let Some(value) = bindings.borrow().get(identifier)
+                                        && let Ok(serializable) =
+                                            value.to_serializable_value(&heap.borrow())
+                                    {
+                                        outputs.insert(identifier.to_string(), serializable);
+                                    }
+                                    break;
+                                }
+                                Rule::assignment => {
+                                    if let Some(ident_pair) = pair.into_inner().next() {
+                                        let identifier = ident_pair.as_str();
+                                        if let Ok(value) = &result {
+                                            if let Err(e) = validate_portable_value(
+                                                value,
+                                                &heap.borrow(),
+                                                &bindings.borrow(),
+                                            ) {
+                                                eprintln!("[output error] {}", e);
+                                            } else if let Ok(serializable) =
+                                                value.to_serializable_value(&heap.borrow())
+                                            {
+                                                outputs
+                                                    .insert(identifier.to_string(), serializable);
+                                            }
+                                        }
+                                    }
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        if let Err(error) = result {
+                            println!("[evaluation error] {}", error);
+                            std::process::exit(1);
+                        }
+                    }
+                    Rule::comment => {}
+                    _ => unreachable!("unexpected rule: {:?}", inner_pair.as_rule()),
+                }
+            }
+        }
+        Rule::EOI => {}
+        rule => unreachable!("unexpected rule: {:?}", rule),
+    });
+
+    Ok(())
+}
+
 fn main() -> ! {
     // Save output path for REPL mode (before args is moved)
     let output_path = ARGS.output.clone();
@@ -159,7 +248,7 @@ fn main() -> ! {
         .insert("inputs".to_string(), inputs_record);
 
     // Check if we should evaluate from stdin with -e flag
-    if ARGS.evaluate && ARGS.path.is_none() {
+    if ARGS.evaluate && ARGS.input.is_none() {
         // Read stdin as Blots source code
         if io::stdin().is_terminal() {
             eprintln!("Error: --evaluate requires piped input");
@@ -169,199 +258,33 @@ fn main() -> ! {
         let mut content = String::new();
         io::stdin().read_to_string(&mut content).unwrap();
 
-        let pairs = get_pairs(&content).unwrap();
-
-        // Process the code (same as file mode)
-        pairs.for_each(|pair| match pair.as_rule() {
-            Rule::statement => {
-                if let Some(inner_pair) = pair.into_inner().next() {
-                    match inner_pair.as_rule() {
-                        Rule::expression => {
-                            let result = evaluate_pairs(
-                                inner_pair.into_inner(),
-                                Rc::clone(&heap),
-                                Rc::clone(&bindings),
-                                0,
-                            );
-
-                            if let Err(error) = result {
-                                println!("[evaluation error] {}", error);
-                                std::process::exit(1);
-                            }
-                        }
-                        Rule::output_declaration => {
-                            // Same output handling as file mode
-                            let inner_pairs_clone = inner_pair.clone().into_inner();
-
-                            let result = evaluate_pairs(
-                                inner_pair.clone().into_inner(),
-                                Rc::clone(&heap),
-                                Rc::clone(&bindings),
-                                0,
-                            );
-
-                            for pair in inner_pairs_clone {
-                                match pair.as_rule() {
-                                    Rule::identifier => {
-                                        let identifier = pair.as_str();
-                                        if let Some(value) = bindings.borrow().get(identifier)
-                                            && let Ok(serializable) =
-                                                value.to_serializable_value(&heap.borrow())
-                                        {
-                                            outputs.insert(identifier.to_string(), serializable);
-                                        }
-                                        break;
-                                    }
-                                    Rule::assignment => {
-                                        if let Some(ident_pair) = pair.into_inner().next() {
-                                            let identifier = ident_pair.as_str();
-                                            if let Ok(value) = &result {
-                                                // Validate that the value is portable
-                                                if let Err(e) = validate_portable_value(
-                                                    value,
-                                                    &heap.borrow(),
-                                                    &bindings.borrow(),
-                                                ) {
-                                                    eprintln!("[output error] {}", e);
-                                                } else if let Ok(serializable) =
-                                                    value.to_serializable_value(&heap.borrow())
-                                                {
-                                                    outputs.insert(
-                                                        identifier.to_string(),
-                                                        serializable,
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        break;
-                                    }
-                                    _ => {}
-                                }
-                            }
-
-                            if let Err(error) = result {
-                                println!("[evaluation error] {}", error);
-                                std::process::exit(1);
-                            }
-                        }
-                        Rule::comment => {}
-                        _ => unreachable!("unexpected rule: {:?}", inner_pair.as_rule()),
-                    }
-                }
-            }
-            Rule::EOI => {}
-            rule => unreachable!("unexpected rule: {:?}", rule),
-        });
-
-        // Output the collected outputs
+        if let Err(e) = evaluate_source(&content, &heap, &bindings, &mut outputs) {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
         write_outputs(&outputs, ARGS.output.as_ref());
-
         std::process::exit(0);
     }
 
-    if let Some(path) = &ARGS.path {
-        let content = std::fs::read_to_string(path).unwrap();
-        let pairs = get_pairs(&content).unwrap();
+    if let Some(path_or_input) = &ARGS.input {
+        let is_file = std::path::Path::new(path_or_input).exists();
 
-        pairs.for_each(|pair| match pair.as_rule() {
-            Rule::statement => {
-                if let Some(inner_pair) = pair.into_inner().next() {
-                    match inner_pair.as_rule() {
-                        Rule::expression => {
-                            let result = evaluate_pairs(
-                                inner_pair.into_inner(),
-                                Rc::clone(&heap),
-                                Rc::clone(&bindings),
-                                0,
-                            );
+        let content = if !is_file {
+            // Treat the argument as inline Blots code
+            path_or_input.clone()
+        } else {
+            // Treat as a file path
+            std::fs::read_to_string(path_or_input).unwrap_or_else(|e| {
+                eprintln!("Error reading file '{}': {}", path_or_input, e);
+                std::process::exit(1);
+            })
+        };
 
-                            if let Err(error) = result {
-                                println!("[evaluation error] {}", error);
-                                std::process::exit(1);
-                            }
-                        }
-                        Rule::output_declaration => {
-                            // The output_declaration contains the entire "output x" or "output x = expr"
-                            // We need to evaluate it like a regular expression/assignment but track the output
-                            let inner_pairs_clone = inner_pair.clone().into_inner();
-
-                            // Evaluate the entire output declaration
-                            let result = evaluate_pairs(
-                                inner_pair.clone().into_inner(),
-                                Rc::clone(&heap),
-                                Rc::clone(&bindings),
-                                0,
-                            );
-
-                            // Extract the output name from the declaration
-                            for pair in inner_pairs_clone {
-                                match pair.as_rule() {
-                                    Rule::identifier => {
-                                        // output x - reference existing binding
-                                        let identifier = pair.as_str();
-                                        if let Some(value) = bindings.borrow().get(identifier) {
-                                            // Validate that the value is portable
-                                            if let Err(e) = validate_portable_value(
-                                                value,
-                                                &heap.borrow(),
-                                                &bindings.borrow(),
-                                            ) {
-                                                eprintln!("[output error] {}", e);
-                                            } else if let Ok(serializable) =
-                                                value.to_serializable_value(&heap.borrow())
-                                            {
-                                                outputs
-                                                    .insert(identifier.to_string(), serializable);
-                                            }
-                                        }
-                                        break;
-                                    }
-                                    Rule::assignment => {
-                                        // output x = expr - get the identifier from the assignment
-                                        if let Some(ident_pair) = pair.into_inner().next() {
-                                            let identifier = ident_pair.as_str();
-                                            if let Ok(value) = &result {
-                                                // Validate that the value is portable
-                                                if let Err(e) = validate_portable_value(
-                                                    value,
-                                                    &heap.borrow(),
-                                                    &bindings.borrow(),
-                                                ) {
-                                                    eprintln!("[output error] {}", e);
-                                                } else if let Ok(serializable) =
-                                                    value.to_serializable_value(&heap.borrow())
-                                                {
-                                                    outputs.insert(
-                                                        identifier.to_string(),
-                                                        serializable,
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        break;
-                                    }
-                                    _ => {}
-                                }
-                            }
-
-                            // Check for errors in evaluation
-                            if let Err(error) = result {
-                                println!("[evaluation error] {}", error);
-                                std::process::exit(1);
-                            }
-                        }
-                        Rule::comment => {} // Ignore comments
-                        _ => unreachable!("unexpected rule: {:?}", inner_pair.as_rule()),
-                    }
-                }
-            }
-            Rule::EOI => {}
-            rule => unreachable!("unexpected rule: {:?}", rule),
-        });
-
-        // Output the collected outputs
+        if let Err(e) = evaluate_source(&content, &heap, &bindings, &mut outputs) {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
         write_outputs(&outputs, ARGS.output.as_ref());
-
         std::process::exit(0);
     }
 

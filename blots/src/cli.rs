@@ -1,17 +1,17 @@
 use clap::Parser;
 
 #[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
+#[command(version, about, about = Some("A small expression-oriented programming language."))]
 pub struct Args {
-    /// Path to a source file to run
+    /// Path to a source file to run OR inline Blots code
     #[arg(group = "source")]
-    pub path: Option<String>,
+    pub input: Option<String>,
 
     /// Evaluate stdin as Blots source code instead of JSON inputs
     #[arg(short, long, group = "source")]
     pub evaluate: bool,
 
-    /// JSON object to use as inputs (can be combined with piped inputs, can be specified multiple times)
+    /// JSON values to use as inputs (can be combined with piped inputs)
     #[arg(short, long, action = clap::ArgAction::Append)]
     pub inputs: Vec<String>,
 

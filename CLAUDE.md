@@ -21,8 +21,10 @@ cargo build -p blots-wasm     # Build WASM bindings
 
 ### Running
 ```bash
-cargo run -p blots             # Start interactive REPL
-cargo run -p blots <file.blot> # Execute a Blots program file
+cargo run -p blots                      # Start interactive REPL
+cargo run -p blots <file.blot>          # Execute a Blots program file
+cargo run -p blots "2 + 3"               # Execute inline Blots code
+echo "output x = 42" | cargo run -p blots -e  # Execute piped Blots code
 ```
 
 ### Testing
@@ -63,9 +65,11 @@ Extensive built-in functions for mathematical operations, list processing, strin
 ## CLI Features
 
 The CLI (`blots/src/main.rs`) supports:
-- Interactive REPL with expression evaluation
+- Interactive REPL with expression evaluation and syntax highlighting
 - File execution mode
-- Performance statistics (parse time, function call tracking)
+- Inline code execution (pass Blots code directly as argument)
+- Piped code execution with `-e` flag
+- JSON input/output handling via `-i` and `-o` flags
 - Simple command system (quit, help)
 
 ## WASM Integration
@@ -78,11 +82,7 @@ The WASM module (`blots-wasm/src/lib.rs`) exposes:
 
 ## Testing
 
-The `tests/` directory contains comprehensive test files:
-
-- **`tests/language-features/`**: Core language feature tests (each/with operators, functional patterns)
-
-See `tests/README.md` for detailed test documentation and usage examples.
+The `tests/` directory contains test files for various language features, including compound interest calculations, comments, and blank line handling. A `tests/README.md` file provides additional test documentation.
 
 ## File Extensions
 
