@@ -5,7 +5,19 @@ members = [
   "blots-wasm",
 ]
 resolver = "2"
+
+[workspace.package]
 rust-version = "1.89"
+version = "0.3.0"
+authors = ["Paul Russo <paul@paulrusso.me>"]
+edition = "2024"
+repository = "https://github.com/paul-russo/blots-lang"
+homepage = "https://github.com/paul-russo/blots-lang"
+license-file = "LICENSE"
+
+[workspace.dependencies]
+# Internal crates - these will use path during development, version during publishing
+blots-core = { path = "blots-core", version = "0.3.0" }
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(wasm_bindgen_unstable_test_coverage)'] }
