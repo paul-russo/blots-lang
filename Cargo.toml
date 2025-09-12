@@ -15,10 +15,6 @@ repository = "https://github.com/paul-russo/blots-lang"
 homepage = "https://github.com/paul-russo/blots-lang"
 license = "MIT"
 
-[workspace.metadata.workspaces]
-# Allow publishing the crates in the correct order
-allow_branch = ["main"]
-
 [workspace.dependencies]
 # Internal crates - these will use path during development, version during publishing
 blots-core = { path = "blots-core", version = "0.4.3" }

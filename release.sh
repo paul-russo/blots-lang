@@ -68,7 +68,6 @@ fi
 # Show what will be done and ask for confirmation
 print_info "Release plan:"
 print_info "- Update workspace version to $VERSION in Cargo.toml"
-print_info "- Update blots-core dependency version to $VERSION"
 print_info "- Run cargo check to update Cargo.lock with new version"
 print_info "- Commit changes (Cargo.toml + Cargo.lock) with message 'Release v$VERSION'"
 print_info "- Create and push git tag 'v$VERSION'"
@@ -96,15 +95,13 @@ fi
 
 print_info "Updating workspace version..."
 
-# Update workspace version and workspace dependency version
+# Update workspace version only
 if [[ "$OSTYPE" == "darwin"* ]]; then
     # macOS sed
     sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" "$WORKSPACE_CARGO"
-    sed -i '' "s/blots-core = { path = \"blots-core\", version = \".*\" }/blots-core = { path = \"blots-core\", version = \"$VERSION\" }/" "$WORKSPACE_CARGO"
 else
     # Linux sed
     sed -i "s/^version = \".*\"/version = \"$VERSION\"/" "$WORKSPACE_CARGO"
-    sed -i "s/blots-core = { path = \"blots-core\", version = \".*\" }/blots-core = { path = \"blots-core\", version = \"$VERSION\" }/" "$WORKSPACE_CARGO"
 fi
 
 # Verify the changes
@@ -148,22 +145,7 @@ if [ "$PUBLISH_TO_CRATES_IO" = true ]; then
         print_warning "Unable to connect to crates.io. Please ensure you're logged in with 'cargo login'"
         print_warning "Skipping crates.io publishing"
     else
-        # Temporarily switch to version dependencies for subsequent crates
-        print_info "Preparing workspace for crates.io publishing..."
-        
-        # Create a backup of the workspace Cargo.toml
-        cp "$WORKSPACE_CARGO" "${WORKSPACE_CARGO}.publish-backup"
-        
-        # Function to restore original Cargo.toml on exit
-        cleanup_publish() {
-            if [ -f "${WORKSPACE_CARGO}.publish-backup" ]; then
-                print_info "Restoring original workspace configuration..."
-                mv "${WORKSPACE_CARGO}.publish-backup" "$WORKSPACE_CARGO"
-            fi
-        }
-        
-        # Set trap to restore on exit (success or failure)
-        trap cleanup_publish EXIT
+        print_info "Publishing crates to crates.io..."
         
         # Track successfully published crates for potential yanking
         PUBLISHED_CRATES=()
@@ -199,22 +181,6 @@ if [ "$PUBLISH_TO_CRATES_IO" = true ]; then
                 
                 # Track this crate as successfully published
                 PUBLISHED_CRATES+=("$crate")
-                
-                # After publishing blots-core, switch workspace to use version dependency
-                if [ "$crate" = "blots-core" ]; then
-                    print_info "Switching workspace to use published blots-core version..."
-                    
-                    # Switch from path to version dependency
-                    if [[ "$OSTYPE" == "darwin"* ]]; then
-                        # macOS sed
-                        sed -i '' "s/blots-core = { path = \"blots-core\", version = \"$VERSION\" }/blots-core = { version = \"$VERSION\" }/" "$WORKSPACE_CARGO"
-                    else
-                        # Linux sed  
-                        sed -i "s/blots-core = { path = \"blots-core\", version = \"$VERSION\" }/blots-core = { version = \"$VERSION\" }/" "$WORKSPACE_CARGO"
-                    fi
-                    
-                    print_info "✓ Workspace now uses published blots-core version"
-                fi
                 
                 # Wait a bit to allow crates.io to process the package
                 if [ "$crate" != "blots-wasm" ]; then  # Don't wait after the last one
