@@ -23,7 +23,8 @@ This allows you to:
 This will:
 - Update the workspace version to `1.0.0` in `Cargo.toml`
 - Update the `blots-core` dependency version to `1.0.0`
-- Commit changes with message "Release v1.0.0"
+- Run `cargo check` to update `Cargo.lock` with the new version
+- Commit changes (`Cargo.toml` + `Cargo.lock`) with message "Release v1.0.0"
 - Create and push git tag `v1.0.0`
 
 ### 2. Release + Publish to crates.io
