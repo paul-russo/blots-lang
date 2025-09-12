@@ -21,15 +21,51 @@ print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+# Function to get current version from workspace Cargo.toml
+get_current_version() {
+    grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\([^"]*\)"/\1/'
+}
+
+# Function to calculate version bump
+calculate_version() {
+    local current_version="$1"
+    local bump_type="$2"
+    
+    # Parse current version into components
+    IFS='.' read -ra VERSION_PARTS <<< "$current_version"
+    local major="${VERSION_PARTS[0]}"
+    local minor="${VERSION_PARTS[1]}"
+    local patch="${VERSION_PARTS[2]}"
+    
+    case "$bump_type" in
+        "patch")
+            echo "$major.$minor.$((patch + 1))"
+            ;;
+        "minor")
+            echo "$major.$((minor + 1)).0"
+            ;;
+        "major")
+            echo "$((major + 1)).0.0"
+            ;;
+        *)
+            echo "$bump_type"  # Return as-is if not a bump command
+            ;;
+    esac
+}
+
 # Check if version argument is provided
 if [ $# -eq 0 ]; then
-    print_error "Usage: $0 <version> [--no-publish]"
-    print_error "Example: $0 0.3.1"
-    print_error "Example: $0 0.3.1 --no-publish  # Skip publishing to crates.io"
+    print_error "Usage: $0 <version|patch|minor|major> [--no-publish]"
+    print_error "Examples:"
+    print_error "  $0 0.3.1                 # Use exact version"
+    print_error "  $0 patch                 # Increment patch version (0.4.7 -> 0.4.8)"
+    print_error "  $0 minor                 # Increment minor version (0.4.7 -> 0.5.0)"
+    print_error "  $0 major                 # Increment major version (0.4.7 -> 1.0.0)"
+    print_error "  $0 patch --no-publish    # Skip publishing to crates.io"
     exit 1
 fi
 
-VERSION=$1
+VERSION_INPUT=$1
 PUBLISH_TO_CRATES_IO=true
 
 # Check for --no-publish flag
@@ -37,9 +73,23 @@ if [ "$2" == "--no-publish" ]; then
     PUBLISH_TO_CRATES_IO=false
 fi
 
+# Get current version and calculate new version
+CURRENT_VERSION=$(get_current_version)
+if [ -z "$CURRENT_VERSION" ]; then
+    print_error "Could not find current version in Cargo.toml"
+    exit 1
+fi
+
+VERSION=$(calculate_version "$CURRENT_VERSION" "$VERSION_INPUT")
+
+print_info "Current version: $CURRENT_VERSION"
+if [ "$VERSION_INPUT" != "$VERSION" ]; then
+    print_info "Bumping $VERSION_INPUT version: $CURRENT_VERSION -> $VERSION"
+fi
+
 # Validate version format (basic semver check)
 if ! [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    print_error "Invalid version format. Please use semantic versioning (e.g., 1.2.3)"
+    print_error "Invalid version format. Please use semantic versioning (e.g., 1.2.3) or bump commands (patch, minor, major)"
     exit 1
 fi
 
