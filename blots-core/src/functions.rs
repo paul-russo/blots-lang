@@ -437,8 +437,10 @@ impl BuiltInFunction {
                     _ => return Err(anyhow!("range requires 1 or 2 numbers")),
                 };
 
-                if start >= end {
-                    return Err(anyhow!("range requires start to be less than end"));
+                if start > end {
+                    return Err(anyhow!(
+                        "range requires start to be less than or equal to end"
+                    ));
                 }
 
                 if !f64::is_finite(start) || !f64::is_finite(end) {
