@@ -1,7 +1,15 @@
 [package]
-edition = "2024"
 name = "blots-core"
-version = "0.3.0"
+description = "Core library for Blots, a small, simple, expression-oriented programming language."
+readme = 'README.md'
+# Inherit common fields from workspace
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+license-file.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 anyhow = "1.0.86"
