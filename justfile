@@ -16,6 +16,10 @@ build-all-release:
     cargo build --release
     cd blots-wasm && wasm-pack build --target bundler
 
+# Publish a new version to Crates.io, and add a release on GitHub with pre-built binaries.
+release version:
+    ./release.sh {{version}}
+
 # Run tests
 test:
     cargo test
