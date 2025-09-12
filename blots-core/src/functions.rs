@@ -1299,16 +1299,25 @@ impl FunctionDef {
                 #[cfg(not(target_arch = "wasm32"))]
                 let start_var_env = std::time::Instant::now();
 
-                let mut new_bindings = scope.clone();
+                // Start with current environment as fallback for late binding
+                let mut new_bindings = bindings.borrow().clone();
 
+                // Override with captured scope (captured variables take precedence)
+                for (key, value) in scope {
+                    new_bindings.insert(key.clone(), *value);
+                }
+
+                // Add self-reference if named
                 if let Some(fn_name) = name {
                     new_bindings.insert(fn_name.clone(), this_value);
                 }
 
-                if let Some(inputs) = bindings.borrow().get("inputs") {
-                    new_bindings.insert(String::from("inputs"), *inputs);
+                // Preserve inputs if present
+                if let Some(inputs) = new_bindings.get("inputs").copied() {
+                    new_bindings.insert(String::from("inputs"), inputs);
                 }
 
+                // Add function arguments (highest precedence)
                 for (idx, expected_arg) in expected_args.iter().enumerate() {
                     match expected_arg {
                         LambdaArg::Required(arg_name) => {

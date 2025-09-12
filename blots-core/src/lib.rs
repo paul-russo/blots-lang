@@ -8,4 +8,5 @@ pub mod functions;
 pub mod heap;
 pub mod parser;
 pub mod stats;
+pub mod tests;
 pub mod values;

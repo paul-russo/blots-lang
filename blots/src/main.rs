@@ -2,7 +2,7 @@ mod cli;
 mod commands;
 mod highlighter;
 
-use blots_core::expressions::evaluate_pairs;
+use blots_core::expressions::{evaluate_pairs, validate_portable_value};
 use blots_core::heap::Heap;
 use blots_core::parser::{Rule, get_pairs};
 use blots_core::values::{SerializableValue, Value};
@@ -215,12 +215,22 @@ fn main() -> ! {
                                     Rule::assignment => {
                                         if let Some(ident_pair) = pair.into_inner().next() {
                                             let identifier = ident_pair.as_str();
-                                            if let Ok(value) = &result
-                                                && let Ok(serializable) =
+                                            if let Ok(value) = &result {
+                                                // Validate that the value is portable
+                                                if let Err(e) = validate_portable_value(
+                                                    value,
+                                                    &heap.borrow(),
+                                                    &bindings.borrow(),
+                                                ) {
+                                                    eprintln!("[output error] {}", e);
+                                                } else if let Ok(serializable) =
                                                     value.to_serializable_value(&heap.borrow())
-                                            {
-                                                outputs
-                                                    .insert(identifier.to_string(), serializable);
+                                                {
+                                                    outputs.insert(
+                                                        identifier.to_string(),
+                                                        serializable,
+                                                    );
+                                                }
                                             }
                                         }
                                         break;
@@ -289,11 +299,20 @@ fn main() -> ! {
                                     Rule::identifier => {
                                         // output x - reference existing binding
                                         let identifier = pair.as_str();
-                                        if let Some(value) = bindings.borrow().get(identifier)
-                                            && let Ok(serializable) =
+                                        if let Some(value) = bindings.borrow().get(identifier) {
+                                            // Validate that the value is portable
+                                            if let Err(e) = validate_portable_value(
+                                                value,
+                                                &heap.borrow(),
+                                                &bindings.borrow(),
+                                            ) {
+                                                eprintln!("[output error] {}", e);
+                                            } else if let Ok(serializable) =
                                                 value.to_serializable_value(&heap.borrow())
-                                        {
-                                            outputs.insert(identifier.to_string(), serializable);
+                                            {
+                                                outputs
+                                                    .insert(identifier.to_string(), serializable);
+                                            }
                                         }
                                         break;
                                     }
@@ -301,12 +320,22 @@ fn main() -> ! {
                                         // output x = expr - get the identifier from the assignment
                                         if let Some(ident_pair) = pair.into_inner().next() {
                                             let identifier = ident_pair.as_str();
-                                            if let Ok(value) = &result
-                                                && let Ok(serializable) =
+                                            if let Ok(value) = &result {
+                                                // Validate that the value is portable
+                                                if let Err(e) = validate_portable_value(
+                                                    value,
+                                                    &heap.borrow(),
+                                                    &bindings.borrow(),
+                                                ) {
+                                                    eprintln!("[output error] {}", e);
+                                                } else if let Ok(serializable) =
                                                     value.to_serializable_value(&heap.borrow())
-                                            {
-                                                outputs
-                                                    .insert(identifier.to_string(), serializable);
+                                                {
+                                                    outputs.insert(
+                                                        identifier.to_string(),
+                                                        serializable,
+                                                    );
+                                                }
                                             }
                                         }
                                         break;
@@ -528,13 +557,21 @@ fn main() -> ! {
                                     Rule::identifier => {
                                         // output x - reference existing binding
                                         let identifier = pair.as_str();
-                                        if let Some(value) = bindings.borrow().get(identifier)
-                                            && let Ok(serializable) =
+                                        if let Some(value) = bindings.borrow().get(identifier) {
+                                            // Validate that the value is portable
+                                            if let Err(e) = validate_portable_value(
+                                                value,
+                                                &heap.borrow(),
+                                                &bindings.borrow(),
+                                            ) {
+                                                eprintln!("[output error] {}", e);
+                                            } else if let Ok(serializable) =
                                                 value.to_serializable_value(&heap.borrow())
-                                        {
-                                            outputs.insert(identifier.to_string(), serializable);
-
-                                            println!("[output '{}' recorded]", identifier);
+                                            {
+                                                outputs
+                                                    .insert(identifier.to_string(), serializable);
+                                                println!("[output '{}' recorded]", identifier);
+                                            }
                                         }
                                         break;
                                     }
@@ -542,21 +579,30 @@ fn main() -> ! {
                                         // output x = expr - get the identifier from the assignment
                                         if let Some(ident_pair) = pair.into_inner().next() {
                                             let identifier = ident_pair.as_str();
-                                            if let Ok(value) = &result
-                                                && let Ok(serializable) =
+                                            if let Ok(value) = &result {
+                                                // Validate that the value is portable
+                                                if let Err(e) = validate_portable_value(
+                                                    value,
+                                                    &heap.borrow(),
+                                                    &bindings.borrow(),
+                                                ) {
+                                                    eprintln!("[output error] {}", e);
+                                                } else if let Ok(serializable) =
                                                     value.to_serializable_value(&heap.borrow())
-                                            {
-                                                outputs
-                                                    .insert(identifier.to_string(), serializable);
-
-                                                // Show value and confirmation in REPL
-                                                let value_str =
-                                                    value.stringify_external(&heap.borrow());
-                                                println!(
-                                                    "{}",
-                                                    highlighter.highlight_result(&value_str)
-                                                );
-                                                println!("[output '{}' recorded]", identifier);
+                                                {
+                                                    outputs.insert(
+                                                        identifier.to_string(),
+                                                        serializable,
+                                                    );
+                                                    // Show value and confirmation in REPL
+                                                    let value_str =
+                                                        value.stringify_external(&heap.borrow());
+                                                    println!(
+                                                        "{}",
+                                                        highlighter.highlight_result(&value_str)
+                                                    );
+                                                    println!("[output '{}' recorded]", identifier);
+                                                }
                                             }
                                         }
                                         break;
