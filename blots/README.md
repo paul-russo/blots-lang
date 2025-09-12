@@ -6,13 +6,17 @@ Blots is a small, dynamic, functional, expression-oriented programming language 
 
 ### Using `cargo`
 
-If you don't have Rust installed, you can use [rustup](https://rustup.rs/) to install the latest stable version of Rust, including the `cargo` tool.
+> If you don't have Rust installed, you can use [rustup](https://rustup.rs/) to install the latest stable version of Rust, including the `cargo` tool.
 
-Then, just run `cargo install blots`.
+```
+cargo install blots
+```
 
 ### Installing a Prebuilt Binary
 
-Coming soon.
+#### Homebrew
+
+`brew install paul-russo/tap/blots`
 
 ## The Blots Language
 
