@@ -2,6 +2,9 @@
 edition = "2024"
 name = "blots"
 version = "0.1.0"
+repository = "https://github.com/paul-russo/blots-lang"
+description = "A small expression-oriented programming language."
+homepage = "https://github.com/paul-russo/blots-lang"
 
 [dependencies]
 anyhow = "1.0.86"
