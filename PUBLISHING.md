@@ -107,15 +107,6 @@ This ensures your workspace crates are always consistent on crates.io - either a
 
 This error occurs when trying to package crates that depend on `blots-core` before it's published to crates.io. This is expected behavior and is resolved by the release script's dependency switching.
 
-### License file warnings
-
-You may see warnings like:
-```
-license-file `../LICENSE` appears to be a path outside of the package
-```
-
-This is harmless. Each crate has its own `LICENSE` file that will be included in the published package.
-
 ### Publishing individual crates
 
 If you need to publish individual crates manually:

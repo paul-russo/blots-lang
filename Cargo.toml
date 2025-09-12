@@ -13,7 +13,7 @@ authors = ["Paul Russo <paul@paulrusso.me>"]
 edition = "2024"
 repository = "https://github.com/paul-russo/blots-lang"
 homepage = "https://github.com/paul-russo/blots-lang"
-license-file = "LICENSE"
+license = "MIT"
 
 [workspace.metadata.workspaces]
 # Allow publishing the crates in the correct order
