@@ -17,6 +17,10 @@ use crate::stats::FunctionCallStats;
 pub static FUNCTION_CALLS: LazyLock<Mutex<Vec<FunctionCallStats>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 
+// Cache built-in function names since they're static
+pub static BUILTIN_FUNCTION_NAMES: LazyLock<Vec<&'static str>> =
+    LazyLock::new(BuiltInFunction::all_names);
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]

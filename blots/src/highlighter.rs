@@ -1,3 +1,6 @@
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
+
+use blots_core::{functions::BUILTIN_FUNCTION_NAMES, values::Value};
 use regex::Regex;
 use rustyline::{
     Context, Helper, completion::Completer, highlight::Highlighter, hint::Hinter,
@@ -12,10 +15,11 @@ pub struct BlotsHighlighter {
     operator_regex: Regex,
     string_regex: Regex,
     number_regex: Regex,
+    bindings: Rc<RefCell<HashMap<String, Value>>>,
 }
 
 impl BlotsHighlighter {
-    pub fn new() -> Self {
+    pub fn new(bindings: Rc<RefCell<HashMap<String, Value>>>) -> Self {
         Self {
             // Comments: // to end of line
             comment_regex: Regex::new(r"//.*$").unwrap(),
@@ -31,6 +35,8 @@ impl BlotsHighlighter {
 
             // Numbers: including decimals and scientific notation
             number_regex: Regex::new(r"\b\d+(\.\d+)?([eE][+-]?\d+)?\b").unwrap(),
+
+            bindings,
         }
     }
 
@@ -137,7 +143,12 @@ impl Highlighter for BlotsHighlighter {
         self.highlight_line(line).into()
     }
 
-    fn highlight_char(&self, _line: &str, _pos: usize, _forced: bool) -> bool {
+    fn highlight_char(
+        &self,
+        _line: &str,
+        _pos: usize,
+        _forced: rustyline::highlight::CmdKind,
+    ) -> bool {
         true // Always highlight
     }
 }
@@ -146,7 +157,7 @@ impl Hinter for BlotsHighlighter {
     type Hint = String;
 
     fn hint(&self, _line: &str, _pos: usize, _ctx: &Context<'_>) -> Option<String> {
-        None // No hints for now
+        None
     }
 }
 
@@ -155,11 +166,41 @@ impl Completer for BlotsHighlighter {
 
     fn complete(
         &self,
-        _line: &str,
-        _pos: usize,
+        line: &str,
+        pos: usize,
         _ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<String>)> {
-        Ok((0, vec![])) // No completion for now
+        let maybe_last_word = line.split_whitespace().last();
+
+        // If the cursor is at the last position, try matching for completions
+        if let Some(last_word) = maybe_last_word
+            && let Some(last_word_pos) = line.match_indices(last_word).last()
+            && pos == line.len()
+        {
+            let rel_pos = pos - last_word_pos.0;
+
+            // First, collect completions from bindings (higher priority)
+            let mut completions: Vec<String> = self
+                .bindings
+                .borrow()
+                .keys()
+                .filter(|key| key.starts_with(last_word))
+                .map(|key| key[rel_pos..].to_string())
+                .collect();
+
+            // Then, add built-in function completions (lower priority)
+            let builtin_completions: Vec<String> = BUILTIN_FUNCTION_NAMES
+                .iter()
+                .filter(|&name| name.starts_with(last_word))
+                .map(|&name| name[rel_pos..].to_string())
+                .collect();
+
+            completions.extend(builtin_completions);
+
+            return Ok((pos, completions));
+        }
+
+        Ok((pos, vec![]))
     }
 }
 
