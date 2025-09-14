@@ -3,7 +3,7 @@
 ## Project Structure & Module Organization
 - Workspace crates:
   - `blots-core/` – core language engine: parser, evaluator, built-ins (`ast.rs`, `parser.rs`, `expressions.rs`, `values.rs`).
-  - `blots/` – CLI and REPL (`src/main.rs`, `cli.rs`, flags: `--evaluate/-e`, `--inputs/-i`, `--output`).
+  - `blots/` – CLI and REPL (`src/main.rs`, `cli.rs`, flags: `--evaluate/-e`, `--input/-i`, `--output`).
   - `blots-wasm/` – WebAssembly wrapper (exports via `wasm-bindgen`).
 - `examples/` – sample Blots programs. `tests/` – language fixtures; `blots/tests/` – CLI integration tests.
 - `Cargo.toml` (workspace) and `Makefile` define common tasks.

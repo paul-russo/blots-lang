@@ -250,15 +250,15 @@ fn main() -> ! {
 
     // Then, apply -i flag inputs (which override piped inputs)
     // Process each -i flag in order, with later ones overriding earlier ones
-    for (index, inputs_str) in ARGS.inputs.iter().enumerate() {
+    for (index, inputs_str) in ARGS.input.iter().enumerate() {
         match parse_json_inputs(
             inputs_str,
             &heap,
-            &format!("--inputs #{}", index + 1),
+            &format!("--input #{}", index + 1),
             &mut unnamed_counter,
         ) {
             Ok(map) => {
-                // Merge with existing inputs (later --inputs override earlier ones)
+                // Merge with existing inputs (later --input override earlier ones)
                 for (k, v) in map {
                     inputs_map.insert(k, v);
                 }
@@ -277,7 +277,7 @@ fn main() -> ! {
         .insert("inputs".to_string(), inputs_record);
 
     // Check if we should evaluate from stdin with -e flag
-    if ARGS.evaluate && ARGS.input.is_none() {
+    if ARGS.evaluate && ARGS.file_or_source.is_none() {
         // Read stdin as Blots source code
         if io::stdin().is_terminal() {
             eprintln!("Error: --evaluate requires piped input");
@@ -295,16 +295,16 @@ fn main() -> ! {
         std::process::exit(0);
     }
 
-    if let Some(path_or_input) = &ARGS.input {
-        let is_file = std::path::Path::new(path_or_input).exists();
+    if let Some(path_or_source) = &ARGS.file_or_source {
+        let is_file = std::path::Path::new(path_or_source).exists();
 
         let content = if !is_file {
             // Treat the argument as inline Blots code
-            path_or_input.clone()
+            path_or_source.clone()
         } else {
             // Treat as a file path
-            std::fs::read_to_string(path_or_input).unwrap_or_else(|e| {
-                eprintln!("Error reading file '{}': {}", path_or_input, e);
+            std::fs::read_to_string(path_or_source).unwrap_or_else(|e| {
+                eprintln!("Error reading file '{}': {}", path_or_source, e);
                 std::process::exit(1);
             })
         };
@@ -329,12 +329,12 @@ fn main() -> ! {
         eprintln!("    echo '{{\"x\": 42}}' | blots myfile.blot");
         eprintln!();
         eprintln!(
-            "If you want to provide inputs that you can use in an interactive session, you can use the -i flag:"
+            "If you want to provide inputs that you can use in an interactive session, you can use the --input (-i) flag:"
         );
-        eprintln!("    blots -i '{{\"x\": 42, \"y\": \"hello\"}}'");
+        eprintln!("    blots --input '{{\"x\": 42, \"y\": \"hello\"}}'");
         eprintln!();
         eprintln!(
-            "You can also pipe Blots code with --evaluate. This can be combined with the -i flag:"
+            "You can also pipe Blots code with --evaluate (-e). This can be combined with the -i flag:"
         );
         eprintln!(
             "    echo -e 'output result = inputs.x + inputs.y' | blots --evaluate -i '{{\"x\": 42, \"y\": \"hello\"}}'"
@@ -349,12 +349,12 @@ fn main() -> ! {
     }
 
     // Initialize rustyline editor for command history
-    let highlighter = BlotsHighlighter::new();
     let mut rl: Option<Editor<BlotsHighlighter, rustyline::history::DefaultHistory>> =
         match Editor::with_config(rustyline::Config::builder().build()) {
             Ok(mut editor) => {
                 // Set up syntax highlighting
-                editor.set_helper(Some(BlotsHighlighter::new()));
+                let highlighter = BlotsHighlighter::new(Rc::clone(&bindings));
+                editor.set_helper(Some(highlighter));
                 Some(editor)
             }
             Err(e) => {
@@ -366,6 +366,7 @@ fn main() -> ! {
     let mut accumulated_input = String::new();
     let mut continuation = false;
 
+    // REPL loop
     loop {
         let prompt = if continuation { "... " } else { "> " };
         let line = if let Some(ref mut editor) = rl {
@@ -404,7 +405,7 @@ fn main() -> ! {
                 }
             }
         } else {
-            // Fall back to basic stdin (should not happen if /dev/tty worked)
+            // Fall back to basic stdin just in case
             let mut line = String::new();
             let bytes_read = std::io::stdin().read_line(&mut line).unwrap();
 
@@ -486,7 +487,14 @@ fn main() -> ! {
                                 Ok(value) => {
                                     let value_str = value.stringify_external(&heap.borrow());
 
-                                    println!("{}", highlighter.highlight_result(&value_str));
+                                    println!(
+                                        "{}",
+                                        rl.as_ref()
+                                            .unwrap()
+                                            .helper()
+                                            .unwrap()
+                                            .highlight_result(&value_str)
+                                    );
                                 }
                                 Err(error) => println!("[evaluation error] {}", error),
                             }
@@ -551,7 +559,11 @@ fn main() -> ! {
                                                         value.stringify_external(&heap.borrow());
                                                     println!(
                                                         "{}",
-                                                        highlighter.highlight_result(&value_str)
+                                                        rl.as_ref()
+                                                            .unwrap()
+                                                            .helper()
+                                                            .unwrap()
+                                                            .highlight_result(&value_str)
                                                     );
                                                     println!("[output '{}' recorded]", identifier);
                                                 }
