@@ -88,8 +88,8 @@ Some things to note about `do` blocks:
 #### Inputs
 
 The Blots CLI accepts JSON values as inputs, either as piped input or via the `--input` (`-i`) flag:
-```
-> blots -i '{ "name": "Paul" }'
+```bash
+blots -i '{ "name": "Paul" }'
 ```
 
 All input values are merged together and made available via the `inputs` record:
@@ -98,14 +98,35 @@ output greeting = "Hey " + inputs.name // "Hey Paul"
 ```
 
 JSON arrays and primitive values (numbers, strings, booleans, and `null`) can be passed directly as inputs as well:
-```
-> blots -i '[1,2,3]'
+```bash
+blots -i '[1,2,3]'
 ```
 
 These unnamed inputs are named like `value_{1-based index}`:
 ```blots
 output total = sum(...inputs.value_1) // 6
 ```
+
+##### More Input Examples
+
+**Multiple inputs:**
+```bash
+# Combine multiple JSON inputs
+blots -i '{"x": 10}' -i '{"y": 20}' "output sum = inputs.x + inputs.y"
+# Output: {"sum": 30}
+```
+
+**Piped input:**
+```bash
+# Pipe JSON data into Blots
+echo '{"items": [1,2,3,4,5]}' | blots -e "output avg = avg(...inputs.items)"
+# Output: {"avg": 3}
+
+# Process command output
+curl -s "https://api.example.com/data.json" | blots -e "output count = len(inputs.results)"
+# Output: { "count": 20 }
+```
+
 
 #### Outputs
 
@@ -124,6 +145,42 @@ The above example would yield this output:
 
 ```json
 { "one": 1, "answer": 42 }
+```
+
+##### More Output Examples
+
+**Multiple outputs:**
+```blots
+// Calculate statistics from input data
+data = inputs.values
+output mean = avg(...data)
+output min_val = min(...data)
+output max_val = max(...data)
+output std_dev = sqrt(avg(...map(data, x => (x - mean)^2)))
+```
+
+**Structured outputs:**
+```blots
+// Return nested data structures
+output result = {
+  summary: {
+    total: sum(...inputs.items),
+    count: len(inputs.items)
+  },
+  processed: map(inputs.items, x => x * 2)
+}
+```
+
+**Using outputs with other tools:**
+```bash
+# Format output with jq
+blots -i '[1,2,3,4,5]' "output stats = {min: min(...inputs.value_1), max: max(...inputs.value_1)}" | jq
+
+# Save output to file
+blots "output data = range(1, 11) via (x => x^2)" > squares.json
+
+# Chain Blots programs
+blots "output nums = range(1, 6)" | blots -e "output squares = inputs.nums via (x => x^2)"
 ```
 
 ### Comments
