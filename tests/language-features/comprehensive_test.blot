@@ -1,16 +1,16 @@
-// Test comprehensive functionality including |> operators
+// Test comprehensive functionality including map operators
 numbers = [1, 2, 3, 4, 5]
 
-// Test basic |> operator
-result1 = 10 |> x => x * 2
+// Test basic map operator
+result1 = 10 map x => x * 2
 print("Basic with: {}", result1)
 
-// Test multiple |> operators (the fixed case)
-result2 = 5 |> x => x * 2 |> y => y + 10
+// Test multiple map operators (the fixed case)
+result2 = 5 map x => x * 2 map y => y + 10
 print("Multiple with: {}", result2)
 
 // Test element-wise with
-result3 = numbers |> x => x * 3
+result3 = numbers map x => x * 3
 print("Element-wise with: {}", result3)
 
 // Test complex expressions without with

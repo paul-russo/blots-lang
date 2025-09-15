@@ -1,5 +1,5 @@
-result1 = each([1,2,3]) |> x => x * 2 |> x => x / 2
+result1 = map(map(each([1,2,3]), x => x * 2), x => x / 2)
 print("each result: {}", result1)
 
-result2 = 10 |> x => x + 5 |> y => y * 2 |> z => z - 3
-print("multiple |> result: {}", result2)
+result2 = (z => z - 3)((y => y * 2)((x => x + 5)(10)))
+print("multiple map result: {}", result2)

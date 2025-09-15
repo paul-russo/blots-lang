@@ -28,7 +28,7 @@ person = {
 person_age = person.age
 has_math = includes(person.skills, "math")
 
-// Functional programming |> lambdas
+// Functional programming map lambdas
 increment = x => x + 1
 add = (a, b) => a + b
 sum_triple = (x, y, z) => x + y + z
@@ -36,7 +36,7 @@ curry_add = x => y => x + y
 add_five = curry_add(5)
 add_five(2)
 
-// Advanced list operations |> spread
+// Advanced list operations map spread
 list1 = [1, 2, 3]
 list2 = [4, 5, 6]
 combined = [...list1, ...list2]
@@ -53,7 +53,7 @@ add_one = x => x + 1
 double_then_add = compose(add_one, double)
 double_then_add(4)
 
-// Working |> ranges and transformations
+// Working map ranges and transformations
 range_nums = range(5)  // [0, 1, 2, 3, 4]
 squared = map(range_nums, x => x ^ 2)
 even_squares = filter(squared, x => x % 2 == 0)
@@ -68,7 +68,7 @@ defaults = { color: "blue", size: "medium" }
 custom = { ...defaults, color: "red" }
 merged = { ...defaults, ...custom }
 
-// Working |> nulls and optional values
+// Working map nulls and optional values
 maybe_null = null
 default_value = maybe_null ?? "default"
 
@@ -86,7 +86,7 @@ users = [
 ]
 
 // Get average score
-avg_score = avg(...(users |> u => u.score))
+avg_score = avg(...(users map u => u.score))
 
 // Sort users by score
 sorted_users = sort_by(users, (a, b) => b.score - a.score)
@@ -100,7 +100,7 @@ stats = {
     p90: percentile(nums, 90)
 }
 
-// Function |> rest parameters
+// Function map rest parameters
 flexible_join = (separator, ...items) => 
     join(map(items, to_string), separator)
 

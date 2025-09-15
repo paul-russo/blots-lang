@@ -25,10 +25,10 @@ impl BlotsHighlighter {
             comment_regex: Regex::new(r"//.*$").unwrap(),
 
             // Keywords: if, then, else, output, with
-            keyword_regex: Regex::new(r"\b(if|then|else|output|with)\b").unwrap(),
+            keyword_regex: Regex::new(r"\b(if|then|else|output)\b").unwrap(),
 
             // Operators: all the operators from the grammar
-            operator_regex: Regex::new(r"(=>|\+|-|\*|/|%|\^|==|!=|<=|<|>=|>|&&|\|\||\?\?|!|\.|=|\{|\}|\[|\]|\(|\)|,|\?|\.\.\.|\band\b|\bor\b)").unwrap(),
+            operator_regex: Regex::new(r"(=>|\+|-|\*|/|%|\^|==|!=|<=|<|>=|>|&&|\|\||\?\?|!|\.|=|\{|\}|\[|\]|\(|\)|,|\?|\.\.\.|\band\b|\bor\b|\bvia\b|\binto\b)").unwrap(),
 
             // Strings: both single and double quoted (simplified for now)
             string_regex: Regex::new(r#""[^"]*"|'[^']*'"#).unwrap(),

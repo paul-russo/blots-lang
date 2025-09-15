@@ -38,12 +38,12 @@ mandelbrot = (x, y, max_iter, iter, z) =>
 // Main computation that exercises different language features
 benchmark = n => {
     primes: filter(range(n), is_prime),
-    fibs: (range(n)) |> (i) => fibonacci(i),
-    factorials: (range(n)) |> (i) => factorial(i), 
+    fibs: map(range(n), (i) => fibonacci(i)),
+    factorials: map(range(n), (i) => factorial(i)), 
     reverse_test: reverse(range(n)),
-    mandel_test: ([[-2, -1], [-1, 0], [0, 0], [0.25, 0]]) |> (point) => mandelbrot(point[0], point[1], 100, 0, [0, 0]),
-    sum_squares: sum(...((range(n)) |> (i) => i * i)),
-    trig_test: (range(n)) |> (i) => [sin(i), cos(i), tan(i)]
+    mandel_test: map([[-2, -1], [-1, 0], [0, 0], [0.25, 0]], (point) => mandelbrot(point[0], point[1], 100, 0, [0, 0])),
+    sum_squares: sum(...map(range(n), (i) => i * i)),
+    trig_test: map(range(n), (i) => [sin(i), cos(i), tan(i)])
 }
 
 // Run benchmark

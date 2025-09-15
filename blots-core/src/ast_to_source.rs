@@ -126,7 +126,8 @@ fn binary_op_to_source(op: &BinaryOp) -> &'static str {
         BinaryOp::NaturalAnd => "and",
         BinaryOp::Or => "||",
         BinaryOp::NaturalOr => "or",
-        BinaryOp::Pipe => "|>",
+        BinaryOp::Via => "via",
+        BinaryOp::Into => "into",
         BinaryOp::Coalesce => "??",
     }
 }

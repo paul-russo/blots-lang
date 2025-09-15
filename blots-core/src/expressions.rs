@@ -29,7 +29,8 @@ static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
             | Op::infix(Rule::natural_and, Assoc::Left)
             | Op::infix(Rule::or, Assoc::Left)
             | Op::infix(Rule::natural_or, Assoc::Left)
-            | Op::infix(Rule::pipe, Assoc::Left))
+            | Op::infix(Rule::via, Assoc::Left)
+            | Op::infix(Rule::into, Assoc::Left))
         .op(Op::infix(Rule::equal, Assoc::Left)
             | Op::infix(Rule::not_equal, Assoc::Left)
             | Op::infix(Rule::less, Assoc::Left)
@@ -679,6 +680,9 @@ fn evaluate_binary_op_ast(
     let rhs = evaluate_ast(right, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
 
     match (lhs, rhs) {
+        (_, Value::List(_)) if op == BinaryOp::Into => Err(anyhow!(
+            "'into' operator requires a function on the right side, not a list"
+        )),
         (Value::List(list_l), Value::List(list_r)) => {
             let (l_vec, r_vec) = {
                 let borrowed_heap = &heap.borrow();
@@ -865,7 +869,7 @@ fn evaluate_binary_op_ast(
                         .collect::<Result<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
-                BinaryOp::Pipe => {
+                BinaryOp::Via => {
                     let mapped_list = l_vec
                         .iter()
                         .zip(&r_vec)
@@ -897,6 +901,10 @@ fn evaluate_binary_op_ast(
                         })
                         .collect::<Result<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+                BinaryOp::Into => {
+                    // This should never be reached due to early check above
+                    unreachable!("Into operator should not reach list-to-list evaluation")
                 }
             }
         }
@@ -1184,7 +1192,7 @@ fn evaluate_binary_op_ast(
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
-                BinaryOp::Pipe => {
+                BinaryOp::Via => {
                     if is_list_first {
                         if !scalar.is_callable() {
                             return Err(anyhow!(
@@ -1207,9 +1215,39 @@ fn evaluate_binary_op_ast(
 
                         Ok(heap.borrow_mut().insert_list(mapped_list))
                     } else {
-                        Err(anyhow!(
-                            "pipe operator '|>' requires function on right side"
-                        ))
+                        Err(anyhow!("map operator requires function on right side"))
+                    }
+                }
+                BinaryOp::Into => {
+                    if is_list_first {
+                        if !scalar.is_callable() {
+                            return Err(anyhow!(
+                                "can't call a non-function: {}",
+                                scalar.stringify_internal(&heap.borrow())
+                            ));
+                        }
+
+                        let list = heap.borrow_mut().insert_list(l_vec.clone());
+
+                        let def = {
+                            let borrowed_heap = &heap.borrow();
+                            get_function_def(&scalar, borrowed_heap).ok_or_else(|| {
+                                anyhow!(
+                                    "unknown function: {}",
+                                    scalar.stringify_internal(borrowed_heap)
+                                )
+                            })?
+                        };
+
+                        def.call(
+                            scalar,
+                            vec![list],
+                            Rc::clone(&heap),
+                            Rc::clone(&bindings),
+                            call_depth,
+                        )
+                    } else {
+                        Err(anyhow!("'into' operator requires function on right side"))
                     }
                 }
             }
@@ -1265,7 +1303,33 @@ fn evaluate_binary_op_ast(
                     Ok(lhs)
                 }
             }
-            BinaryOp::Pipe => {
+            BinaryOp::Via => {
+                if !rhs.is_callable() {
+                    return Err(anyhow!(
+                        "can't call a non-function ({} is of type {})",
+                        rhs.stringify_internal(&heap.borrow()),
+                        rhs.get_type()
+                    ));
+                }
+
+                let def = { get_function_def(&rhs, &heap.borrow()) };
+
+                if def.is_none() {
+                    return Err(anyhow!(
+                        "unknown function: {}",
+                        rhs.stringify_internal(&heap.borrow())
+                    ));
+                }
+
+                def.unwrap().call(
+                    rhs,
+                    vec![lhs],
+                    Rc::clone(&heap),
+                    Rc::clone(&bindings),
+                    call_depth,
+                )
+            }
+            BinaryOp::Into => {
                 if !rhs.is_callable() {
                     return Err(anyhow!(
                         "can't call a non-function ({} is of type {})",
@@ -1530,7 +1594,8 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> Result<Expr> {
                 Rule::natural_and => BinaryOp::NaturalAnd,
                 Rule::or => BinaryOp::Or,
                 Rule::natural_or => BinaryOp::NaturalOr,
-                Rule::pipe => BinaryOp::Pipe,
+                Rule::via => BinaryOp::Via,
+                Rule::into => BinaryOp::Into,
                 Rule::coalesce => BinaryOp::Coalesce,
                 _ => unreachable!(),
             };
@@ -2050,7 +2115,7 @@ mod tests {
     fn list_with_operator() {
         let heap = Rc::new(RefCell::new(Heap::new()));
         let result =
-            parse_and_evaluate("[1, 2, 3] |> (x => x * x)", Some(Rc::clone(&heap)), None).unwrap();
+            parse_and_evaluate("[1, 2, 3] via (x => x * x)", Some(Rc::clone(&heap)), None).unwrap();
         let expected = vec![Value::Number(1.0), Value::Number(4.0), Value::Number(9.0)];
         assert_eq!(result.as_list(&heap.borrow()).unwrap(), &expected);
     }
@@ -2059,9 +2124,84 @@ mod tests {
     fn list_with_builtin_function() {
         let heap = Rc::new(RefCell::new(Heap::new()));
         let result =
-            parse_and_evaluate("[4, 9, 16] |> sqrt", Some(Rc::clone(&heap)), None).unwrap();
+            parse_and_evaluate("[4, 9, 16] via sqrt", Some(Rc::clone(&heap)), None).unwrap();
         let expected = vec![Value::Number(2.0), Value::Number(3.0), Value::Number(4.0)];
         assert_eq!(result.as_list(&heap.borrow()).unwrap(), &expected);
+    }
+
+    #[test]
+    fn into_operator_with_list() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let result =
+            parse_and_evaluate("['hello', 'world'] into head", Some(Rc::clone(&heap)), None)
+                .unwrap();
+        assert_eq!(result.as_string(&heap.borrow()).unwrap(), "hello");
+    }
+
+    #[test]
+    fn into_operator_with_string() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let result = parse_and_evaluate("'hello' into head", Some(Rc::clone(&heap)), None).unwrap();
+        assert_eq!(result.as_string(&heap.borrow()).unwrap(), "h");
+    }
+
+    #[test]
+    fn into_vs_via_difference() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        // via should apply to each element
+        let via_result =
+            parse_and_evaluate("['hello', 'world'] via head", Some(Rc::clone(&heap)), None)
+                .unwrap();
+        let borrowed_heap = heap.borrow();
+        let via_list = via_result.as_list(&borrowed_heap).unwrap();
+        assert_eq!(via_list.len(), 2);
+        assert_eq!(via_list[0].as_string(&borrowed_heap).unwrap(), "h");
+        assert_eq!(via_list[1].as_string(&borrowed_heap).unwrap(), "w");
+        drop(borrowed_heap);
+
+        // into should apply to the whole list
+        let into_result =
+            parse_and_evaluate("['hello', 'world'] into head", Some(Rc::clone(&heap)), None)
+                .unwrap();
+        assert_eq!(into_result.as_string(&heap.borrow()).unwrap(), "hello");
+    }
+
+    #[test]
+    fn into_operator_with_aggregation() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let result =
+            parse_and_evaluate("[1, 2, 3, 4, 5] into sum", Some(Rc::clone(&heap)), None).unwrap();
+        assert_eq!(result.as_number().unwrap(), 15.0);
+    }
+
+    #[test]
+    fn into_operator_rejects_lists() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        // Test with multiple functions in list
+        let result = parse_and_evaluate(
+            "[1, 2, 3] into [sqrt, sqrt, sqrt]",
+            Some(Rc::clone(&heap)),
+            None,
+        );
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("'into' operator requires a function on the right side, not a list")
+        );
+
+        // Test with single function in list
+        let result = parse_and_evaluate("[1, 2, 3] into [sqrt]", Some(Rc::clone(&heap)), None);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("'into' operator requires a function on the right side, not a list")
+        );
     }
 
     #[test]

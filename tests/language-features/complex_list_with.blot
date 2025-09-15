@@ -1,20 +1,20 @@
-// Test complex list |> operations
+// Test complex list map operations
 nums = range(10)
 
-// Test list |> transformations
-fibs_like = nums |> (i => i * i + 1)
+// Test list map transformations
+fibs_like = nums map (i => i * i + 1)
 print("Fibonacci-like sequence: {}", fibs_like)
 
-// Test filtering |> transformations
-evens = filter(nums |> (i => i * 2), x => x % 2 == 0)
+// Test filtering map transformations
+evens = filter(nums map (i => i * 2), x => x % 2 == 0)
 print("Even doubled numbers: {}", evens)
 
 // Test chained operations
-result = range(5) |> (x => x * x)
+result = range(5) map (x => x * x)
 sum_of_squares = sum(...result)
 print("Sum of squares 0-4: {}", sum_of_squares)
 
-// Test |> nested lists
+// Test map nested lists
 point_list = [[1, 2], [3, 4], [5, 6]]
-distances = point_list |> (point => sqrt(point[0] * point[0] + point[1] * point[1]))
+distances = point_list map (point => sqrt(point[0] * point[0] + point[1] * point[1]))
 print("Distances from origin: {}", distances)

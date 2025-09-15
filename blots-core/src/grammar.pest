@@ -40,10 +40,11 @@ and        =  { "&&" }
 or         =  { "||" }
 coalesce   =  { "??" }
 
-natural_infix_op = _{ natural_and | natural_or | pipe }
+natural_infix_op = _{ natural_and | natural_or | via | into }
 natural_and      =  { "and" }
 natural_or       =  { "or" }
-pipe             =  { "|>" }
+via              =  { "via" }
+into             =  { "into" }
 
 infix_usage = _{ (WHITESPACE | NEWLINE)+ ~ natural_infix_op ~ WHITESPACE+ | (WHITESPACE | NEWLINE)* ~ infix_op ~ (WHITESPACE | NEWLINE)* }
 
