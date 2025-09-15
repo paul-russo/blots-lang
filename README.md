@@ -44,17 +44,28 @@ There are no mutable variables in Blots. Instead, values are _bound_ to a _name_
 
 ### Broadcasting
 
-Arithmetic operations automatically broadcast over lists:
+Arithmetic and comparison operations automatically "broadcast" over lists, meaning they apply to each element:
 
 ```blots
-[1, 2, 3] * 10  // [10, 20, 30]
+[1, 2, 3] * 10  // [10, 20, 30] (because [1 * 10 = 10, 2 * 10 = 20, 3 * 10 = 30])
+[4, 5, 6] > 3 // true (because [4 > 3 = true, 5 > 3 = true, 6 > 3 = true], so the condition is true for all elements)
 ```
 
-Pipes (`|>`) are also broadcast over lists:
+### `via` and `into`
+
+The `via` operator takes a value and sends it through a function, applying the function to each element if the value is a list. For example:
 
 ```blots
-'hello' |> uppercase // 'HELLO'
-['hello', 'world'] |> uppercase // ['HELLO', 'WORLD']
+'hello' via uppercase // 'HELLO' (because uppercase('hello') = 'HELLO')
+['hello', 'world'] via uppercase // ['HELLO', 'WORLD'] (because [uppercase('hello') = 'HELLO', uppercase('world') = 'WORLD'])
+```
+
+`into` works exactly the same as `via`, except there is no broadcasting. This means that you can "reduce" a list into a single value (though you could also produce another list). Example:
+
+```blots
+'hello' into head // 'h' (because head('hello') = 'h')
+['hello', 'world'] via head // ['h', 'w'] (because [head('hello') = 'h', head('world') = 'w'])
+['hello', 'world'] into head // 'hello' (because head(['hello', 'world']) = 'hello')
 ```
 
 ### `do` Blocks

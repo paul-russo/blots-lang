@@ -122,7 +122,8 @@ pub enum BinaryOp {
     NaturalOr,
 
     // Special
-    Pipe,
+    Via,
+    Into,
     Coalesce,
 }
 

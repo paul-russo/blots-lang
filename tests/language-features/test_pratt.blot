@@ -1,2 +1,2 @@
-result = 5 |> x => x * 2 |> y => y + 10
+result = (y => y + 10)((x => x * 2)(5))
 print("Result: {}", result)

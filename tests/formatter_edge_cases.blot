@@ -16,7 +16,7 @@ config = {server:{host:"localhost",port:8080},debug:true}
 // Chained operations
 result = list.filter(x=>x>0).map(x=>x*2).reduce((a,b)=>a+b)
 
-// Multiline do block |> comments
+// Multiline do block map comments
 compute = do {
   // Initialize values
   x = 10
@@ -28,7 +28,7 @@ compute = do {
   return z + 100
 }
 
-// Record |> dynamic keys
+// Record map dynamic keys
 dynamic = {
   [key1]: value1,
   ["literal-key"]: value2,

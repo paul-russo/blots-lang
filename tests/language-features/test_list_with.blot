@@ -1,15 +1,15 @@
-// Test |> operations on lists
+// Test map operations on lists
 numbers = [1, 2, 3, 4, 5]
 
-// Test |> operator for mapping
-doubled = numbers |> (x => x * 2)
-print("numbers |> (x => x * 2): {}", doubled)
+// Test map operator for mapping
+doubled = numbers map (x => x * 2)
+print("numbers map (x => x * 2): {}", doubled)
 
-// Test |> for squaring
-squares = numbers |> (x => x * x)
-print("numbers |> (x => x * x): {}", squares)
+// Test map for squaring
+squares = numbers map (x => x * x)
+print("numbers map (x => x * x): {}", squares)
 
-// Test |> range
+// Test map range
 range_nums = range(5)
-range_doubled = range_nums |> (x => x * 2)
-print("range(5) |> doubling: {}", range_doubled)
+range_doubled = range_nums map (x => x * 2)
+print("range(5) map doubling: {}", range_doubled)
