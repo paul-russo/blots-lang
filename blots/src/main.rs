@@ -324,9 +324,9 @@ fn main() -> ! {
         eprintln!("Error: Cannot start Interactive Mode after reading piped input.");
         eprintln!();
         eprintln!(
-            "When piping JSON data, you must also specify what to do with it, by specifying a .blot file to run:"
+            "When piping JSON data, you must also specify what to do with it, by specifying a .blots file to run:"
         );
-        eprintln!("    echo '{{\"x\": 42}}' | blots myfile.blot");
+        eprintln!("    echo '{{\"x\": 42}}' | blots myfile.blots");
         eprintln!();
         eprintln!(
             "If you want to provide inputs that you can use in an interactive session, you can use the --input (-i) flag:"

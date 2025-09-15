@@ -1,22 +1,22 @@
 # Blots Test Files
 
-This directory contains test files for the Blots programming language and its JavaScript transpiler.
+This directory contains test files for the Blots programming language.
 
 ## Directory Structure
 
 ### `language-features/`
 Tests for specific Blots language features:
 
-- **`benchmark-pattern.blot`** - Tests the benchmark pattern with factorial and complex operations
-- **`complex-each-with.blot`** - Tests complex each/with combinations for functional programming
-- **`each-with-test.blot`** - Tests each() function and with operator for mapping
+- **`benchmark-pattern.blots`** - Tests the benchmark pattern with factorial and complex operations
+- **`complex-each-with.blots`** - Tests complex each/with combinations for functional programming
+- **`each-with-test.blots`** - Tests each() function and with operator for mapping
 
 ## Running Tests
 
 ### Language Feature Tests  
 ```bash
 # Test functional programming patterns
-cargo run -p blots -- tests/language-features/each-with-test.blot
+cargo run -p blots -- tests/language-features/each-with-test.blots
 ```
 
 ## Test Categories
