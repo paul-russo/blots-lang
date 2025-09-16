@@ -1,0 +1,28 @@
+compound_interest = (P, r, t, n) => P * (1 + r/n)^(n*t)
+
+// Example parameters
+principal = inputs.principal ?? 1000
+compounding_frequency = 1  // compounded annually
+years = range(inputs.years ?? 10)
+
+output timeseries_with_years = map(years, t => do {
+  below_average = if inputs.include_below_average ?? false then {
+    below_average: compound_interest(
+      principal,
+      (inputs.annual_rate ?? 0.05) - (inputs.outcome_range ?? 0.02),
+      t,
+      compounding_frequency
+    )
+  } else null
+
+  average = compound_interest(principal, inputs.annual_rate ?? 0.05, t, compounding_frequency)
+
+  good = compound_interest(principal, (inputs.annual_rate ?? 0.05) + (inputs.outcome_range ?? 0.02), t, compounding_frequency)
+
+  return {
+    x: (inputs.starting_year ?? 2024) + t,
+    ...below_average,
+    average,
+    good,
+  }
+})

@@ -1,7 +1,0 @@
-// This is a comment at the start
-x = 1 + 2
-
-// Comment in the middle
-y = x * 3
-
-// Final comment

@@ -1,7 +1,0 @@
-// Test cases for long line formatting
-veryLongListOnOneLine = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
-veryLongRecordOnOneLine = {firstName: "John", lastName: "Doe", age: 30, occupation: "Software Engineer", location: "San Francisco"}
-veryLongFunctionCall = someFunction(argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8)
-veryLongChainedCalls = list.filter(x => x > 0).map(x => x * 2).reduce((a, b) => a + b).toString().toUpperCase().trim()
-nestedStructure = {outer: {inner: {deep: {deeper: {deepest: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]}}}}}
-complexExpression = if someVeryLongConditionName and anotherVeryLongConditionName or yetAnotherCondition then performSomeVeryLongActionName() else performAlternativeVeryLongActionName()

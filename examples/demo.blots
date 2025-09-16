@@ -86,7 +86,7 @@ users = [
 ]
 
 // Get average score
-avg_score = avg(...(users map u => u.score))
+avg_score = avg(...(users via (u => u.score)))
 
 // Sort users by score
 sorted_users = sort_by(users, (a, b) => b.score - a.score)
@@ -94,9 +94,9 @@ sorted_users = sort_by(users, (a, b) => b.score - a.score)
 // Statistical operations
 nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 stats = {
-    mean: avg(...nums),
-    median: median(...nums),
-    sum: sum(...nums),
+    mean: avg(nums),
+    median: median(nums),
+    sum: sum(nums),
     p90: percentile(nums, 90)
 }
 

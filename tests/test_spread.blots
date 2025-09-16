@@ -1,2 +1,0 @@
-base = {a: 1, b: 2}
-result = {...base, c: 3}

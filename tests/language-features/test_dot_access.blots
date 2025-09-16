@@ -1,7 +1,0 @@
-// Test basic dot access
-person = { name: "Alice", age: 30, salary: 50000 }
-print("person: {}", person)
-print("person.name: {}", person.name)
-print("person.age: {}", person.age)
-result = person.salary * 2
-print("result: {}", result)

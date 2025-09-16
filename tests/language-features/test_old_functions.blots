@@ -1,4 +1,0 @@
-// Test that old functions are gone
-text = "hello world"
-result = to_uppercase(text)
-print("Result: {}", result)

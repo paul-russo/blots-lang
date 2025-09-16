@@ -1,5 +1,0 @@
-// Test only the correct uppercase/lowercase functions
-text = "hello world"
-print("Original: {}", text)
-print("uppercase(): {}", uppercase(text))
-print("lowercase(): {}", lowercase("HELLO WORLD"))

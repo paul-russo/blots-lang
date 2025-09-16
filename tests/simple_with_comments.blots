@@ -1,4 +1,0 @@
-// Initialize values
-x = 1 + 2  // inline comment
-y = x * 3
-// End of calculations
