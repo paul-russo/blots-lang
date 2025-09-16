@@ -1,13 +1,15 @@
 ---
 import Head from "./Head.astro";
 import Logo from "../images/blots-logo.svg";
+import Link from "./Link.astro";
+
 const { title } = Astro.props;
 ---
 
 <html lang="en">
   <Head title={title} />
   <body class="flex min-h-screen flex-col bg-amber-50 p-4">
-    <main class="mx-auto max-w-3xl">
+    <main class="mx-auto w-full max-w-3xl">
       <h1
         class="mb-2 flex items-center justify-between border-y-2 px-2 pt-2 pb-4 font-serif text-3xl italic md:text-5xl"
       >
@@ -21,7 +23,7 @@ const { title } = Astro.props;
 
     <footer class="text-md mt-auto pt-4 text-center font-serif">
       <p>
-        {new Date().getFullYear()}, Paul Russo
+        Made by<Link href="https://paulrusso.org" external>Paul Russo</Link>
       </p>
     </footer>
   </body>

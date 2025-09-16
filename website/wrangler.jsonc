@@ -1,0 +1,10 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "blots-lang",
+  "compatibility_date": "2025-09-16",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "404-page", // If you have a custom `src/pages/404.astro` page
+  },
+  "workers_dev": true,
+}
