@@ -86,7 +86,7 @@ users = [
 ]
 
 // Get average score
-avg_score = avg(...(users via (u => u.score)))
+avg_score = avg(users via u => u.score)
 
 // Sort users by score
 sorted_users = sort_by(users, (a, b) => b.score - a.score)
