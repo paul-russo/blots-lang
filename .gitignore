@@ -1,4 +1,10 @@
+# general
 .DS_Store
 /target
 CLAUDE.md
 .claude/
+
+# website
+node_modules/
+.astro/
+dist/

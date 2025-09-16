@@ -1,0 +1,28 @@
+---
+import Head from "./Head.astro";
+import Logo from "../images/blots-logo.svg";
+const { title } = Astro.props;
+---
+
+<html lang="en">
+  <Head title={title} />
+  <body class="flex min-h-screen flex-col bg-amber-50 p-4">
+    <main class="mx-auto max-w-3xl">
+      <h1
+        class="mb-2 flex items-center justify-between border-y-2 px-2 pt-2 pb-4 font-serif text-3xl italic md:text-5xl"
+      >
+        <div>
+          The <span class="font-bold text-purple-700">Blots</span> Programming Language
+        </div>
+        <Logo class="relative top-1 size-8 md:size-12" />
+      </h1>
+      <slot />
+    </main>
+
+    <footer class="text-md mt-auto pt-4 text-center font-serif">
+      <p>
+        {new Date().getFullYear()}, Paul Russo
+      </p>
+    </footer>
+  </body>
+</html>
