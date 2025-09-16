@@ -25,10 +25,10 @@ cargo install blots
 - **Number**: 64-bit float with decimal/sci-notation support and `_` separators (e.g., `1_000_000`, `3.14e-2`)
 - **String**: Single or double quotes (`'hello'`, `"world"`); concatenate with `+`
 - **Boolean**: `true`, `false`; operators: `and`/`&&`, `or`/`||`, `not`/`!`
-- **Null**: `null`
 - **List**: Ordered collection `[1, 2, 3]`; access with `list[index]` (0-based); spread with `[...list1, ...list2]`
-- **Record**: Key-value pairs `{a: 1, "hello there": "hi"}`; key shorthand `{foo}`; access with `record.a` or `record["key"]`
-- **Function**: Arrow functions `x => x+1`, `(x,y?) => x + (y ?? 0)`, `(f, ...rest) => map(rest,f)`
+- **Record**: JSON compatible. Key-value pairs `{a: 1, "hello there": "hi"}`; key shorthand `{foo}`; access with `record.a` or `record["key"]`
+- **Function**: `x => x+1`, `(x,y?) => x + (y ?? 0)`, `(f, ...rest) => map(rest,f)`
+- **Null**: `null`
 
 ### Operators & Control Flow
 
@@ -70,7 +70,8 @@ The `via` operator takes a value and sends it through a function, applying the f
 
 ### `do` Blocks
 
-Blots is an expression-oriented language, in the sense that every "thing" in a Blots program should evaluate to a useful value. Sometimes it's more intuitive to represent a computation as a series of steps instead of composing functions. For these cases, you can use `do` blocks for imperative code with intermediate variables:
+Blots is an expression-oriented language, in the sense that every statement in a Blots program should evaluate to a useful value. This works well with a functional approach, where you compose functions to compute values. However, sometimes it's more intuitive to represent a computation as a series of discrete steps that happen one after another, instead of composing functions. For these cases, you can use `do` blocks to create an expression whose final value is the result of imperative code with intermediate variables:
+
 ```blots
 result = do {
   y = x * 2
@@ -80,8 +81,8 @@ result = do {
 ```
 
 Some things to note about `do` blocks:
-- Since each `do` block is an expression, it must end with a `return` statement so that the entire block evaluates to a useful value.
-- Statements in `do` blocks can be separated by newlines. Alternatively, if you're writing a single-line block, you can use semicolons (`;`) to separate statements.
+- Since each `do` block is an expression and needs to evaluate to a single value, it must end with a `return` statement.
+- Statements in `do` blocks are separated by newlines, just like other statements in Blots. Alternatively, if you want to keep things more compact, you can use semicolons (`;`) to separate statements on the same line.
 
 ### Inputs and Outputs
 
@@ -112,15 +113,15 @@ output total = sum(...inputs.value_1) // 6
 **Multiple inputs:**
 ```bash
 # Combine multiple JSON inputs
-blots -i '{"x": 10}' -i '{"y": 20}' "output sum = inputs.x + inputs.y"
-# Output: {"sum": 30}
+blots -i '{"x": 10}' -i '{"y": 20}' "output total = inputs.x + inputs.y"
+# Output: {"total": 30}
 ```
 
 **Piped input:**
 ```bash
 # Pipe JSON data into Blots
-echo '{"items": [1,2,3,4,5]}' | blots -e "output avg = avg(...inputs.items)"
-# Output: {"avg": 3}
+echo '{"items": [1,2,3,4,5]}' | blots -e "output average = avg(...inputs.items)"
+# Output: {"average": 3}
 
 # Process command output
 curl -s "https://api.example.com/data.json" | blots -e "output count = len(inputs.results)"
@@ -174,13 +175,15 @@ output result = {
 **Using outputs with other tools:**
 ```bash
 # Format output with jq
-blots -i '[1,2,3,4,5]' "output stats = {min: min(...inputs.value_1), max: max(...inputs.value_1)}" | jq
+blots -i '[1,2,3,4,5]' "output stats = {minimum: min(...inputs.value_1), maximum: max(...inputs.value_1)}" | jq
 
 # Save output to file
+blots "output data = range(1, 11) via (x => x^2)" -o squares.json
+# Or:
 blots "output data = range(1, 11) via (x => x^2)" > squares.json
 
 # Chain Blots programs
-blots "output nums = range(1, 6)" | blots -e "output squares = inputs.nums via (x => x^2)"
+blots "output nums = range(1, 6)" | blots "output squares = inputs.nums via x => x^2"
 ```
 
 ### Comments

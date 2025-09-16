@@ -44,11 +44,7 @@ fn parse_json_inputs(
                 // If not an object, wrap in a record with a unique key
                 let serializable = SerializableValue::from_json(&json_value);
                 if let Ok(val) = serializable.to_value(&mut heap.borrow_mut()) {
-                    let key = if *unnamed_counter == 0 {
-                        "value".to_string()
-                    } else {
-                        format!("value_{}", *unnamed_counter + 1)
-                    };
+                    let key = format!("value_{}", *unnamed_counter + 1);
                     *unnamed_counter += 1;
                     inputs_map.insert(key, val);
                 }
