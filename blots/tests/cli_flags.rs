@@ -311,8 +311,8 @@ fn test_multiple_inputs_unnamed_values() {
     );
 
     assert!(success);
-    // First unnamed gets "value", subsequent ones get "value_2", "value_3", etc.
-    assert!(stdout.contains(r#""value":[1.0,2.0,3.0]"#));
+    // First unnamed gets "value_1", subsequent ones get "value_2", "value_3", etc.
+    assert!(stdout.contains(r#""value_1":[1.0,2.0,3.0]"#));
     assert!(stdout.contains(r#""value_2":[4.0,5.0,6.0]"#));
     assert!(stdout.contains(r#""value_3":42.0"#));
 }
@@ -342,7 +342,7 @@ fn test_mixed_named_and_unnamed_inputs() {
     assert!(success);
     assert!(stdout.contains(r#""x":10.0"#));
     assert!(stdout.contains(r#""y":20.0"#));
-    assert!(stdout.contains(r#""value":[1.0,2.0,3.0]"#));
+    assert!(stdout.contains(r#""value_1":[1.0,2.0,3.0]"#));
     assert!(stdout.contains(r#""value_2":"hello""#));
 }
 
@@ -365,7 +365,7 @@ fn test_multiple_inputs_with_evaluate_flag() {
     assert!(success);
     assert!(stdout.contains(r#""a":1.0"#));
     assert!(stdout.contains(r#""b":2.0"#));
-    assert!(stdout.contains(r#""value":[10.0,20.0]"#));
+    assert!(stdout.contains(r#""value_1":[10.0,20.0]"#));
 }
 
 #[test]
@@ -387,8 +387,8 @@ fn test_piped_and_multiple_flags_inputs() {
     );
 
     assert!(success);
-    // Piped array gets "value", flag array gets "value_2"
-    assert!(stdout.contains(r#""value":[1.0,2.0,3.0]"#));
+    // Piped array gets "value_1", flag array gets "value_2"
+    assert!(stdout.contains(r#""value_1":[1.0,2.0,3.0]"#));
     assert!(stdout.contains(r#""value_2":[7.0,8.0,9.0]"#));
     assert!(stdout.contains(r#""x":100.0"#));
 }
