@@ -128,6 +128,7 @@ if [ "$PUBLISH_TO_CRATES_IO" = true ]; then
 else
     print_info "- Skip publishing to crates.io (--no-publish flag specified)"
 fi
+print_info "- Deploy website to production (bun run deploy)"
 print_info ""
 print_warning "This will trigger a GitHub Actions build. Continue? (y/N)"
 read -r response
@@ -246,6 +247,16 @@ if [ "$PUBLISH_TO_CRATES_IO" = true ]; then
     fi
 fi
 
+# Deploy website
+print_info "Deploying website..."
+if (cd website && bun run deploy); then
+    print_info "✓ Website deployed successfully!"
+else
+    print_error "Failed to deploy website"
+    print_warning "The release has been completed, but the website deployment failed."
+    print_warning "You can manually deploy the website with: cd website && bun run deploy"
+fi
+
 print_info "✓ Release v$VERSION completed successfully!"
 print_info "GitHub Actions should now be triggered by the new tag."
 print_info ""
@@ -260,3 +271,4 @@ if [ "$PUBLISH_TO_CRATES_IO" = true ]; then
 else
     print_info "- Skipped publishing to crates.io (--no-publish flag specified)"
 fi
+print_info "- Deployed website to production"
