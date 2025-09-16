@@ -118,6 +118,7 @@ fi
 # Show what will be done and ask for confirmation
 print_info "Release plan:"
 print_info "- Update workspace version to $VERSION in Cargo.toml"
+print_info "- Sync internal workspace dependency versions in [workspace.dependencies] to $VERSION"
 print_info "- Run cargo check to update Cargo.lock with new version"
 print_info "- Commit changes (Cargo.toml + Cargo.lock) with message 'Release v$VERSION'"
 print_info "- Create and push git tag 'v$VERSION'"
@@ -163,6 +164,41 @@ if grep -q "version = \"$VERSION\"" "$WORKSPACE_CARGO"; then
 else
     print_error "Failed to update workspace version"
     exit 1
+fi
+
+# Update versions of internal workspace dependencies in [workspace.dependencies]
+print_info "Syncing internal workspace dependency versions in [workspace.dependencies]..."
+
+# Use awk for portability across macOS and Linux. We:
+# - Enter the [workspace.dependencies] table
+# - For any inline dep with path = ..., replace existing version or add it if missing
+TMP_FILE="${WORKSPACE_CARGO}.tmp"
+awk -v ver="$VERSION" '
+  BEGIN { inwd = 0 }
+  /^\[workspace\.dependencies\]/ { inwd = 1; print; next }
+  /^\[/ { if (inwd) inwd = 0 }
+  {
+    if (inwd && $0 ~ /path[[:space:]]*=/) {
+      if ($0 ~ /version[[:space:]]*=/) {
+        sub(/version[[:space:]]*=[[:space:]]*\"[^\"]*\"/, "version = \"" ver "\"")
+      } else {
+        sub(/\}[[:space:]]*$/, ", version = \"" ver "\" }")
+      }
+    }
+    print
+  }
+' "$WORKSPACE_CARGO" > "$TMP_FILE" && mv "$TMP_FILE" "$WORKSPACE_CARGO"
+
+# Verify at least blots-core was updated if present
+if grep -qE '^\s*blots-core\s*=\s*\{[^}]*version\s*=\s*\"'"$VERSION"'\"' "$WORKSPACE_CARGO"; then
+    print_info "✓ Updated [workspace.dependencies] internal versions to $VERSION"
+else
+    # If blots-core isn't present, still proceed but warn (covers future refactors)
+    if grep -qE '^\s*blots-core\s*=\s*\{' "$WORKSPACE_CARGO"; then
+        print_warning "blots-core entry found but version did not update. Please verify [workspace.dependencies]."
+    else
+        print_info "No blots-core entry detected in [workspace.dependencies]; nothing to sync."
+    fi
 fi
 
 # Run cargo check to ensure everything still compiles and update Cargo.lock
