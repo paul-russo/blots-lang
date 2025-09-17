@@ -1,29 +1,145 @@
 ---
 import Layout from "../components/Layout.astro";
+import { version, releaseDate } from "../../../current-version.json";
+import SectionHeading from "../components/SectionHeading.astro";
+import CopyBox from "../components/CopyBox.astro";
+import Link from "../components/Link.astro";
+import Code from "../components/Code.astro";
 ---
 
 <Layout title="The Blots Programming Language">
-  <div class="space-y-4 font-serif text-2xl text-pretty">
-    <p>
-      Blots is a small, expression-oriented programming language designed to be
-      quick to learn, easy to use, and to produce code that's readable yet
-      reasonably compact.
-    </p>
+  <div
+    class="space-y-6 font-serif text-lg text-pretty break-words hyphens-auto md:text-xl"
+  >
+    <section class="space-y-4">
+      <p>
+        Blots is a small, expression-oriented programming language designed to
+        be quick to learn and easy to use. Blots code tends to be very readable
+        yet reasonably compact.
+      </p>
 
-    <p>
-      Blots is not a general-purpose programming language. Instead, it's
-      designed to be useful out of the box for quick calculations and data
-      transformation, particularly with JSON.
-    </p>
+      <p>
+        Blots is not a general-purpose programming language. Instead, it's
+        designed to be useful out of the box for quick calculations and data
+        transformation, particularly with JSON.
+      </p>
+    </section>
 
-    <p>
-      Visit the <a
-        href="https://github.com/paul-russo/blots-lang"
-        target="_blank"
-        rel="noopener noreferrer"
-        class="underline transition-colors hover:text-purple-700 focus:text-purple-700"
-        >GitHub repository</a
-      > to install the Blots runtime and learn more.
-    </p>
+    <section>
+      <SectionHeading>Installation</SectionHeading>
+      <div class="space-y-4">
+        <p>
+          The most recent version of Blots is <span
+            class="font-bold text-purple-700">{version}</span
+          >, released on <span class="font-bold text-purple-700"
+            >{new Date(releaseDate).toLocaleDateString()}</span
+          >.
+        </p>
+        <p>
+          If you're on macOS, the recommended way to install the latest version
+          of Blots is with <Link href="https://brew.sh/" external>Homebrew</Link
+          >:
+
+          <CopyBox code="brew install paul-russo/tap/blots" />
+        </p>
+        <p>
+          You can also install <span class="font-bold text-purple-700"
+            >Blots {version}</span
+          > for both Linux and macOS by running the following command:
+
+          <CopyBox
+            code={`curl --proto '=https' --tlsv1.2 -LsSf https://github.com/paul-russo/blots-lang/releases/download/v${version}/blots-installer.sh | sh`}
+          />
+        </p>
+      </div>
+    </section>
+
+    <section>
+      <SectionHeading>Example</SectionHeading>
+      <div class="space-y-4">
+        <p>
+          Here's a quick example of how you could use Blots to interactively
+          compute some basic statistics about the weather forecast for the next
+          7 days in Denver, CO:
+        </p>
+        <p>
+          First, we'll grab the forecast for Denver from the National Weather
+          Service API and pass the response to Blots as an input. We'll also use
+          the <Code>--output</Code> flag to provide a filename to write the outputs
+          to (this is optional; if we didn't provide a filename, the outputs would
+          just be written to stdout):
+        </p>
+        <CopyBox
+          code=`blots --input "$(curl -s https://api.weather.gov/gridpoints/BOU/63,62/forecast)" --output weather.json`
+        />
+        <p>
+          Since we provided neither a source file nor some inline code, Blots
+          will open up in interactive mode. We can now use the <Code
+            >inputs</Code
+          > record to access the forecast data and bind it to a name (<Code
+            >forecasts</Code
+          >):
+        </p>
+        <CopyBox
+          code=`> forecasts = inputs.properties.periods
+= [{detailedForecast: "A chance of showers and thunderstorms... (truncated)`
+        />
+        <p>
+          Next, we'll grab the temperatures from the forecasts by mapping over
+          the list. We can use Blots's <Code>via</Code> operator to apply a function
+          to each element of the list. Our function will take just the forecasted
+          tempeature for that period and return it, so the whole expression evaluates
+          to a new list containing only the temperatures:
+        </p>
+        <CopyBox
+          code=`> temps = forecasts via forecast => forecast.temperature
+= [52, 71, 49, 73, 49, 80, 53, 85, 56, 83, 56, 83, 54, 86]`
+        />
+        <p>
+          Now we can compute the average temperature using Blots's <Code
+            >avg</Code
+          > function. We want to include this in our output file `weather.json`,
+          so we'll use the <Code>output</Code> keyword to bind the result to a name
+          and record it in the outputs:
+        </p>
+        <CopyBox
+          code=`> output average = avg(temps)
+= 66.42857142857143
+[output 'average' recorded]`
+        />
+        <p>Let's do the same for the minimum and maximum temperatures:</p>
+        <CopyBox
+          code=`> output minimum = min(temps)
+= 49
+[output 'minimum' recorded]
+> output maximum = max(temps)
+= 86
+[output 'maximum' recorded]`
+        />
+        <p>
+          We can now exit Blots (by typing <Code>exit</Code> or hitting <Code
+            >Ctrl + c</Code
+          >). Let's take a look at the output file:
+        </p>
+        <CopyBox
+          code=`cat weather.json
+{"average":66.42857142857143,"minimum":49.0,"maximum":86.0}`
+        />
+      </div>
+    </section>
+
+    <section>
+      <SectionHeading>Documentation</SectionHeading>
+      <p>
+        Please consult the <a
+          href="https://github.com/paul-russo/blots-lang?tab=readme-ov-file#the-blots-language"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="underline transition-colors hover:text-purple-700 focus:text-purple-700"
+          >README</a
+        > in the GitHub repository for more information on Blots' syntax, built-in
+        functions, and other features.
+      </p>
+    </section>
   </div>
 </Layout>

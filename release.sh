@@ -119,6 +119,7 @@ fi
 print_info "Release plan:"
 print_info "- Update workspace version to $VERSION in Cargo.toml"
 print_info "- Sync internal workspace dependency versions in [workspace.dependencies] to $VERSION"
+print_info "- Update current-version.json to $VERSION and set releaseDate"
 print_info "- Run cargo check to update Cargo.lock with new version"
 print_info "- Commit changes (Cargo.toml + Cargo.lock) with message 'Release v$VERSION'"
 print_info "- Create and push git tag 'v$VERSION'"
@@ -163,6 +164,21 @@ if grep -q "version = \"$VERSION\"" "$WORKSPACE_CARGO"; then
     print_info "✓ Updated workspace version to $VERSION"
 else
     print_error "Failed to update workspace version"
+    exit 1
+fi
+
+# Update current-version.json to match the new version
+print_info "Updating current-version.json..."
+JSON_FILE="current-version.json"
+RELEASE_DATE=$(date -u +%F)
+if printf '{\n  "version": "%s",\n  "releaseDate": "%s"\n}\n' "$VERSION" "$RELEASE_DATE" > "$JSON_FILE"; then
+    if grep -q '"version": '"\"$VERSION\"" "$JSON_FILE" && grep -q '"releaseDate": '"\"$RELEASE_DATE\"" "$JSON_FILE"; then
+        print_info "✓ Updated $JSON_FILE to $VERSION (releaseDate $RELEASE_DATE)"
+    else
+        print_warning "Wrote $JSON_FILE but could not verify contents; please check manually."
+    fi
+else
+    print_error "Failed to write $JSON_FILE"
     exit 1
 fi
 
@@ -212,7 +228,7 @@ print_info "✓ All packages compile successfully"
 
 # Commit the changes (including Cargo.lock)
 print_info "Committing version updates..."
-git add "$WORKSPACE_CARGO" Cargo.lock
+git add "$WORKSPACE_CARGO" Cargo.lock "$JSON_FILE"
 git commit -m "Release v$VERSION"
 
 # Create and push tag
