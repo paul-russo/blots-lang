@@ -9,7 +9,7 @@ import Code from "../components/Code.astro";
 
 <Layout title="The Blots Programming Language">
   <div
-    class="space-y-6 font-serif text-lg text-pretty break-words hyphens-auto md:text-xl"
+    class="space-y-6 font-serif text-lg text-pretty break-words hyphens-auto md:space-y-8 md:text-xl"
   >
     <section class="space-y-4">
       <p>
@@ -139,6 +139,19 @@ import Code from "../components/Code.astro";
           >README</a
         > in the GitHub repository for more information on Blots' syntax, built-in
         functions, and other features.
+      </p>
+    </section>
+
+    <section>
+      <SectionHeading>Tools</SectionHeading>
+      <p>
+        There's a language support extension for Blots, available on both the <Link
+          href="https://marketplace.visualstudio.com/items?itemName=Blots.blots-syntax"
+          external>VSCode Marketplace</Link
+        > (for VSCode)and the <Link
+          href="https://open-vsx.org/extension/blots/blots-syntax"
+          external>Open VSX Registry</Link
+        > (for other VSCode-based editors, like Cursor).
       </p>
     </section>
   </div>
