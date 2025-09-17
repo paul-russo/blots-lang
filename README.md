@@ -272,3 +272,7 @@ Access mathematical constants via `constants.*`:
 - `constants.e`: The mathematical constant _e_.
 - `constants.max_value`: The maximum value that can be represented as a 64-bit floating point number.
 - `constants.min_value`: The minimum non-zero value that can be represented as a 64-bit floating point number.
+
+## Tools
+
+There's a language support [extension](https://github.com/paul-russo/blots-syntax) for Blots, available on both the [VSCode Marketplace](https://marketplace.visualstudio.com/items?itemName=Blots.blots-syntax) and the [Open VSX Registry](https://open-vsx.org/extension/blots/blots-syntax). You should be able to install it from within your editor like other extensions, but you can also download the VSIX file directly from either directory.
