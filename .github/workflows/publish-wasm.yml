@@ -1,10 +1,9 @@
-name: Build and Publish WASM Package
+name: Publish WASM Package to NPM
 
 on:
   push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+    tags:
+      - '**[0-9]+.[0-9]+.[0-9]+*'
 
 jobs:
   build-and-publish:
@@ -83,8 +82,7 @@ jobs:
             exit 1
           fi
 
-      - name: Check if version already exists (main branch only)
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      - name: Check if version already exists
         id: version_check
         run: |
           cd blots-wasm/pkg
@@ -100,8 +98,8 @@ jobs:
             echo "skip_publish=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Publish to npm (main branch only)
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && steps.version_check.outputs.skip_publish != 'true'
+      - name: Publish to npm
+        if: steps.version_check.outputs.skip_publish != 'true'
         run: |
           cd blots-wasm/pkg
           npm publish --access public
