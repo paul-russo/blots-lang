@@ -313,6 +313,23 @@ impl SerializableValue {
                 SerializableValue::List(arr.iter().map(Self::from_json).collect())
             }
             serde_json::Value::Object(obj) => {
+                // Check if this is a function object
+                if let Some(func_value) = obj.get("__blots_function") {
+                    if let Some(func_str) = func_value.as_str() {
+                        // Try to parse as a built-in function first (just a name)
+                        if crate::functions::BuiltInFunction::from_ident(func_str).is_some() {
+                            return SerializableValue::BuiltIn(func_str.to_string());
+                        }
+
+                        // Otherwise, parse as a lambda function
+                        // We need to parse the function source and convert it to a SerializableLambdaDef
+                        if let Ok(lambda_def) = Self::parse_function_source(func_str) {
+                            return SerializableValue::Lambda(lambda_def);
+                        }
+                    }
+                }
+
+                // Regular record
                 let map: IndexMap<String, SerializableValue> = obj
                     .iter()
                     .map(|(k, v)| (k.clone(), Self::from_json(v)))
@@ -320,6 +337,41 @@ impl SerializableValue {
                 SerializableValue::Record(map)
             }
         }
+    }
+
+    /// Parse a function source string into a SerializableLambdaDef
+    fn parse_function_source(source: &str) -> Result<SerializableLambdaDef> {
+        use crate::parser::get_pairs;
+        use crate::expressions::pairs_to_expr;
+
+        // Parse the source as an expression
+        let pairs = get_pairs(source)?;
+
+        // Extract the lambda expression from the parsed pairs
+        for pair in pairs {
+            if let crate::parser::Rule::statement = pair.as_rule() {
+                if let Some(inner_pair) = pair.into_inner().next() {
+                    if let crate::parser::Rule::expression = inner_pair.as_rule() {
+                        // Parse the expression to get an AST
+                        let expr = pairs_to_expr(inner_pair.into_inner())?;
+
+                        // Check if it's a lambda
+                        if let crate::ast::Expr::Lambda { args, body } = expr {
+                            // Since the function is already inlined (no scope needed),
+                            // we create a SerializableLambdaDef with the source as the body
+                            return Ok(SerializableLambdaDef {
+                                name: None,
+                                args,
+                                body: crate::ast_to_source::expr_to_source(&body),
+                                scope: None, // Functions from JSON have no scope - they're already inlined
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        Err(anyhow!("Failed to parse function source: {}", source))
     }
 
     /// Convert SerializableValue to clean serde_json::Value
@@ -353,17 +405,13 @@ impl SerializableValue {
                     LambdaArg::Rest(name) => format!("...{}", name),
                 }).collect();
 
-                let function_source = if args_str.len() == 1 && !lambda_def.args[0].is_rest() && !lambda_def.args[0].is_optional() {
-                    // Single required argument doesn't need parentheses
-                    format!("{} => {}", args_str[0], lambda_def.body)
-                } else {
-                    format!("({}) => {}", args_str.join(", "), lambda_def.body)
-                };
+                let function_source = format!("({}) => {}", args_str.join(", "), lambda_def.body);
 
                 map.insert("__blots_function".to_string(), serde_json::Value::String(function_source));
                 serde_json::Value::Object(map)
             }
             SerializableValue::BuiltIn(name) => {
+                // Output built-in functions in the same format as lambdas
                 let mut map = serde_json::Map::new();
                 map.insert("__blots_function".to_string(), serde_json::Value::String(name.clone()));
                 serde_json::Value::Object(map)

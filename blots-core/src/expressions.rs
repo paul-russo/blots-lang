@@ -662,7 +662,7 @@ pub fn validate_portable_value(
             }
             Ok(())
         }
-        // Other value types are always portable
+        // Other value types are always portable (including built-in functions)
         _ => Ok(()),
     }
 }

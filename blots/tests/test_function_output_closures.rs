@@ -53,7 +53,7 @@ fn test_simple_closure() {
     let code = "x = 5\noutput f = y => x + 2";
     let output = run_blots_eval(code);
     let func_src = parse_function_output(&output);
-    assert_eq!(func_src, "y => 5 + 2");
+    assert_eq!(func_src, "(y) => 5 + 2");
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn test_function_without_closure() {
     let code = "output f = x => x * 2";
     let output = run_blots_eval(code);
     let func_src = parse_function_output(&output);
-    assert_eq!(func_src, "x => x * 2");
+    assert_eq!(func_src, "(x) => x * 2");
 }
 
 #[test]
@@ -85,7 +85,7 @@ fn test_closure_with_list() {
     let code = "arr = [1, 2, 3]\noutput f = x => arr via (y => y * x)";
     let output = run_blots_eval(code);
     let func_src = parse_function_output(&output);
-    assert_eq!(func_src, "x => [1, 2, 3] via (y) => y * x");
+    assert_eq!(func_src, "(x) => [1, 2, 3] via (y) => y * x");
 }
 
 #[test]
@@ -93,7 +93,7 @@ fn test_nested_function_with_closure() {
     let code = "a = 5\noutput f = x => y => a + x + y";
     let output = run_blots_eval(code);
     let func_src = parse_function_output(&output);
-    assert_eq!(func_src, "x => (y) => 5 + x + y");
+    assert_eq!(func_src, "(x) => (y) => 5 + x + y");
 }
 
 #[test]
@@ -101,7 +101,7 @@ fn test_closure_over_record() {
     let code = "y = 42\nx = { something: y }\noutput f = z => x.something + z";
     let output = run_blots_eval(code);
     let func_src = parse_function_output(&output);
-    assert_eq!(func_src, "z => {something: 42}.something + z");
+    assert_eq!(func_src, "(z) => {something: 42}.something + z");
 }
 
 #[test]
@@ -109,7 +109,7 @@ fn test_closure_over_list_with_bindings() {
     let code = "a = 10\nb = 20\narr = [a, b, a + b]\noutput f = i => arr[i]";
     let output = run_blots_eval(code);
     let func_src = parse_function_output(&output);
-    assert_eq!(func_src, "i => [10, 20, 30][i]");
+    assert_eq!(func_src, "(i) => [10, 20, 30][i]");
 }
 
 #[test]
@@ -125,7 +125,7 @@ fn test_list_of_records_with_closures() {
     let code = "x = 3\ny = { value: x * 2 }\narr = [y, { value: x * 3 }]\noutput f = i => arr[i].value";
     let output = run_blots_eval(code);
     let func_src = parse_function_output(&output);
-    assert_eq!(func_src, "i => [{value: 6}, {value: 9}][i].value");
+    assert_eq!(func_src, "(i) => [{value: 6}, {value: 9}][i].value");
 }
 
 #[test]
@@ -141,7 +141,7 @@ fn test_string_closure() {
     let code = "greeting = \"Hello\"\noutput f = name => greeting + \", \" + name";
     let output = run_blots_eval(code);
     let func_src = parse_function_output(&output);
-    assert_eq!(func_src, "name => \"Hello\" + \", \" + name");
+    assert_eq!(func_src, "(name) => \"Hello\" + \", \" + name");
 }
 
 #[test]
@@ -149,7 +149,7 @@ fn test_boolean_closure() {
     let code = "flag = true\noutput f = x => if flag then x * 2 else x";
     let output = run_blots_eval(code);
     let func_src = parse_function_output(&output);
-    assert_eq!(func_src, "x => if true then x * 2 else x");
+    assert_eq!(func_src, "(x) => if true then x * 2 else x");
 }
 
 #[test]
@@ -157,7 +157,7 @@ fn test_null_closure() {
     let code = "nothing = null\noutput f = x => x ?? nothing";
     let output = run_blots_eval(code);
     let func_src = parse_function_output(&output);
-    assert_eq!(func_src, "x => x ?? null");
+    assert_eq!(func_src, "(x) => x ?? null");
 }
 
 #[test]
