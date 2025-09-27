@@ -341,8 +341,8 @@ impl SerializableValue {
 
     /// Parse a function source string into a SerializableLambdaDef
     fn parse_function_source(source: &str) -> Result<SerializableLambdaDef> {
-        use crate::parser::get_pairs;
         use crate::expressions::pairs_to_expr;
+        use crate::parser::get_pairs;
 
         // Parse the source as an expression
         let pairs = get_pairs(source)?;
@@ -399,21 +399,31 @@ impl SerializableValue {
                 let mut map = serde_json::Map::new();
 
                 // Build the function source with arguments
-                let args_str: Vec<String> = lambda_def.args.iter().map(|arg| match arg {
-                    LambdaArg::Required(name) => name.clone(),
-                    LambdaArg::Optional(name) => format!("{}?", name),
-                    LambdaArg::Rest(name) => format!("...{}", name),
-                }).collect();
+                let args_str: Vec<String> = lambda_def
+                    .args
+                    .iter()
+                    .map(|arg| match arg {
+                        LambdaArg::Required(name) => name.clone(),
+                        LambdaArg::Optional(name) => format!("{}?", name),
+                        LambdaArg::Rest(name) => format!("...{}", name),
+                    })
+                    .collect();
 
                 let function_source = format!("({}) => {}", args_str.join(", "), lambda_def.body);
 
-                map.insert("__blots_function".to_string(), serde_json::Value::String(function_source));
+                map.insert(
+                    "__blots_function".to_string(),
+                    serde_json::Value::String(function_source),
+                );
                 serde_json::Value::Object(map)
             }
             SerializableValue::BuiltIn(name) => {
                 // Output built-in functions in the same format as lambdas
                 let mut map = serde_json::Map::new();
-                map.insert("__blots_function".to_string(), serde_json::Value::String(name.clone()));
+                map.insert(
+                    "__blots_function".to_string(),
+                    serde_json::Value::String(name.clone()),
+                );
                 serde_json::Value::Object(map)
             }
         }
@@ -456,7 +466,10 @@ impl SerializableValue {
                     .collect::<Result<IndexMap<String, SerializableValue>>>()?;
 
                 // Generate the body with inlined scope values
-                let body_with_inlined_scope = crate::ast_to_source::expr_to_source_with_scope(&lambda.body, &serializable_scope);
+                let body_with_inlined_scope = crate::ast_to_source::expr_to_source_with_scope(
+                    &lambda.body,
+                    &serializable_scope,
+                );
 
                 Ok(SerializableValue::Lambda(SerializableLambdaDef {
                     name: lambda.name.clone(),

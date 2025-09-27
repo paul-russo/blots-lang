@@ -36,7 +36,13 @@ static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
             | Op::infix(Rule::less, Assoc::Left)
             | Op::infix(Rule::less_eq, Assoc::Left)
             | Op::infix(Rule::greater, Assoc::Left)
-            | Op::infix(Rule::greater_eq, Assoc::Left))
+            | Op::infix(Rule::greater_eq, Assoc::Left)
+            | Op::infix(Rule::dot_equal, Assoc::Left)
+            | Op::infix(Rule::dot_not_equal, Assoc::Left)
+            | Op::infix(Rule::dot_less, Assoc::Left)
+            | Op::infix(Rule::dot_less_eq, Assoc::Left)
+            | Op::infix(Rule::dot_greater, Assoc::Left)
+            | Op::infix(Rule::dot_greater_eq, Assoc::Left))
         .op(Op::infix(Rule::add, Assoc::Left) | Op::infix(Rule::subtract, Assoc::Left))
         .op(Op::infix(Rule::multiply, Assoc::Left)
             | Op::infix(Rule::divide, Assoc::Left)
@@ -679,6 +685,39 @@ fn evaluate_binary_op_ast(
     let lhs = evaluate_ast(left, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
     let rhs = evaluate_ast(right, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
 
+    // Handle dot operators first - they never broadcast
+    match op {
+        BinaryOp::DotEqual => return Ok(Bool(lhs.equals(&rhs, &heap.borrow())?)),
+        BinaryOp::DotNotEqual => return Ok(Bool(!lhs.equals(&rhs, &heap.borrow())?)),
+        BinaryOp::DotLess => {
+            return match lhs.compare(&rhs, &heap.borrow())? {
+                Some(std::cmp::Ordering::Less) => Ok(Bool(true)),
+                _ => Ok(Bool(false)),
+            };
+        }
+        BinaryOp::DotLessEq => {
+            return match lhs.compare(&rhs, &heap.borrow())? {
+                Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal) => Ok(Bool(true)),
+                _ => Ok(Bool(false)),
+            };
+        }
+        BinaryOp::DotGreater => {
+            return match lhs.compare(&rhs, &heap.borrow())? {
+                Some(std::cmp::Ordering::Greater) => Ok(Bool(true)),
+                _ => Ok(Bool(false)),
+            };
+        }
+        BinaryOp::DotGreaterEq => {
+            return match lhs.compare(&rhs, &heap.borrow())? {
+                Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal) => {
+                    Ok(Bool(true))
+                }
+                _ => Ok(Bool(false)),
+            };
+        }
+        _ => {} // Continue to regular operator handling
+    }
+
     match (lhs, rhs) {
         (_, Value::List(_)) if op == BinaryOp::Into => Err(anyhow!(
             "'into' operator requires a function on the right side, not a list"
@@ -905,6 +944,15 @@ fn evaluate_binary_op_ast(
                 BinaryOp::Into => {
                     // This should never be reached due to early check above
                     unreachable!("Into operator should not reach list-to-list evaluation")
+                }
+                BinaryOp::DotEqual
+                | BinaryOp::DotNotEqual
+                | BinaryOp::DotLess
+                | BinaryOp::DotLessEq
+                | BinaryOp::DotGreater
+                | BinaryOp::DotGreaterEq => {
+                    // Dot operators are handled before this match, so this should never be reached
+                    unreachable!("Dot operators should be handled before list broadcasting")
                 }
             }
         }
@@ -1250,6 +1298,15 @@ fn evaluate_binary_op_ast(
                         Err(anyhow!("'into' operator requires function on right side"))
                     }
                 }
+                BinaryOp::DotEqual
+                | BinaryOp::DotNotEqual
+                | BinaryOp::DotLess
+                | BinaryOp::DotLessEq
+                | BinaryOp::DotGreater
+                | BinaryOp::DotGreaterEq => {
+                    // Dot operators are handled before this match, so this should never be reached
+                    unreachable!("Dot operators should be handled before list broadcasting")
+                }
             }
         }
         (lhs, rhs) => match op {
@@ -1354,6 +1411,15 @@ fn evaluate_binary_op_ast(
                     Rc::clone(&bindings),
                     call_depth,
                 )
+            }
+            BinaryOp::DotEqual
+            | BinaryOp::DotNotEqual
+            | BinaryOp::DotLess
+            | BinaryOp::DotLessEq
+            | BinaryOp::DotGreater
+            | BinaryOp::DotGreaterEq => {
+                // Dot operators are handled before this match, so this should never be reached
+                unreachable!("Dot operators should be handled before generic value matching")
             }
         },
     }
@@ -1590,6 +1656,12 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> Result<Expr> {
                 Rule::less_eq => BinaryOp::LessEq,
                 Rule::greater => BinaryOp::Greater,
                 Rule::greater_eq => BinaryOp::GreaterEq,
+                Rule::dot_equal => BinaryOp::DotEqual,
+                Rule::dot_not_equal => BinaryOp::DotNotEqual,
+                Rule::dot_less => BinaryOp::DotLess,
+                Rule::dot_less_eq => BinaryOp::DotLessEq,
+                Rule::dot_greater => BinaryOp::DotGreater,
+                Rule::dot_greater_eq => BinaryOp::DotGreaterEq,
                 Rule::and => BinaryOp::And,
                 Rule::natural_and => BinaryOp::NaturalAnd,
                 Rule::or => BinaryOp::Or,
@@ -3149,5 +3221,187 @@ mod tests {
         // This should fail because x is not bound
         let result = parse_and_evaluate("y = x + 1", Some(heap), Some(bindings));
         assert!(result.is_err());
+    }
+
+    // Tests for dot-prefixed comparison operators (non-broadcasting)
+    #[test]
+    fn dot_equal_lists() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        // Lists with same values should be equal
+        let result =
+            parse_and_evaluate("[1, 2, 3] .== [1, 2, 3]", Some(Rc::clone(&heap)), None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        // Different lists should not be equal
+        let result =
+            parse_and_evaluate("[1, 2, 3] .== [1, 2, 4]", Some(Rc::clone(&heap)), None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        // Different lengths should not be equal
+        let result =
+            parse_and_evaluate("[1, 2] .== [1, 2, 3]", Some(Rc::clone(&heap)), None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        // List vs scalar should not be equal
+        let result = parse_and_evaluate("[1, 2, 3] .== 1", Some(Rc::clone(&heap)), None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        // Empty lists should be equal
+        let result = parse_and_evaluate("[] .== []", Some(Rc::clone(&heap)), None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        // Nested lists
+        let result =
+            parse_and_evaluate("[[1, 2], [3, 4]] .== [[1, 2], [3, 4]]", Some(heap), None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn dot_not_equal_lists() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        let result =
+            parse_and_evaluate("[1, 2, 3] .!= [1, 2, 3]", Some(Rc::clone(&heap)), None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        let result =
+            parse_and_evaluate("[1, 2, 3] .!= [1, 2, 4]", Some(Rc::clone(&heap)), None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result = parse_and_evaluate("[1, 2, 3] .!= 1", Some(heap), None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn dot_less_lists() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        // Lexicographic comparison
+        let result =
+            parse_and_evaluate("[1, 2, 2] .< [1, 2, 3]", Some(Rc::clone(&heap)), None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result =
+            parse_and_evaluate("[1, 2] .< [1, 2, 3]", Some(Rc::clone(&heap)), None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result = parse_and_evaluate("[] .< [1]", Some(Rc::clone(&heap)), None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result = parse_and_evaluate("[2] .< [1, 9, 9]", Some(Rc::clone(&heap)), None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        let result = parse_and_evaluate("[1, 2, 3] .< [1, 2, 3]", Some(heap), None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    #[test]
+    fn dot_less_eq_lists() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        let result =
+            parse_and_evaluate("[1, 2, 2] .<= [1, 2, 3]", Some(Rc::clone(&heap)), None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result =
+            parse_and_evaluate("[1, 2, 3] .<= [1, 2, 3]", Some(Rc::clone(&heap)), None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result = parse_and_evaluate("[1, 2, 4] .<= [1, 2, 3]", Some(heap), None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    #[test]
+    fn dot_greater_lists() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        let result =
+            parse_and_evaluate("[1, 2, 3] .> [1, 2, 2]", Some(Rc::clone(&heap)), None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result = parse_and_evaluate("[2] .> [1, 9, 9]", Some(Rc::clone(&heap)), None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result = parse_and_evaluate("[1] .> []", Some(Rc::clone(&heap)), None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result = parse_and_evaluate("[1, 2, 3] .> [1, 2, 3]", Some(heap), None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    #[test]
+    fn dot_greater_eq_lists() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        let result =
+            parse_and_evaluate("[1, 2, 3] .>= [1, 2, 2]", Some(Rc::clone(&heap)), None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result =
+            parse_and_evaluate("[1, 2, 3] .>= [1, 2, 3]", Some(Rc::clone(&heap)), None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result = parse_and_evaluate("[1, 2, 2] .>= [1, 2, 3]", Some(heap), None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    #[test]
+    fn dot_operators_with_scalars() {
+        // Dot operators should work normally with scalars
+        let result = parse_and_evaluate("5 .== 5", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result = parse_and_evaluate("5 .!= 3", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result = parse_and_evaluate("3 .< 5", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result = parse_and_evaluate("5 .> 3", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn dot_equal_vs_regular_equal_with_broadcasting() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        // Regular == with broadcasting: each element equals true
+        let result =
+            parse_and_evaluate("[true, true, true] == true", Some(Rc::clone(&heap)), None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        // Dot operator without broadcasting: list doesn't equal scalar
+        let result =
+            parse_and_evaluate("[true, true, true] .== true", Some(Rc::clone(&heap)), None)
+                .unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        // Dot operator comparing whole lists
+        let result = parse_and_evaluate(
+            "[true, true, true] .== [true, true, true]",
+            Some(heap),
+            None,
+        )
+        .unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn dot_operators_mixed_types() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        // String vs list should not be equal
+        let result =
+            parse_and_evaluate("\"hello\" .== [1, 2, 3]", Some(Rc::clone(&heap)), None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        // Number vs list comparison returns false (no natural ordering)
+        let result = parse_and_evaluate("5 .< [1, 2, 3]", Some(Rc::clone(&heap)), None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        // String comparison works
+        let result = parse_and_evaluate("\"abc\" .< \"def\"", Some(heap), None).unwrap();
+        assert_eq!(result, Value::Bool(true));
     }
 }

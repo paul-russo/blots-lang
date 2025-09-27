@@ -23,13 +23,19 @@ identifier      = @{ !(reserved_word ~ !identifier_rest) ~ (ASCII_ALPHA | "_")+ 
 reserved_word   = _{ "if" | "then" | "else" | "true" | "false" | "null" | "and" | "or" | "not" | "do" | "return" | "output" }
 identifier_rest = _{ ASCII_ALPHA+ | ASCII_DIGIT+ | "_"+ }
 
-infix_op   = _{ add | subtract | multiply | divide | modulo | power | equal | not_equal | less_eq | less | greater_eq | greater | and | or | coalesce }
+infix_op   = _{ add | subtract | multiply | divide | modulo | power | dot_equal | dot_not_equal | dot_less_eq | dot_less | dot_greater_eq | dot_greater | equal | not_equal | less_eq | less | greater_eq | greater | and | or | coalesce }
 add        =  { "+" }
 subtract   =  { "-" }
 multiply   =  { "*" }
 divide     =  { "/" }
 modulo     =  { "%" }
 power      =  { "^" }
+dot_equal      =  { ".==" }
+dot_not_equal  =  { ".!=" }
+dot_less_eq    =  { ".<=" }
+dot_less       =  { ".<" }
+dot_greater_eq =  { ".>=" }
+dot_greater    =  { ".>" }
 equal      =  { "==" }
 not_equal  =  { "!=" }
 less_eq    =  { "<=" }

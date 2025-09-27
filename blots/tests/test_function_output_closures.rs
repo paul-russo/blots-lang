@@ -15,7 +15,9 @@ fn run_blots_eval(code: &str) -> String {
 
     // Write code to stdin
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(code.as_bytes()).expect("Failed to write to stdin");
+        stdin
+            .write_all(code.as_bytes())
+            .expect("Failed to write to stdin");
     }
 
     let output = child.wait_with_output().expect("Failed to wait for blots");
@@ -30,8 +32,8 @@ fn run_blots_eval(code: &str) -> String {
 }
 
 fn parse_function_output(json_str: &str) -> String {
-    let json: Value = serde_json::from_str(json_str)
-        .expect(&format!("Failed to parse JSON: {}", json_str));
+    let json: Value =
+        serde_json::from_str(json_str).expect(&format!("Failed to parse JSON: {}", json_str));
 
     // Extract the function source from the first output
     if let Some(obj) = json.as_object() {
@@ -117,12 +119,16 @@ fn test_closure_over_nested_record() {
     let code = "x = 5\ny = 10\nobj = { a: x, b: y, nested: { sum: x + y, product: x * y } }\noutput f = () => obj.nested.sum";
     let output = run_blots_eval(code);
     let func_src = parse_function_output(&output);
-    assert_eq!(func_src, "() => {a: 5, b: 10, nested: {sum: 15, product: 50}}.nested.sum");
+    assert_eq!(
+        func_src,
+        "() => {a: 5, b: 10, nested: {sum: 15, product: 50}}.nested.sum"
+    );
 }
 
 #[test]
 fn test_list_of_records_with_closures() {
-    let code = "x = 3\ny = { value: x * 2 }\narr = [y, { value: x * 3 }]\noutput f = i => arr[i].value";
+    let code =
+        "x = 3\ny = { value: x * 2 }\narr = [y, { value: x * 3 }]\noutput f = i => arr[i].value";
     let output = run_blots_eval(code);
     let func_src = parse_function_output(&output);
     assert_eq!(func_src, "(i) => [{value: 6}, {value: 9}][i].value");
@@ -130,7 +136,8 @@ fn test_list_of_records_with_closures() {
 
 #[test]
 fn test_via_operator_with_closures() {
-    let code = "base = 100\nmultipliers = [1, 2, 3]\noutput f = () => multipliers via (m => m * base)";
+    let code =
+        "base = 100\nmultipliers = [1, 2, 3]\noutput f = () => multipliers via (m => m * base)";
     let output = run_blots_eval(code);
     let func_src = parse_function_output(&output);
     assert_eq!(func_src, "() => [1, 2, 3] via (m) => m * 100");

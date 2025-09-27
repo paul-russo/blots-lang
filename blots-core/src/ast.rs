@@ -107,13 +107,21 @@ pub enum BinaryOp {
     Modulo,
     Power,
 
-    // Comparison
+    // Comparison (with broadcasting)
     Equal,
     NotEqual,
     Less,
     LessEq,
     Greater,
     GreaterEq,
+
+    // Comparison (without broadcasting)
+    DotEqual,
+    DotNotEqual,
+    DotLess,
+    DotLessEq,
+    DotGreater,
+    DotGreaterEq,
 
     // Logical
     And,

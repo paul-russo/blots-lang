@@ -123,6 +123,12 @@ fn binary_op_to_source(op: &BinaryOp) -> &'static str {
         BinaryOp::LessEq => "<=",
         BinaryOp::Greater => ">",
         BinaryOp::GreaterEq => ">=",
+        BinaryOp::DotEqual => ".==",
+        BinaryOp::DotNotEqual => ".!=",
+        BinaryOp::DotLess => ".<",
+        BinaryOp::DotLessEq => ".<=",
+        BinaryOp::DotGreater => ".>",
+        BinaryOp::DotGreaterEq => ".>=",
         BinaryOp::And => "&&",
         BinaryOp::NaturalAnd => "and",
         BinaryOp::Or => "||",
@@ -190,7 +196,11 @@ pub fn expr_to_source_with_scope(
         Expr::Lambda { args, body } => {
             let args_str: Vec<String> = args.iter().map(lambda_arg_to_source).collect();
             // Lambda bodies should not inline their own parameters
-            format!("({}) => {}", args_str.join(", "), expr_to_source_with_scope(body, scope))
+            format!(
+                "({}) => {}",
+                args_str.join(", "),
+                expr_to_source_with_scope(body, scope)
+            )
         }
         Expr::Conditional {
             condition,
@@ -254,10 +264,18 @@ pub fn expr_to_source_with_scope(
                 .iter()
                 .map(|e| expr_to_source_with_scope(e, scope))
                 .collect();
-            format!("{}({})", expr_to_source_with_scope(func, scope), args_str.join(", "))
+            format!(
+                "{}({})",
+                expr_to_source_with_scope(func, scope),
+                args_str.join(", ")
+            )
         }
         Expr::Access { expr, index } => {
-            format!("{}[{}]", expr_to_source_with_scope(expr, scope), expr_to_source_with_scope(index, scope))
+            format!(
+                "{}[{}]",
+                expr_to_source_with_scope(expr, scope),
+                expr_to_source_with_scope(index, scope)
+            )
         }
         Expr::DotAccess { expr, field } => {
             format!("{}.{}", expr_to_source_with_scope(expr, scope), field)
@@ -271,7 +289,11 @@ fn record_entry_to_source_with_scope(
 ) -> String {
     match &entry.key {
         RecordKey::Static(key) => {
-            format!("{}: {}", key, expr_to_source_with_scope(&entry.value, scope))
+            format!(
+                "{}: {}",
+                key,
+                expr_to_source_with_scope(&entry.value, scope)
+            )
         }
         RecordKey::Dynamic(key_expr) => {
             format!(
@@ -304,7 +326,9 @@ fn serializable_value_to_source(value: &SerializableValue) -> String {
         }
         SerializableValue::Bool(b) => b.to_string(),
         SerializableValue::Null => "null".to_string(),
-        SerializableValue::String(s) => format!("\"{}\"", s.replace("\\", "\\\\").replace("\"", "\\\"")),
+        SerializableValue::String(s) => {
+            format!("\"{}\"", s.replace("\\", "\\\\").replace("\"", "\\\""))
+        }
         SerializableValue::List(items) => {
             let items_str: Vec<String> = items.iter().map(serializable_value_to_source).collect();
             format!("[{}]", items_str.join(", "))
