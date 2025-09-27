@@ -3,6 +3,7 @@
 /target
 CLAUDE.md
 .claude/
+AGENTS.md
 
 # website
 node_modules/
