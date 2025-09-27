@@ -33,7 +33,8 @@ cargo install blots
 ### Operators & Control Flow
 
 - **Arithmetic**: `+ - * / % ^ !`
-- **Comparison**: `== != < <= > >=`
+- **Comparison**: `== != < <= > >=` (with broadcasting)
+- **Non-broadcasting comparison**: `.== .!= .< .<= .> .>=` (use these to compare entire lists as whole values)
 - **Logic**: `&& || !` or `and or not`
 - **Special**: `??` (null-coalesce), `...` (spread)
 - **Conditional**: `if cond then expr else expr`
@@ -49,6 +50,70 @@ Arithmetic and comparison operations automatically "broadcast" over lists, meani
 ```blots
 [1, 2, 3] * 10  // [10, 20, 30] (because [1 * 10 = 10, 2 * 10 = 20, 3 * 10 = 30])
 [4, 5, 6] > 3 // true (because [4 > 3 = true, 5 > 3 = true, 6 > 3 = true], so the condition is true for all elements)
+```
+
+#### Dot-Prefixed Comparison Operators
+
+Sometimes you want to compare whole values without broadcasting. The dot-prefixed comparison operators (`.==`, `.!=`, `.<`, `.<=`, `.>`, `.>=`) disable broadcasting and perform direct value comparisons:
+
+```blots
+// Regular == with broadcasting
+[true, true, true] == true     // true (each element equals true)
+
+// Dot operator without broadcasting
+[true, true, true] .== true     // false (list doesn't equal scalar)
+[true, true, true] .== [true, true, true]  // true (lists are identical)
+```
+
+##### List Comparison Algorithm
+
+For ordering operators (`.<`, `.<=`, `.>`, `.>=`), lists are compared **lexicographically** (like dictionary ordering):
+
+1. **Element-by-element comparison**: Lists are compared element by element from left to right
+2. **First difference decides**: The first non-equal pair of elements determines the result
+3. **Length as tiebreaker**: If all compared elements are equal, the shorter list is considered less than the longer list
+
+```blots
+// Element-by-element comparison
+[1, 2, 3] .< [1, 2, 4]   // true  (first two elements equal, 3 < 4)
+[1, 2, 3] .< [1, 3, 0]   // true  (first element equal, 2 < 3)
+[2, 0, 0] .> [1, 9, 9]   // true  (first element decides: 2 > 1)
+
+// Length comparison when elements are equal
+[1, 2] .< [1, 2, 3]      // true  (all common elements equal, shorter is less)
+[] .< [1]                // true  (empty list is less than any non-empty list)
+[1, 2, 3] .== [1, 2]     // false (different lengths)
+
+// Nested lists work recursively
+[[1, 2], [3]] .< [[1, 2], [3, 4]]  // true  ([3] < [3, 4])
+[[2]] .> [[1, 9]]        // true  ([2] > [1, 9] because 2 > 1)
+```
+
+##### Equality Comparisons
+
+For `.==` and `.!=`, lists must be exactly equal in both structure and values:
+
+```blots
+// Deep equality check
+[1, 2, 3] .== [1, 2, 3]              // true  (same values, same order)
+[[1, 2], [3, 4]] .== [[1, 2], [3, 4]]  // true  (nested equality)
+
+// Any difference makes them unequal
+[1, 2, 3] .!= [1, 2, 4]              // true  (different values)
+[1, 2, 3] .!= [1, 2]                 // true  (different lengths)
+[1, 2, 3] .!= 123                    // true  (different types)
+```
+
+##### Mixed Type Comparisons
+
+When comparing different types with dot operators:
+- `.==` and `.!=` always return `false` and `true` respectively for different types
+- Ordering operators (`.<`, etc.) return `false` when types can't be ordered
+
+```blots
+"hello" .== [1, 2, 3]    // false (string != list)
+5 .< [1, 2, 3]           // false (number and list have no natural ordering)
+"abc" .< "def"           // true  (strings compare lexicographically)
 ```
 
 ### `via` and `into`
