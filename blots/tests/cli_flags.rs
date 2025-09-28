@@ -5,7 +5,7 @@ use tempfile::NamedTempFile;
 
 fn run_blots(args: &[&str], stdin: Option<&str>) -> (String, String, bool) {
     let mut cmd = Command::new("cargo");
-    cmd.args(&["run", "-p", "blots", "--"]);
+    cmd.args(["run", "-p", "blots", "--"]);
     cmd.args(args);
 
     if stdin.is_some() {
@@ -89,7 +89,7 @@ fn test_inputs_flag_with_file() {
 fn test_inputs_flag_merge() {
     // Create a test file
     let mut file = NamedTempFile::new().unwrap();
-    writeln!(file, "output all = inputs").unwrap();
+    writeln!(file, "output outputs = inputs").unwrap();
 
     // Test merging piped inputs with -i flag inputs
     let (stdout, _, success) = run_blots(
@@ -267,7 +267,7 @@ fn test_output_with_nullish_coalescing() {
 fn test_multiple_inputs_flags() {
     // Test multiple -i flags merging together
     let mut file = NamedTempFile::new().unwrap();
-    writeln!(file, "output all = inputs").unwrap();
+    writeln!(file, "output outputs = inputs").unwrap();
 
     // Test with multiple -i flags
     let (stdout, _, success) = run_blots(
@@ -294,7 +294,7 @@ fn test_multiple_inputs_flags() {
 fn test_multiple_inputs_unnamed_values() {
     // Test multiple unnamed values (arrays, primitives) get unique keys
     let mut file = NamedTempFile::new().unwrap();
-    writeln!(file, "output all = inputs").unwrap();
+    writeln!(file, "output outputs = inputs").unwrap();
 
     // Test with multiple unnamed inputs
     let (stdout, _, success) = run_blots(
@@ -321,7 +321,7 @@ fn test_multiple_inputs_unnamed_values() {
 fn test_mixed_named_and_unnamed_inputs() {
     // Test mixing named (objects) and unnamed inputs
     let mut file = NamedTempFile::new().unwrap();
-    writeln!(file, "output all = inputs").unwrap();
+    writeln!(file, "output outputs = inputs").unwrap();
 
     // Test with mix of object and non-object inputs
     let (stdout, _, success) = run_blots(
@@ -372,7 +372,7 @@ fn test_multiple_inputs_with_evaluate_flag() {
 fn test_piped_and_multiple_flags_inputs() {
     // Test piped inputs combined with multiple -i flags
     let mut file = NamedTempFile::new().unwrap();
-    writeln!(file, "output all = inputs").unwrap();
+    writeln!(file, "output outputs = inputs").unwrap();
 
     // Pipe in an array, then add more inputs via flags
     let (stdout, _, success) = run_blots(
