@@ -314,8 +314,8 @@ impl SerializableValue {
             }
             serde_json::Value::Object(obj) => {
                 // Check if this is a function object
-                if let Some(func_value) = obj.get("__blots_function") {
-                    if let Some(func_str) = func_value.as_str() {
+                if let Some(func_value) = obj.get("__blots_function")
+                    && let Some(func_str) = func_value.as_str() {
                         // Try to parse as a built-in function first (just a name)
                         if crate::functions::BuiltInFunction::from_ident(func_str).is_some() {
                             return SerializableValue::BuiltIn(func_str.to_string());
@@ -327,7 +327,6 @@ impl SerializableValue {
                             return SerializableValue::Lambda(lambda_def);
                         }
                     }
-                }
 
                 // Regular record
                 let map: IndexMap<String, SerializableValue> = obj
@@ -349,9 +348,9 @@ impl SerializableValue {
 
         // Extract the lambda expression from the parsed pairs
         for pair in pairs {
-            if let crate::parser::Rule::statement = pair.as_rule() {
-                if let Some(inner_pair) = pair.into_inner().next() {
-                    if let crate::parser::Rule::expression = inner_pair.as_rule() {
+            if let crate::parser::Rule::statement = pair.as_rule()
+                && let Some(inner_pair) = pair.into_inner().next()
+                    && let crate::parser::Rule::expression = inner_pair.as_rule() {
                         // Parse the expression to get an AST
                         let expr = pairs_to_expr(inner_pair.into_inner())?;
 
@@ -367,8 +366,6 @@ impl SerializableValue {
                             });
                         }
                     }
-                }
-            }
         }
 
         Err(anyhow!("Failed to parse function source: {}", source))
