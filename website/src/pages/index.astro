@@ -5,6 +5,9 @@ import SectionHeading from "../components/SectionHeading.astro";
 import CopyBox from "../components/CopyBox.astro";
 import Link from "../components/Link.astro";
 import Code from "../components/Code.astro";
+import { format } from "date-fns";
+
+const releaseDateFormatted = format(new Date(releaseDate), "MMMM d, yyyy");
 ---
 
 <Layout title="The Blots Programming Language">
@@ -32,7 +35,7 @@ import Code from "../components/Code.astro";
           The most recent version of Blots is <span
             class="font-bold text-purple-700">{version}</span
           >, released on <span class="font-bold text-purple-700"
-            >{new Date(releaseDate).toLocaleDateString()}</span
+            >{releaseDateFormatted}</span
           >.
         </p>
         <p>
