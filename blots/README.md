@@ -48,8 +48,10 @@ There are no mutable variables in Blots. Instead, values are _bound_ to a _name_
 Arithmetic and comparison operations automatically "broadcast" over lists, meaning they apply to each element:
 
 ```blots
-[1, 2, 3] * 10  // [10, 20, 30] (because [1 * 10 = 10, 2 * 10 = 20, 3 * 10 = 30])
-[4, 5, 6] > 3 // true (because [4 > 3 = true, 5 > 3 = true, 6 > 3 = true], so the condition is true for all elements)
+[1, 2, 3] * 10     // [10, 20, 30]
+[10, 20, 30] + 2   // [12, 22, 32]
+[4, 5, 6] > 3      // [true, true, true]
+[1, 2] == [2, 2]   // [false, true]
 ```
 
 #### Dot-Prefixed Comparison Operators
@@ -58,11 +60,11 @@ Sometimes you want to compare whole values without broadcasting. The dot-prefixe
 
 ```blots
 // Regular == with broadcasting
-[true, true, true] == true     // true (each element equals true)
+[10, 5, 10] == 10 // [true, false, true] (equality is evaluated for each element)
 
 // Dot operator without broadcasting
-[true, true, true] .== true     // false (list doesn't equal scalar)
-[true, true, true] .== [true, true, true]  // true (lists are identical)
+[10, 5, 10] .== 10           // false (list isn't the same type as `10`)
+[10, 5, 10] .== [10, 5, 10]  // true (lists are identical)
 ```
 
 ##### List Comparison Algorithm
@@ -301,8 +303,8 @@ x = 42 // This is also a comment
 - `sort(list)` - returns a sorted copy of the list (ascending)
 - `sort_by(list, fn)` - sorts a list using a comparison function
 - `reverse(list)` - returns a reversed copy of the list
-- `any(list)` - returns true if any element in the list is `true`
-- `all(list)` - returns true if all elements in the list are `true`
+- `any(list)` - returns true if *any* element in the list is `true`
+- `all(list)` - returns true if *all* elements in the list are `true`
 
 #### Higher-Order Functions
 - `map(list, fn)` - applies a function to each element of a list
