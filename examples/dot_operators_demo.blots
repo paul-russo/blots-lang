@@ -3,7 +3,7 @@
 
 // Regular == with broadcasting
 // Each element of [true, true, true] is compared to true
-output broadcast_eq = [true, true, true] == true  // true
+output broadcast_eq = [true, true, true] == true  // [true, true, true]
 
 // Dot operator without broadcasting
 // The whole list is compared to the scalar
@@ -19,7 +19,7 @@ output list_greater = [2] .> [1, 9, 9]  // true (first element decides)
 output list_less_empty = [] .< [1]  // true (empty list is less)
 
 // Mixed comparisons
-output regular_5_equals_each = [5, 5, 5] == 5  // true (all elements equal 5)
+output regular_5_equals_each = [5, 5, 5] == 5  // [true, true, true] (each element compared to 5)
 output dot_list_not_equals_5 = [5, 5, 5] .== 5  // false (list !== scalar)
 
 // Nested lists work too
