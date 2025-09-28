@@ -63,6 +63,8 @@ pub enum BuiltInFunction {
     Sort,
     SortBy,
     Reverse,
+    Any,
+    All,
 
     // Higher-order functions
     Map,
@@ -78,8 +80,6 @@ pub enum BuiltInFunction {
     Trim,
     Uppercase,
     Lowercase,
-    ToString,
-    ToNumber,
     Includes,
     Format,
 
@@ -91,6 +91,11 @@ pub enum BuiltInFunction {
     Keys,
     Values,
     Entries,
+
+    // Conversion functions
+    ToString,
+    ToNumber,
+    ToBool,
 
     // Platform-specific functions
     #[cfg(not(target_arch = "wasm32"))]
@@ -131,6 +136,8 @@ impl BuiltInFunction {
             "median" => Some(Self::Median),
             "percentile" => Some(Self::Percentile),
             "range" => Some(Self::Range),
+            "any" => Some(Self::Any),
+            "all" => Some(Self::All),
             "len" => Some(Self::Len),
             "head" => Some(Self::Head),
             "tail" => Some(Self::Tail),
@@ -154,6 +161,7 @@ impl BuiltInFunction {
             "lowercase" => Some(Self::Lowercase),
             "to_string" => Some(Self::ToString),
             "to_number" => Some(Self::ToNumber),
+            "to_bool" => Some(Self::ToBool),
             "includes" => Some(Self::Includes),
             "format" => Some(Self::Format),
             "typeof" => Some(Self::Typeof),
@@ -194,6 +202,8 @@ impl BuiltInFunction {
             Self::Median => "median",
             Self::Percentile => "percentile",
             Self::Range => "range",
+            Self::Any => "any",
+            Self::All => "all",
             Self::Len => "len",
             Self::Head => "head",
             Self::Tail => "tail",
@@ -215,8 +225,6 @@ impl BuiltInFunction {
             Self::Trim => "trim",
             Self::Uppercase => "uppercase",
             Self::Lowercase => "lowercase",
-            Self::ToString => "to_string",
-            Self::ToNumber => "to_number",
             Self::Includes => "includes",
             Self::Format => "format",
             Self::Typeof => "typeof",
@@ -224,6 +232,9 @@ impl BuiltInFunction {
             Self::Keys => "keys",
             Self::Values => "values",
             Self::Entries => "entries",
+            Self::ToString => "to_string",
+            Self::ToNumber => "to_number",
+            Self::ToBool => "to_bool",
             #[cfg(not(target_arch = "wasm32"))]
             Self::Print => "print",
             #[cfg(not(target_arch = "wasm32"))]
@@ -261,9 +272,14 @@ impl BuiltInFunction {
             Self::Range => FunctionArity::Between(1, 2),
 
             // List functions
-            Self::Len | Self::Head | Self::Tail | Self::Unique | Self::Sort | Self::Reverse => {
-                FunctionArity::Exact(1)
-            }
+            Self::Len
+            | Self::Head
+            | Self::Tail
+            | Self::Unique
+            | Self::Sort
+            | Self::Reverse
+            | Self::Any
+            | Self::All => FunctionArity::Exact(1),
             Self::Slice => FunctionArity::Exact(3),
             Self::Concat => FunctionArity::AtLeast(2),
             Self::Dot | Self::Percentile => FunctionArity::Exact(2),
@@ -277,9 +293,12 @@ impl BuiltInFunction {
             // String functions
             Self::Split | Self::Join | Self::Includes => FunctionArity::Exact(2),
             Self::Replace => FunctionArity::Exact(3),
-            Self::Trim | Self::Uppercase | Self::Lowercase | Self::ToString | Self::ToNumber => {
-                FunctionArity::Exact(1)
-            }
+            Self::Trim
+            | Self::Uppercase
+            | Self::Lowercase
+            | Self::ToString
+            | Self::ToNumber
+            | Self::ToBool => FunctionArity::Exact(1),
             Self::Format => FunctionArity::AtLeast(1),
 
             // Type functions
@@ -737,6 +756,20 @@ impl BuiltInFunction {
                 Ok(heap.borrow_mut().insert_list(list))
             }
 
+            Self::Any => {
+                let list = args[0].as_list(&heap.borrow())?.clone();
+                Ok(Value::Bool(
+                    list.iter().any(|v| v.as_bool().unwrap_or(false)),
+                ))
+            }
+
+            Self::All => {
+                let list = args[0].as_list(&heap.borrow())?.clone();
+                Ok(Value::Bool(
+                    list.iter().all(|v| v.as_bool().unwrap_or(false)),
+                ))
+            }
+
             // String functions
             Self::Split => {
                 let (s, delimeter) = {
@@ -800,26 +833,30 @@ impl BuiltInFunction {
                 Ok(heap.borrow_mut().insert_string(string))
             }
 
-            Self::ToString => {
-                let string = args[0].stringify_internal(&heap.borrow());
-                Ok(heap.borrow_mut().insert_string(string))
-            }
-
-            Self::ToNumber => Ok(Value::Number(args[0].as_string(&heap.borrow())?.parse()?)),
-
             Self::Includes => {
-                let needle = {
-                    let borrowed_heap = &heap.borrow();
-                    args[1].as_string(borrowed_heap)?.to_string()
-                };
-
                 match &args[0].reify(&heap.borrow())? {
-                    ReifiedValue::List(l, _) => Ok(Value::Bool(
-                        (*l).iter()
-                            .any(|v| v.as_string(&heap.borrow()).unwrap().eq(&needle)),
-                    )),
-                    ReifiedValue::String(s, _) => Ok(Value::Bool(s.contains(&needle))),
-                    _ => Err(anyhow!("second argument must be a list or string")),
+                    // If haystack is a list, check for structural equality with any-type needle
+                    ReifiedValue::List(l, _) => {
+                        let borrowed_heap = heap.borrow();
+                        for item in (*l).iter() {
+                            if item.equals(&args[1], &borrowed_heap)? {
+                                return Ok(Value::Bool(true));
+                            }
+                        }
+                        Ok(Value::Bool(false))
+                    }
+                    // If haystack is a string, require needle to be a string and do substring search
+                    ReifiedValue::String(s, _) => {
+                        let needle = {
+                            let borrowed_heap = &heap.borrow();
+                            args[1]
+                                .as_string(borrowed_heap)
+                                .map_err(|_| anyhow!("second argument must be a string"))?
+                                .to_string()
+                        };
+                        Ok(Value::Bool(s.contains(&needle)))
+                    }
+                    _ => Err(anyhow!("first argument must be a list or string")),
                 }
             }
 
@@ -900,6 +937,30 @@ impl BuiltInFunction {
 
                 Ok(heap.borrow_mut().insert_list(entries))
             }
+
+            // Conversion functions
+            Self::ToString => match args[0] {
+                Value::String(_) => Ok(args[0]), // If it's already a string, just return it
+                _ => {
+                    let string = args[0].stringify_internal(&heap.borrow());
+                    Ok(heap.borrow_mut().insert_string(string))
+                }
+            },
+
+            Self::ToNumber => match args[0] {
+                Value::Number(_) => Ok(args[0]), // If it's already a number, just return it
+                Value::Bool(b) => Ok(Value::Number(if b { 1.0 } else { 0.0 })),
+                _ => Ok(Value::Number(args[0].as_string(&heap.borrow())?.parse()?)),
+            },
+
+            Self::ToBool => match args[0] {
+                Value::Bool(_) => Ok(args[0]), // If it's already a boolean, just return it
+                Value::Number(_) => Ok(Value::Bool(args[0].as_number()? != 0.0)),
+                _ => Err(anyhow!(
+                    "expected a boolean or number, but got a {}",
+                    args[0].get_type()
+                )),
+            },
 
             // Platform-specific functions
             #[cfg(not(target_arch = "wasm32"))]
@@ -1142,6 +1203,8 @@ impl BuiltInFunction {
             Self::Sort,
             Self::SortBy,
             Self::Reverse,
+            Self::Any,
+            Self::All,
             Self::Map,
             Self::Reduce,
             Self::Filter,
@@ -1155,6 +1218,7 @@ impl BuiltInFunction {
             Self::Lowercase,
             Self::ToString,
             Self::ToNumber,
+            Self::ToBool,
             Self::Includes,
             Self::Format,
             Self::Typeof,

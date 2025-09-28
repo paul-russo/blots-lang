@@ -301,6 +301,8 @@ x = 42 // This is also a comment
 - `sort(list)` - returns a sorted copy of the list (ascending)
 - `sort_by(list, fn)` - sorts a list using a comparison function
 - `reverse(list)` - returns a reversed copy of the list
+- `any(list)` - returns true if any element in the list is `true`
+- `all(list)` - returns true if all elements in the list are `true`
 
 #### Higher-Order Functions
 - `map(list, fn)` - applies a function to each element of a list
@@ -316,14 +318,15 @@ x = 42 // This is also a comment
 - `trim(string)` - removes leading and trailing whitespace
 - `uppercase(string)` - converts string to uppercase
 - `lowercase(string)` - converts string to lowercase
-- `to_string(value)` - converts a value to its string representation
-- `to_number(string)` - converts a string to a number
 - `includes(string, substring)` - checks if string contains substring
 - `format(string, ...values)` - formats a string with placeholder values (e.g. `format("answer: {}", 42))
 
 #### Type Functions
 - `typeof(value)` - returns the type of a value ("number", "string", "boolean", "null", "list", "record", "built-in function", or "function")
 - `arity(fn)` - returns the minimum number of parameters a function expects
+- `to_string(value)` - converts a value to its string representation
+- `to_number(value)` - converts a string or boolean to a number. If value is a string, parses it as a floating-point number. If value is a boolean, returns 1 for `true` and 0 for `false`.
+- `to_bool(number)` - converts a number to a boolean. If the number is 0, then returns `false`. Otherwise, returns `true`.
 
 #### Record Functions
 - `keys(record)` - returns a list of all keys in a record
