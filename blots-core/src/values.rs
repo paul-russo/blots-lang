@@ -19,6 +19,16 @@ pub enum FunctionArity {
     Between(usize, usize),
 }
 
+impl FunctionArity {
+    pub fn can_accept(&self, n: usize) -> bool {
+        match self {
+            FunctionArity::Exact(expected) => n == *expected,
+            FunctionArity::Between(min, max) => n >= *min && n <= *max,
+            FunctionArity::AtLeast(min) => n >= *min,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
 pub enum LambdaArg {
     Required(String),

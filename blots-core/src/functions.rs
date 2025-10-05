@@ -997,22 +997,32 @@ impl BuiltInFunction {
             // Higher-order functions
             Self::Map => {
                 let func = &args[1];
-                let list = {
+                let (list, func_accepts_two_args) = {
                     let borrowed_heap = &heap.borrow();
                     let list = args[0].as_list(borrowed_heap)?.clone();
                     let func_def = get_function_def(func, borrowed_heap)
                         .ok_or_else(|| anyhow!("second argument must be a function"))?;
-                    drop(func_def);
-                    list
+
+                    // Check if the function can accept 2 arguments (element, index)
+                    let accepts_two = func_def.arity().can_accept(2);
+
+                    (list, accepts_two)
                 };
 
                 let mut mapped_list = vec![];
-                for item in list {
+                for (idx, item) in list.iter().enumerate() {
                     let func_def = get_function_def(func, &heap.borrow())
                         .ok_or_else(|| anyhow!("second argument must be a function"))?;
+
+                    let args = if func_accepts_two_args {
+                        vec![*item, Value::Number(idx as f64)]
+                    } else {
+                        vec![*item]
+                    };
+
                     let result = func_def.call(
                         Value::Null,
-                        vec![item],
+                        args,
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
@@ -1025,24 +1035,38 @@ impl BuiltInFunction {
 
             Self::Filter => {
                 let func = &args[1];
-                let list = {
+                let (list, func_accepts_two_args) = {
                     let borrowed_heap = &heap.borrow();
-                    args[0].as_list(borrowed_heap)?.clone()
+                    let list = args[0].as_list(borrowed_heap)?.clone();
+                    let func_def = get_function_def(func, borrowed_heap)
+                        .ok_or_else(|| anyhow!("second argument must be a function"))?;
+
+                    // Check if the function can accept 2 arguments (element, index)
+                    let accepts_two = func_def.arity().can_accept(2);
+
+                    (list, accepts_two)
                 };
 
                 let mut filtered_list = vec![];
-                for item in list {
+                for (idx, item) in list.iter().enumerate() {
                     let func_def = get_function_def(func, &heap.borrow())
                         .ok_or_else(|| anyhow!("second argument must be a function"))?;
+
+                    let args = if func_accepts_two_args {
+                        vec![*item, Value::Number(idx as f64)]
+                    } else {
+                        vec![*item]
+                    };
+
                     let result = func_def.call(
                         Value::Null,
-                        vec![item],
+                        args,
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
                     )?;
                     if result.as_bool()? {
-                        filtered_list.push(item);
+                        filtered_list.push(*item);
                     }
                 }
 
@@ -1052,18 +1076,32 @@ impl BuiltInFunction {
             Self::Reduce => {
                 let func = &args[1];
                 let initial = args[2];
-                let list = {
+                let (list, func_accepts_three_args) = {
                     let borrowed_heap = &heap.borrow();
-                    args[0].as_list(borrowed_heap)?.clone()
+                    let list = args[0].as_list(borrowed_heap)?.clone();
+                    let func_def = get_function_def(func, borrowed_heap)
+                        .ok_or_else(|| anyhow!("second argument must be a function"))?;
+
+                    // Check if the function can accept 3 arguments (accumulator, element, index)
+                    let accepts_three = func_def.arity().can_accept(3);
+
+                    (list, accepts_three)
                 };
 
                 let mut accumulator = initial;
-                for item in list {
+                for (idx, item) in list.iter().enumerate() {
                     let func_def = get_function_def(func, &heap.borrow())
                         .ok_or_else(|| anyhow!("second argument must be a function"))?;
+
+                    let args = if func_accepts_three_args {
+                        vec![accumulator, *item, Value::Number(idx as f64)]
+                    } else {
+                        vec![accumulator, *item]
+                    };
+
                     accumulator = func_def.call(
                         Value::Null,
-                        vec![accumulator, item],
+                        args,
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
@@ -1075,17 +1113,31 @@ impl BuiltInFunction {
 
             Self::Every => {
                 let func = &args[1];
-                let list = {
+                let (list, func_accepts_two_args) = {
                     let borrowed_heap = &heap.borrow();
-                    args[0].as_list(borrowed_heap)?.clone()
+                    let list = args[0].as_list(borrowed_heap)?.clone();
+                    let func_def = get_function_def(func, borrowed_heap)
+                        .ok_or_else(|| anyhow!("second argument must be a function"))?;
+
+                    // Check if the function can accept 2 arguments (element, index)
+                    let accepts_two = func_def.arity().can_accept(2);
+
+                    (list, accepts_two)
                 };
 
-                for item in list {
+                for (idx, item) in list.iter().enumerate() {
                     let func_def = get_function_def(func, &heap.borrow())
                         .ok_or_else(|| anyhow!("second argument must be a function"))?;
+
+                    let args = if func_accepts_two_args {
+                        vec![*item, Value::Number(idx as f64)]
+                    } else {
+                        vec![*item]
+                    };
+
                     let result = func_def.call(
                         Value::Null,
-                        vec![item],
+                        args,
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
@@ -1100,17 +1152,31 @@ impl BuiltInFunction {
 
             Self::Some => {
                 let func = &args[1];
-                let list = {
+                let (list, func_accepts_two_args) = {
                     let borrowed_heap = &heap.borrow();
-                    args[0].as_list(borrowed_heap)?.clone()
+                    let list = args[0].as_list(borrowed_heap)?.clone();
+                    let func_def = get_function_def(func, borrowed_heap)
+                        .ok_or_else(|| anyhow!("second argument must be a function"))?;
+
+                    // Check if the function can accept 2 arguments (element, index)
+                    let accepts_two = func_def.arity().can_accept(2);
+
+                    (list, accepts_two)
                 };
 
-                for item in list {
+                for (idx, item) in list.iter().enumerate() {
                     let func_def = get_function_def(func, &heap.borrow())
                         .ok_or_else(|| anyhow!("second argument must be a function"))?;
+
+                    let args = if func_accepts_two_args {
+                        vec![*item, Value::Number(idx as f64)]
+                    } else {
+                        vec![*item]
+                    };
+
                     let result = func_def.call(
                         Value::Null,
-                        vec![item],
+                        args,
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
@@ -1249,6 +1315,13 @@ impl FunctionDef {
                 .map_or(String::from("anonymous function"), |n| {
                     format!("function \"{}\"", n)
                 }),
+        }
+    }
+
+    pub fn arity(&self) -> FunctionArity {
+        match self {
+            FunctionDef::BuiltIn(built_in) => built_in.arity(),
+            FunctionDef::Lambda(lambda_def) => lambda_def.get_arity(),
         }
     }
 
@@ -1689,5 +1762,202 @@ mod tests {
                 panic!("Expected number result");
             }
         }
+    }
+
+    #[test]
+    fn test_map_with_index() {
+        use crate::ast::Expr;
+        use crate::values::LambdaDef;
+
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // Create a list [10, 20, 30]
+        let list = heap.borrow_mut().insert_list(vec![
+            Value::Number(10.0),
+            Value::Number(20.0),
+            Value::Number(30.0),
+        ]);
+
+        // Create a lambda (x, i) => x + i
+        let lambda = LambdaDef {
+            name: None,
+            args: vec![
+                crate::values::LambdaArg::Required("x".to_string()),
+                crate::values::LambdaArg::Required("i".to_string()),
+            ],
+            body: Expr::BinaryOp {
+                op: crate::ast::BinaryOp::Add,
+                left: Box::new(Expr::Identifier("x".to_string())),
+                right: Box::new(Expr::Identifier("i".to_string())),
+            },
+            scope: HashMap::new(),
+        };
+        let lambda_value = heap.borrow_mut().insert_lambda(lambda);
+
+        // Call map
+        let result = BuiltInFunction::Map
+            .call(
+                vec![list, lambda_value],
+                heap.clone(),
+                bindings.clone(),
+                0,
+            )
+            .unwrap();
+
+        // Verify result is [10, 21, 32]
+        let heap_borrow = heap.borrow();
+        let result_list = result.as_list(&heap_borrow).unwrap();
+        assert_eq!(result_list.len(), 3);
+        assert_eq!(result_list[0], Value::Number(10.0)); // 10 + 0
+        assert_eq!(result_list[1], Value::Number(21.0)); // 20 + 1
+        assert_eq!(result_list[2], Value::Number(32.0)); // 30 + 2
+    }
+
+    #[test]
+    fn test_filter_with_index() {
+        use crate::ast::Expr;
+        use crate::values::LambdaDef;
+
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // Create a list [10, 20, 30, 40]
+        let list = heap.borrow_mut().insert_list(vec![
+            Value::Number(10.0),
+            Value::Number(20.0),
+            Value::Number(30.0),
+            Value::Number(40.0),
+        ]);
+
+        // Create a lambda (x, i) => i > 1
+        let lambda = LambdaDef {
+            name: None,
+            args: vec![
+                crate::values::LambdaArg::Required("x".to_string()),
+                crate::values::LambdaArg::Required("i".to_string()),
+            ],
+            body: Expr::BinaryOp {
+                op: crate::ast::BinaryOp::Greater,
+                left: Box::new(Expr::Identifier("i".to_string())),
+                right: Box::new(Expr::Number(1.0)),
+            },
+            scope: HashMap::new(),
+        };
+        let lambda_value = heap.borrow_mut().insert_lambda(lambda);
+
+        // Call filter
+        let result = BuiltInFunction::Filter
+            .call(
+                vec![list, lambda_value],
+                heap.clone(),
+                bindings.clone(),
+                0,
+            )
+            .unwrap();
+
+        // Verify result is [30, 40] (indices 2 and 3)
+        let heap_borrow = heap.borrow();
+        let result_list = result.as_list(&heap_borrow).unwrap();
+        assert_eq!(result_list.len(), 2);
+        assert_eq!(result_list[0], Value::Number(30.0));
+        assert_eq!(result_list[1], Value::Number(40.0));
+    }
+
+    #[test]
+    fn test_reduce_with_index() {
+        use crate::ast::Expr;
+        use crate::values::LambdaDef;
+
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // Create a list [10, 20, 30]
+        let list = heap.borrow_mut().insert_list(vec![
+            Value::Number(10.0),
+            Value::Number(20.0),
+            Value::Number(30.0),
+        ]);
+
+        // Create a lambda (acc, x, i) => acc + x + i
+        let lambda = LambdaDef {
+            name: None,
+            args: vec![
+                crate::values::LambdaArg::Required("acc".to_string()),
+                crate::values::LambdaArg::Required("x".to_string()),
+                crate::values::LambdaArg::Required("i".to_string()),
+            ],
+            body: Expr::BinaryOp {
+                op: crate::ast::BinaryOp::Add,
+                left: Box::new(Expr::BinaryOp {
+                    op: crate::ast::BinaryOp::Add,
+                    left: Box::new(Expr::Identifier("acc".to_string())),
+                    right: Box::new(Expr::Identifier("x".to_string())),
+                }),
+                right: Box::new(Expr::Identifier("i".to_string())),
+            },
+            scope: HashMap::new(),
+        };
+        let lambda_value = heap.borrow_mut().insert_lambda(lambda);
+
+        // Call reduce with initial value 0
+        let result = BuiltInFunction::Reduce
+            .call(
+                vec![list, lambda_value, Value::Number(0.0)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+            )
+            .unwrap();
+
+        // Verify result is 63 (0 + 10+0 + 20+1 + 30+2)
+        assert_eq!(result, Value::Number(63.0));
+    }
+
+    #[test]
+    fn test_map_backward_compatible() {
+        use crate::ast::Expr;
+        use crate::values::LambdaDef;
+
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // Create a list [10, 20, 30]
+        let list = heap.borrow_mut().insert_list(vec![
+            Value::Number(10.0),
+            Value::Number(20.0),
+            Value::Number(30.0),
+        ]);
+
+        // Create a lambda x => x * 2 (only one argument)
+        let lambda = LambdaDef {
+            name: None,
+            args: vec![crate::values::LambdaArg::Required("x".to_string())],
+            body: Expr::BinaryOp {
+                op: crate::ast::BinaryOp::Multiply,
+                left: Box::new(Expr::Identifier("x".to_string())),
+                right: Box::new(Expr::Number(2.0)),
+            },
+            scope: HashMap::new(),
+        };
+        let lambda_value = heap.borrow_mut().insert_lambda(lambda);
+
+        // Call map
+        let result = BuiltInFunction::Map
+            .call(
+                vec![list, lambda_value],
+                heap.clone(),
+                bindings.clone(),
+                0,
+            )
+            .unwrap();
+
+        // Verify result is [20, 40, 60] - backward compatible, no index passed
+        let heap_borrow = heap.borrow();
+        let result_list = result.as_list(&heap_borrow).unwrap();
+        assert_eq!(result_list.len(), 3);
+        assert_eq!(result_list[0], Value::Number(20.0));
+        assert_eq!(result_list[1], Value::Number(40.0));
+        assert_eq!(result_list[2], Value::Number(60.0));
     }
 }
