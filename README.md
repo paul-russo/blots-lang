@@ -165,6 +165,21 @@ All input values are merged together and made available via the `inputs` record:
 output greeting = "Hey " + inputs.name // "Hey Paul"
 ```
 
+##### Input Shorthand Syntax
+
+For convenience, you can use the `#` character as shorthand for `inputs.`:
+```blots
+// These are equivalent:
+output greeting = "Hey " + #name
+output greeting = "Hey " + inputs.name
+
+// Useful with the coalesce operator for default values:
+principal = #principal ?? 1000
+years = #years ?? 10
+```
+
+The `#field` syntax works everywhere `inputs.field` works and returns `null` for missing fields (making it compatible with the `??` operator).
+
 JSON arrays and primitive values (numbers, strings, booleans, and `null`) can be passed directly as inputs as well:
 ```bash
 blots -i '[1,2,3]'
