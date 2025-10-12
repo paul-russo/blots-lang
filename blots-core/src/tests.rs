@@ -267,3 +267,189 @@ mod late_binding_tests {
         assert_eq!(result, Value::Number(10.0));
     }
 }
+
+// Tests for input reference syntax (#field)
+#[cfg(test)]
+mod input_reference_tests {
+    use crate::expressions::evaluate_pairs;
+    use crate::heap::{Heap, HeapPointer};
+    use crate::parser::{Rule, get_pairs};
+    use crate::values::Value;
+    use indexmap::IndexMap;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    fn parse_and_evaluate(
+        code: &str,
+        heap: Option<Rc<RefCell<Heap>>>,
+        bindings: Option<Rc<RefCell<HashMap<String, Value>>>>,
+    ) -> Result<Value, anyhow::Error> {
+        let pairs = get_pairs(code)?;
+
+        let heap = heap.unwrap_or_else(|| Rc::new(RefCell::new(Heap::new())));
+        let bindings = bindings.unwrap_or_else(|| Rc::new(RefCell::new(HashMap::new())));
+
+        let mut result = Value::Null;
+        for pair in pairs {
+            match pair.as_rule() {
+                Rule::statement => {
+                    if let Some(inner_pair) = pair.into_inner().next() {
+                        match inner_pair.as_rule() {
+                            Rule::expression | Rule::assignment => {
+                                result = evaluate_pairs(
+                                    inner_pair.into_inner(),
+                                    Rc::clone(&heap),
+                                    Rc::clone(&bindings),
+                                    0,
+                                )?;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Rule::EOI => {}
+                _ => {}
+            }
+        }
+        Ok(result)
+    }
+
+    fn setup_inputs(heap: &Rc<RefCell<Heap>>, bindings: &Rc<RefCell<HashMap<String, Value>>>) {
+        // Create an inputs record with test data
+        let mut inputs_map = IndexMap::new();
+        inputs_map.insert("x".to_string(), Value::Number(42.0));
+        inputs_map.insert("y".to_string(), Value::Number(10.0));
+        inputs_map.insert("name".to_string(), heap.borrow_mut().insert_string("Alice".to_string()));
+
+        let inputs_value = heap.borrow_mut().insert_record(inputs_map);
+        bindings.borrow_mut().insert("inputs".to_string(), inputs_value);
+    }
+
+    #[test]
+    fn test_input_reference_simple() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        setup_inputs(&heap, &bindings);
+
+        let result = parse_and_evaluate("#x", Some(heap), Some(bindings)).unwrap();
+        assert_eq!(result, Value::Number(42.0));
+    }
+
+    #[test]
+    fn test_input_reference_string() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        setup_inputs(&heap, &bindings);
+
+        let result = parse_and_evaluate("#name", Some(Rc::clone(&heap)), Some(bindings)).unwrap();
+
+        if let Value::String(s) = result {
+            let borrowed_heap = heap.borrow();
+            let name = s.reify(&borrowed_heap).as_string().unwrap();
+            assert_eq!(name, "Alice");
+        } else {
+            panic!("Expected string value");
+        }
+    }
+
+    #[test]
+    fn test_input_reference_in_expression() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        setup_inputs(&heap, &bindings);
+
+        let result = parse_and_evaluate("#x + #y", Some(heap), Some(bindings)).unwrap();
+        assert_eq!(result, Value::Number(52.0));
+    }
+
+    #[test]
+    fn test_input_reference_equivalence() {
+        // Test that #field is equivalent to inputs.field
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        setup_inputs(&heap, &bindings);
+
+        let result1 = parse_and_evaluate("#x", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
+        let result2 = parse_and_evaluate("inputs.x", Some(heap), Some(bindings)).unwrap();
+
+        assert_eq!(result1, result2);
+    }
+
+    #[test]
+    fn test_input_reference_in_function() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        setup_inputs(&heap, &bindings);
+
+        // Define a function that uses input reference
+        parse_and_evaluate("double_x = () => #x * 2", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
+
+        let result = parse_and_evaluate("double_x()", Some(heap), Some(bindings)).unwrap();
+        assert_eq!(result, Value::Number(84.0));
+    }
+
+    #[test]
+    fn test_input_reference_multiple_uses() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        setup_inputs(&heap, &bindings);
+
+        let result = parse_and_evaluate("#x + #x * #y", Some(heap), Some(bindings)).unwrap();
+        // 42 + (42 * 10) = 42 + 420 = 462
+        assert_eq!(result, Value::Number(462.0));
+    }
+
+    #[test]
+    fn test_input_reference_missing_field() {
+        // Missing fields should return null, consistent with inputs.field behavior
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        setup_inputs(&heap, &bindings);
+
+        let result = parse_and_evaluate("#missing", Some(heap), Some(bindings)).unwrap();
+        assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn test_input_reference_no_inputs() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        // Don't setup inputs
+
+        let result = parse_and_evaluate("#x", Some(heap), Some(bindings));
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("inputs not found"));
+    }
+
+    #[test]
+    fn test_input_reference_in_conditional() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        setup_inputs(&heap, &bindings);
+
+        let result = parse_and_evaluate(
+            "if #x > 40 then #x + 10 else #y",
+            Some(heap),
+            Some(bindings)
+        ).unwrap();
+
+        assert_eq!(result, Value::Number(52.0)); // 42 + 10
+    }
+
+    #[test]
+    fn test_input_reference_with_underscore() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // Create inputs with underscore field
+        let mut inputs_map = IndexMap::new();
+        inputs_map.insert("my_value".to_string(), Value::Number(123.0));
+        let inputs_value = heap.borrow_mut().insert_record(inputs_map);
+        bindings.borrow_mut().insert("inputs".to_string(), inputs_value);
+
+        let result = parse_and_evaluate("#my_value", Some(heap), Some(bindings)).unwrap();
+        assert_eq!(result, Value::Number(123.0));
+    }
+}

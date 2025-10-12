@@ -15,6 +15,7 @@ pub struct BlotsHighlighter {
     operator_regex: Regex,
     string_regex: Regex,
     number_regex: Regex,
+    input_reference_regex: Regex,
     bindings: Rc<RefCell<HashMap<String, Value>>>,
 }
 
@@ -35,6 +36,9 @@ impl BlotsHighlighter {
 
             // Numbers: including decimals and scientific notation
             number_regex: Regex::new(r"\b\d+(\.\d+)?([eE][+-]?\d+)?\b").unwrap(),
+
+            // Input references: #identifier
+            input_reference_regex: Regex::new(r"#[a-zA-Z_][a-zA-Z0-9_]*").unwrap(),
 
             bindings,
         }
@@ -64,6 +68,13 @@ impl BlotsHighlighter {
         for mat in self.number_regex.find_iter(line) {
             if !self.is_inside_ranges(&matches, mat.start(), mat.end()) {
                 matches.push((mat.start(), mat.end(), HighlightType::Number));
+            }
+        }
+
+        // Find input references
+        for mat in self.input_reference_regex.find_iter(line) {
+            if !self.is_inside_ranges(&matches, mat.start(), mat.end()) {
+                matches.push((mat.start(), mat.end(), HighlightType::InputReference));
             }
         }
 
@@ -99,6 +110,7 @@ impl BlotsHighlighter {
                 HighlightType::Operator => text.fg(Color::Cyan).to_string(),          // Cyan
                 HighlightType::String => text.fg(Color::Green).to_string(),           // Green
                 HighlightType::Number => text.fg(Color::Yellow).to_string(),          // Yellow
+                HighlightType::InputReference => text.fg(Color::Blue).to_string(),    // Blue
             };
             highlighted.push_str(&colored_text);
             last_end = end;
@@ -136,6 +148,7 @@ enum HighlightType {
     Operator,
     String,
     Number,
+    InputReference,
 }
 
 impl Highlighter for BlotsHighlighter {

@@ -12,6 +12,7 @@ pub enum Expr {
 
     // Variables and functions
     Identifier(String),
+    InputReference(String), // Shorthand for inputs.field (e.g., #field)
     BuiltIn(BuiltInFunction), // Built-in function
 
     // Collections

@@ -15,6 +15,7 @@ pub fn expr_to_source(expr: &Expr) -> String {
         Expr::Bool(b) => b.to_string(),
         Expr::Null => "null".to_string(),
         Expr::Identifier(name) => name.clone(),
+        Expr::InputReference(field) => format!("#{}", field),
         Expr::BuiltIn(built_in) => built_in.name().to_string(),
         Expr::List(items) => {
             let items_str: Vec<String> = items.iter().map(expr_to_source).collect();
@@ -167,6 +168,7 @@ pub fn expr_to_source_with_scope(
                 name.clone()
             }
         }
+        Expr::InputReference(field) => format!("#{}", field),
         // For all other expression types, recursively process with scope
         Expr::Number(n) => {
             if n.fract() == 0.0 && n.abs() < 1e15 {

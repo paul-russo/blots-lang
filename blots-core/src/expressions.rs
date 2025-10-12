@@ -168,6 +168,24 @@ pub fn evaluate_ast(
                 .copied()
                 .ok_or(anyhow!("unknown identifier: {}", ident)),
         },
+        Expr::InputReference(field) => {
+            // Desugar #field to inputs.field
+            let inputs_value = bindings
+                .borrow()
+                .get("inputs")
+                .copied()
+                .ok_or(anyhow!("inputs not found (required for #{} syntax)", field))?;
+
+            match inputs_value {
+                Value::Record(record_ptr) => {
+                    let borrowed_heap = heap.borrow();
+                    let record = record_ptr.reify(&borrowed_heap).as_record()?;
+                    // Return null if field doesn't exist (consistent with inputs.field behavior)
+                    Ok(record.get(field).copied().unwrap_or(Value::Null))
+                }
+                _ => Err(anyhow!("inputs must be a record to use #{} syntax", field)),
+            }
+        }
         Expr::BuiltIn(built_in) => Ok(Value::BuiltIn(*built_in)),
         Expr::List(exprs) => {
             let values = exprs
@@ -1558,6 +1576,11 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> Result<Expr> {
                 } else {
                     Ok(Expr::Identifier(ident.to_string()))
                 }
+            }
+            Rule::input_reference => {
+                // Strip the leading '#' and create an InputReference
+                let field = primary.as_str()[1..].to_string();
+                Ok(Expr::InputReference(field))
             }
             Rule::expression => pairs_to_expr(primary.into_inner()),
             _ => unreachable!("{}", primary.as_str()),
