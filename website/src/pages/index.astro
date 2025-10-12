@@ -5,9 +5,9 @@ import SectionHeading from "../components/SectionHeading.astro";
 import CopyBox from "../components/CopyBox.astro";
 import Link from "../components/Link.astro";
 import Code from "../components/Code.astro";
-import { format } from "date-fns";
+import { format, parseISO } from "date-fns";
 
-const releaseDateFormatted = format(new Date(releaseDate), "MMMM d, yyyy");
+const releaseDateFormatted = format(parseISO(releaseDate), "MMMM d, yyyy");
 ---
 
 <Layout title="The Blots Programming Language">
