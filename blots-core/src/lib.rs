@@ -10,4 +10,5 @@ pub mod heap;
 pub mod parser;
 pub mod stats;
 pub mod tests;
+pub mod units;
 pub mod values;

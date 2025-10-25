@@ -1,6 +1,7 @@
 use crate::{
     expressions::evaluate_ast,
     heap::{Heap, HeapPointer, IterablePointer},
+    units,
     values::{FunctionArity, LambdaArg, LambdaDef, ReifiedValue, Value},
 };
 use anyhow::{Result, anyhow};
@@ -96,6 +97,7 @@ pub enum BuiltInFunction {
     ToString,
     ToNumber,
     ToBool,
+    Convert,
 
     // Platform-specific functions
     #[cfg(not(target_arch = "wasm32"))]
@@ -162,6 +164,7 @@ impl BuiltInFunction {
             "to_string" => Some(Self::ToString),
             "to_number" => Some(Self::ToNumber),
             "to_bool" => Some(Self::ToBool),
+            "convert" => Some(Self::Convert),
             "includes" => Some(Self::Includes),
             "format" => Some(Self::Format),
             "typeof" => Some(Self::Typeof),
@@ -235,6 +238,7 @@ impl BuiltInFunction {
             Self::ToString => "to_string",
             Self::ToNumber => "to_number",
             Self::ToBool => "to_bool",
+            Self::Convert => "convert",
             #[cfg(not(target_arch = "wasm32"))]
             Self::Print => "print",
             #[cfg(not(target_arch = "wasm32"))]
@@ -299,6 +303,7 @@ impl BuiltInFunction {
             | Self::ToString
             | Self::ToNumber
             | Self::ToBool => FunctionArity::Exact(1),
+            Self::Convert => FunctionArity::Exact(3),
             Self::Format => FunctionArity::AtLeast(1),
 
             // Type functions
@@ -962,6 +967,21 @@ impl BuiltInFunction {
                 )),
             },
 
+            Self::Convert => {
+                let value = args[0].as_number()?;
+                let from_unit = {
+                    let borrowed_heap = &heap.borrow();
+                    args[1].as_string(borrowed_heap)?.to_string()
+                };
+                let to_unit = {
+                    let borrowed_heap = &heap.borrow();
+                    args[2].as_string(borrowed_heap)?.to_string()
+                };
+
+                let result = units::convert(value, &from_unit, &to_unit)?;
+                Ok(Value::Number(result))
+            }
+
             // Platform-specific functions
             #[cfg(not(target_arch = "wasm32"))]
             Self::Print => {
@@ -1285,6 +1305,7 @@ impl BuiltInFunction {
             Self::ToString,
             Self::ToNumber,
             Self::ToBool,
+            Self::Convert,
             Self::Includes,
             Self::Format,
             Self::Typeof,
@@ -1959,5 +1980,143 @@ mod tests {
         assert_eq!(result_list[0], Value::Number(20.0));
         assert_eq!(result_list[1], Value::Number(40.0));
         assert_eq!(result_list[2], Value::Number(60.0));
+    }
+
+    #[test]
+    fn test_convert_length() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let convert_fn = BuiltInFunction::Convert;
+
+        // Test km to m
+        let from_unit = heap.borrow_mut().insert_string("km".to_string());
+        let to_unit = heap.borrow_mut().insert_string("m".to_string());
+        let args = vec![Value::Number(1.0), from_unit, to_unit];
+        let result = convert_fn.call(args, heap.clone(), bindings.clone(), 0).unwrap();
+        assert_eq!(result, Value::Number(1000.0));
+
+        // Test miles to km
+        let from_unit = heap.borrow_mut().insert_string("miles".to_string());
+        let to_unit = heap.borrow_mut().insert_string("km".to_string());
+        let args = vec![Value::Number(1.0), from_unit, to_unit];
+        let result = convert_fn.call(args, heap.clone(), bindings.clone(), 0).unwrap();
+        if let Value::Number(n) = result {
+            assert!((n - 1.609344).abs() < 1e-6);
+        } else {
+            panic!("Expected number");
+        }
+    }
+
+    #[test]
+    fn test_convert_temperature() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let convert_fn = BuiltInFunction::Convert;
+
+        // Test 0°C to °F (should be 32°F)
+        let from_unit = heap.borrow_mut().insert_string("celsius".to_string());
+        let to_unit = heap.borrow_mut().insert_string("fahrenheit".to_string());
+        let args = vec![Value::Number(0.0), from_unit, to_unit];
+        let result = convert_fn.call(args, heap.clone(), bindings.clone(), 0).unwrap();
+        if let Value::Number(n) = result {
+            assert!((n - 32.0).abs() < 1e-10);
+        }
+
+        // Test 100°C to °F (should be 212°F)
+        let from_unit = heap.borrow_mut().insert_string("celsius".to_string());
+        let to_unit = heap.borrow_mut().insert_string("fahrenheit".to_string());
+        let args = vec![Value::Number(100.0), from_unit, to_unit];
+        let result = convert_fn.call(args, heap.clone(), bindings.clone(), 0).unwrap();
+        if let Value::Number(n) = result {
+            assert!((n - 212.0).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_convert_mass() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let convert_fn = BuiltInFunction::Convert;
+
+        // Test 1 kg to lbs
+        let from_unit = heap.borrow_mut().insert_string("kg".to_string());
+        let to_unit = heap.borrow_mut().insert_string("lbs".to_string());
+        let args = vec![Value::Number(1.0), from_unit, to_unit];
+        let result = convert_fn.call(args, heap.clone(), bindings.clone(), 0).unwrap();
+        if let Value::Number(n) = result {
+            assert!((n - 2.20462).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn test_convert_information_storage() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let convert_fn = BuiltInFunction::Convert;
+
+        // Test 1 kibibyte to bytes
+        let from_unit = heap.borrow_mut().insert_string("kibibytes".to_string());
+        let to_unit = heap.borrow_mut().insert_string("bytes".to_string());
+        let args = vec![Value::Number(1.0), from_unit, to_unit];
+        let result = convert_fn.call(args, heap.clone(), bindings.clone(), 0).unwrap();
+        assert_eq!(result, Value::Number(1024.0));
+    }
+
+    #[test]
+    fn test_convert_same_unit() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let convert_fn = BuiltInFunction::Convert;
+
+        // Test converting to same unit
+        let from_unit = heap.borrow_mut().insert_string("meters".to_string());
+        let to_unit = heap.borrow_mut().insert_string("m".to_string());
+        let args = vec![Value::Number(42.0), from_unit, to_unit];
+        let result = convert_fn.call(args, heap.clone(), bindings.clone(), 0).unwrap();
+        assert_eq!(result, Value::Number(42.0));
+    }
+
+    #[test]
+    fn test_convert_incompatible_units() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let convert_fn = BuiltInFunction::Convert;
+
+        // Test incompatible units
+        let from_unit = heap.borrow_mut().insert_string("kg".to_string());
+        let to_unit = heap.borrow_mut().insert_string("meters".to_string());
+        let args = vec![Value::Number(1.0), from_unit, to_unit];
+        let result = convert_fn.call(args, heap.clone(), bindings.clone(), 0);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Cannot convert"));
+    }
+
+    #[test]
+    fn test_convert_unknown_unit() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let convert_fn = BuiltInFunction::Convert;
+
+        // Test unknown unit
+        let from_unit = heap.borrow_mut().insert_string("foobar".to_string());
+        let to_unit = heap.borrow_mut().insert_string("meters".to_string());
+        let args = vec![Value::Number(1.0), from_unit, to_unit];
+        let result = convert_fn.call(args, heap.clone(), bindings.clone(), 0);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown unit"));
+    }
+
+    #[test]
+    fn test_convert_case_insensitive() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let convert_fn = BuiltInFunction::Convert;
+
+        // Test case insensitivity
+        let from_unit = heap.borrow_mut().insert_string("KM".to_string());
+        let to_unit = heap.borrow_mut().insert_string("M".to_string());
+        let args = vec![Value::Number(1.0), from_unit, to_unit];
+        let result = convert_fn.call(args, heap.clone(), bindings.clone(), 0).unwrap();
+        assert_eq!(result, Value::Number(1000.0));
     }
 }
