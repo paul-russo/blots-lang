@@ -320,10 +320,15 @@ mod input_reference_tests {
         let mut inputs_map = IndexMap::new();
         inputs_map.insert("x".to_string(), Value::Number(42.0));
         inputs_map.insert("y".to_string(), Value::Number(10.0));
-        inputs_map.insert("name".to_string(), heap.borrow_mut().insert_string("Alice".to_string()));
+        inputs_map.insert(
+            "name".to_string(),
+            heap.borrow_mut().insert_string("Alice".to_string()),
+        );
 
         let inputs_value = heap.borrow_mut().insert_record(inputs_map);
-        bindings.borrow_mut().insert("inputs".to_string(), inputs_value);
+        bindings
+            .borrow_mut()
+            .insert("inputs".to_string(), inputs_value);
     }
 
     #[test]
@@ -370,7 +375,8 @@ mod input_reference_tests {
         let bindings = Rc::new(RefCell::new(HashMap::new()));
         setup_inputs(&heap, &bindings);
 
-        let result1 = parse_and_evaluate("#x", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
+        let result1 =
+            parse_and_evaluate("#x", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
         let result2 = parse_and_evaluate("inputs.x", Some(heap), Some(bindings)).unwrap();
 
         assert_eq!(result1, result2);
@@ -383,7 +389,12 @@ mod input_reference_tests {
         setup_inputs(&heap, &bindings);
 
         // Define a function that uses input reference
-        parse_and_evaluate("double_x = () => #x * 2", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
+        parse_and_evaluate(
+            "double_x = () => #x * 2",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
 
         let result = parse_and_evaluate("double_x()", Some(heap), Some(bindings)).unwrap();
         assert_eq!(result, Value::Number(84.0));
@@ -432,8 +443,9 @@ mod input_reference_tests {
         let result = parse_and_evaluate(
             "if #x > 40 then #x + 10 else #y",
             Some(heap),
-            Some(bindings)
-        ).unwrap();
+            Some(bindings),
+        )
+        .unwrap();
 
         assert_eq!(result, Value::Number(52.0)); // 42 + 10
     }
@@ -447,7 +459,9 @@ mod input_reference_tests {
         let mut inputs_map = IndexMap::new();
         inputs_map.insert("my_value".to_string(), Value::Number(123.0));
         let inputs_value = heap.borrow_mut().insert_record(inputs_map);
-        bindings.borrow_mut().insert("inputs".to_string(), inputs_value);
+        bindings
+            .borrow_mut()
+            .insert("inputs".to_string(), inputs_value);
 
         let result = parse_and_evaluate("#my_value", Some(heap), Some(bindings)).unwrap();
         assert_eq!(result, Value::Number(123.0));

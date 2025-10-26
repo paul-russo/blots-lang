@@ -325,18 +325,19 @@ impl SerializableValue {
             serde_json::Value::Object(obj) => {
                 // Check if this is a function object
                 if let Some(func_value) = obj.get("__blots_function")
-                    && let Some(func_str) = func_value.as_str() {
-                        // Try to parse as a built-in function first (just a name)
-                        if crate::functions::BuiltInFunction::from_ident(func_str).is_some() {
-                            return SerializableValue::BuiltIn(func_str.to_string());
-                        }
-
-                        // Otherwise, parse as a lambda function
-                        // We need to parse the function source and convert it to a SerializableLambdaDef
-                        if let Ok(lambda_def) = Self::parse_function_source(func_str) {
-                            return SerializableValue::Lambda(lambda_def);
-                        }
+                    && let Some(func_str) = func_value.as_str()
+                {
+                    // Try to parse as a built-in function first (just a name)
+                    if crate::functions::BuiltInFunction::from_ident(func_str).is_some() {
+                        return SerializableValue::BuiltIn(func_str.to_string());
                     }
+
+                    // Otherwise, parse as a lambda function
+                    // We need to parse the function source and convert it to a SerializableLambdaDef
+                    if let Ok(lambda_def) = Self::parse_function_source(func_str) {
+                        return SerializableValue::Lambda(lambda_def);
+                    }
+                }
 
                 // Regular record
                 let map: IndexMap<String, SerializableValue> = obj
@@ -360,22 +361,23 @@ impl SerializableValue {
         for pair in pairs {
             if let crate::parser::Rule::statement = pair.as_rule()
                 && let Some(inner_pair) = pair.into_inner().next()
-                    && let crate::parser::Rule::expression = inner_pair.as_rule() {
-                        // Parse the expression to get an AST
-                        let expr = pairs_to_expr(inner_pair.into_inner())?;
+                && let crate::parser::Rule::expression = inner_pair.as_rule()
+            {
+                // Parse the expression to get an AST
+                let expr = pairs_to_expr(inner_pair.into_inner())?;
 
-                        // Check if it's a lambda
-                        if let crate::ast::Expr::Lambda { args, body } = expr {
-                            // Since the function is already inlined (no scope needed),
-                            // we create a SerializableLambdaDef with the source as the body
-                            return Ok(SerializableLambdaDef {
-                                name: None,
-                                args,
-                                body: crate::ast_to_source::expr_to_source(&body),
-                                scope: None, // Functions from JSON have no scope - they're already inlined
-                            });
-                        }
-                    }
+                // Check if it's a lambda
+                if let crate::ast::Expr::Lambda { args, body } = expr {
+                    // Since the function is already inlined (no scope needed),
+                    // we create a SerializableLambdaDef with the source as the body
+                    return Ok(SerializableLambdaDef {
+                        name: None,
+                        args,
+                        body: crate::ast_to_source::expr_to_source(&body),
+                        scope: None, // Functions from JSON have no scope - they're already inlined
+                    });
+                }
+            }
         }
 
         Err(anyhow!("Failed to parse function source: {}", source))

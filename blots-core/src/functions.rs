@@ -1818,12 +1818,7 @@ mod tests {
 
         // Call map
         let result = BuiltInFunction::Map
-            .call(
-                vec![list, lambda_value],
-                heap.clone(),
-                bindings.clone(),
-                0,
-            )
+            .call(vec![list, lambda_value], heap.clone(), bindings.clone(), 0)
             .unwrap();
 
         // Verify result is [10, 21, 32]
@@ -1869,12 +1864,7 @@ mod tests {
 
         // Call filter
         let result = BuiltInFunction::Filter
-            .call(
-                vec![list, lambda_value],
-                heap.clone(),
-                bindings.clone(),
-                0,
-            )
+            .call(vec![list, lambda_value], heap.clone(), bindings.clone(), 0)
             .unwrap();
 
         // Verify result is [30, 40] (indices 2 and 3)
@@ -1965,12 +1955,7 @@ mod tests {
 
         // Call map
         let result = BuiltInFunction::Map
-            .call(
-                vec![list, lambda_value],
-                heap.clone(),
-                bindings.clone(),
-                0,
-            )
+            .call(vec![list, lambda_value], heap.clone(), bindings.clone(), 0)
             .unwrap();
 
         // Verify result is [20, 40, 60] - backward compatible, no index passed
@@ -1992,14 +1977,18 @@ mod tests {
         let from_unit = heap.borrow_mut().insert_string("km".to_string());
         let to_unit = heap.borrow_mut().insert_string("m".to_string());
         let args = vec![Value::Number(1.0), from_unit, to_unit];
-        let result = convert_fn.call(args, heap.clone(), bindings.clone(), 0).unwrap();
+        let result = convert_fn
+            .call(args, heap.clone(), bindings.clone(), 0)
+            .unwrap();
         assert_eq!(result, Value::Number(1000.0));
 
         // Test miles to km
         let from_unit = heap.borrow_mut().insert_string("miles".to_string());
         let to_unit = heap.borrow_mut().insert_string("km".to_string());
         let args = vec![Value::Number(1.0), from_unit, to_unit];
-        let result = convert_fn.call(args, heap.clone(), bindings.clone(), 0).unwrap();
+        let result = convert_fn
+            .call(args, heap.clone(), bindings.clone(), 0)
+            .unwrap();
         if let Value::Number(n) = result {
             assert!((n - 1.609344).abs() < 1e-6);
         } else {
@@ -2017,7 +2006,9 @@ mod tests {
         let from_unit = heap.borrow_mut().insert_string("celsius".to_string());
         let to_unit = heap.borrow_mut().insert_string("fahrenheit".to_string());
         let args = vec![Value::Number(0.0), from_unit, to_unit];
-        let result = convert_fn.call(args, heap.clone(), bindings.clone(), 0).unwrap();
+        let result = convert_fn
+            .call(args, heap.clone(), bindings.clone(), 0)
+            .unwrap();
         if let Value::Number(n) = result {
             assert!((n - 32.0).abs() < 1e-10);
         }
@@ -2026,7 +2017,9 @@ mod tests {
         let from_unit = heap.borrow_mut().insert_string("celsius".to_string());
         let to_unit = heap.borrow_mut().insert_string("fahrenheit".to_string());
         let args = vec![Value::Number(100.0), from_unit, to_unit];
-        let result = convert_fn.call(args, heap.clone(), bindings.clone(), 0).unwrap();
+        let result = convert_fn
+            .call(args, heap.clone(), bindings.clone(), 0)
+            .unwrap();
         if let Value::Number(n) = result {
             assert!((n - 212.0).abs() < 1e-10);
         }
@@ -2042,7 +2035,9 @@ mod tests {
         let from_unit = heap.borrow_mut().insert_string("kg".to_string());
         let to_unit = heap.borrow_mut().insert_string("lbs".to_string());
         let args = vec![Value::Number(1.0), from_unit, to_unit];
-        let result = convert_fn.call(args, heap.clone(), bindings.clone(), 0).unwrap();
+        let result = convert_fn
+            .call(args, heap.clone(), bindings.clone(), 0)
+            .unwrap();
         if let Value::Number(n) = result {
             assert!((n - 2.20462).abs() < 0.001);
         }
@@ -2058,7 +2053,9 @@ mod tests {
         let from_unit = heap.borrow_mut().insert_string("kibibytes".to_string());
         let to_unit = heap.borrow_mut().insert_string("bytes".to_string());
         let args = vec![Value::Number(1.0), from_unit, to_unit];
-        let result = convert_fn.call(args, heap.clone(), bindings.clone(), 0).unwrap();
+        let result = convert_fn
+            .call(args, heap.clone(), bindings.clone(), 0)
+            .unwrap();
         assert_eq!(result, Value::Number(1024.0));
     }
 
@@ -2072,7 +2069,9 @@ mod tests {
         let from_unit = heap.borrow_mut().insert_string("meters".to_string());
         let to_unit = heap.borrow_mut().insert_string("m".to_string());
         let args = vec![Value::Number(42.0), from_unit, to_unit];
-        let result = convert_fn.call(args, heap.clone(), bindings.clone(), 0).unwrap();
+        let result = convert_fn
+            .call(args, heap.clone(), bindings.clone(), 0)
+            .unwrap();
         assert_eq!(result, Value::Number(42.0));
     }
 
@@ -2116,7 +2115,9 @@ mod tests {
         let from_unit = heap.borrow_mut().insert_string("KM".to_string());
         let to_unit = heap.borrow_mut().insert_string("M".to_string());
         let args = vec![Value::Number(1.0), from_unit, to_unit];
-        let result = convert_fn.call(args, heap.clone(), bindings.clone(), 0).unwrap();
+        let result = convert_fn
+            .call(args, heap.clone(), bindings.clone(), 0)
+            .unwrap();
         assert_eq!(result, Value::Number(1000.0));
     }
 }

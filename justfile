@@ -23,6 +23,11 @@ release version:
 # Run tests
 test:
     cargo test
+    if [ -x .venv/bin/python ]; then \
+        .venv/bin/python scripts/check_unit_conversions.py; \
+    else \
+        python3 scripts/check_unit_conversions.py; \
+    fi
 
 # Clean build artifacts
 clean:
