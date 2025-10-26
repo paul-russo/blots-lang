@@ -350,6 +350,42 @@ x = 42 // This is also a comment
 - `values(record)` - returns a list of all values in a record
 - `entries(record)` - returns a list of [key, value] pairs from a record
 
+#### Unit Conversion
+- `convert(value, from_unit, to_unit)` - converts a numeric value from one unit to another
+
+The `convert` function supports 200+ units across 19 categories:
+- **Angle**: degrees, radians, gradians, revolutions, arc minutes, arc seconds
+- **Area**: square meters/kilometers/miles/feet/etc., acres, hectares
+- **Concentration of Mass**: grams per liter, milligrams per deciliter
+- **Duration**: seconds, minutes, hours, days, weeks, milliseconds, etc.
+- **Electric Charge**: coulombs, ampere hours (with metric prefixes)
+- **Electric Current**: amperes (with metric prefixes)
+- **Electric Potential Difference**: volts (with metric prefixes)
+- **Electric Resistance**: ohms (with metric prefixes)
+- **Energy**: joules, calories, kilocalories, kilowatt hours
+- **Frequency**: hertz (with metric prefixes)
+- **Fuel Efficiency**: liters per 100km, miles per gallon
+- **Information Storage**: bits, bytes, kilobytes, kibibytes, megabytes, mebibytes, etc.
+- **Length**: meters, kilometers, miles, feet, inches, nautical miles, light years, etc.
+- **Mass**: kilograms, grams, pounds, ounces, tons, stones, etc.
+- **Power**: watts (with metric prefixes), horsepower
+- **Pressure**: pascals, bars, atmospheres, psi, mmHg, inHg
+- **Speed**: meters per second, kilometers per hour, miles per hour, knots
+- **Temperature**: Celsius, Fahrenheit, Kelvin
+- **Volume**: liters, gallons, cubic meters, cups, pints, quarts, etc.
+
+Units can be specified by full name or abbreviation and are case-insensitive. Metric units support both American ("meter") and British ("metre") spellings.
+
+Examples:
+```blots
+convert(100, "celsius", "fahrenheit")  // 212
+convert(5, "km", "miles")              // 3.1068559611866697
+convert(1, "kg", "lbs")                // 2.2046226218487757
+convert(1024, "bytes", "kibibytes")    // 1
+convert(180, "degrees", "radians")     // 3.141592653589793 (π)
+convert(1, "kilowatt", "watts")        // 1000
+```
+
 ### Constants
 
 Access mathematical constants via `constants.*`:
