@@ -16,9 +16,14 @@ from __future__ import annotations
 import math
 import re
 import sys
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
+
+if os.getenv("SKIP_UNIT_CHECK"):
+    print("Skipping unit conversion verification because SKIP_UNIT_CHECK is set.")
+    sys.exit(0)
 
 try:
     from pint import UnitRegistry
@@ -26,8 +31,7 @@ try:
 except ImportError as exc:  # pragma: no cover - fails fast when dependency missing
     raise SystemExit(
         "The 'pint' package is required for scripts/check_unit_conversions.py.\n"
-        "Install it with `python3 -m pip install pint` or create a virtualenv "
-        "and install it there."
+        "Install it with `uv run --with pint` or `python3 -m pip install pint`."
     ) from exc
 
 UNITS_RS_PATH = Path("blots-core/src/units.rs")

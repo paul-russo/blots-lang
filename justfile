@@ -23,10 +23,10 @@ release version:
 # Run tests
 test:
     cargo test
-    if [ -x .venv/bin/python ]; then \
-        .venv/bin/python scripts/check_unit_conversions.py; \
+    if [ -n "$$SKIP_UNIT_CHECK" ]; then \
+        UV_CACHE_DIR=.uv-cache uv run --python 3.11 python scripts/check_unit_conversions.py; \
     else \
-        python3 scripts/check_unit_conversions.py; \
+        UV_CACHE_DIR=.uv-cache uv run --python 3.11 --with pint python scripts/check_unit_conversions.py; \
     fi
 
 # Clean build artifacts

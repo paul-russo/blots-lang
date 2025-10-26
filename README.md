@@ -397,7 +397,3 @@ Access mathematical constants via `constants.*`:
 ## Tools
 
 There's a language support [extension](https://github.com/paul-russo/blots-syntax) for Blots, available on both the [VSCode Marketplace](https://marketplace.visualstudio.com/items?itemName=Blots.blots-syntax) and the [Open VSX Registry](https://open-vsx.org/extension/blots/blots-syntax). You should be able to install it from within your editor like other extensions, but you can also download the VSIX file directly from either directory.
-
-## Development
-
-- Run `just test` to execute the Rust test suite and verify the unit catalogue against the [Pint](https://pint.readthedocs.io/) reference implementation. The cross-checker requires the `pint` Python package; install it with `python3 -m pip install pint` or run it from a virtual environment where Pint is available.

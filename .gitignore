@@ -4,6 +4,7 @@
 CLAUDE.md
 .claude/
 AGENTS.md
+.uv-cache/
 
 # website
 node_modules/
