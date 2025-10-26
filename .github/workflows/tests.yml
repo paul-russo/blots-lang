@@ -29,6 +29,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
+      - name: Install just
+        uses: extractions/setup-just@v3
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
