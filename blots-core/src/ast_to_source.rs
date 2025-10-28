@@ -1,9 +1,9 @@
-use crate::ast::{BinaryOp, DoStatement, Expr, PostfixOp, RecordEntry, RecordKey, UnaryOp};
+use crate::ast::{BinaryOp, DoStatement, Expr, PostfixOp, RecordEntry, RecordKey, SpannedExpr, UnaryOp};
 use crate::values::{LambdaArg, SerializableValue};
 use indexmap::IndexMap;
 
-pub fn expr_to_source(expr: &Expr) -> String {
-    match expr {
+pub fn expr_to_source(spanned_expr: &SpannedExpr) -> String {
+    match &spanned_expr.node {
         Expr::Number(n) => {
             if n.fract() == 0.0 && n.abs() < 1e15 {
                 format!("{:.0}", n)
@@ -156,10 +156,10 @@ fn postfix_op_to_source(op: &PostfixOp) -> &'static str {
 
 /// Convert an expression to source code with inlined scope values
 pub fn expr_to_source_with_scope(
-    expr: &Expr,
+    spanned_expr: &SpannedExpr,
     scope: &IndexMap<String, SerializableValue>,
 ) -> String {
-    match expr {
+    match &spanned_expr.node {
         Expr::Identifier(name) => {
             // If the identifier is in the scope, inline its value
             if let Some(value) = scope.get(name) {

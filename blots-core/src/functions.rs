@@ -1807,11 +1807,11 @@ mod tests {
                 crate::values::LambdaArg::Required("x".to_string()),
                 crate::values::LambdaArg::Required("i".to_string()),
             ],
-            body: Expr::BinaryOp {
+            body: crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
                 op: crate::ast::BinaryOp::Add,
-                left: Box::new(Expr::Identifier("x".to_string())),
-                right: Box::new(Expr::Identifier("i".to_string())),
-            },
+                left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier("x".to_string()))),
+                right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier("i".to_string()))),
+            }),
             scope: HashMap::new(),
         };
         let lambda_value = heap.borrow_mut().insert_lambda(lambda);
@@ -1853,11 +1853,11 @@ mod tests {
                 crate::values::LambdaArg::Required("x".to_string()),
                 crate::values::LambdaArg::Required("i".to_string()),
             ],
-            body: Expr::BinaryOp {
+            body: crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
                 op: crate::ast::BinaryOp::Greater,
-                left: Box::new(Expr::Identifier("i".to_string())),
-                right: Box::new(Expr::Number(1.0)),
-            },
+                left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier("i".to_string()))),
+                right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Number(1.0))),
+            }),
             scope: HashMap::new(),
         };
         let lambda_value = heap.borrow_mut().insert_lambda(lambda);
@@ -1898,15 +1898,15 @@ mod tests {
                 crate::values::LambdaArg::Required("x".to_string()),
                 crate::values::LambdaArg::Required("i".to_string()),
             ],
-            body: Expr::BinaryOp {
+            body: crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
                 op: crate::ast::BinaryOp::Add,
-                left: Box::new(Expr::BinaryOp {
+                left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
                     op: crate::ast::BinaryOp::Add,
-                    left: Box::new(Expr::Identifier("acc".to_string())),
-                    right: Box::new(Expr::Identifier("x".to_string())),
-                }),
-                right: Box::new(Expr::Identifier("i".to_string())),
-            },
+                    left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier("acc".to_string()))),
+                    right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier("x".to_string()))),
+                })),
+                right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier("i".to_string()))),
+            }),
             scope: HashMap::new(),
         };
         let lambda_value = heap.borrow_mut().insert_lambda(lambda);
@@ -1944,11 +1944,11 @@ mod tests {
         let lambda = LambdaDef {
             name: None,
             args: vec![crate::values::LambdaArg::Required("x".to_string())],
-            body: Expr::BinaryOp {
+            body: crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
                 op: crate::ast::BinaryOp::Multiply,
-                left: Box::new(Expr::Identifier("x".to_string())),
-                right: Box::new(Expr::Number(2.0)),
-            },
+                left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier("x".to_string()))),
+                right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Number(2.0))),
+            }),
             scope: HashMap::new(),
         };
         let lambda_value = heap.borrow_mut().insert_lambda(lambda);

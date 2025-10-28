@@ -1,5 +1,5 @@
 use crate::{
-    ast::{BinaryOp, DoStatement, Expr, PostfixOp, RecordEntry, RecordKey, UnaryOp},
+    ast::{BinaryOp, DoStatement, Expr, PostfixOp, RecordEntry, RecordKey, Span, Spanned, SpannedExpr, UnaryOp},
     functions::{
         BuiltInFunction, get_built_in_function_def_by_ident, get_function_def, is_built_in_function,
     },
@@ -13,7 +13,7 @@ use crate::{
 use anyhow::{Result, anyhow};
 use indexmap::IndexMap;
 use pest::{
-    iterators::Pairs,
+    iterators::{Pair, Pairs},
     pratt_parser::{Assoc, Op, PrattParser},
 };
 use std::{
@@ -113,13 +113,13 @@ fn flatten_spread_value(
 
 // Helper function for evaluating expressions inside do blocks with shadowing allowed
 fn evaluate_do_block_expr(
-    expr: &Expr,
+    expr: &SpannedExpr,
     heap: Rc<RefCell<Heap>>,
     bindings: Rc<RefCell<HashMap<String, Value>>>,
     call_depth: usize,
 ) -> Result<Value> {
     // For assignments in do blocks, skip the immutability check
-    if let Expr::Assignment { ident, value } = expr {
+    if let Expr::Assignment { ident, value } = &expr.node {
         // Still check for keywords
         if matches!(
             ident.as_str(),
@@ -148,12 +148,12 @@ fn evaluate_do_block_expr(
 }
 
 pub fn evaluate_ast(
-    expr: &Expr,
+    expr: &SpannedExpr,
     heap: Rc<RefCell<Heap>>,
     bindings: Rc<RefCell<HashMap<String, Value>>>,
     call_depth: usize,
 ) -> Result<Value> {
-    match expr {
+    match &expr.node {
         Expr::Number(n) => Ok(Number(*n)),
         Expr::String(s) => Ok(heap.borrow_mut().insert_string(s.clone())),
         Expr::Bool(b) => Ok(Bool(*b)),
@@ -532,8 +532,8 @@ pub fn evaluate_ast(
 }
 
 // Helper function to collect free variables in an expression
-fn collect_free_variables(expr: &Expr, vars: &mut Vec<String>, bound: &mut HashSet<String>) {
-    match expr {
+fn collect_free_variables(expr: &SpannedExpr, vars: &mut Vec<String>, bound: &mut HashSet<String>) {
+    match &expr.node {
         Expr::Identifier(name) => {
             if !bound.contains(name) && name != "infinity" && name != "inf" && name != "constants" {
                 vars.push(name.clone());
@@ -546,11 +546,11 @@ fn collect_free_variables(expr: &Expr, vars: &mut Vec<String>, bound: &mut HashS
             }
             collect_free_variables(body, vars, &mut new_bound);
         }
-        Expr::BinaryOp { left, right, .. } => {
+        Expr::BinaryOp { op: _, left, right } => {
             collect_free_variables(left, vars, bound);
             collect_free_variables(right, vars, bound);
         }
-        Expr::UnaryOp { expr, .. } | Expr::PostfixOp { expr, .. } | Expr::Spread(expr) => {
+        Expr::UnaryOp { op: _, expr } | Expr::PostfixOp { op: _, expr } | Expr::Spread(expr) => {
             collect_free_variables(expr, vars, bound);
         }
         Expr::Call { func, args } => {
@@ -563,7 +563,7 @@ fn collect_free_variables(expr: &Expr, vars: &mut Vec<String>, bound: &mut HashS
             collect_free_variables(expr, vars, bound);
             collect_free_variables(index, vars, bound);
         }
-        Expr::DotAccess { expr, .. } => {
+        Expr::DotAccess { expr, field: _ } => {
             collect_free_variables(expr, vars, bound);
         }
         Expr::Conditional {
@@ -575,7 +575,7 @@ fn collect_free_variables(expr: &Expr, vars: &mut Vec<String>, bound: &mut HashS
             collect_free_variables(then_expr, vars, bound);
             collect_free_variables(else_expr, vars, bound);
         }
-        Expr::Assignment { value, .. } => {
+        Expr::Assignment { ident: _, value } => {
             collect_free_variables(value, vars, bound);
         }
         Expr::List(exprs) => {
@@ -606,7 +606,7 @@ fn collect_free_variables(expr: &Expr, vars: &mut Vec<String>, bound: &mut HashS
             for stmt in statements {
                 if let DoStatement::Expression(expr) = stmt {
                     // Check if this is an assignment and add the variable to block scope
-                    if let Expr::Assignment { ident, value } = expr {
+                    if let Expr::Assignment { ident, value } = &expr.node {
                         // First collect free variables from the value
                         collect_free_variables(value, vars, &mut block_bound);
                         // Then add the assigned variable to the block's bound set
@@ -694,8 +694,8 @@ pub fn validate_portable_value(
 // Evaluate binary operations on AST
 fn evaluate_binary_op_ast(
     op: BinaryOp,
-    left: &Expr,
-    right: &Expr,
+    left: &SpannedExpr,
+    right: &SpannedExpr,
     heap: Rc<RefCell<Heap>>,
     bindings: Rc<RefCell<HashMap<String, Value>>>,
     call_depth: usize,
@@ -1407,24 +1407,34 @@ fn evaluate_binary_op_ast(
     }
 }
 
+// Helper function to extract Span from a Pest Pair
+fn span_from_pair(pair: &Pair<Rule>) -> Span {
+    let span = pair.as_span();
+    let (line, col) = span.start_pos().line_col();
+    Span::new(span.start(), span.end(), line, col)
+}
+
 // Convert Pest pairs to our AST
-pub fn pairs_to_expr(pairs: Pairs<Rule>) -> Result<Expr> {
+pub fn pairs_to_expr(pairs: Pairs<Rule>) -> Result<SpannedExpr> {
     PRATT
-        .map_primary(|primary| match primary.as_rule() {
-            Rule::number => Ok(Expr::Number(
-                primary
+        .map_primary(|primary| {
+            let span = span_from_pair(&primary);
+            match primary.as_rule() {
+            Rule::number => {
+                let value = primary
                     .as_str()
                     .replace("_", "")
                     .parse::<f64>()
-                    .map_err(anyhow::Error::from)?,
-            )),
+                    .map_err(anyhow::Error::from)?;
+                Ok(Spanned::new(Expr::Number(value), span))
+            },
             Rule::list => {
                 let list_pairs = primary.into_inner();
-                let exprs = list_pairs
+                let elements = list_pairs
                     .into_iter()
                     .map(|pair| pairs_to_expr(pair.into_inner()))
-                    .collect::<Result<Vec<Expr>>>()?;
-                Ok(Expr::List(exprs))
+                    .collect::<Result<Vec<SpannedExpr>>>()?;
+                Ok(Spanned::new(Expr::List(elements), span))
             }
             Rule::record => {
                 let record_pairs = primary.into_inner();
@@ -1461,40 +1471,41 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> Result<Expr> {
                             let ident = pair.into_inner().next().unwrap().as_str().to_string();
                             entries.push(RecordEntry {
                                 key: RecordKey::Shorthand(ident),
-                                value: Expr::Null, // Will be resolved during evaluation
+                                value: Spanned::dummy(Expr::Null), // Will be resolved during evaluation
                             });
                         }
                         Rule::spread_expression => {
                             let spread_expr = pairs_to_expr(pair.into_inner())?;
                             entries.push(RecordEntry {
                                 key: RecordKey::Spread(Box::new(spread_expr)),
-                                value: Expr::Null, // Will be resolved during evaluation
+                                value: Spanned::dummy(Expr::Null), // Will be resolved during evaluation
                             });
                         }
                         _ => {}
                     }
                 }
 
-                Ok(Expr::Record(entries))
+                Ok(Spanned::new(Expr::Record(entries), span))
             }
             Rule::bool => {
                 let bool_str = primary.as_str();
-                match bool_str {
-                    "true" => Ok(Expr::Bool(true)),
-                    "false" => Ok(Expr::Bool(false)),
+                let value = match bool_str {
+                    "true" => true,
+                    "false" => false,
                     _ => unreachable!(),
-                }
+                };
+                Ok(Spanned::new(Expr::Bool(value), span))
             }
-            Rule::null => Ok(Expr::Null),
+            Rule::null => Ok(Spanned::new(Expr::Null, span)),
             Rule::string => {
-                let contents = primary.into_inner().as_str().to_string();
-                Ok(Expr::String(contents))
+                let value = primary.into_inner().as_str().to_string();
+                Ok(Spanned::new(Expr::String(value), span))
             }
             Rule::assignment => {
                 let mut inner_pairs = primary.into_inner();
                 let ident = inner_pairs.next().unwrap().as_str().to_string();
                 let value = Box::new(pairs_to_expr(inner_pairs.next().unwrap().into_inner())?);
-                Ok(Expr::Assignment { ident, value })
+                Ok(Spanned::new(Expr::Assignment { ident, value }, span))
             }
             Rule::lambda => {
                 let mut inner_pairs = primary.into_inner();
@@ -1522,23 +1533,23 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> Result<Expr> {
                 }
 
                 let body = Box::new(pairs_to_expr(body_pairs.into_inner())?);
-                Ok(Expr::Lambda { args, body })
+                Ok(Spanned::new(Expr::Lambda { args, body }, span))
             }
             Rule::conditional => {
                 let mut inner_pairs = primary.into_inner();
                 let condition = Box::new(pairs_to_expr(inner_pairs.next().unwrap().into_inner())?);
                 let then_expr = Box::new(pairs_to_expr(inner_pairs.next().unwrap().into_inner())?);
                 let else_expr = Box::new(pairs_to_expr(inner_pairs.next().unwrap().into_inner())?);
-                Ok(Expr::Conditional {
+                Ok(Spanned::new(Expr::Conditional {
                     condition,
                     then_expr,
                     else_expr,
-                })
+                }, span))
             }
             Rule::do_block => {
                 let inner_pairs = primary.into_inner();
                 let mut statements = Vec::new();
-                let mut return_expr = Box::new(Expr::Null);
+                let mut return_expr = Box::new(Spanned::dummy(Expr::Null));
 
                 for pair in inner_pairs {
                     match pair.as_rule() {
@@ -1562,75 +1573,83 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> Result<Expr> {
                     }
                 }
 
-                Ok(Expr::DoBlock {
+                Ok(Spanned::new(Expr::DoBlock {
                     statements,
                     return_expr,
-                })
+                }, span))
             }
             Rule::identifier => {
                 let ident = primary.as_str();
 
                 // Check if it's a built-in function
                 if let Some(built_in) = BuiltInFunction::from_ident(ident) {
-                    Ok(Expr::BuiltIn(built_in))
+                    Ok(Spanned::new(Expr::BuiltIn(built_in), span))
                 } else {
-                    Ok(Expr::Identifier(ident.to_string()))
+                    Ok(Spanned::new(Expr::Identifier(ident.to_string()), span))
                 }
             }
             Rule::input_reference => {
                 // Strip the leading '#' and create an InputReference
                 let field = primary.as_str()[1..].to_string();
-                Ok(Expr::InputReference(field))
+                Ok(Spanned::new(Expr::InputReference(field), span))
             }
             Rule::expression => pairs_to_expr(primary.into_inner()),
             _ => unreachable!("{}", primary.as_str()),
+        }
         })
-        .map_prefix(|op, rhs| match op.as_rule() {
-            Rule::negation => Ok(Expr::UnaryOp {
+        .map_prefix(|op, rhs| {
+            let span = span_from_pair(&op);
+            match op.as_rule() {
+            Rule::negation => Ok(Spanned::new(Expr::UnaryOp {
                 op: UnaryOp::Negate,
                 expr: Box::new(rhs?),
-            }),
-            Rule::spread_operator => Ok(Expr::Spread(Box::new(rhs?))),
-            Rule::invert | Rule::natural_not => Ok(Expr::UnaryOp {
+            }, span)),
+            Rule::spread_operator => Ok(Spanned::new(Expr::Spread(Box::new(rhs?)), span)),
+            Rule::invert | Rule::natural_not => Ok(Spanned::new(Expr::UnaryOp {
                 op: UnaryOp::Not,
                 expr: Box::new(rhs?),
-            }),
+            }, span)),
             _ => unreachable!(),
+        }
         })
-        .map_postfix(|lhs, op| match op.as_rule() {
-            Rule::factorial => Ok(Expr::PostfixOp {
+        .map_postfix(|lhs, op| {
+            let span = span_from_pair(&op);
+            match op.as_rule() {
+            Rule::factorial => Ok(Spanned::new(Expr::PostfixOp {
                 op: PostfixOp::Factorial,
                 expr: Box::new(lhs?),
-            }),
+            }, span)),
             Rule::access => {
                 let index_expr = pairs_to_expr(op.into_inner())?;
-                Ok(Expr::Access {
+                Ok(Spanned::new(Expr::Access {
                     expr: Box::new(lhs?),
                     index: Box::new(index_expr),
-                })
+                }, span))
             }
             Rule::dot_access => {
                 let field = op.into_inner().as_str().to_string();
-                Ok(Expr::DotAccess {
+                Ok(Spanned::new(Expr::DotAccess {
                     expr: Box::new(lhs?),
                     field,
-                })
+                }, span))
             }
             Rule::call_list => {
                 let call_list = op.into_inner();
                 let args = call_list
                     .into_iter()
                     .map(|arg| pairs_to_expr(arg.into_inner()))
-                    .collect::<Result<Vec<Expr>>>()?;
-                Ok(Expr::Call {
+                    .collect::<Result<Vec<SpannedExpr>>>()?;
+                Ok(Spanned::new(Expr::Call {
                     func: Box::new(lhs?),
                     args,
-                })
+                }, span))
             }
             _ => unreachable!(),
+        }
         })
         .map_infix(|lhs, op, rhs| {
-            let op = match op.as_rule() {
+            let span = span_from_pair(&op);
+            let op_type = match op.as_rule() {
                 Rule::add => BinaryOp::Add,
                 Rule::subtract => BinaryOp::Subtract,
                 Rule::multiply => BinaryOp::Multiply,
@@ -1658,11 +1677,11 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> Result<Expr> {
                 Rule::coalesce => BinaryOp::Coalesce,
                 _ => unreachable!(),
             };
-            Ok(Expr::BinaryOp {
-                op,
+            Ok(Spanned::new(Expr::BinaryOp {
+                op: op_type,
                 left: Box::new(lhs?),
                 right: Box::new(rhs?),
-            })
+            }, span))
         })
         .parse(pairs)
 }
@@ -1963,12 +1982,12 @@ mod tests {
             assert_eq!(lambda_def.args, vec![LambdaArg::Required("x".to_string())]);
             assert_eq!(lambda_def.scope, HashMap::new());
             // The body should be a BinaryOp(Add) with Identifier("x") and Number(1)
-            match &lambda_def.body {
+            match &lambda_def.body.node {
                 Expr::BinaryOp {
                     op: BinaryOp::Add,
                     left,
                     right,
-                } => match (left.as_ref(), right.as_ref()) {
+                } => match (&left.node, &right.node) {
                     (Expr::Identifier(x), Expr::Number(n)) => {
                         assert_eq!(x, "x");
                         assert_eq!(*n, 1.0);
