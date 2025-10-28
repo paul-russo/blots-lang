@@ -475,7 +475,8 @@ pub fn evaluate_ast(
                 })?
             };
 
-            def.call(func_val, arg_vals, heap, bindings, call_depth, source).map_err(Into::into)
+            def.call(func_val, arg_vals, heap, bindings, call_depth, source)
+                .map_err(|e| RuntimeError::from(e).with_call_site(expr.span, source.to_string()))
         }
         Expr::Access { expr, index } => {
             let val = evaluate_ast(expr, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source)?;
@@ -998,7 +999,7 @@ fn evaluate_binary_op_ast(
                                 Rc::clone(&bindings),
                                 call_depth,
                                 source,
-                            ).map_err(Into::into)
+                            ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source_owned.clone()))
                         })
                         .collect::<Result<Vec<Value>, RuntimeError>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
@@ -1304,7 +1305,7 @@ fn evaluate_binary_op_ast(
                             Rc::clone(&bindings),
                             call_depth,
                                 source
-                        )?;
+                        ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source.to_string()))?;
 
                         let mapped_list = { call_result.as_list(&heap.borrow())?.clone() };
 
@@ -1346,7 +1347,7 @@ fn evaluate_binary_op_ast(
                             Rc::clone(&bindings),
                             call_depth,
                                 source
-                        ).map_err(Into::into)
+                        ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source.to_string()))
                     } else {
                         Err(RuntimeError::with_span(
                             "'into' operator requires function on right side".to_string(),
@@ -1443,7 +1444,7 @@ fn evaluate_binary_op_ast(
                     Rc::clone(&bindings),
                     call_depth,
                                 source
-                ).map_err(Into::into)
+                ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source.to_string()))
             }
             BinaryOp::Into => {
                 if !rhs.is_callable() {
@@ -1471,7 +1472,7 @@ fn evaluate_binary_op_ast(
                     Rc::clone(&bindings),
                     call_depth,
                                 source
-                ).map_err(Into::into)
+                ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source.to_string()))
             }
             BinaryOp::DotEqual
             | BinaryOp::DotNotEqual

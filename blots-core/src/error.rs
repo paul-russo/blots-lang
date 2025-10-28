@@ -28,6 +28,21 @@ impl RuntimeError {
             source: Some(source),
         }
     }
+
+    /// Add span information to an existing error (useful for wrapping function call errors)
+    pub fn with_call_site(self, span: Span, source: String) -> Self {
+        // If the error already has span info, keep it (it's more specific)
+        // Otherwise, add the call site span
+        if self.span.is_some() {
+            self
+        } else {
+            Self {
+                message: self.message,
+                span: Some(span),
+                source: Some(source),
+            }
+        }
+    }
 }
 
 impl fmt::Display for RuntimeError {
