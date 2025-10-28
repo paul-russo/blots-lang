@@ -1,13 +1,13 @@
 use crate::ast::Span;
 use ariadne::{Color, Label, Report, ReportKind, Source};
-use std::fmt;
+use std::{fmt, rc::Rc};
 
 /// Runtime error with source location information for beautiful error reporting
 #[derive(Debug)]
 pub struct RuntimeError {
     pub message: String,
     pub span: Option<Span>,
-    pub source: Option<String>,
+    pub source: Option<Rc<str>>,
 }
 
 impl RuntimeError {
@@ -21,7 +21,7 @@ impl RuntimeError {
     }
 
     /// Create a runtime error with source location
-    pub fn with_span(message: String, span: Span, source: String) -> Self {
+    pub fn with_span(message: String, span: Span, source: Rc<str>) -> Self {
         Self {
             message,
             span: Some(span),
@@ -30,7 +30,7 @@ impl RuntimeError {
     }
 
     /// Add span information to an existing error (useful for wrapping function call errors)
-    pub fn with_call_site(self, span: Span, source: String) -> Self {
+    pub fn with_call_site(self, span: Span, source: Rc<str>) -> Self {
         // If the error already has span info, keep it (it's more specific)
         // Otherwise, add the call site span
         if self.span.is_some() {
@@ -59,7 +59,7 @@ impl fmt::Display for RuntimeError {
                         .with_color(Color::Red),
                 )
                 .finish()
-                .write(Source::from(source.as_str()), &mut output)
+                .write(Source::from(&**source), &mut output)
                 .map_err(|_| fmt::Error)?;
 
             let output_str = String::from_utf8(output).map_err(|_| fmt::Error)?;
@@ -108,7 +108,7 @@ mod tests {
         let error = RuntimeError::with_span(
             "unknown identifier: undefined_variable".to_string(),
             span,
-            source,
+            source.into(),
         );
 
         let error_msg = format!("{}", error);

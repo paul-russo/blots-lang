@@ -70,8 +70,11 @@ pub fn evaluate_pairs(
     // First parse to AST
     let ast = pairs_to_expr(pairs)?;
 
+    // Convert source to Rc for efficient sharing across lambdas
+    let source_rc: Rc<str> = source.into();
+
     // Then evaluate the AST
-    evaluate_ast(&ast, heap, bindings, call_depth, source)
+    evaluate_ast(&ast, heap, bindings, call_depth, source_rc)
 }
 
 // Evaluate an AST expression
@@ -119,7 +122,7 @@ fn evaluate_do_block_expr(
     heap: Rc<RefCell<Heap>>,
     bindings: Rc<RefCell<HashMap<String, Value>>>,
     call_depth: usize,
-    source: &str,
+    source: Rc<str>,
 ) -> Result<Value, RuntimeError> {
     // For assignments in do blocks, skip the immutability check
     if let Expr::Assignment { ident, value } = &expr.node {
@@ -131,12 +134,12 @@ fn evaluate_do_block_expr(
             return Err(RuntimeError::with_span(
                 format!("{} is a keyword, and cannot be reassigned", ident),
                 expr.span,
-                source.to_string(),
+                source.clone(),
             ));
         }
 
         // Evaluate the value (allow shadowing - no check for existing binding)
-        let val = evaluate_ast(value, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source)?;
+        let val = evaluate_ast(value, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone())?;
 
         // Set lambda name if assigning a lambda
         if let Value::Lambda(lambda_ptr) = val {
@@ -151,7 +154,7 @@ fn evaluate_do_block_expr(
     }
 
     // For all other expressions, use the regular evaluate_ast
-    evaluate_ast(expr, heap, bindings, call_depth, source)
+    evaluate_ast(expr, heap, bindings, call_depth, source.clone())
 }
 
 pub fn evaluate_ast(
@@ -159,7 +162,7 @@ pub fn evaluate_ast(
     heap: Rc<RefCell<Heap>>,
     bindings: Rc<RefCell<HashMap<String, Value>>>,
     call_depth: usize,
-    source: &str,
+    source: Rc<str>,
 ) -> Result<Value, RuntimeError> {
     match &expr.node {
         Expr::Number(n) => Ok(Number(*n)),
@@ -178,7 +181,7 @@ pub fn evaluate_ast(
                     RuntimeError::with_span(
                         format!("unknown identifier: {}", ident),
                         expr.span,
-                        source.to_string(),
+                        source.clone(),
                     )
                 }),
         },
@@ -200,7 +203,7 @@ pub fn evaluate_ast(
                 _ => Err(RuntimeError::with_span(
                     format!("inputs must be a record to use #{} syntax", field),
                     expr.span,
-                    source.to_string(),
+                    source.clone(),
                 )),
             }
         }
@@ -208,7 +211,7 @@ pub fn evaluate_ast(
         Expr::List(exprs) => {
             let values = exprs
                 .iter()
-                .map(|e| evaluate_ast(e, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source))
+                .map(|e| evaluate_ast(e, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone()))
                 .collect::<Result<Vec<Value>, RuntimeError>>()?;
 
             // Flatten spreads
@@ -237,7 +240,7 @@ pub fn evaluate_ast(
                             Rc::clone(&heap),
                             Rc::clone(&bindings),
                             call_depth,
-                            source,
+                            source.clone(),
                         )?;
                         record.insert(key.clone(), value);
                     }
@@ -247,7 +250,7 @@ pub fn evaluate_ast(
                             Rc::clone(&heap),
                             Rc::clone(&bindings),
                             call_depth,
-                            source,
+                            source.clone(),
                         )?;
                         let key = key_value.as_string(&heap.borrow())?.to_string();
                         let value = evaluate_ast(
@@ -255,7 +258,7 @@ pub fn evaluate_ast(
                             Rc::clone(&heap),
                             Rc::clone(&bindings),
                             call_depth,
-                            source,
+                            source.clone(),
                         )?;
                         record.insert(key, value);
                     }
@@ -273,7 +276,7 @@ pub fn evaluate_ast(
                             Rc::clone(&heap),
                             Rc::clone(&bindings),
                             call_depth,
-                            source,
+                            source.clone(),
                         )?;
 
                         if let Spread(iterable) = spread_value {
@@ -336,6 +339,7 @@ pub fn evaluate_ast(
                 args: args.clone(),
                 body: (**body).clone(),
                 scope: captured_scope,
+                source: source.clone(),
             });
 
             Ok(lambda)
@@ -345,7 +349,7 @@ pub fn evaluate_ast(
                 return Err(RuntimeError::with_span(
                     format!("{} is the name of a built-in function, and cannot be reassigned", ident),
                     expr.span,
-                    source.to_string(),
+                    source.clone(),
                 ));
             }
 
@@ -363,7 +367,7 @@ pub fn evaluate_ast(
                 return Err(RuntimeError::with_span(
                     format!("{} is a keyword, and cannot be reassigned", ident),
                     expr.span,
-                    source.to_string(),
+                    source.clone(),
                 ));
             }
 
@@ -372,11 +376,11 @@ pub fn evaluate_ast(
                 return Err(RuntimeError::with_span(
                     format!("{} is already defined, and cannot be reassigned", ident),
                     expr.span,
-                    source.to_string(),
+                    source.clone(),
                 ));
             }
 
-            let val = evaluate_ast(value, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source)?;
+            let val = evaluate_ast(value, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone())?;
 
             // Set lambda name if assigning a lambda
             if let Value::Lambda(lambda_ptr) = val {
@@ -401,13 +405,13 @@ pub fn evaluate_ast(
                 Rc::clone(&heap),
                 Rc::clone(&bindings),
                 call_depth,
-                source,
+                source.clone(),
             )?;
 
             if cond_val.as_bool()? {
-                evaluate_ast(then_expr, heap, bindings, call_depth, source)
+                evaluate_ast(then_expr, heap, bindings, call_depth, source.clone())
             } else {
-                evaluate_ast(else_expr, heap, bindings, call_depth, source)
+                evaluate_ast(else_expr, heap, bindings, call_depth, source.clone())
             }
         }
         Expr::DoBlock {
@@ -427,7 +431,7 @@ pub fn evaluate_ast(
                             Rc::clone(&heap),
                             Rc::clone(&block_bindings),
                             call_depth,
-                            source,
+                            source.clone(),
                         )?;
                     }
                     DoStatement::Comment(_) => {} // Skip comments
@@ -435,13 +439,13 @@ pub fn evaluate_ast(
             }
 
             // Return the final expression
-            evaluate_do_block_expr(return_expr, heap, block_bindings, call_depth, source)
+            evaluate_do_block_expr(return_expr, heap, block_bindings, call_depth, source.clone())
         }
         Expr::Call { func, args } => {
-            let func_val = evaluate_ast(func, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source)?;
+            let func_val = evaluate_ast(func, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone())?;
             let arg_vals_raw = args
                 .iter()
-                .map(|arg| evaluate_ast(arg, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source))
+                .map(|arg| evaluate_ast(arg, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone()))
                 .collect::<Result<Vec<_>, RuntimeError>>()?;
 
             // Flatten any spread arguments
@@ -461,7 +465,7 @@ pub fn evaluate_ast(
                 return Err(RuntimeError::with_span(
                     format!("can't call a non-function: {}", func_val.stringify_internal(&heap.borrow())),
                     expr.span,
-                    source.to_string(),
+                    source.clone(),
                 ));
             }
 
@@ -475,12 +479,12 @@ pub fn evaluate_ast(
                 })?
             };
 
-            def.call(func_val, arg_vals, heap, bindings, call_depth, source)
-                .map_err(|e| RuntimeError::from(e).with_call_site(expr.span, source.to_string()))
+            def.call(func_val, arg_vals, heap, bindings, call_depth, &source)
+                .map_err(|e| RuntimeError::from(e).with_call_site(expr.span, source.clone()))
         }
         Expr::Access { expr, index } => {
-            let val = evaluate_ast(expr, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source)?;
-            let idx_val = evaluate_ast(index, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source)?;
+            let val = evaluate_ast(expr, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone())?;
+            let idx_val = evaluate_ast(index, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone())?;
 
             match val {
                 Value::Record(record) => {
@@ -510,12 +514,12 @@ pub fn evaluate_ast(
                 _ => Err(RuntimeError::with_span(
                     format!("expected a record, list, or string, but got a {}", val.get_type()),
                     expr.span,
-                    source.to_string(),
+                    source.clone(),
                 )),
             }
         }
         Expr::DotAccess { expr, field } => {
-            let val = evaluate_ast(expr, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source)?;
+            let val = evaluate_ast(expr, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone())?;
             let borrowed_heap = &heap.borrow();
 
             match val {
@@ -526,15 +530,15 @@ pub fn evaluate_ast(
                 _ => Err(RuntimeError::with_span(
                     format!("expected a record, but got a {}", val.get_type()),
                     expr.span,
-                    source.to_string(),
+                    source.clone(),
                 )),
             }
         }
         Expr::BinaryOp { op, left, right } => {
-            evaluate_binary_op_ast(*op, left, right, heap, bindings, call_depth, source)
+            evaluate_binary_op_ast(*op, left, right, heap, bindings, call_depth, source.clone())
         }
         Expr::UnaryOp { op, expr } => {
-            let val = evaluate_ast(expr, heap, bindings, call_depth, source)?;
+            let val = evaluate_ast(expr, heap, bindings, call_depth, source.clone())?;
 
             match op {
                 UnaryOp::Negate => Ok(Number(-val.as_number()?)),
@@ -542,7 +546,7 @@ pub fn evaluate_ast(
             }
         }
         Expr::PostfixOp { op, expr } => {
-            let val = evaluate_ast(expr, heap, bindings, call_depth, source)?;
+            let val = evaluate_ast(expr, heap, bindings, call_depth, source.clone())?;
 
             match op {
                 PostfixOp::Factorial => {
@@ -555,14 +559,14 @@ pub fn evaluate_ast(
                         Err(RuntimeError::with_span(
                             "factorial only works on non-negative integers".to_string(),
                             expr.span,
-                            source.to_string(),
+                            source.clone(),
                         ))
                     }
                 }
             }
         }
         Expr::Spread(expr) => {
-            let val = evaluate_ast(expr, heap, bindings, call_depth, source)?;
+            let val = evaluate_ast(expr, heap, bindings, call_depth, source.clone())?;
 
             match val {
                 List(pointer) => Ok(Spread(IterablePointer::List(pointer))),
@@ -571,7 +575,7 @@ pub fn evaluate_ast(
                 _ => Err(RuntimeError::with_span(
                     "expected a list, record, or string".to_string(),
                     expr.span,
-                    source.to_string(),
+                    source.clone(),
                 )),
             }
         }
@@ -746,10 +750,10 @@ fn evaluate_binary_op_ast(
     heap: Rc<RefCell<Heap>>,
     bindings: Rc<RefCell<HashMap<String, Value>>>,
     call_depth: usize,
-    source: &str,
+    source: Rc<str>,
 ) -> Result<Value, RuntimeError> {
-    let lhs = evaluate_ast(left, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source)?;
-    let rhs = evaluate_ast(right, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source)?;
+    let lhs = evaluate_ast(left, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone())?;
+    let rhs = evaluate_ast(right, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone())?;
 
     // Handle dot operators first - they never broadcast
     match op {
@@ -791,7 +795,7 @@ fn evaluate_binary_op_ast(
         (_, Value::List(_)) if op == BinaryOp::Into => Err(RuntimeError::with_span(
             "'into' operator requires a function on the right side, not a list".to_string(),
             op_span,
-            source.to_string(),
+            source.clone(),
         )),
         (Value::List(list_l), Value::List(list_r)) => {
             let (l_vec, r_vec) = {
@@ -806,7 +810,7 @@ fn evaluate_binary_op_ast(
                 return Err(RuntimeError::with_span(
                     "left- and right-hand-side lists must be the same length".to_string(),
                     op_span,
-                    source.to_string(),
+                    source.clone(),
                 ));
             }
 
@@ -892,7 +896,7 @@ fn evaluate_binary_op_ast(
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Add => {
-                    let source_owned = source.to_string();
+                    let source_owned = source.clone();
                     let mapped_list = l_vec
                         .iter()
                         .zip(&r_vec)
@@ -969,7 +973,7 @@ fn evaluate_binary_op_ast(
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Via => {
-                    let source_owned = source.to_string();
+                    let source_owned = source.clone();
                     let mapped_list = l_vec
                         .iter()
                         .zip(&r_vec)
@@ -998,7 +1002,7 @@ fn evaluate_binary_op_ast(
                                 Rc::clone(&heap),
                                 Rc::clone(&bindings),
                                 call_depth,
-                                source,
+                                &source,
                             ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source_owned.clone()))
                         })
                         .collect::<Result<Vec<Value>, RuntimeError>>()?;
@@ -1143,7 +1147,7 @@ fn evaluate_binary_op_ast(
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Add => {
-                    let source_owned = source.to_string();
+                    let source_owned = source.clone();
                     let mapped_list = if is_list_first {
                         l_vec
                             .iter()
@@ -1292,7 +1296,7 @@ fn evaluate_binary_op_ast(
                             return Err(RuntimeError::with_span(
                                 format!("can't call a non-function: {}", scalar.stringify_internal(&heap.borrow())),
                                 op_span,
-                                source.to_string(),
+                                source.clone(),
                             ));
                         }
 
@@ -1304,8 +1308,8 @@ fn evaluate_binary_op_ast(
                             Rc::clone(&heap),
                             Rc::clone(&bindings),
                             call_depth,
-                                source
-                        ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source.to_string()))?;
+                                &source
+                        ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source.clone()))?;
 
                         let mapped_list = { call_result.as_list(&heap.borrow())?.clone() };
 
@@ -1314,7 +1318,7 @@ fn evaluate_binary_op_ast(
                         Err(RuntimeError::with_span(
                             "map operator requires function on right side".to_string(),
                             op_span,
-                            source.to_string(),
+                            source.clone(),
                         ))
                     }
                 }
@@ -1324,7 +1328,7 @@ fn evaluate_binary_op_ast(
                             return Err(RuntimeError::with_span(
                                 format!("can't call a non-function: {}", scalar.stringify_internal(&heap.borrow())),
                                 op_span,
-                                source.to_string(),
+                                source.clone(),
                             ));
                         }
 
@@ -1346,13 +1350,13 @@ fn evaluate_binary_op_ast(
                             Rc::clone(&heap),
                             Rc::clone(&bindings),
                             call_depth,
-                                source
-                        ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source.to_string()))
+                                &source
+                        ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source.clone()))
                     } else {
                         Err(RuntimeError::with_span(
                             "'into' operator requires function on right side".to_string(),
                             op_span,
-                            source.to_string(),
+                            source.clone(),
                         ))
                     }
                 }
@@ -1423,7 +1427,7 @@ fn evaluate_binary_op_ast(
                     return Err(RuntimeError::with_span(
                         format!("can't call a non-function ({} is of type {})", rhs.stringify_internal(&heap.borrow()), rhs.get_type()),
                         op_span,
-                        source.to_string(),
+                        source.clone(),
                     ));
                 }
 
@@ -1433,7 +1437,7 @@ fn evaluate_binary_op_ast(
                     return Err(RuntimeError::with_span(
                         format!("unknown function: {}", rhs.stringify_internal(&heap.borrow())),
                         op_span,
-                        source.to_string(),
+                        source.clone(),
                     ));
                 }
 
@@ -1443,15 +1447,15 @@ fn evaluate_binary_op_ast(
                     Rc::clone(&heap),
                     Rc::clone(&bindings),
                     call_depth,
-                                source
-                ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source.to_string()))
+                                &source
+                ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source.clone()))
             }
             BinaryOp::Into => {
                 if !rhs.is_callable() {
                     return Err(RuntimeError::with_span(
                         format!("can't call a non-function ({} is of type {})", rhs.stringify_internal(&heap.borrow()), rhs.get_type()),
                         op_span,
-                        source.to_string(),
+                        source.clone(),
                     ));
                 }
 
@@ -1461,7 +1465,7 @@ fn evaluate_binary_op_ast(
                     return Err(RuntimeError::with_span(
                         format!("unknown function: {}", rhs.stringify_internal(&heap.borrow())),
                         op_span,
-                        source.to_string(),
+                        source.clone(),
                     ));
                 }
 
@@ -1471,8 +1475,8 @@ fn evaluate_binary_op_ast(
                     Rc::clone(&heap),
                     Rc::clone(&bindings),
                     call_depth,
-                                source
-                ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source.to_string()))
+                                &source
+                ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source.clone()))
             }
             BinaryOp::DotEqual
             | BinaryOp::DotNotEqual

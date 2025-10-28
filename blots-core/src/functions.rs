@@ -1468,6 +1468,7 @@ impl FunctionDef {
                 args: expected_args,
                 body,
                 scope,
+                source: lambda_source,
             }) => {
                 #[cfg(not(target_arch = "wasm32"))]
                 let start_var_env = std::time::Instant::now();
@@ -1520,7 +1521,7 @@ impl FunctionDef {
                     Rc::clone(&heap),
                     Rc::new(RefCell::new(new_bindings)),
                     call_depth + 1,
-                    source,
+                    lambda_source.clone(),
                 )
                 .map_err(|error| anyhow!("in {}: {}", self.get_name(), error));
 
@@ -1826,6 +1827,7 @@ mod tests {
                 ))),
             }),
             scope: HashMap::new(),
+            source: Rc::from(""),
         };
         let lambda_value = heap.borrow_mut().insert_lambda(lambda);
 
@@ -1879,6 +1881,7 @@ mod tests {
                 right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Number(1.0))),
             }),
             scope: HashMap::new(),
+            source: Rc::from(""),
         };
         let lambda_value = heap.borrow_mut().insert_lambda(lambda);
 
@@ -1939,6 +1942,7 @@ mod tests {
                 ))),
             }),
             scope: HashMap::new(),
+            source: Rc::from(""),
         };
         let lambda_value = heap.borrow_mut().insert_lambda(lambda);
 
@@ -1983,6 +1987,7 @@ mod tests {
                 right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Number(2.0))),
             }),
             scope: HashMap::new(),
+            source: Rc::from(""),
         };
         let lambda_value = heap.borrow_mut().insert_lambda(lambda);
 

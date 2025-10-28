@@ -13,8 +13,8 @@ mod do_block_shadowing_tests {
         code: &str,
         heap: Option<Rc<RefCell<Heap>>>,
         bindings: Option<Rc<RefCell<HashMap<String, Value>>>>,
-    ) -> Result<Value, anyhow::Error> {
-        let pairs = get_pairs(code)?;
+    ) -> Result<Value, crate::error::RuntimeError> {
+        let pairs = get_pairs(code).map_err(|e| crate::error::RuntimeError::new(e.to_string()))?;
 
         let heap = heap.unwrap_or_else(|| Rc::new(RefCell::new(Heap::new())));
         let bindings = bindings.unwrap_or_else(|| Rc::new(RefCell::new(HashMap::new())));

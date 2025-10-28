@@ -104,6 +104,8 @@ pub struct LambdaDef {
     pub args: Vec<LambdaArg>,
     pub body: SpannedExpr,
     pub scope: HashMap<String, Value>,
+    /// The source code string that the body's spans refer to (shared via Rc for efficiency)
+    pub source: Rc<str>,
 }
 
 impl LambdaDef {
@@ -537,6 +539,7 @@ impl SerializableValue {
                     args: s_lambda.args.clone(),
                     body: body_ast,
                     scope,
+                    source: Rc::from(""),  // Deserialized lambdas don't have original source
                 };
 
                 Ok(heap.insert_lambda(lambda))
