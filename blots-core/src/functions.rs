@@ -326,6 +326,7 @@ impl BuiltInFunction {
         heap: Rc<RefCell<Heap>>,
         bindings: Rc<RefCell<HashMap<String, Value>>>,
         call_depth: usize,
+        source: &str,
     ) -> Result<Value> {
         match self {
             // Math functions
@@ -1046,6 +1047,7 @@ impl BuiltInFunction {
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
+                                source
                     )?;
                     mapped_list.push(result);
                 }
@@ -1084,6 +1086,7 @@ impl BuiltInFunction {
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
+                                source
                     )?;
                     if result.as_bool()? {
                         filtered_list.push(*item);
@@ -1125,6 +1128,7 @@ impl BuiltInFunction {
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
+                                source
                     )?;
                 }
 
@@ -1161,6 +1165,7 @@ impl BuiltInFunction {
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
+                                source
                     )?;
                     if !result.as_bool()? {
                         return Ok(Value::Bool(false));
@@ -1200,6 +1205,7 @@ impl BuiltInFunction {
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
+                                source
                     )?;
                     if result.as_bool()? {
                         return Ok(Value::Bool(true));
@@ -1228,6 +1234,7 @@ impl BuiltInFunction {
                                 Rc::clone(&heap),
                                 Rc::clone(&bindings),
                                 call_depth + 1,
+                                source
                             );
                             let result_b = fd_b.call(
                                 Value::Null,
@@ -1235,6 +1242,7 @@ impl BuiltInFunction {
                                 Rc::clone(&heap),
                                 Rc::clone(&bindings),
                                 call_depth + 1,
+                                source
                             );
 
                             match (result_a, result_b) {
@@ -1440,6 +1448,7 @@ impl FunctionDef {
         heap: Rc<RefCell<Heap>>,
         bindings: Rc<RefCell<HashMap<String, Value>>>,
         call_depth: usize,
+        source: &str,
     ) -> Result<Value> {
         #[cfg(not(target_arch = "wasm32"))]
         let start = std::time::Instant::now();
@@ -1511,6 +1520,7 @@ impl FunctionDef {
                     Rc::clone(&heap),
                     Rc::new(RefCell::new(new_bindings)),
                     call_depth + 1,
+                    source,
                 )
                 .map_err(|error| anyhow!("in {}: {}", self.get_name(), error));
 
@@ -1527,7 +1537,7 @@ impl FunctionDef {
             }
             FunctionDef::BuiltIn(built_in) => {
                 let return_value = built_in
-                    .call(args, heap, bindings, call_depth + 1)
+                    .call(args, heap, bindings, call_depth + 1, source)
                     .map_err(|error| anyhow!("in {}: {}", self.get_name(), error));
 
                 #[cfg(not(target_arch = "wasm32"))]

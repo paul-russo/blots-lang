@@ -64,12 +64,13 @@ pub fn evaluate_pairs(
     heap: Rc<RefCell<Heap>>,
     bindings: Rc<RefCell<HashMap<String, Value>>>,
     call_depth: usize,
+    source: &str,
 ) -> Result<Value> {
     // First parse to AST
     let ast = pairs_to_expr(pairs)?;
 
     // Then evaluate the AST
-    evaluate_ast(&ast, heap, bindings, call_depth)
+    evaluate_ast(&ast, heap, bindings, call_depth, source)
 }
 
 // Evaluate an AST expression
@@ -117,6 +118,7 @@ fn evaluate_do_block_expr(
     heap: Rc<RefCell<Heap>>,
     bindings: Rc<RefCell<HashMap<String, Value>>>,
     call_depth: usize,
+    source: &str,
 ) -> Result<Value> {
     // For assignments in do blocks, skip the immutability check
     if let Expr::Assignment { ident, value } = &expr.node {
@@ -129,7 +131,7 @@ fn evaluate_do_block_expr(
         }
 
         // Evaluate the value (allow shadowing - no check for existing binding)
-        let val = evaluate_ast(value, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
+        let val = evaluate_ast(value, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source)?;
 
         // Set lambda name if assigning a lambda
         if let Value::Lambda(lambda_ptr) = val {
@@ -144,7 +146,7 @@ fn evaluate_do_block_expr(
     }
 
     // For all other expressions, use the regular evaluate_ast
-    evaluate_ast(expr, heap, bindings, call_depth)
+    evaluate_ast(expr, heap, bindings, call_depth, source)
 }
 
 pub fn evaluate_ast(
@@ -152,6 +154,7 @@ pub fn evaluate_ast(
     heap: Rc<RefCell<Heap>>,
     bindings: Rc<RefCell<HashMap<String, Value>>>,
     call_depth: usize,
+    source: &str,
 ) -> Result<Value> {
     match &expr.node {
         Expr::Number(n) => Ok(Number(*n)),
@@ -190,7 +193,7 @@ pub fn evaluate_ast(
         Expr::List(exprs) => {
             let values = exprs
                 .iter()
-                .map(|e| evaluate_ast(e, Rc::clone(&heap), Rc::clone(&bindings), call_depth))
+                .map(|e| evaluate_ast(e, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source))
                 .collect::<Result<Vec<Value>>>()?;
 
             // Flatten spreads
@@ -219,6 +222,7 @@ pub fn evaluate_ast(
                             Rc::clone(&heap),
                             Rc::clone(&bindings),
                             call_depth,
+                            source,
                         )?;
                         record.insert(key.clone(), value);
                     }
@@ -228,6 +232,7 @@ pub fn evaluate_ast(
                             Rc::clone(&heap),
                             Rc::clone(&bindings),
                             call_depth,
+                            source,
                         )?;
                         let key = key_value.as_string(&heap.borrow())?.to_string();
                         let value = evaluate_ast(
@@ -235,6 +240,7 @@ pub fn evaluate_ast(
                             Rc::clone(&heap),
                             Rc::clone(&bindings),
                             call_depth,
+                            source,
                         )?;
                         record.insert(key, value);
                     }
@@ -252,6 +258,7 @@ pub fn evaluate_ast(
                             Rc::clone(&heap),
                             Rc::clone(&bindings),
                             call_depth,
+                            source,
                         )?;
 
                         if let Spread(iterable) = spread_value {
@@ -348,7 +355,7 @@ pub fn evaluate_ast(
                 ));
             }
 
-            let val = evaluate_ast(value, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
+            let val = evaluate_ast(value, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source)?;
 
             // Set lambda name if assigning a lambda
             if let Value::Lambda(lambda_ptr) = val {
@@ -373,12 +380,13 @@ pub fn evaluate_ast(
                 Rc::clone(&heap),
                 Rc::clone(&bindings),
                 call_depth,
+                source,
             )?;
 
             if cond_val.as_bool()? {
-                evaluate_ast(then_expr, heap, bindings, call_depth)
+                evaluate_ast(then_expr, heap, bindings, call_depth, source)
             } else {
-                evaluate_ast(else_expr, heap, bindings, call_depth)
+                evaluate_ast(else_expr, heap, bindings, call_depth, source)
             }
         }
         Expr::DoBlock {
@@ -398,6 +406,7 @@ pub fn evaluate_ast(
                             Rc::clone(&heap),
                             Rc::clone(&block_bindings),
                             call_depth,
+                            source,
                         )?;
                     }
                     DoStatement::Comment(_) => {} // Skip comments
@@ -405,13 +414,13 @@ pub fn evaluate_ast(
             }
 
             // Return the final expression
-            evaluate_do_block_expr(return_expr, heap, block_bindings, call_depth)
+            evaluate_do_block_expr(return_expr, heap, block_bindings, call_depth, source)
         }
         Expr::Call { func, args } => {
-            let func_val = evaluate_ast(func, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
+            let func_val = evaluate_ast(func, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source)?;
             let arg_vals_raw = args
                 .iter()
-                .map(|arg| evaluate_ast(arg, Rc::clone(&heap), Rc::clone(&bindings), call_depth))
+                .map(|arg| evaluate_ast(arg, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source))
                 .collect::<Result<Vec<_>>>()?;
 
             // Flatten any spread arguments
@@ -444,11 +453,11 @@ pub fn evaluate_ast(
                 })?
             };
 
-            def.call(func_val, arg_vals, heap, bindings, call_depth)
+            def.call(func_val, arg_vals, heap, bindings, call_depth, source)
         }
         Expr::Access { expr, index } => {
-            let val = evaluate_ast(expr, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
-            let idx_val = evaluate_ast(index, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
+            let val = evaluate_ast(expr, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source)?;
+            let idx_val = evaluate_ast(index, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source)?;
 
             match val {
                 Value::Record(record) => {
@@ -480,7 +489,7 @@ pub fn evaluate_ast(
             }
         }
         Expr::DotAccess { expr, field } => {
-            let val = evaluate_ast(expr, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
+            let val = evaluate_ast(expr, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source)?;
             let borrowed_heap = &heap.borrow();
 
             match val {
@@ -492,10 +501,10 @@ pub fn evaluate_ast(
             }
         }
         Expr::BinaryOp { op, left, right } => {
-            evaluate_binary_op_ast(*op, left, right, heap, bindings, call_depth)
+            evaluate_binary_op_ast(*op, left, right, heap, bindings, call_depth, source)
         }
         Expr::UnaryOp { op, expr } => {
-            let val = evaluate_ast(expr, heap, bindings, call_depth)?;
+            let val = evaluate_ast(expr, heap, bindings, call_depth, source)?;
 
             match op {
                 UnaryOp::Negate => Ok(Number(-val.as_number()?)),
@@ -503,7 +512,7 @@ pub fn evaluate_ast(
             }
         }
         Expr::PostfixOp { op, expr } => {
-            let val = evaluate_ast(expr, heap, bindings, call_depth)?;
+            let val = evaluate_ast(expr, heap, bindings, call_depth, source)?;
 
             match op {
                 PostfixOp::Factorial => {
@@ -519,7 +528,7 @@ pub fn evaluate_ast(
             }
         }
         Expr::Spread(expr) => {
-            let val = evaluate_ast(expr, heap, bindings, call_depth)?;
+            let val = evaluate_ast(expr, heap, bindings, call_depth, source)?;
 
             match val {
                 List(pointer) => Ok(Spread(IterablePointer::List(pointer))),
@@ -699,9 +708,10 @@ fn evaluate_binary_op_ast(
     heap: Rc<RefCell<Heap>>,
     bindings: Rc<RefCell<HashMap<String, Value>>>,
     call_depth: usize,
+    source: &str,
 ) -> Result<Value> {
-    let lhs = evaluate_ast(left, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
-    let rhs = evaluate_ast(right, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
+    let lhs = evaluate_ast(left, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source)?;
+    let rhs = evaluate_ast(right, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source)?;
 
     // Handle dot operators first - they never broadcast
     match op {
@@ -936,6 +946,7 @@ fn evaluate_binary_op_ast(
                                 Rc::clone(&heap),
                                 Rc::clone(&bindings),
                                 call_depth,
+                                source,
                             )
                         })
                         .collect::<Result<Vec<Value>>>()?;
@@ -1239,6 +1250,7 @@ fn evaluate_binary_op_ast(
                             Rc::clone(&heap),
                             Rc::clone(&bindings),
                             call_depth,
+                                source
                         )?;
 
                         let mapped_list = { call_result.as_list(&heap.borrow())?.clone() };
@@ -1275,6 +1287,7 @@ fn evaluate_binary_op_ast(
                             Rc::clone(&heap),
                             Rc::clone(&bindings),
                             call_depth,
+                                source
                         )
                     } else {
                         Err(anyhow!("'into' operator requires function on right side"))
@@ -1366,6 +1379,7 @@ fn evaluate_binary_op_ast(
                     Rc::clone(&heap),
                     Rc::clone(&bindings),
                     call_depth,
+                                source
                 )
             }
             BinaryOp::Into => {
@@ -1392,6 +1406,7 @@ fn evaluate_binary_op_ast(
                     Rc::clone(&heap),
                     Rc::clone(&bindings),
                     call_depth,
+                                source
                 )
             }
             BinaryOp::DotEqual
