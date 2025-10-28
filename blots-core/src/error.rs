@@ -1,5 +1,5 @@
 use crate::ast::Span;
-use ariadne::{Color, Label, Report, ReportKind, Source};
+use ariadne::{Color, Config, Label, Report, ReportKind, Source};
 use std::{fmt, rc::Rc};
 
 /// Runtime error with source location information for beautiful error reporting
@@ -51,6 +51,14 @@ impl fmt::Display for RuntimeError {
         if let (Some(span), Some(source)) = (&self.span, &self.source) {
             let mut output = Vec::new();
 
+            // Disable colors when compiling for WASM to avoid ANSI escape sequences
+            // in browser/Node.js environments where they won't be interpreted
+            #[cfg(target_arch = "wasm32")]
+            let config = Config::default().with_color(false);
+
+            #[cfg(not(target_arch = "wasm32"))]
+            let config = Config::default();
+
             Report::build(ReportKind::Error, (), span.start_byte)
                 .with_message(&self.message)
                 .with_label(
@@ -58,6 +66,7 @@ impl fmt::Display for RuntimeError {
                         .with_message(&self.message)
                         .with_color(Color::Red),
                 )
+                .with_config(config)
                 .finish()
                 .write(Source::from(&**source), &mut output)
                 .map_err(|_| fmt::Error)?;
