@@ -1,6 +1,10 @@
 use crate::ast::Span;
-use ariadne::{Color, Config, Label, Report, ReportKind, Source};
+use ariadne::{Config, Label, Report, ReportKind, Source};
 use std::{fmt, rc::Rc};
+
+// Only import Color when not building for WASM (since we don't use colors there)
+#[cfg(not(target_arch = "wasm32"))]
+use ariadne::Color;
 
 /// Runtime error with source location information for beautiful error reporting
 #[derive(Debug)]
@@ -59,13 +63,19 @@ impl fmt::Display for RuntimeError {
             #[cfg(not(target_arch = "wasm32"))]
             let config = Config::default();
 
+            // Build label - don't set color in WASM builds as it may override config
+            #[cfg(target_arch = "wasm32")]
+            let label = Label::new(span.start_byte..span.end_byte)
+                .with_message(&self.message);
+
+            #[cfg(not(target_arch = "wasm32"))]
+            let label = Label::new(span.start_byte..span.end_byte)
+                .with_message(&self.message)
+                .with_color(Color::Red);
+
             Report::build(ReportKind::Error, (), span.start_byte)
                 .with_message(&self.message)
-                .with_label(
-                    Label::new(span.start_byte..span.end_byte)
-                        .with_message(&self.message)
-                        .with_color(Color::Red),
-                )
+                .with_label(label)
                 .with_config(config)
                 .finish()
                 .write(Source::from(&**source), &mut output)
