@@ -31,6 +31,7 @@ mod do_block_shadowing_tests {
                                     Rc::clone(&heap),
                                     Rc::clone(&bindings),
                                     0,
+                                    code,
                                 )?;
                             }
                             _ => {}

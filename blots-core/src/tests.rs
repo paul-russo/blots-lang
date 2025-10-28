@@ -31,6 +31,7 @@ mod late_binding_tests {
                                     Rc::clone(&heap),
                                     Rc::clone(&bindings),
                                     0,
+                                    code,
                                 )?;
                             }
                             _ => {}
@@ -302,6 +303,7 @@ mod input_reference_tests {
                                     Rc::clone(&heap),
                                     Rc::clone(&bindings),
                                     0,
+                                    code,
                                 )?;
                             }
                             _ => {}

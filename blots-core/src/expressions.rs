@@ -1,5 +1,6 @@
 use crate::{
     ast::{BinaryOp, DoStatement, Expr, PostfixOp, RecordEntry, RecordKey, Span, Spanned, SpannedExpr, UnaryOp},
+    error::RuntimeError,
     functions::{
         BuiltInFunction, get_built_in_function_def_by_ident, get_function_def, is_built_in_function,
     },
@@ -10,7 +11,7 @@ use crate::{
         Value::{self, Bool, List, Number, Spread},
     },
 };
-use anyhow::{Result, anyhow};
+use anyhow::{Result as AnyhowResult, anyhow};
 use indexmap::IndexMap;
 use pest::{
     iterators::{Pair, Pairs},
@@ -65,7 +66,7 @@ pub fn evaluate_pairs(
     bindings: Rc<RefCell<HashMap<String, Value>>>,
     call_depth: usize,
     source: &str,
-) -> Result<Value> {
+) -> Result<Value, RuntimeError> {
     // First parse to AST
     let ast = pairs_to_expr(pairs)?;
 
@@ -78,7 +79,7 @@ pub fn evaluate_pairs(
 fn flatten_spread_value(
     spread_ptr: &IterablePointer,
     heap: &Rc<RefCell<Heap>>,
-) -> Result<Vec<Value>> {
+) -> AnyhowResult<Vec<Value>> {
     match spread_ptr {
         IterablePointer::List(list_ptr) => {
             let borrowed_heap = heap.borrow();
@@ -119,7 +120,7 @@ fn evaluate_do_block_expr(
     bindings: Rc<RefCell<HashMap<String, Value>>>,
     call_depth: usize,
     source: &str,
-) -> Result<Value> {
+) -> Result<Value, RuntimeError> {
     // For assignments in do blocks, skip the immutability check
     if let Expr::Assignment { ident, value } = &expr.node {
         // Still check for keywords
@@ -127,7 +128,11 @@ fn evaluate_do_block_expr(
             ident.as_str(),
             "return" | "if" | "then" | "else" | "do" | "true" | "false" | "null" | "output"
         ) {
-            return Err(anyhow!("{} is a keyword, and cannot be reassigned", ident));
+            return Err(RuntimeError::with_span(
+                format!("{} is a keyword, and cannot be reassigned", ident),
+                expr.span,
+                source.to_string(),
+            ));
         }
 
         // Evaluate the value (allow shadowing - no check for existing binding)
@@ -155,7 +160,7 @@ pub fn evaluate_ast(
     bindings: Rc<RefCell<HashMap<String, Value>>>,
     call_depth: usize,
     source: &str,
-) -> Result<Value> {
+) -> Result<Value, RuntimeError> {
     match &expr.node {
         Expr::Number(n) => Ok(Number(*n)),
         Expr::String(s) => Ok(heap.borrow_mut().insert_string(s.clone())),
@@ -169,7 +174,13 @@ pub fn evaluate_ast(
                 .borrow()
                 .get(ident)
                 .copied()
-                .ok_or(anyhow!("unknown identifier: {}", ident)),
+                .ok_or_else(|| {
+                    RuntimeError::with_span(
+                        format!("unknown identifier: {}", ident),
+                        expr.span,
+                        source.to_string(),
+                    )
+                }),
         },
         Expr::InputReference(field) => {
             // Desugar #field to inputs.field
@@ -186,7 +197,7 @@ pub fn evaluate_ast(
                     // Return null if field doesn't exist (consistent with inputs.field behavior)
                     Ok(record.get(field).copied().unwrap_or(Value::Null))
                 }
-                _ => Err(anyhow!("inputs must be a record to use #{} syntax", field)),
+                _ => Err(RuntimeError::from(anyhow!("inputs must be a record to use #{} syntax", field))),
             }
         }
         Expr::BuiltIn(built_in) => Ok(Value::BuiltIn(*built_in)),
@@ -194,7 +205,7 @@ pub fn evaluate_ast(
             let values = exprs
                 .iter()
                 .map(|e| evaluate_ast(e, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source))
-                .collect::<Result<Vec<Value>>>()?;
+                .collect::<Result<Vec<Value>, RuntimeError>>()?;
 
             // Flatten spreads
             let mut flattened = Vec::new();
@@ -327,10 +338,10 @@ pub fn evaluate_ast(
         }
         Expr::Assignment { ident, value } => {
             if is_built_in_function(ident) {
-                return Err(anyhow!(
+                return Err(RuntimeError::from(anyhow!(
                     "{} is the name of a built-in function, and cannot be reassigned",
                     ident
-                ));
+                )));
             }
 
             if ident == "constants"
@@ -344,15 +355,15 @@ pub fn evaluate_ast(
                 || ident == "and"
                 || ident == "or"
             {
-                return Err(anyhow!("{} is a keyword, and cannot be reassigned", ident));
+                return Err(RuntimeError::from(anyhow!("{} is a keyword, and cannot be reassigned", ident)));
             }
 
             // Check if the variable already exists (immutability check)
             if bindings.borrow().contains_key(ident) {
-                return Err(anyhow!(
+                return Err(RuntimeError::from(anyhow!(
                     "{} is already defined, and cannot be reassigned",
                     ident
-                ));
+                )));
             }
 
             let val = evaluate_ast(value, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source)?;
@@ -421,7 +432,7 @@ pub fn evaluate_ast(
             let arg_vals_raw = args
                 .iter()
                 .map(|arg| evaluate_ast(arg, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source))
-                .collect::<Result<Vec<_>>>()?;
+                .collect::<Result<Vec<_>, RuntimeError>>()?;
 
             // Flatten any spread arguments
             let mut arg_vals = Vec::new();
@@ -437,10 +448,10 @@ pub fn evaluate_ast(
             }
 
             if !func_val.is_lambda() && !func_val.is_built_in() {
-                return Err(anyhow!(
+                return Err(RuntimeError::from(anyhow!(
                     "can't call a non-function: {}",
                     func_val.stringify_internal(&heap.borrow())
-                ));
+                )));
             }
 
             let def = {
@@ -453,7 +464,7 @@ pub fn evaluate_ast(
                 })?
             };
 
-            def.call(func_val, arg_vals, heap, bindings, call_depth, source)
+            def.call(func_val, arg_vals, heap, bindings, call_depth, source).map_err(Into::into)
         }
         Expr::Access { expr, index } => {
             let val = evaluate_ast(expr, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source)?;
@@ -469,12 +480,14 @@ pub fn evaluate_ast(
                 Value::List(list) => {
                     let borrowed_heap = &heap.borrow();
                     let list = list.reify(borrowed_heap).as_list()?;
-                    let index = usize::try_from(idx_val.as_number()? as u64)?;
+                    let index = usize::try_from(idx_val.as_number()? as u64)
+                        .map_err(|e| RuntimeError::from(anyhow::Error::from(e)))?;
                     Ok(list.get(index).copied().unwrap_or(Value::Null))
                 }
                 Value::String(string) => {
                     let string = string.reify(&heap.borrow()).as_string()?.to_string();
-                    let index = usize::try_from(idx_val.as_number()? as u64)?;
+                    let index = usize::try_from(idx_val.as_number()? as u64)
+                        .map_err(|e| RuntimeError::from(anyhow::Error::from(e)))?;
 
                     Ok(string
                         .chars()
@@ -482,10 +495,10 @@ pub fn evaluate_ast(
                         .map(|c| heap.borrow_mut().insert_string(c.to_string()))
                         .unwrap_or(Value::Null))
                 }
-                _ => Err(anyhow!(
+                _ => Err(RuntimeError::from(anyhow!(
                     "expected a record, list, string, but got a {}",
                     val.get_type()
-                )),
+                ))),
             }
         }
         Expr::DotAccess { expr, field } => {
@@ -497,7 +510,7 @@ pub fn evaluate_ast(
                     let record = record.reify(borrowed_heap).as_record()?;
                     Ok(record.get(field).copied().unwrap_or(Value::Null))
                 }
-                _ => Err(anyhow!("expected a record, but got a {}", val.get_type())),
+                _ => Err(RuntimeError::from(anyhow!("expected a record, but got a {}", val.get_type()))),
             }
         }
         Expr::BinaryOp { op, left, right } => {
@@ -522,7 +535,7 @@ pub fn evaluate_ast(
                             (1..(n as u64) + 1).map(|x| x as f64).product::<f64>(),
                         ))
                     } else {
-                        Err(anyhow!("factorial only works on non-negative integers"))
+                        Err(RuntimeError::from(anyhow!("factorial only works on non-negative integers"))).into()
                     }
                 }
             }
@@ -534,7 +547,7 @@ pub fn evaluate_ast(
                 List(pointer) => Ok(Spread(IterablePointer::List(pointer))),
                 Value::String(pointer) => Ok(Spread(IterablePointer::String(pointer))),
                 Value::Record(pointer) => Ok(Spread(IterablePointer::Record(pointer))),
-                _ => Err(anyhow!("expected a list, record, or string")),
+                _ => Err(RuntimeError::from(anyhow!("expected a list, record, or string"))),
             }
         }
     }
@@ -636,7 +649,7 @@ pub fn validate_portable_value(
     value: &Value,
     heap: &Heap,
     bindings: &HashMap<String, Value>,
-) -> Result<()> {
+) -> AnyhowResult<()> {
     match value {
         Value::Lambda(lambda_ptr) => {
             // Get the lambda definition
@@ -709,7 +722,7 @@ fn evaluate_binary_op_ast(
     bindings: Rc<RefCell<HashMap<String, Value>>>,
     call_depth: usize,
     source: &str,
-) -> Result<Value> {
+) -> Result<Value, RuntimeError> {
     let lhs = evaluate_ast(left, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source)?;
     let rhs = evaluate_ast(right, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source)?;
 
@@ -747,9 +760,9 @@ fn evaluate_binary_op_ast(
     }
 
     match (lhs, rhs) {
-        (_, Value::List(_)) if op == BinaryOp::Into => Err(anyhow!(
+        (_, Value::List(_)) if op == BinaryOp::Into => Err(RuntimeError::from(anyhow!(
             "'into' operator requires a function on the right side, not a list"
-        )),
+        ))),
         (Value::List(list_l), Value::List(list_r)) => {
             let (l_vec, r_vec) = {
                 let borrowed_heap = &heap.borrow();
@@ -760,9 +773,9 @@ fn evaluate_binary_op_ast(
             };
 
             if l_vec.len() != r_vec.len() {
-                return Err(anyhow!(
+                return Err(RuntimeError::from(anyhow!(
                     "left- and right-hand-side lists must be the same length"
-                ));
+                )));
             }
 
             match op {
@@ -771,7 +784,7 @@ fn evaluate_binary_op_ast(
                         .iter()
                         .zip(&r_vec)
                         .map(|(l, r)| Ok(Bool(l.equals(r, &heap.borrow())?)))
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::NotEqual => {
@@ -779,7 +792,7 @@ fn evaluate_binary_op_ast(
                         .iter()
                         .zip(&r_vec)
                         .map(|(l, r)| Ok(Bool(!l.equals(r, &heap.borrow())?)))
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Less => {
@@ -790,7 +803,7 @@ fn evaluate_binary_op_ast(
                             Some(std::cmp::Ordering::Less) => Ok(Bool(true)),
                             _ => Ok(Bool(false)),
                         })
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::LessEq => {
@@ -803,7 +816,7 @@ fn evaluate_binary_op_ast(
                             }
                             _ => Ok(Bool(false)),
                         })
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Greater => {
@@ -814,7 +827,7 @@ fn evaluate_binary_op_ast(
                             Some(std::cmp::Ordering::Greater) => Ok(Bool(true)),
                             _ => Ok(Bool(false)),
                         })
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::GreaterEq => {
@@ -827,7 +840,7 @@ fn evaluate_binary_op_ast(
                             }
                             _ => Ok(Bool(false)),
                         })
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::And | BinaryOp::NaturalAnd => {
@@ -835,7 +848,7 @@ fn evaluate_binary_op_ast(
                         .iter()
                         .zip(&r_vec)
                         .map(|(l, r)| Ok(Bool(l.as_bool()? && r.as_bool()?)))
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Or | BinaryOp::NaturalOr => {
@@ -843,7 +856,7 @@ fn evaluate_binary_op_ast(
                         .iter()
                         .zip(&r_vec)
                         .map(|(l, r)| Ok(Bool(l.as_bool()? || r.as_bool()?)))
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Add => {
@@ -865,9 +878,9 @@ fn evaluate_binary_op_ast(
                             (Value::Number(_), Value::Number(_)) => {
                                 Ok(Number(l.as_number()? + r.as_number()?))
                             }
-                            _ => Err(anyhow!("can't add {} and {}", l.get_type(), r.get_type())),
+                            _ => Err(RuntimeError::from(anyhow!("can't add {} and {}", l.get_type(), r.get_type()))),
                         })
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<Result<Vec<Value>, RuntimeError>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Subtract => {
@@ -875,7 +888,7 @@ fn evaluate_binary_op_ast(
                         .iter()
                         .zip(&r_vec)
                         .map(|(l, r)| Ok(Number(l.as_number()? - r.as_number()?)))
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Multiply => {
@@ -883,7 +896,7 @@ fn evaluate_binary_op_ast(
                         .iter()
                         .zip(&r_vec)
                         .map(|(l, r)| Ok(Number(l.as_number()? * r.as_number()?)))
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Divide => {
@@ -891,7 +904,7 @@ fn evaluate_binary_op_ast(
                         .iter()
                         .zip(&r_vec)
                         .map(|(l, r)| Ok(Number(l.as_number()? / r.as_number()?)))
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Modulo => {
@@ -899,7 +912,7 @@ fn evaluate_binary_op_ast(
                         .iter()
                         .zip(&r_vec)
                         .map(|(l, r)| Ok(Number(l.as_number()? % r.as_number()?)))
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Power => {
@@ -907,7 +920,7 @@ fn evaluate_binary_op_ast(
                         .iter()
                         .zip(&r_vec)
                         .map(|(l, r)| Ok(Number(l.as_number()?.powf(r.as_number()?))))
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Coalesce => {
@@ -915,7 +928,7 @@ fn evaluate_binary_op_ast(
                         .iter()
                         .zip(&r_vec)
                         .map(|(l, r)| if *l == Value::Null { Ok(*r) } else { Ok(*l) })
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Via => {
@@ -924,10 +937,10 @@ fn evaluate_binary_op_ast(
                         .zip(&r_vec)
                         .map(|(l, r)| {
                             if !r.is_lambda() && !r.is_built_in() {
-                                return Err(anyhow!(
+                                return Err(RuntimeError::from(anyhow!(
                                     "right-hand iterable contains non-function {}",
                                     r.stringify_internal(&heap.borrow())
-                                ));
+                                )));
                             }
 
                             let def = {
@@ -947,9 +960,9 @@ fn evaluate_binary_op_ast(
                                 Rc::clone(&bindings),
                                 call_depth,
                                 source,
-                            )
+                            ).map_err(Into::into)
                         })
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<Result<Vec<Value>, RuntimeError>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Into => {
@@ -982,14 +995,14 @@ fn evaluate_binary_op_ast(
                     let mapped_list = l_vec
                         .iter()
                         .map(|v| Ok(Bool(v.equals(&scalar, &heap.borrow())?)))
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::NotEqual => {
                     let mapped_list = l_vec
                         .iter()
                         .map(|v| Ok(Bool(!v.equals(&scalar, &heap.borrow())?)))
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Less => {
@@ -1006,7 +1019,7 @@ fn evaluate_binary_op_ast(
                                 _ => Ok(Bool(false)),
                             }
                         })
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::LessEq => {
@@ -1024,7 +1037,7 @@ fn evaluate_binary_op_ast(
                                 _ => Ok(Bool(false)),
                             }
                         })
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Greater => {
@@ -1041,7 +1054,7 @@ fn evaluate_binary_op_ast(
                                 _ => Ok(Bool(false)),
                             }
                         })
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::GreaterEq => {
@@ -1059,7 +1072,7 @@ fn evaluate_binary_op_ast(
                                 _ => Ok(Bool(false)),
                             }
                         })
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::And | BinaryOp::NaturalAnd => {
@@ -1067,12 +1080,12 @@ fn evaluate_binary_op_ast(
                         l_vec
                             .iter()
                             .map(|v| Ok(Bool(v.as_bool()? && scalar.as_bool()?)))
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     } else {
                         l_vec
                             .iter()
                             .map(|v| Ok(Bool(scalar.as_bool()? && v.as_bool()?)))
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
@@ -1081,12 +1094,12 @@ fn evaluate_binary_op_ast(
                         l_vec
                             .iter()
                             .map(|v| Ok(Bool(v.as_bool()? || scalar.as_bool()?)))
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     } else {
                         l_vec
                             .iter()
                             .map(|v| Ok(Bool(scalar.as_bool()? || v.as_bool()?)))
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
@@ -1109,13 +1122,13 @@ fn evaluate_binary_op_ast(
                                 (Value::Number(_), Value::Number(_)) => {
                                     Ok(Number(v.as_number()? + scalar.as_number()?))
                                 }
-                                _ => Err(anyhow!(
+                                _ => Err(RuntimeError::from(anyhow!(
                                     "can't add {} and {}",
                                     v.get_type(),
                                     scalar.get_type()
-                                )),
+                                ))),
                             })
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     } else {
                         l_vec
                             .iter()
@@ -1134,13 +1147,13 @@ fn evaluate_binary_op_ast(
                                 (Value::Number(_), Value::Number(_)) => {
                                     Ok(Number(scalar.as_number()? + v.as_number()?))
                                 }
-                                _ => Err(anyhow!(
+                                _ => Err(RuntimeError::from(anyhow!(
                                     "can't add {} and {}",
                                     scalar.get_type(),
                                     v.get_type()
-                                )),
+                                ))),
                             })
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
@@ -1149,12 +1162,12 @@ fn evaluate_binary_op_ast(
                         l_vec
                             .iter()
                             .map(|v| Ok(Number(v.as_number()? - scalar.as_number()?)))
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     } else {
                         l_vec
                             .iter()
                             .map(|v| Ok(Number(scalar.as_number()? - v.as_number()?)))
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
@@ -1162,7 +1175,7 @@ fn evaluate_binary_op_ast(
                     let mapped_list = l_vec
                         .iter()
                         .map(|v| Ok(Number(v.as_number()? * scalar.as_number()?)))
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Divide => {
@@ -1170,12 +1183,12 @@ fn evaluate_binary_op_ast(
                         l_vec
                             .iter()
                             .map(|v| Ok(Number(v.as_number()? / scalar.as_number()?)))
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     } else {
                         l_vec
                             .iter()
                             .map(|v| Ok(Number(scalar.as_number()? / v.as_number()?)))
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
@@ -1184,12 +1197,12 @@ fn evaluate_binary_op_ast(
                         l_vec
                             .iter()
                             .map(|v| Ok(Number(v.as_number()? % scalar.as_number()?)))
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     } else {
                         l_vec
                             .iter()
                             .map(|v| Ok(Number(scalar.as_number()? % v.as_number()?)))
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
@@ -1198,12 +1211,12 @@ fn evaluate_binary_op_ast(
                         l_vec
                             .iter()
                             .map(|v| Ok(Number(v.as_number()?.powf(scalar.as_number()?))))
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     } else {
                         l_vec
                             .iter()
                             .map(|v| Ok(Number(scalar.as_number()?.powf(v.as_number()?))))
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
@@ -1218,7 +1231,7 @@ fn evaluate_binary_op_ast(
                                     Ok(*v)
                                 }
                             })
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     } else {
                         l_vec
                             .iter()
@@ -1229,17 +1242,17 @@ fn evaluate_binary_op_ast(
                                     Ok(scalar)
                                 }
                             })
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Via => {
                     if is_list_first {
                         if !scalar.is_callable() {
-                            return Err(anyhow!(
+                            return Err(RuntimeError::from(anyhow!(
                                 "can't call a non-function: {}",
                                 scalar.stringify_internal(&heap.borrow())
-                            ));
+                            )));
                         }
 
                         let list = heap.borrow_mut().insert_list(l_vec.clone());
@@ -1257,16 +1270,16 @@ fn evaluate_binary_op_ast(
 
                         Ok(heap.borrow_mut().insert_list(mapped_list))
                     } else {
-                        Err(anyhow!("map operator requires function on right side"))
+                        Err(RuntimeError::from(anyhow!("map operator requires function on right side"))).into()
                     }
                 }
                 BinaryOp::Into => {
                     if is_list_first {
                         if !scalar.is_callable() {
-                            return Err(anyhow!(
+                            return Err(RuntimeError::from(anyhow!(
                                 "can't call a non-function: {}",
                                 scalar.stringify_internal(&heap.borrow())
-                            ));
+                            )));
                         }
 
                         let list = heap.borrow_mut().insert_list(l_vec.clone());
@@ -1288,9 +1301,9 @@ fn evaluate_binary_op_ast(
                             Rc::clone(&bindings),
                             call_depth,
                                 source
-                        )
+                        ).map_err(Into::into)
                     } else {
-                        Err(anyhow!("'into' operator requires function on right side"))
+                        Err(RuntimeError::from(anyhow!("'into' operator requires function on right side"))).into()
                     }
                 }
                 BinaryOp::DotEqual
@@ -1357,20 +1370,20 @@ fn evaluate_binary_op_ast(
             }
             BinaryOp::Via => {
                 if !rhs.is_callable() {
-                    return Err(anyhow!(
+                    return Err(RuntimeError::from(anyhow!(
                         "can't call a non-function ({} is of type {})",
                         rhs.stringify_internal(&heap.borrow()),
                         rhs.get_type()
-                    ));
+                    )));
                 }
 
                 let def = { get_function_def(&rhs, &heap.borrow()) };
 
                 if def.is_none() {
-                    return Err(anyhow!(
+                    return Err(RuntimeError::from(anyhow!(
                         "unknown function: {}",
                         rhs.stringify_internal(&heap.borrow())
-                    ));
+                    )));
                 }
 
                 def.unwrap().call(
@@ -1380,24 +1393,24 @@ fn evaluate_binary_op_ast(
                     Rc::clone(&bindings),
                     call_depth,
                                 source
-                )
+                ).map_err(Into::into)
             }
             BinaryOp::Into => {
                 if !rhs.is_callable() {
-                    return Err(anyhow!(
+                    return Err(RuntimeError::from(anyhow!(
                         "can't call a non-function ({} is of type {})",
                         rhs.stringify_internal(&heap.borrow()),
                         rhs.get_type()
-                    ));
+                    )));
                 }
 
                 let def = { get_function_def(&rhs, &heap.borrow()) };
 
                 if def.is_none() {
-                    return Err(anyhow!(
+                    return Err(RuntimeError::from(anyhow!(
                         "unknown function: {}",
                         rhs.stringify_internal(&heap.borrow())
-                    ));
+                    )));
                 }
 
                 def.unwrap().call(
@@ -1407,7 +1420,7 @@ fn evaluate_binary_op_ast(
                     Rc::clone(&bindings),
                     call_depth,
                                 source
-                )
+                ).map_err(Into::into)
             }
             BinaryOp::DotEqual
             | BinaryOp::DotNotEqual
@@ -1430,7 +1443,7 @@ fn span_from_pair(pair: &Pair<Rule>) -> Span {
 }
 
 // Convert Pest pairs to our AST
-pub fn pairs_to_expr(pairs: Pairs<Rule>) -> Result<SpannedExpr> {
+pub fn pairs_to_expr(pairs: Pairs<Rule>) -> AnyhowResult<SpannedExpr> {
     PRATT
         .map_primary(|primary| {
             let span = span_from_pair(&primary);
@@ -1448,7 +1461,7 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> Result<SpannedExpr> {
                 let elements = list_pairs
                     .into_iter()
                     .map(|pair| pairs_to_expr(pair.into_inner()))
-                    .collect::<Result<Vec<SpannedExpr>>>()?;
+                    .collect::<AnyhowResult<Vec<SpannedExpr>>>()?;
                 Ok(Spanned::new(Expr::List(elements), span))
             }
             Rule::record => {
@@ -1653,7 +1666,7 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> Result<SpannedExpr> {
                 let args = call_list
                     .into_iter()
                     .map(|arg| pairs_to_expr(arg.into_inner()))
-                    .collect::<Result<Vec<SpannedExpr>>>()?;
+                    .collect::<AnyhowResult<Vec<SpannedExpr>>>()?;
                 Ok(Spanned::new(Expr::Call {
                     func: Box::new(lhs?),
                     args,
@@ -1710,7 +1723,7 @@ mod tests {
         input: &str,
         heap: Option<Rc<RefCell<Heap>>>,
         bindings: Option<Rc<RefCell<HashMap<String, Value>>>>,
-    ) -> Result<Value> {
+    ) -> Result<Value, RuntimeError> {
         let binding = input.to_string();
         let mut pairs = get_pairs(&binding).unwrap();
         let expr = pairs.next().unwrap().into_inner();
@@ -1719,6 +1732,7 @@ mod tests {
             heap.unwrap_or(Rc::new(RefCell::new(Heap::new()))),
             bindings.unwrap_or(Rc::new(RefCell::new(HashMap::new()))),
             0,
+            &binding,
         )
     }
 
