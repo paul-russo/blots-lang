@@ -1047,7 +1047,7 @@ impl BuiltInFunction {
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
-                                source
+                        source,
                     )?;
                     mapped_list.push(result);
                 }
@@ -1086,7 +1086,7 @@ impl BuiltInFunction {
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
-                                source
+                        source,
                     )?;
                     if result.as_bool()? {
                         filtered_list.push(*item);
@@ -1128,7 +1128,7 @@ impl BuiltInFunction {
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
-                                source
+                        source,
                     )?;
                 }
 
@@ -1165,7 +1165,7 @@ impl BuiltInFunction {
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
-                                source
+                        source,
                     )?;
                     if !result.as_bool()? {
                         return Ok(Value::Bool(false));
@@ -1205,7 +1205,7 @@ impl BuiltInFunction {
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
-                                source
+                        source,
                     )?;
                     if result.as_bool()? {
                         return Ok(Value::Bool(true));
@@ -1234,7 +1234,7 @@ impl BuiltInFunction {
                                 Rc::clone(&heap),
                                 Rc::clone(&bindings),
                                 call_depth + 1,
-                                source
+                                source,
                             );
                             let result_b = fd_b.call(
                                 Value::Null,
@@ -1242,7 +1242,7 @@ impl BuiltInFunction {
                                 Rc::clone(&heap),
                                 Rc::clone(&bindings),
                                 call_depth + 1,
-                                source
+                                source,
                             );
 
                             match (result_a, result_b) {
@@ -1797,7 +1797,6 @@ mod tests {
 
     #[test]
     fn test_map_with_index() {
-        use crate::ast::Expr;
         use crate::values::LambdaDef;
 
         let heap = Rc::new(RefCell::new(Heap::new()));
@@ -1819,8 +1818,12 @@ mod tests {
             ],
             body: crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
                 op: crate::ast::BinaryOp::Add,
-                left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier("x".to_string()))),
-                right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier("i".to_string()))),
+                left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
+                    "x".to_string(),
+                ))),
+                right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
+                    "i".to_string(),
+                ))),
             }),
             scope: HashMap::new(),
         };
@@ -1828,7 +1831,13 @@ mod tests {
 
         // Call map
         let result = BuiltInFunction::Map
-            .call(vec![list, lambda_value], heap.clone(), bindings.clone(), 0, "")
+            .call(
+                vec![list, lambda_value],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
             .unwrap();
 
         // Verify result is [10, 21, 32]
@@ -1842,7 +1851,6 @@ mod tests {
 
     #[test]
     fn test_filter_with_index() {
-        use crate::ast::Expr;
         use crate::values::LambdaDef;
 
         let heap = Rc::new(RefCell::new(Heap::new()));
@@ -1865,7 +1873,9 @@ mod tests {
             ],
             body: crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
                 op: crate::ast::BinaryOp::Greater,
-                left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier("i".to_string()))),
+                left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
+                    "i".to_string(),
+                ))),
                 right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Number(1.0))),
             }),
             scope: HashMap::new(),
@@ -1874,7 +1884,13 @@ mod tests {
 
         // Call filter
         let result = BuiltInFunction::Filter
-            .call(vec![list, lambda_value], heap.clone(), bindings.clone(), 0, "")
+            .call(
+                vec![list, lambda_value],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
             .unwrap();
 
         // Verify result is [30, 40] (indices 2 and 3)
@@ -1887,7 +1903,6 @@ mod tests {
 
     #[test]
     fn test_reduce_with_index() {
-        use crate::ast::Expr;
         use crate::values::LambdaDef;
 
         let heap = Rc::new(RefCell::new(Heap::new()));
@@ -1912,10 +1927,16 @@ mod tests {
                 op: crate::ast::BinaryOp::Add,
                 left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
                     op: crate::ast::BinaryOp::Add,
-                    left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier("acc".to_string()))),
-                    right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier("x".to_string()))),
+                    left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
+                        "acc".to_string(),
+                    ))),
+                    right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
+                        "x".to_string(),
+                    ))),
                 })),
-                right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier("i".to_string()))),
+                right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
+                    "i".to_string(),
+                ))),
             }),
             scope: HashMap::new(),
         };
@@ -1938,7 +1959,6 @@ mod tests {
 
     #[test]
     fn test_map_backward_compatible() {
-        use crate::ast::Expr;
         use crate::values::LambdaDef;
 
         let heap = Rc::new(RefCell::new(Heap::new()));
@@ -1957,7 +1977,9 @@ mod tests {
             args: vec![crate::values::LambdaArg::Required("x".to_string())],
             body: crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
                 op: crate::ast::BinaryOp::Multiply,
-                left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier("x".to_string()))),
+                left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
+                    "x".to_string(),
+                ))),
                 right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Number(2.0))),
             }),
             scope: HashMap::new(),
@@ -1966,7 +1988,13 @@ mod tests {
 
         // Call map
         let result = BuiltInFunction::Map
-            .call(vec![list, lambda_value], heap.clone(), bindings.clone(), 0, "")
+            .call(
+                vec![list, lambda_value],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
             .unwrap();
 
         // Verify result is [20, 40, 60] - backward compatible, no index passed
