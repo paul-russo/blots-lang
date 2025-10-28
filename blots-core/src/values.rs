@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{cell::RefCell, collections::HashMap, fmt::Display, rc::Rc};
 
 use crate::{
-    ast::Expr,
+    ast::SpannedExpr,
     functions::BuiltInFunction,
     heap::{
         Heap, HeapPointer, HeapValue, IterablePointer, LambdaPointer, ListPointer, RecordPointer,
@@ -102,8 +102,10 @@ impl Display for LambdaArg {
 pub struct LambdaDef {
     pub name: Option<String>,
     pub args: Vec<LambdaArg>,
-    pub body: Expr,
+    pub body: SpannedExpr,
     pub scope: HashMap<String, Value>,
+    /// The source code string that the body's spans refer to (shared via Rc for efficiency)
+    pub source: Rc<str>,
 }
 
 impl LambdaDef {
@@ -367,7 +369,7 @@ impl SerializableValue {
                 let expr = pairs_to_expr(inner_pair.into_inner())?;
 
                 // Check if it's a lambda
-                if let crate::ast::Expr::Lambda { args, body } = expr {
+                if let crate::ast::Expr::Lambda { args, body } = expr.node {
                     // Since the function is already inlined (no scope needed),
                     // we create a SerializableLambdaDef with the source as the body
                     return Ok(SerializableLambdaDef {
@@ -537,6 +539,7 @@ impl SerializableValue {
                     args: s_lambda.args.clone(),
                     body: body_ast,
                     scope,
+                    source: Rc::from(""),  // Deserialized lambdas don't have original source
                 };
 
                 Ok(heap.insert_lambda(lambda))

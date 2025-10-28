@@ -13,8 +13,8 @@ mod late_binding_tests {
         code: &str,
         heap: Option<Rc<RefCell<Heap>>>,
         bindings: Option<Rc<RefCell<HashMap<String, Value>>>>,
-    ) -> Result<Value, anyhow::Error> {
-        let pairs = get_pairs(code)?;
+    ) -> Result<Value, crate::error::RuntimeError> {
+        let pairs = get_pairs(code).map_err(|e| crate::error::RuntimeError::new(e.to_string()))?;
 
         let heap = heap.unwrap_or_else(|| Rc::new(RefCell::new(Heap::new())));
         let bindings = bindings.unwrap_or_else(|| Rc::new(RefCell::new(HashMap::new())));
@@ -31,6 +31,7 @@ mod late_binding_tests {
                                     Rc::clone(&heap),
                                     Rc::clone(&bindings),
                                     0,
+                                    code,
                                 )?;
                             }
                             _ => {}
@@ -284,8 +285,8 @@ mod input_reference_tests {
         code: &str,
         heap: Option<Rc<RefCell<Heap>>>,
         bindings: Option<Rc<RefCell<HashMap<String, Value>>>>,
-    ) -> Result<Value, anyhow::Error> {
-        let pairs = get_pairs(code)?;
+    ) -> Result<Value, crate::error::RuntimeError> {
+        let pairs = get_pairs(code).map_err(|e| crate::error::RuntimeError::new(e.to_string()))?;
 
         let heap = heap.unwrap_or_else(|| Rc::new(RefCell::new(Heap::new())));
         let bindings = bindings.unwrap_or_else(|| Rc::new(RefCell::new(HashMap::new())));
@@ -302,6 +303,7 @@ mod input_reference_tests {
                                     Rc::clone(&heap),
                                     Rc::clone(&bindings),
                                     0,
+                                    code,
                                 )?;
                             }
                             _ => {}
@@ -465,5 +467,127 @@ mod input_reference_tests {
 
         let result = parse_and_evaluate("#my_value", Some(heap), Some(bindings)).unwrap();
         assert_eq!(result, Value::Number(123.0));
+    }
+}
+
+// Tests for lambda error reporting across contexts
+#[cfg(test)]
+mod lambda_error_context_tests {
+    use crate::expressions::evaluate_pairs;
+    use crate::heap::Heap;
+    use crate::parser::{Rule, get_pairs};
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    fn parse_and_evaluate(
+        code: &str,
+        heap: Option<Rc<RefCell<Heap>>>,
+        bindings: Option<Rc<RefCell<HashMap<String, Value>>>>,
+    ) -> Result<Value, crate::error::RuntimeError> {
+        let pairs = get_pairs(code).map_err(|e| crate::error::RuntimeError::new(e.to_string()))?;
+
+        let heap = heap.unwrap_or_else(|| Rc::new(RefCell::new(Heap::new())));
+        let bindings = bindings.unwrap_or_else(|| Rc::new(RefCell::new(HashMap::new())));
+
+        let mut result = Value::Null;
+        for pair in pairs {
+            match pair.as_rule() {
+                Rule::statement => {
+                    if let Some(inner_pair) = pair.into_inner().next() {
+                        match inner_pair.as_rule() {
+                            Rule::expression | Rule::assignment => {
+                                result = evaluate_pairs(
+                                    inner_pair.into_inner(),
+                                    Rc::clone(&heap),
+                                    Rc::clone(&bindings),
+                                    0,
+                                    code,
+                                )?;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Rule::EOI => {}
+                _ => {}
+            }
+        }
+        Ok(result)
+    }
+
+    #[test]
+    fn test_lambda_error_preserves_original_source() {
+        // Test that when a lambda is defined in one context and called in another,
+        // errors in the lambda body still reference the original source
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // Define a lambda that will error (references undefined variable)
+        let lambda_definition = "f = x => x + undefined_var";
+        parse_and_evaluate(lambda_definition, Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
+            .unwrap();
+
+        // Call the lambda in a completely different source context
+        let call_code = "f(5)";
+        let result = parse_and_evaluate(call_code, Some(heap), Some(bindings));
+
+        // The call should fail
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        let error_msg = error.to_string();
+
+        // The error should mention the undefined variable
+        assert!(error_msg.contains("undefined_var"));
+    }
+
+    #[test]
+    fn test_lambda_error_with_multiple_calls() {
+        // Test that multiple calls to the same lambda all report errors correctly
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // Define a lambda with a division by zero
+        let lambda_def = "divide = (a, b) => a / b";
+        parse_and_evaluate(lambda_def, Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
+            .unwrap();
+
+        // First call - should succeed
+        let call1 = "divide(10, 2)";
+        let result1 = parse_and_evaluate(call1, Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)));
+        assert!(result1.is_ok());
+        assert_eq!(result1.unwrap(), Value::Number(5.0));
+
+        // Second call - with division by zero should succeed (returns infinity in floating point)
+        let call2 = "divide(10, 0)";
+        let result2 = parse_and_evaluate(call2, Some(heap), Some(bindings));
+        assert!(result2.is_ok());
+    }
+
+    #[test]
+    fn test_nested_lambda_error_reporting() {
+        // Test that nested lambdas report errors correctly
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // Define a lambda that returns another lambda
+        let outer_lambda = "outer = x => (y => x + y + undefined_nested)";
+        parse_and_evaluate(outer_lambda, Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
+            .unwrap();
+
+        // Call outer to get inner lambda
+        let get_inner = "inner = outer(5)";
+        parse_and_evaluate(get_inner, Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
+            .unwrap();
+
+        // Call inner lambda - should error
+        let call_inner = "inner(10)";
+        let result = parse_and_evaluate(call_inner, Some(heap), Some(bindings));
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("undefined_nested"));
     }
 }

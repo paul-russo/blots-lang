@@ -326,6 +326,7 @@ impl BuiltInFunction {
         heap: Rc<RefCell<Heap>>,
         bindings: Rc<RefCell<HashMap<String, Value>>>,
         call_depth: usize,
+        source: &str,
     ) -> Result<Value> {
         match self {
             // Math functions
@@ -1046,6 +1047,7 @@ impl BuiltInFunction {
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
+                        source,
                     )?;
                     mapped_list.push(result);
                 }
@@ -1084,6 +1086,7 @@ impl BuiltInFunction {
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
+                        source,
                     )?;
                     if result.as_bool()? {
                         filtered_list.push(*item);
@@ -1125,6 +1128,7 @@ impl BuiltInFunction {
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
+                        source,
                     )?;
                 }
 
@@ -1161,6 +1165,7 @@ impl BuiltInFunction {
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
+                        source,
                     )?;
                     if !result.as_bool()? {
                         return Ok(Value::Bool(false));
@@ -1200,6 +1205,7 @@ impl BuiltInFunction {
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
+                        source,
                     )?;
                     if result.as_bool()? {
                         return Ok(Value::Bool(true));
@@ -1228,6 +1234,7 @@ impl BuiltInFunction {
                                 Rc::clone(&heap),
                                 Rc::clone(&bindings),
                                 call_depth + 1,
+                                source,
                             );
                             let result_b = fd_b.call(
                                 Value::Null,
@@ -1235,6 +1242,7 @@ impl BuiltInFunction {
                                 Rc::clone(&heap),
                                 Rc::clone(&bindings),
                                 call_depth + 1,
+                                source,
                             );
 
                             match (result_a, result_b) {
@@ -1440,6 +1448,7 @@ impl FunctionDef {
         heap: Rc<RefCell<Heap>>,
         bindings: Rc<RefCell<HashMap<String, Value>>>,
         call_depth: usize,
+        source: &str,
     ) -> Result<Value> {
         #[cfg(not(target_arch = "wasm32"))]
         let start = std::time::Instant::now();
@@ -1459,6 +1468,7 @@ impl FunctionDef {
                 args: expected_args,
                 body,
                 scope,
+                source: lambda_source,
             }) => {
                 #[cfg(not(target_arch = "wasm32"))]
                 let start_var_env = std::time::Instant::now();
@@ -1511,6 +1521,7 @@ impl FunctionDef {
                     Rc::clone(&heap),
                     Rc::new(RefCell::new(new_bindings)),
                     call_depth + 1,
+                    lambda_source.clone(),
                 )
                 .map_err(|error| anyhow!("in {}: {}", self.get_name(), error));
 
@@ -1527,7 +1538,7 @@ impl FunctionDef {
             }
             FunctionDef::BuiltIn(built_in) => {
                 let return_value = built_in
-                    .call(args, heap, bindings, call_depth + 1)
+                    .call(args, heap, bindings, call_depth + 1, source)
                     .map_err(|error| anyhow!("in {}: {}", self.get_name(), error));
 
                 #[cfg(not(target_arch = "wasm32"))]
@@ -1584,7 +1595,7 @@ mod tests {
         // Test range(4) - exclusive, so [0, 1, 2, 3]
         let args = vec![Value::Number(4.0)];
         let result = range_fn
-            .call(args, heap.clone(), bindings.clone(), 0)
+            .call(args, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
 
         let heap_borrow = heap.borrow();
@@ -1604,7 +1615,7 @@ mod tests {
         // Test range(4, 10) - exclusive, so [4, 5, 6, 7, 8, 9]
         let args = vec![Value::Number(4.0), Value::Number(10.0)];
         let result = range_fn
-            .call(args, heap.clone(), bindings.clone(), 0)
+            .call(args, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
 
         let heap_borrow = heap.borrow();
@@ -1636,7 +1647,7 @@ mod tests {
         for (input, expected) in test_cases {
             let args = vec![Value::Number(input)];
             let result = round_fn
-                .call(args, heap.clone(), bindings.clone(), 0)
+                .call(args, heap.clone(), bindings.clone(), 0, "")
                 .unwrap();
             assert_eq!(
                 result,
@@ -1673,7 +1684,7 @@ mod tests {
         for (input, places, expected) in test_cases {
             let args = vec![Value::Number(input), Value::Number(places)];
             let result = round_fn
-                .call(args, heap.clone(), bindings.clone(), 0)
+                .call(args, heap.clone(), bindings.clone(), 0, "")
                 .unwrap();
 
             // Use approximate comparison for floating point
@@ -1716,7 +1727,7 @@ mod tests {
         for (input, places, expected) in test_cases {
             let args = vec![Value::Number(input), Value::Number(places)];
             let result = round_fn
-                .call(args, heap.clone(), bindings.clone(), 0)
+                .call(args, heap.clone(), bindings.clone(), 0, "")
                 .unwrap();
             assert_eq!(
                 result,
@@ -1748,7 +1759,7 @@ mod tests {
         for (input, places, expected) in test_cases {
             let args = vec![Value::Number(input), Value::Number(places)];
             let result = round_fn
-                .call(args, heap.clone(), bindings.clone(), 0)
+                .call(args, heap.clone(), bindings.clone(), 0, "")
                 .unwrap();
 
             if let Value::Number(result_num) = result {
@@ -1787,7 +1798,6 @@ mod tests {
 
     #[test]
     fn test_map_with_index() {
-        use crate::ast::Expr;
         use crate::values::LambdaDef;
 
         let heap = Rc::new(RefCell::new(Heap::new()));
@@ -1807,18 +1817,29 @@ mod tests {
                 crate::values::LambdaArg::Required("x".to_string()),
                 crate::values::LambdaArg::Required("i".to_string()),
             ],
-            body: Expr::BinaryOp {
+            body: crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
                 op: crate::ast::BinaryOp::Add,
-                left: Box::new(Expr::Identifier("x".to_string())),
-                right: Box::new(Expr::Identifier("i".to_string())),
-            },
+                left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
+                    "x".to_string(),
+                ))),
+                right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
+                    "i".to_string(),
+                ))),
+            }),
             scope: HashMap::new(),
+            source: Rc::from(""),
         };
         let lambda_value = heap.borrow_mut().insert_lambda(lambda);
 
         // Call map
         let result = BuiltInFunction::Map
-            .call(vec![list, lambda_value], heap.clone(), bindings.clone(), 0)
+            .call(
+                vec![list, lambda_value],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
             .unwrap();
 
         // Verify result is [10, 21, 32]
@@ -1832,7 +1853,6 @@ mod tests {
 
     #[test]
     fn test_filter_with_index() {
-        use crate::ast::Expr;
         use crate::values::LambdaDef;
 
         let heap = Rc::new(RefCell::new(Heap::new()));
@@ -1853,18 +1873,27 @@ mod tests {
                 crate::values::LambdaArg::Required("x".to_string()),
                 crate::values::LambdaArg::Required("i".to_string()),
             ],
-            body: Expr::BinaryOp {
+            body: crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
                 op: crate::ast::BinaryOp::Greater,
-                left: Box::new(Expr::Identifier("i".to_string())),
-                right: Box::new(Expr::Number(1.0)),
-            },
+                left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
+                    "i".to_string(),
+                ))),
+                right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Number(1.0))),
+            }),
             scope: HashMap::new(),
+            source: Rc::from(""),
         };
         let lambda_value = heap.borrow_mut().insert_lambda(lambda);
 
         // Call filter
         let result = BuiltInFunction::Filter
-            .call(vec![list, lambda_value], heap.clone(), bindings.clone(), 0)
+            .call(
+                vec![list, lambda_value],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
             .unwrap();
 
         // Verify result is [30, 40] (indices 2 and 3)
@@ -1877,7 +1906,6 @@ mod tests {
 
     #[test]
     fn test_reduce_with_index() {
-        use crate::ast::Expr;
         use crate::values::LambdaDef;
 
         let heap = Rc::new(RefCell::new(Heap::new()));
@@ -1898,16 +1926,23 @@ mod tests {
                 crate::values::LambdaArg::Required("x".to_string()),
                 crate::values::LambdaArg::Required("i".to_string()),
             ],
-            body: Expr::BinaryOp {
+            body: crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
                 op: crate::ast::BinaryOp::Add,
-                left: Box::new(Expr::BinaryOp {
+                left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
                     op: crate::ast::BinaryOp::Add,
-                    left: Box::new(Expr::Identifier("acc".to_string())),
-                    right: Box::new(Expr::Identifier("x".to_string())),
-                }),
-                right: Box::new(Expr::Identifier("i".to_string())),
-            },
+                    left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
+                        "acc".to_string(),
+                    ))),
+                    right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
+                        "x".to_string(),
+                    ))),
+                })),
+                right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
+                    "i".to_string(),
+                ))),
+            }),
             scope: HashMap::new(),
+            source: Rc::from(""),
         };
         let lambda_value = heap.borrow_mut().insert_lambda(lambda);
 
@@ -1918,6 +1953,7 @@ mod tests {
                 heap.clone(),
                 bindings.clone(),
                 0,
+                "",
             )
             .unwrap();
 
@@ -1927,7 +1963,6 @@ mod tests {
 
     #[test]
     fn test_map_backward_compatible() {
-        use crate::ast::Expr;
         use crate::values::LambdaDef;
 
         let heap = Rc::new(RefCell::new(Heap::new()));
@@ -1944,18 +1979,27 @@ mod tests {
         let lambda = LambdaDef {
             name: None,
             args: vec![crate::values::LambdaArg::Required("x".to_string())],
-            body: Expr::BinaryOp {
+            body: crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
                 op: crate::ast::BinaryOp::Multiply,
-                left: Box::new(Expr::Identifier("x".to_string())),
-                right: Box::new(Expr::Number(2.0)),
-            },
+                left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
+                    "x".to_string(),
+                ))),
+                right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Number(2.0))),
+            }),
             scope: HashMap::new(),
+            source: Rc::from(""),
         };
         let lambda_value = heap.borrow_mut().insert_lambda(lambda);
 
         // Call map
         let result = BuiltInFunction::Map
-            .call(vec![list, lambda_value], heap.clone(), bindings.clone(), 0)
+            .call(
+                vec![list, lambda_value],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
             .unwrap();
 
         // Verify result is [20, 40, 60] - backward compatible, no index passed
@@ -1978,7 +2022,7 @@ mod tests {
         let to_unit = heap.borrow_mut().insert_string("m".to_string());
         let args = vec![Value::Number(1.0), from_unit, to_unit];
         let result = convert_fn
-            .call(args, heap.clone(), bindings.clone(), 0)
+            .call(args, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
         assert_eq!(result, Value::Number(1000.0));
 
@@ -1987,7 +2031,7 @@ mod tests {
         let to_unit = heap.borrow_mut().insert_string("km".to_string());
         let args = vec![Value::Number(1.0), from_unit, to_unit];
         let result = convert_fn
-            .call(args, heap.clone(), bindings.clone(), 0)
+            .call(args, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
         if let Value::Number(n) = result {
             assert!((n - 1.609344).abs() < 1e-6);
@@ -2007,7 +2051,7 @@ mod tests {
         let to_unit = heap.borrow_mut().insert_string("fahrenheit".to_string());
         let args = vec![Value::Number(0.0), from_unit, to_unit];
         let result = convert_fn
-            .call(args, heap.clone(), bindings.clone(), 0)
+            .call(args, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
         if let Value::Number(n) = result {
             assert!((n - 32.0).abs() < 1e-10);
@@ -2018,7 +2062,7 @@ mod tests {
         let to_unit = heap.borrow_mut().insert_string("fahrenheit".to_string());
         let args = vec![Value::Number(100.0), from_unit, to_unit];
         let result = convert_fn
-            .call(args, heap.clone(), bindings.clone(), 0)
+            .call(args, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
         if let Value::Number(n) = result {
             assert!((n - 212.0).abs() < 1e-10);
@@ -2036,7 +2080,7 @@ mod tests {
         let to_unit = heap.borrow_mut().insert_string("lbs".to_string());
         let args = vec![Value::Number(1.0), from_unit, to_unit];
         let result = convert_fn
-            .call(args, heap.clone(), bindings.clone(), 0)
+            .call(args, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
         if let Value::Number(n) = result {
             assert!((n - 2.20462).abs() < 0.001);
@@ -2054,7 +2098,7 @@ mod tests {
         let to_unit = heap.borrow_mut().insert_string("bytes".to_string());
         let args = vec![Value::Number(1.0), from_unit, to_unit];
         let result = convert_fn
-            .call(args, heap.clone(), bindings.clone(), 0)
+            .call(args, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
         assert_eq!(result, Value::Number(1024.0));
     }
@@ -2070,7 +2114,7 @@ mod tests {
         let to_unit = heap.borrow_mut().insert_string("m".to_string());
         let args = vec![Value::Number(42.0), from_unit, to_unit];
         let result = convert_fn
-            .call(args, heap.clone(), bindings.clone(), 0)
+            .call(args, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
         assert_eq!(result, Value::Number(42.0));
     }
@@ -2085,7 +2129,7 @@ mod tests {
         let from_unit = heap.borrow_mut().insert_string("kg".to_string());
         let to_unit = heap.borrow_mut().insert_string("meters".to_string());
         let args = vec![Value::Number(1.0), from_unit, to_unit];
-        let result = convert_fn.call(args, heap.clone(), bindings.clone(), 0);
+        let result = convert_fn.call(args, heap.clone(), bindings.clone(), 0, "");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Cannot convert"));
     }
@@ -2100,7 +2144,7 @@ mod tests {
         let from_unit = heap.borrow_mut().insert_string("foobar".to_string());
         let to_unit = heap.borrow_mut().insert_string("meters".to_string());
         let args = vec![Value::Number(1.0), from_unit, to_unit];
-        let result = convert_fn.call(args, heap.clone(), bindings.clone(), 0);
+        let result = convert_fn.call(args, heap.clone(), bindings.clone(), 0, "");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Unknown unit"));
     }
@@ -2116,7 +2160,7 @@ mod tests {
         let to_unit = heap.borrow_mut().insert_string("M".to_string());
         let args = vec![Value::Number(1.0), from_unit, to_unit];
         let result = convert_fn
-            .call(args, heap.clone(), bindings.clone(), 0)
+            .call(args, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
         assert_eq!(result, Value::Number(1000.0));
     }

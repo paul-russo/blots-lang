@@ -108,6 +108,7 @@ fn evaluate_source(
                             Rc::clone(heap),
                             Rc::clone(bindings),
                             0,
+                            source,
                         );
 
                         if let Err(error) = result {
@@ -123,6 +124,7 @@ fn evaluate_source(
                             Rc::clone(heap),
                             Rc::clone(bindings),
                             0,
+                            source,
                         );
 
                         for pair in inner_pairs_clone {
@@ -477,6 +479,7 @@ fn main() -> ! {
                                 Rc::clone(&heap),
                                 Rc::clone(&bindings),
                                 0,
+                                &accumulated_input,
                             );
 
                             match result {
@@ -505,6 +508,7 @@ fn main() -> ! {
                                 Rc::clone(&heap),
                                 Rc::clone(&bindings),
                                 0,
+                                &accumulated_input,
                             );
 
                             // Extract the output name from the declaration

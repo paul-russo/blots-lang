@@ -1,5 +1,6 @@
 use crate::{
-    ast::{BinaryOp, DoStatement, Expr, PostfixOp, RecordEntry, RecordKey, UnaryOp},
+    ast::{BinaryOp, DoStatement, Expr, PostfixOp, RecordEntry, RecordKey, Span, Spanned, SpannedExpr, UnaryOp},
+    error::RuntimeError,
     functions::{
         BuiltInFunction, get_built_in_function_def_by_ident, get_function_def, is_built_in_function,
     },
@@ -10,10 +11,10 @@ use crate::{
         Value::{self, Bool, List, Number, Spread},
     },
 };
-use anyhow::{Result, anyhow};
+use anyhow::{Result as AnyhowResult, anyhow};
 use indexmap::IndexMap;
 use pest::{
-    iterators::Pairs,
+    iterators::{Pair, Pairs},
     pratt_parser::{Assoc, Op, PrattParser},
 };
 use std::{
@@ -64,12 +65,16 @@ pub fn evaluate_pairs(
     heap: Rc<RefCell<Heap>>,
     bindings: Rc<RefCell<HashMap<String, Value>>>,
     call_depth: usize,
-) -> Result<Value> {
+    source: &str,
+) -> Result<Value, RuntimeError> {
     // First parse to AST
     let ast = pairs_to_expr(pairs)?;
 
+    // Convert source to Rc for efficient sharing across lambdas
+    let source_rc: Rc<str> = source.into();
+
     // Then evaluate the AST
-    evaluate_ast(&ast, heap, bindings, call_depth)
+    evaluate_ast(&ast, heap, bindings, call_depth, source_rc)
 }
 
 // Evaluate an AST expression
@@ -77,7 +82,7 @@ pub fn evaluate_pairs(
 fn flatten_spread_value(
     spread_ptr: &IterablePointer,
     heap: &Rc<RefCell<Heap>>,
-) -> Result<Vec<Value>> {
+) -> AnyhowResult<Vec<Value>> {
     match spread_ptr {
         IterablePointer::List(list_ptr) => {
             let borrowed_heap = heap.borrow();
@@ -113,23 +118,28 @@ fn flatten_spread_value(
 
 // Helper function for evaluating expressions inside do blocks with shadowing allowed
 fn evaluate_do_block_expr(
-    expr: &Expr,
+    expr: &SpannedExpr,
     heap: Rc<RefCell<Heap>>,
     bindings: Rc<RefCell<HashMap<String, Value>>>,
     call_depth: usize,
-) -> Result<Value> {
+    source: Rc<str>,
+) -> Result<Value, RuntimeError> {
     // For assignments in do blocks, skip the immutability check
-    if let Expr::Assignment { ident, value } = expr {
+    if let Expr::Assignment { ident, value } = &expr.node {
         // Still check for keywords
         if matches!(
             ident.as_str(),
             "return" | "if" | "then" | "else" | "do" | "true" | "false" | "null" | "output"
         ) {
-            return Err(anyhow!("{} is a keyword, and cannot be reassigned", ident));
+            return Err(RuntimeError::with_span(
+                format!("{} is a keyword, and cannot be reassigned", ident),
+                expr.span,
+                source.clone(),
+            ));
         }
 
         // Evaluate the value (allow shadowing - no check for existing binding)
-        let val = evaluate_ast(value, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
+        let val = evaluate_ast(value, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone())?;
 
         // Set lambda name if assigning a lambda
         if let Value::Lambda(lambda_ptr) = val {
@@ -144,16 +154,17 @@ fn evaluate_do_block_expr(
     }
 
     // For all other expressions, use the regular evaluate_ast
-    evaluate_ast(expr, heap, bindings, call_depth)
+    evaluate_ast(expr, heap, bindings, call_depth, source.clone())
 }
 
 pub fn evaluate_ast(
-    expr: &Expr,
+    expr: &SpannedExpr,
     heap: Rc<RefCell<Heap>>,
     bindings: Rc<RefCell<HashMap<String, Value>>>,
     call_depth: usize,
-) -> Result<Value> {
-    match expr {
+    source: Rc<str>,
+) -> Result<Value, RuntimeError> {
+    match &expr.node {
         Expr::Number(n) => Ok(Number(*n)),
         Expr::String(s) => Ok(heap.borrow_mut().insert_string(s.clone())),
         Expr::Bool(b) => Ok(Bool(*b)),
@@ -166,7 +177,13 @@ pub fn evaluate_ast(
                 .borrow()
                 .get(ident)
                 .copied()
-                .ok_or(anyhow!("unknown identifier: {}", ident)),
+                .ok_or_else(|| {
+                    RuntimeError::with_span(
+                        format!("unknown identifier: {}", ident),
+                        expr.span,
+                        source.clone(),
+                    )
+                }),
         },
         Expr::InputReference(field) => {
             // Desugar #field to inputs.field
@@ -183,15 +200,19 @@ pub fn evaluate_ast(
                     // Return null if field doesn't exist (consistent with inputs.field behavior)
                     Ok(record.get(field).copied().unwrap_or(Value::Null))
                 }
-                _ => Err(anyhow!("inputs must be a record to use #{} syntax", field)),
+                _ => Err(RuntimeError::with_span(
+                    format!("inputs must be a record to use #{} syntax", field),
+                    expr.span,
+                    source.clone(),
+                )),
             }
         }
         Expr::BuiltIn(built_in) => Ok(Value::BuiltIn(*built_in)),
         Expr::List(exprs) => {
             let values = exprs
                 .iter()
-                .map(|e| evaluate_ast(e, Rc::clone(&heap), Rc::clone(&bindings), call_depth))
-                .collect::<Result<Vec<Value>>>()?;
+                .map(|e| evaluate_ast(e, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone()))
+                .collect::<Result<Vec<Value>, RuntimeError>>()?;
 
             // Flatten spreads
             let mut flattened = Vec::new();
@@ -219,6 +240,7 @@ pub fn evaluate_ast(
                             Rc::clone(&heap),
                             Rc::clone(&bindings),
                             call_depth,
+                            source.clone(),
                         )?;
                         record.insert(key.clone(), value);
                     }
@@ -228,6 +250,7 @@ pub fn evaluate_ast(
                             Rc::clone(&heap),
                             Rc::clone(&bindings),
                             call_depth,
+                            source.clone(),
                         )?;
                         let key = key_value.as_string(&heap.borrow())?.to_string();
                         let value = evaluate_ast(
@@ -235,6 +258,7 @@ pub fn evaluate_ast(
                             Rc::clone(&heap),
                             Rc::clone(&bindings),
                             call_depth,
+                            source.clone(),
                         )?;
                         record.insert(key, value);
                     }
@@ -252,6 +276,7 @@ pub fn evaluate_ast(
                             Rc::clone(&heap),
                             Rc::clone(&bindings),
                             call_depth,
+                            source.clone(),
                         )?;
 
                         if let Spread(iterable) = spread_value {
@@ -314,15 +339,17 @@ pub fn evaluate_ast(
                 args: args.clone(),
                 body: (**body).clone(),
                 scope: captured_scope,
+                source: source.clone(),
             });
 
             Ok(lambda)
         }
         Expr::Assignment { ident, value } => {
             if is_built_in_function(ident) {
-                return Err(anyhow!(
-                    "{} is the name of a built-in function, and cannot be reassigned",
-                    ident
+                return Err(RuntimeError::with_span(
+                    format!("{} is the name of a built-in function, and cannot be reassigned", ident),
+                    expr.span,
+                    source.clone(),
                 ));
             }
 
@@ -337,18 +364,23 @@ pub fn evaluate_ast(
                 || ident == "and"
                 || ident == "or"
             {
-                return Err(anyhow!("{} is a keyword, and cannot be reassigned", ident));
+                return Err(RuntimeError::with_span(
+                    format!("{} is a keyword, and cannot be reassigned", ident),
+                    expr.span,
+                    source.clone(),
+                ));
             }
 
             // Check if the variable already exists (immutability check)
             if bindings.borrow().contains_key(ident) {
-                return Err(anyhow!(
-                    "{} is already defined, and cannot be reassigned",
-                    ident
+                return Err(RuntimeError::with_span(
+                    format!("{} is already defined, and cannot be reassigned", ident),
+                    expr.span,
+                    source.clone(),
                 ));
             }
 
-            let val = evaluate_ast(value, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
+            let val = evaluate_ast(value, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone())?;
 
             // Set lambda name if assigning a lambda
             if let Value::Lambda(lambda_ptr) = val {
@@ -373,12 +405,13 @@ pub fn evaluate_ast(
                 Rc::clone(&heap),
                 Rc::clone(&bindings),
                 call_depth,
+                source.clone(),
             )?;
 
             if cond_val.as_bool()? {
-                evaluate_ast(then_expr, heap, bindings, call_depth)
+                evaluate_ast(then_expr, heap, bindings, call_depth, source.clone())
             } else {
-                evaluate_ast(else_expr, heap, bindings, call_depth)
+                evaluate_ast(else_expr, heap, bindings, call_depth, source.clone())
             }
         }
         Expr::DoBlock {
@@ -398,6 +431,7 @@ pub fn evaluate_ast(
                             Rc::clone(&heap),
                             Rc::clone(&block_bindings),
                             call_depth,
+                            source.clone(),
                         )?;
                     }
                     DoStatement::Comment(_) => {} // Skip comments
@@ -405,14 +439,14 @@ pub fn evaluate_ast(
             }
 
             // Return the final expression
-            evaluate_do_block_expr(return_expr, heap, block_bindings, call_depth)
+            evaluate_do_block_expr(return_expr, heap, block_bindings, call_depth, source.clone())
         }
         Expr::Call { func, args } => {
-            let func_val = evaluate_ast(func, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
+            let func_val = evaluate_ast(func, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone())?;
             let arg_vals_raw = args
                 .iter()
-                .map(|arg| evaluate_ast(arg, Rc::clone(&heap), Rc::clone(&bindings), call_depth))
-                .collect::<Result<Vec<_>>>()?;
+                .map(|arg| evaluate_ast(arg, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone()))
+                .collect::<Result<Vec<_>, RuntimeError>>()?;
 
             // Flatten any spread arguments
             let mut arg_vals = Vec::new();
@@ -428,9 +462,10 @@ pub fn evaluate_ast(
             }
 
             if !func_val.is_lambda() && !func_val.is_built_in() {
-                return Err(anyhow!(
-                    "can't call a non-function: {}",
-                    func_val.stringify_internal(&heap.borrow())
+                return Err(RuntimeError::with_span(
+                    format!("can't call a non-function: {}", func_val.stringify_internal(&heap.borrow())),
+                    expr.span,
+                    source.clone(),
                 ));
             }
 
@@ -444,11 +479,12 @@ pub fn evaluate_ast(
                 })?
             };
 
-            def.call(func_val, arg_vals, heap, bindings, call_depth)
+            def.call(func_val, arg_vals, heap, bindings, call_depth, &source)
+                .map_err(|e| RuntimeError::from(e).with_call_site(expr.span, source.clone()))
         }
         Expr::Access { expr, index } => {
-            let val = evaluate_ast(expr, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
-            let idx_val = evaluate_ast(index, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
+            let val = evaluate_ast(expr, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone())?;
+            let idx_val = evaluate_ast(index, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone())?;
 
             match val {
                 Value::Record(record) => {
@@ -460,12 +496,14 @@ pub fn evaluate_ast(
                 Value::List(list) => {
                     let borrowed_heap = &heap.borrow();
                     let list = list.reify(borrowed_heap).as_list()?;
-                    let index = usize::try_from(idx_val.as_number()? as u64)?;
+                    let index = usize::try_from(idx_val.as_number()? as u64)
+                        .map_err(|e| RuntimeError::from(anyhow::Error::from(e)))?;
                     Ok(list.get(index).copied().unwrap_or(Value::Null))
                 }
                 Value::String(string) => {
                     let string = string.reify(&heap.borrow()).as_string()?.to_string();
-                    let index = usize::try_from(idx_val.as_number()? as u64)?;
+                    let index = usize::try_from(idx_val.as_number()? as u64)
+                        .map_err(|e| RuntimeError::from(anyhow::Error::from(e)))?;
 
                     Ok(string
                         .chars()
@@ -473,14 +511,15 @@ pub fn evaluate_ast(
                         .map(|c| heap.borrow_mut().insert_string(c.to_string()))
                         .unwrap_or(Value::Null))
                 }
-                _ => Err(anyhow!(
-                    "expected a record, list, string, but got a {}",
-                    val.get_type()
+                _ => Err(RuntimeError::with_span(
+                    format!("expected a record, list, or string, but got a {}", val.get_type()),
+                    expr.span,
+                    source.clone(),
                 )),
             }
         }
         Expr::DotAccess { expr, field } => {
-            let val = evaluate_ast(expr, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
+            let val = evaluate_ast(expr, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone())?;
             let borrowed_heap = &heap.borrow();
 
             match val {
@@ -488,14 +527,18 @@ pub fn evaluate_ast(
                     let record = record.reify(borrowed_heap).as_record()?;
                     Ok(record.get(field).copied().unwrap_or(Value::Null))
                 }
-                _ => Err(anyhow!("expected a record, but got a {}", val.get_type())),
+                _ => Err(RuntimeError::with_span(
+                    format!("expected a record, but got a {}", val.get_type()),
+                    expr.span,
+                    source.clone(),
+                )),
             }
         }
         Expr::BinaryOp { op, left, right } => {
-            evaluate_binary_op_ast(*op, left, right, heap, bindings, call_depth)
+            evaluate_binary_op_ast(*op, left, right, heap, bindings, call_depth, source.clone())
         }
         Expr::UnaryOp { op, expr } => {
-            let val = evaluate_ast(expr, heap, bindings, call_depth)?;
+            let val = evaluate_ast(expr, heap, bindings, call_depth, source.clone())?;
 
             match op {
                 UnaryOp::Negate => Ok(Number(-val.as_number()?)),
@@ -503,7 +546,7 @@ pub fn evaluate_ast(
             }
         }
         Expr::PostfixOp { op, expr } => {
-            let val = evaluate_ast(expr, heap, bindings, call_depth)?;
+            let val = evaluate_ast(expr, heap, bindings, call_depth, source.clone())?;
 
             match op {
                 PostfixOp::Factorial => {
@@ -513,27 +556,35 @@ pub fn evaluate_ast(
                             (1..(n as u64) + 1).map(|x| x as f64).product::<f64>(),
                         ))
                     } else {
-                        Err(anyhow!("factorial only works on non-negative integers"))
+                        Err(RuntimeError::with_span(
+                            "factorial only works on non-negative integers".to_string(),
+                            expr.span,
+                            source.clone(),
+                        ))
                     }
                 }
             }
         }
         Expr::Spread(expr) => {
-            let val = evaluate_ast(expr, heap, bindings, call_depth)?;
+            let val = evaluate_ast(expr, heap, bindings, call_depth, source.clone())?;
 
             match val {
                 List(pointer) => Ok(Spread(IterablePointer::List(pointer))),
                 Value::String(pointer) => Ok(Spread(IterablePointer::String(pointer))),
                 Value::Record(pointer) => Ok(Spread(IterablePointer::Record(pointer))),
-                _ => Err(anyhow!("expected a list, record, or string")),
+                _ => Err(RuntimeError::with_span(
+                    "expected a list, record, or string".to_string(),
+                    expr.span,
+                    source.clone(),
+                )),
             }
         }
     }
 }
 
 // Helper function to collect free variables in an expression
-fn collect_free_variables(expr: &Expr, vars: &mut Vec<String>, bound: &mut HashSet<String>) {
-    match expr {
+fn collect_free_variables(expr: &SpannedExpr, vars: &mut Vec<String>, bound: &mut HashSet<String>) {
+    match &expr.node {
         Expr::Identifier(name) => {
             if !bound.contains(name) && name != "infinity" && name != "inf" && name != "constants" {
                 vars.push(name.clone());
@@ -546,11 +597,11 @@ fn collect_free_variables(expr: &Expr, vars: &mut Vec<String>, bound: &mut HashS
             }
             collect_free_variables(body, vars, &mut new_bound);
         }
-        Expr::BinaryOp { left, right, .. } => {
+        Expr::BinaryOp { op: _, left, right } => {
             collect_free_variables(left, vars, bound);
             collect_free_variables(right, vars, bound);
         }
-        Expr::UnaryOp { expr, .. } | Expr::PostfixOp { expr, .. } | Expr::Spread(expr) => {
+        Expr::UnaryOp { op: _, expr } | Expr::PostfixOp { op: _, expr } | Expr::Spread(expr) => {
             collect_free_variables(expr, vars, bound);
         }
         Expr::Call { func, args } => {
@@ -563,7 +614,7 @@ fn collect_free_variables(expr: &Expr, vars: &mut Vec<String>, bound: &mut HashS
             collect_free_variables(expr, vars, bound);
             collect_free_variables(index, vars, bound);
         }
-        Expr::DotAccess { expr, .. } => {
+        Expr::DotAccess { expr, field: _ } => {
             collect_free_variables(expr, vars, bound);
         }
         Expr::Conditional {
@@ -575,7 +626,7 @@ fn collect_free_variables(expr: &Expr, vars: &mut Vec<String>, bound: &mut HashS
             collect_free_variables(then_expr, vars, bound);
             collect_free_variables(else_expr, vars, bound);
         }
-        Expr::Assignment { value, .. } => {
+        Expr::Assignment { ident: _, value } => {
             collect_free_variables(value, vars, bound);
         }
         Expr::List(exprs) => {
@@ -606,7 +657,7 @@ fn collect_free_variables(expr: &Expr, vars: &mut Vec<String>, bound: &mut HashS
             for stmt in statements {
                 if let DoStatement::Expression(expr) = stmt {
                     // Check if this is an assignment and add the variable to block scope
-                    if let Expr::Assignment { ident, value } = expr {
+                    if let Expr::Assignment { ident, value } = &expr.node {
                         // First collect free variables from the value
                         collect_free_variables(value, vars, &mut block_bound);
                         // Then add the assigned variable to the block's bound set
@@ -627,7 +678,7 @@ pub fn validate_portable_value(
     value: &Value,
     heap: &Heap,
     bindings: &HashMap<String, Value>,
-) -> Result<()> {
+) -> AnyhowResult<()> {
     match value {
         Value::Lambda(lambda_ptr) => {
             // Get the lambda definition
@@ -694,14 +745,15 @@ pub fn validate_portable_value(
 // Evaluate binary operations on AST
 fn evaluate_binary_op_ast(
     op: BinaryOp,
-    left: &Expr,
-    right: &Expr,
+    left: &SpannedExpr,
+    right: &SpannedExpr,
     heap: Rc<RefCell<Heap>>,
     bindings: Rc<RefCell<HashMap<String, Value>>>,
     call_depth: usize,
-) -> Result<Value> {
-    let lhs = evaluate_ast(left, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
-    let rhs = evaluate_ast(right, Rc::clone(&heap), Rc::clone(&bindings), call_depth)?;
+    source: Rc<str>,
+) -> Result<Value, RuntimeError> {
+    let lhs = evaluate_ast(left, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone())?;
+    let rhs = evaluate_ast(right, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone())?;
 
     // Handle dot operators first - they never broadcast
     match op {
@@ -736,9 +788,14 @@ fn evaluate_binary_op_ast(
         _ => {} // Continue to regular operator handling
     }
 
+    // Create a combined span for the entire binary operation
+    let op_span = Span::new(left.span.start_byte, right.span.end_byte, left.span.start_line, left.span.start_col);
+
     match (lhs, rhs) {
-        (_, Value::List(_)) if op == BinaryOp::Into => Err(anyhow!(
-            "'into' operator requires a function on the right side, not a list"
+        (_, Value::List(_)) if op == BinaryOp::Into => Err(RuntimeError::with_span(
+            "'into' operator requires a function on the right side, not a list".to_string(),
+            op_span,
+            source.clone(),
         )),
         (Value::List(list_l), Value::List(list_r)) => {
             let (l_vec, r_vec) = {
@@ -750,8 +807,10 @@ fn evaluate_binary_op_ast(
             };
 
             if l_vec.len() != r_vec.len() {
-                return Err(anyhow!(
-                    "left- and right-hand-side lists must be the same length"
+                return Err(RuntimeError::with_span(
+                    "left- and right-hand-side lists must be the same length".to_string(),
+                    op_span,
+                    source.clone(),
                 ));
             }
 
@@ -761,7 +820,7 @@ fn evaluate_binary_op_ast(
                         .iter()
                         .zip(&r_vec)
                         .map(|(l, r)| Ok(Bool(l.equals(r, &heap.borrow())?)))
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::NotEqual => {
@@ -769,7 +828,7 @@ fn evaluate_binary_op_ast(
                         .iter()
                         .zip(&r_vec)
                         .map(|(l, r)| Ok(Bool(!l.equals(r, &heap.borrow())?)))
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Less => {
@@ -780,7 +839,7 @@ fn evaluate_binary_op_ast(
                             Some(std::cmp::Ordering::Less) => Ok(Bool(true)),
                             _ => Ok(Bool(false)),
                         })
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::LessEq => {
@@ -793,7 +852,7 @@ fn evaluate_binary_op_ast(
                             }
                             _ => Ok(Bool(false)),
                         })
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Greater => {
@@ -804,7 +863,7 @@ fn evaluate_binary_op_ast(
                             Some(std::cmp::Ordering::Greater) => Ok(Bool(true)),
                             _ => Ok(Bool(false)),
                         })
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::GreaterEq => {
@@ -817,7 +876,7 @@ fn evaluate_binary_op_ast(
                             }
                             _ => Ok(Bool(false)),
                         })
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::And | BinaryOp::NaturalAnd => {
@@ -825,7 +884,7 @@ fn evaluate_binary_op_ast(
                         .iter()
                         .zip(&r_vec)
                         .map(|(l, r)| Ok(Bool(l.as_bool()? && r.as_bool()?)))
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Or | BinaryOp::NaturalOr => {
@@ -833,10 +892,11 @@ fn evaluate_binary_op_ast(
                         .iter()
                         .zip(&r_vec)
                         .map(|(l, r)| Ok(Bool(l.as_bool()? || r.as_bool()?)))
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Add => {
+                    let source_owned = source.clone();
                     let mapped_list = l_vec
                         .iter()
                         .zip(&r_vec)
@@ -855,9 +915,13 @@ fn evaluate_binary_op_ast(
                             (Value::Number(_), Value::Number(_)) => {
                                 Ok(Number(l.as_number()? + r.as_number()?))
                             }
-                            _ => Err(anyhow!("can't add {} and {}", l.get_type(), r.get_type())),
+                            _ => Err(RuntimeError::with_span(
+                                format!("can't add {} and {}", l.get_type(), r.get_type()),
+                                op_span,
+                                source_owned.clone(),
+                            )),
                         })
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<Result<Vec<Value>, RuntimeError>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Subtract => {
@@ -865,7 +929,7 @@ fn evaluate_binary_op_ast(
                         .iter()
                         .zip(&r_vec)
                         .map(|(l, r)| Ok(Number(l.as_number()? - r.as_number()?)))
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Multiply => {
@@ -873,7 +937,7 @@ fn evaluate_binary_op_ast(
                         .iter()
                         .zip(&r_vec)
                         .map(|(l, r)| Ok(Number(l.as_number()? * r.as_number()?)))
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Divide => {
@@ -881,7 +945,7 @@ fn evaluate_binary_op_ast(
                         .iter()
                         .zip(&r_vec)
                         .map(|(l, r)| Ok(Number(l.as_number()? / r.as_number()?)))
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Modulo => {
@@ -889,7 +953,7 @@ fn evaluate_binary_op_ast(
                         .iter()
                         .zip(&r_vec)
                         .map(|(l, r)| Ok(Number(l.as_number()? % r.as_number()?)))
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Power => {
@@ -897,7 +961,7 @@ fn evaluate_binary_op_ast(
                         .iter()
                         .zip(&r_vec)
                         .map(|(l, r)| Ok(Number(l.as_number()?.powf(r.as_number()?))))
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Coalesce => {
@@ -905,18 +969,20 @@ fn evaluate_binary_op_ast(
                         .iter()
                         .zip(&r_vec)
                         .map(|(l, r)| if *l == Value::Null { Ok(*r) } else { Ok(*l) })
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Via => {
+                    let source_owned = source.clone();
                     let mapped_list = l_vec
                         .iter()
                         .zip(&r_vec)
                         .map(|(l, r)| {
                             if !r.is_lambda() && !r.is_built_in() {
-                                return Err(anyhow!(
-                                    "right-hand iterable contains non-function {}",
-                                    r.stringify_internal(&heap.borrow())
+                                return Err(RuntimeError::with_span(
+                                    format!("right-hand iterable contains non-function {}", r.stringify_internal(&heap.borrow())),
+                                    op_span,
+                                    source_owned.clone(),
                                 ));
                             }
 
@@ -936,9 +1002,10 @@ fn evaluate_binary_op_ast(
                                 Rc::clone(&heap),
                                 Rc::clone(&bindings),
                                 call_depth,
-                            )
+                                &source,
+                            ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source_owned.clone()))
                         })
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<Result<Vec<Value>, RuntimeError>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Into => {
@@ -971,14 +1038,14 @@ fn evaluate_binary_op_ast(
                     let mapped_list = l_vec
                         .iter()
                         .map(|v| Ok(Bool(v.equals(&scalar, &heap.borrow())?)))
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::NotEqual => {
                     let mapped_list = l_vec
                         .iter()
                         .map(|v| Ok(Bool(!v.equals(&scalar, &heap.borrow())?)))
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Less => {
@@ -995,7 +1062,7 @@ fn evaluate_binary_op_ast(
                                 _ => Ok(Bool(false)),
                             }
                         })
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::LessEq => {
@@ -1013,7 +1080,7 @@ fn evaluate_binary_op_ast(
                                 _ => Ok(Bool(false)),
                             }
                         })
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Greater => {
@@ -1030,7 +1097,7 @@ fn evaluate_binary_op_ast(
                                 _ => Ok(Bool(false)),
                             }
                         })
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::GreaterEq => {
@@ -1048,7 +1115,7 @@ fn evaluate_binary_op_ast(
                                 _ => Ok(Bool(false)),
                             }
                         })
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::And | BinaryOp::NaturalAnd => {
@@ -1056,12 +1123,12 @@ fn evaluate_binary_op_ast(
                         l_vec
                             .iter()
                             .map(|v| Ok(Bool(v.as_bool()? && scalar.as_bool()?)))
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     } else {
                         l_vec
                             .iter()
                             .map(|v| Ok(Bool(scalar.as_bool()? && v.as_bool()?)))
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
@@ -1070,16 +1137,17 @@ fn evaluate_binary_op_ast(
                         l_vec
                             .iter()
                             .map(|v| Ok(Bool(v.as_bool()? || scalar.as_bool()?)))
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     } else {
                         l_vec
                             .iter()
                             .map(|v| Ok(Bool(scalar.as_bool()? || v.as_bool()?)))
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Add => {
+                    let source_owned = source.clone();
                     let mapped_list = if is_list_first {
                         l_vec
                             .iter()
@@ -1098,13 +1166,13 @@ fn evaluate_binary_op_ast(
                                 (Value::Number(_), Value::Number(_)) => {
                                     Ok(Number(v.as_number()? + scalar.as_number()?))
                                 }
-                                _ => Err(anyhow!(
-                                    "can't add {} and {}",
-                                    v.get_type(),
-                                    scalar.get_type()
+                                _ => Err(RuntimeError::with_span(
+                                    format!("can't add {} and {}", v.get_type(), scalar.get_type()),
+                                    op_span,
+                                    source_owned.clone(),
                                 )),
                             })
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     } else {
                         l_vec
                             .iter()
@@ -1123,13 +1191,13 @@ fn evaluate_binary_op_ast(
                                 (Value::Number(_), Value::Number(_)) => {
                                     Ok(Number(scalar.as_number()? + v.as_number()?))
                                 }
-                                _ => Err(anyhow!(
-                                    "can't add {} and {}",
-                                    scalar.get_type(),
-                                    v.get_type()
+                                _ => Err(RuntimeError::with_span(
+                                    format!("can't add {} and {}", scalar.get_type(), v.get_type()),
+                                    op_span,
+                                    source_owned.clone(),
                                 )),
                             })
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
@@ -1138,12 +1206,12 @@ fn evaluate_binary_op_ast(
                         l_vec
                             .iter()
                             .map(|v| Ok(Number(v.as_number()? - scalar.as_number()?)))
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     } else {
                         l_vec
                             .iter()
                             .map(|v| Ok(Number(scalar.as_number()? - v.as_number()?)))
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
@@ -1151,7 +1219,7 @@ fn evaluate_binary_op_ast(
                     let mapped_list = l_vec
                         .iter()
                         .map(|v| Ok(Number(v.as_number()? * scalar.as_number()?)))
-                        .collect::<Result<Vec<Value>>>()?;
+                        .collect::<AnyhowResult<Vec<Value>>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Divide => {
@@ -1159,12 +1227,12 @@ fn evaluate_binary_op_ast(
                         l_vec
                             .iter()
                             .map(|v| Ok(Number(v.as_number()? / scalar.as_number()?)))
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     } else {
                         l_vec
                             .iter()
                             .map(|v| Ok(Number(scalar.as_number()? / v.as_number()?)))
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
@@ -1173,12 +1241,12 @@ fn evaluate_binary_op_ast(
                         l_vec
                             .iter()
                             .map(|v| Ok(Number(v.as_number()? % scalar.as_number()?)))
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     } else {
                         l_vec
                             .iter()
                             .map(|v| Ok(Number(scalar.as_number()? % v.as_number()?)))
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
@@ -1187,12 +1255,12 @@ fn evaluate_binary_op_ast(
                         l_vec
                             .iter()
                             .map(|v| Ok(Number(v.as_number()?.powf(scalar.as_number()?))))
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     } else {
                         l_vec
                             .iter()
                             .map(|v| Ok(Number(scalar.as_number()?.powf(v.as_number()?))))
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
@@ -1207,7 +1275,7 @@ fn evaluate_binary_op_ast(
                                     Ok(*v)
                                 }
                             })
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     } else {
                         l_vec
                             .iter()
@@ -1218,16 +1286,17 @@ fn evaluate_binary_op_ast(
                                     Ok(scalar)
                                 }
                             })
-                            .collect::<Result<Vec<Value>>>()?
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Via => {
                     if is_list_first {
                         if !scalar.is_callable() {
-                            return Err(anyhow!(
-                                "can't call a non-function: {}",
-                                scalar.stringify_internal(&heap.borrow())
+                            return Err(RuntimeError::with_span(
+                                format!("can't call a non-function: {}", scalar.stringify_internal(&heap.borrow())),
+                                op_span,
+                                source.clone(),
                             ));
                         }
 
@@ -1239,21 +1308,27 @@ fn evaluate_binary_op_ast(
                             Rc::clone(&heap),
                             Rc::clone(&bindings),
                             call_depth,
-                        )?;
+                                &source
+                        ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source.clone()))?;
 
                         let mapped_list = { call_result.as_list(&heap.borrow())?.clone() };
 
                         Ok(heap.borrow_mut().insert_list(mapped_list))
                     } else {
-                        Err(anyhow!("map operator requires function on right side"))
+                        Err(RuntimeError::with_span(
+                            "map operator requires function on right side".to_string(),
+                            op_span,
+                            source.clone(),
+                        ))
                     }
                 }
                 BinaryOp::Into => {
                     if is_list_first {
                         if !scalar.is_callable() {
-                            return Err(anyhow!(
-                                "can't call a non-function: {}",
-                                scalar.stringify_internal(&heap.borrow())
+                            return Err(RuntimeError::with_span(
+                                format!("can't call a non-function: {}", scalar.stringify_internal(&heap.borrow())),
+                                op_span,
+                                source.clone(),
                             ));
                         }
 
@@ -1275,9 +1350,14 @@ fn evaluate_binary_op_ast(
                             Rc::clone(&heap),
                             Rc::clone(&bindings),
                             call_depth,
-                        )
+                                &source
+                        ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source.clone()))
                     } else {
-                        Err(anyhow!("'into' operator requires function on right side"))
+                        Err(RuntimeError::with_span(
+                            "'into' operator requires function on right side".to_string(),
+                            op_span,
+                            source.clone(),
+                        ))
                     }
                 }
                 BinaryOp::DotEqual
@@ -1344,19 +1424,20 @@ fn evaluate_binary_op_ast(
             }
             BinaryOp::Via => {
                 if !rhs.is_callable() {
-                    return Err(anyhow!(
-                        "can't call a non-function ({} is of type {})",
-                        rhs.stringify_internal(&heap.borrow()),
-                        rhs.get_type()
+                    return Err(RuntimeError::with_span(
+                        format!("can't call a non-function ({} is of type {})", rhs.stringify_internal(&heap.borrow()), rhs.get_type()),
+                        op_span,
+                        source.clone(),
                     ));
                 }
 
                 let def = { get_function_def(&rhs, &heap.borrow()) };
 
                 if def.is_none() {
-                    return Err(anyhow!(
-                        "unknown function: {}",
-                        rhs.stringify_internal(&heap.borrow())
+                    return Err(RuntimeError::with_span(
+                        format!("unknown function: {}", rhs.stringify_internal(&heap.borrow())),
+                        op_span,
+                        source.clone(),
                     ));
                 }
 
@@ -1366,23 +1447,25 @@ fn evaluate_binary_op_ast(
                     Rc::clone(&heap),
                     Rc::clone(&bindings),
                     call_depth,
-                )
+                                &source
+                ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source.clone()))
             }
             BinaryOp::Into => {
                 if !rhs.is_callable() {
-                    return Err(anyhow!(
-                        "can't call a non-function ({} is of type {})",
-                        rhs.stringify_internal(&heap.borrow()),
-                        rhs.get_type()
+                    return Err(RuntimeError::with_span(
+                        format!("can't call a non-function ({} is of type {})", rhs.stringify_internal(&heap.borrow()), rhs.get_type()),
+                        op_span,
+                        source.clone(),
                     ));
                 }
 
                 let def = { get_function_def(&rhs, &heap.borrow()) };
 
                 if def.is_none() {
-                    return Err(anyhow!(
-                        "unknown function: {}",
-                        rhs.stringify_internal(&heap.borrow())
+                    return Err(RuntimeError::with_span(
+                        format!("unknown function: {}", rhs.stringify_internal(&heap.borrow())),
+                        op_span,
+                        source.clone(),
                     ));
                 }
 
@@ -1392,7 +1475,8 @@ fn evaluate_binary_op_ast(
                     Rc::clone(&heap),
                     Rc::clone(&bindings),
                     call_depth,
-                )
+                                &source
+                ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source.clone()))
             }
             BinaryOp::DotEqual
             | BinaryOp::DotNotEqual
@@ -1407,24 +1491,34 @@ fn evaluate_binary_op_ast(
     }
 }
 
+// Helper function to extract Span from a Pest Pair
+fn span_from_pair(pair: &Pair<Rule>) -> Span {
+    let span = pair.as_span();
+    let (line, col) = span.start_pos().line_col();
+    Span::new(span.start(), span.end(), line, col)
+}
+
 // Convert Pest pairs to our AST
-pub fn pairs_to_expr(pairs: Pairs<Rule>) -> Result<Expr> {
+pub fn pairs_to_expr(pairs: Pairs<Rule>) -> AnyhowResult<SpannedExpr> {
     PRATT
-        .map_primary(|primary| match primary.as_rule() {
-            Rule::number => Ok(Expr::Number(
-                primary
+        .map_primary(|primary| {
+            let span = span_from_pair(&primary);
+            match primary.as_rule() {
+            Rule::number => {
+                let value = primary
                     .as_str()
                     .replace("_", "")
                     .parse::<f64>()
-                    .map_err(anyhow::Error::from)?,
-            )),
+                    .map_err(anyhow::Error::from)?;
+                Ok(Spanned::new(Expr::Number(value), span))
+            },
             Rule::list => {
                 let list_pairs = primary.into_inner();
-                let exprs = list_pairs
+                let elements = list_pairs
                     .into_iter()
                     .map(|pair| pairs_to_expr(pair.into_inner()))
-                    .collect::<Result<Vec<Expr>>>()?;
-                Ok(Expr::List(exprs))
+                    .collect::<AnyhowResult<Vec<SpannedExpr>>>()?;
+                Ok(Spanned::new(Expr::List(elements), span))
             }
             Rule::record => {
                 let record_pairs = primary.into_inner();
@@ -1461,40 +1555,41 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> Result<Expr> {
                             let ident = pair.into_inner().next().unwrap().as_str().to_string();
                             entries.push(RecordEntry {
                                 key: RecordKey::Shorthand(ident),
-                                value: Expr::Null, // Will be resolved during evaluation
+                                value: Spanned::dummy(Expr::Null), // Will be resolved during evaluation
                             });
                         }
                         Rule::spread_expression => {
                             let spread_expr = pairs_to_expr(pair.into_inner())?;
                             entries.push(RecordEntry {
                                 key: RecordKey::Spread(Box::new(spread_expr)),
-                                value: Expr::Null, // Will be resolved during evaluation
+                                value: Spanned::dummy(Expr::Null), // Will be resolved during evaluation
                             });
                         }
                         _ => {}
                     }
                 }
 
-                Ok(Expr::Record(entries))
+                Ok(Spanned::new(Expr::Record(entries), span))
             }
             Rule::bool => {
                 let bool_str = primary.as_str();
-                match bool_str {
-                    "true" => Ok(Expr::Bool(true)),
-                    "false" => Ok(Expr::Bool(false)),
+                let value = match bool_str {
+                    "true" => true,
+                    "false" => false,
                     _ => unreachable!(),
-                }
+                };
+                Ok(Spanned::new(Expr::Bool(value), span))
             }
-            Rule::null => Ok(Expr::Null),
+            Rule::null => Ok(Spanned::new(Expr::Null, span)),
             Rule::string => {
-                let contents = primary.into_inner().as_str().to_string();
-                Ok(Expr::String(contents))
+                let value = primary.into_inner().as_str().to_string();
+                Ok(Spanned::new(Expr::String(value), span))
             }
             Rule::assignment => {
                 let mut inner_pairs = primary.into_inner();
                 let ident = inner_pairs.next().unwrap().as_str().to_string();
                 let value = Box::new(pairs_to_expr(inner_pairs.next().unwrap().into_inner())?);
-                Ok(Expr::Assignment { ident, value })
+                Ok(Spanned::new(Expr::Assignment { ident, value }, span))
             }
             Rule::lambda => {
                 let mut inner_pairs = primary.into_inner();
@@ -1522,23 +1617,23 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> Result<Expr> {
                 }
 
                 let body = Box::new(pairs_to_expr(body_pairs.into_inner())?);
-                Ok(Expr::Lambda { args, body })
+                Ok(Spanned::new(Expr::Lambda { args, body }, span))
             }
             Rule::conditional => {
                 let mut inner_pairs = primary.into_inner();
                 let condition = Box::new(pairs_to_expr(inner_pairs.next().unwrap().into_inner())?);
                 let then_expr = Box::new(pairs_to_expr(inner_pairs.next().unwrap().into_inner())?);
                 let else_expr = Box::new(pairs_to_expr(inner_pairs.next().unwrap().into_inner())?);
-                Ok(Expr::Conditional {
+                Ok(Spanned::new(Expr::Conditional {
                     condition,
                     then_expr,
                     else_expr,
-                })
+                }, span))
             }
             Rule::do_block => {
                 let inner_pairs = primary.into_inner();
                 let mut statements = Vec::new();
-                let mut return_expr = Box::new(Expr::Null);
+                let mut return_expr = Box::new(Spanned::dummy(Expr::Null));
 
                 for pair in inner_pairs {
                     match pair.as_rule() {
@@ -1562,75 +1657,83 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> Result<Expr> {
                     }
                 }
 
-                Ok(Expr::DoBlock {
+                Ok(Spanned::new(Expr::DoBlock {
                     statements,
                     return_expr,
-                })
+                }, span))
             }
             Rule::identifier => {
                 let ident = primary.as_str();
 
                 // Check if it's a built-in function
                 if let Some(built_in) = BuiltInFunction::from_ident(ident) {
-                    Ok(Expr::BuiltIn(built_in))
+                    Ok(Spanned::new(Expr::BuiltIn(built_in), span))
                 } else {
-                    Ok(Expr::Identifier(ident.to_string()))
+                    Ok(Spanned::new(Expr::Identifier(ident.to_string()), span))
                 }
             }
             Rule::input_reference => {
                 // Strip the leading '#' and create an InputReference
                 let field = primary.as_str()[1..].to_string();
-                Ok(Expr::InputReference(field))
+                Ok(Spanned::new(Expr::InputReference(field), span))
             }
             Rule::expression => pairs_to_expr(primary.into_inner()),
             _ => unreachable!("{}", primary.as_str()),
+        }
         })
-        .map_prefix(|op, rhs| match op.as_rule() {
-            Rule::negation => Ok(Expr::UnaryOp {
+        .map_prefix(|op, rhs| {
+            let span = span_from_pair(&op);
+            match op.as_rule() {
+            Rule::negation => Ok(Spanned::new(Expr::UnaryOp {
                 op: UnaryOp::Negate,
                 expr: Box::new(rhs?),
-            }),
-            Rule::spread_operator => Ok(Expr::Spread(Box::new(rhs?))),
-            Rule::invert | Rule::natural_not => Ok(Expr::UnaryOp {
+            }, span)),
+            Rule::spread_operator => Ok(Spanned::new(Expr::Spread(Box::new(rhs?)), span)),
+            Rule::invert | Rule::natural_not => Ok(Spanned::new(Expr::UnaryOp {
                 op: UnaryOp::Not,
                 expr: Box::new(rhs?),
-            }),
+            }, span)),
             _ => unreachable!(),
+        }
         })
-        .map_postfix(|lhs, op| match op.as_rule() {
-            Rule::factorial => Ok(Expr::PostfixOp {
+        .map_postfix(|lhs, op| {
+            let span = span_from_pair(&op);
+            match op.as_rule() {
+            Rule::factorial => Ok(Spanned::new(Expr::PostfixOp {
                 op: PostfixOp::Factorial,
                 expr: Box::new(lhs?),
-            }),
+            }, span)),
             Rule::access => {
                 let index_expr = pairs_to_expr(op.into_inner())?;
-                Ok(Expr::Access {
+                Ok(Spanned::new(Expr::Access {
                     expr: Box::new(lhs?),
                     index: Box::new(index_expr),
-                })
+                }, span))
             }
             Rule::dot_access => {
                 let field = op.into_inner().as_str().to_string();
-                Ok(Expr::DotAccess {
+                Ok(Spanned::new(Expr::DotAccess {
                     expr: Box::new(lhs?),
                     field,
-                })
+                }, span))
             }
             Rule::call_list => {
                 let call_list = op.into_inner();
                 let args = call_list
                     .into_iter()
                     .map(|arg| pairs_to_expr(arg.into_inner()))
-                    .collect::<Result<Vec<Expr>>>()?;
-                Ok(Expr::Call {
+                    .collect::<AnyhowResult<Vec<SpannedExpr>>>()?;
+                Ok(Spanned::new(Expr::Call {
                     func: Box::new(lhs?),
                     args,
-                })
+                }, span))
             }
             _ => unreachable!(),
+        }
         })
         .map_infix(|lhs, op, rhs| {
-            let op = match op.as_rule() {
+            let span = span_from_pair(&op);
+            let op_type = match op.as_rule() {
                 Rule::add => BinaryOp::Add,
                 Rule::subtract => BinaryOp::Subtract,
                 Rule::multiply => BinaryOp::Multiply,
@@ -1658,11 +1761,11 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> Result<Expr> {
                 Rule::coalesce => BinaryOp::Coalesce,
                 _ => unreachable!(),
             };
-            Ok(Expr::BinaryOp {
-                op,
+            Ok(Spanned::new(Expr::BinaryOp {
+                op: op_type,
                 left: Box::new(lhs?),
                 right: Box::new(rhs?),
-            })
+            }, span))
         })
         .parse(pairs)
 }
@@ -1676,7 +1779,7 @@ mod tests {
         input: &str,
         heap: Option<Rc<RefCell<Heap>>>,
         bindings: Option<Rc<RefCell<HashMap<String, Value>>>>,
-    ) -> Result<Value> {
+    ) -> Result<Value, RuntimeError> {
         let binding = input.to_string();
         let mut pairs = get_pairs(&binding).unwrap();
         let expr = pairs.next().unwrap().into_inner();
@@ -1685,6 +1788,7 @@ mod tests {
             heap.unwrap_or(Rc::new(RefCell::new(Heap::new()))),
             bindings.unwrap_or(Rc::new(RefCell::new(HashMap::new()))),
             0,
+            &binding,
         )
     }
 
@@ -1963,12 +2067,12 @@ mod tests {
             assert_eq!(lambda_def.args, vec![LambdaArg::Required("x".to_string())]);
             assert_eq!(lambda_def.scope, HashMap::new());
             // The body should be a BinaryOp(Add) with Identifier("x") and Number(1)
-            match &lambda_def.body {
+            match &lambda_def.body.node {
                 Expr::BinaryOp {
                     op: BinaryOp::Add,
                     left,
                     right,
-                } => match (left.as_ref(), right.as_ref()) {
+                } => match (&left.node, &right.node) {
                     (Expr::Identifier(x), Expr::Number(n)) => {
                         assert_eq!(x, "x");
                         assert_eq!(*n, 1.0);

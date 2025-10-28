@@ -88,7 +88,7 @@ pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
                     );
 
                     let value =
-                        evaluate_pairs(inner_pairs, Rc::clone(&heap), Rc::clone(&bindings), 0)
+                        evaluate_pairs(inner_pairs, Rc::clone(&heap), Rc::clone(&bindings), 0, expr)
                             .map_err(|error| {
                                 JsError::new(&format!("Evaluation error: {}", error))
                             })?;
@@ -251,7 +251,7 @@ fn evaluate_single_inline_expression(
                 if let Some(inner_pair) = pair.into_inner().next() {
                     let inner_pairs = inner_pair.into_inner();
 
-                    match evaluate_pairs(inner_pairs, Rc::clone(&heap), Rc::clone(&bindings), 0) {
+                    match evaluate_pairs(inner_pairs, Rc::clone(&heap), Rc::clone(&bindings), 0, expr) {
                         Ok(value) => match value.to_serializable_value(&heap.borrow()) {
                             Ok(serializable) => {
                                 return ExpressionResult::Value {
