@@ -197,7 +197,11 @@ pub fn evaluate_ast(
                     // Return null if field doesn't exist (consistent with inputs.field behavior)
                     Ok(record.get(field).copied().unwrap_or(Value::Null))
                 }
-                _ => Err(RuntimeError::from(anyhow!("inputs must be a record to use #{} syntax", field))),
+                _ => Err(RuntimeError::with_span(
+                    format!("inputs must be a record to use #{} syntax", field),
+                    expr.span,
+                    source.to_string(),
+                )),
             }
         }
         Expr::BuiltIn(built_in) => Ok(Value::BuiltIn(*built_in)),
@@ -338,10 +342,11 @@ pub fn evaluate_ast(
         }
         Expr::Assignment { ident, value } => {
             if is_built_in_function(ident) {
-                return Err(RuntimeError::from(anyhow!(
-                    "{} is the name of a built-in function, and cannot be reassigned",
-                    ident
-                )));
+                return Err(RuntimeError::with_span(
+                    format!("{} is the name of a built-in function, and cannot be reassigned", ident),
+                    expr.span,
+                    source.to_string(),
+                ));
             }
 
             if ident == "constants"
@@ -355,15 +360,20 @@ pub fn evaluate_ast(
                 || ident == "and"
                 || ident == "or"
             {
-                return Err(RuntimeError::from(anyhow!("{} is a keyword, and cannot be reassigned", ident)));
+                return Err(RuntimeError::with_span(
+                    format!("{} is a keyword, and cannot be reassigned", ident),
+                    expr.span,
+                    source.to_string(),
+                ));
             }
 
             // Check if the variable already exists (immutability check)
             if bindings.borrow().contains_key(ident) {
-                return Err(RuntimeError::from(anyhow!(
-                    "{} is already defined, and cannot be reassigned",
-                    ident
-                )));
+                return Err(RuntimeError::with_span(
+                    format!("{} is already defined, and cannot be reassigned", ident),
+                    expr.span,
+                    source.to_string(),
+                ));
             }
 
             let val = evaluate_ast(value, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source)?;
@@ -448,10 +458,11 @@ pub fn evaluate_ast(
             }
 
             if !func_val.is_lambda() && !func_val.is_built_in() {
-                return Err(RuntimeError::from(anyhow!(
-                    "can't call a non-function: {}",
-                    func_val.stringify_internal(&heap.borrow())
-                )));
+                return Err(RuntimeError::with_span(
+                    format!("can't call a non-function: {}", func_val.stringify_internal(&heap.borrow())),
+                    expr.span,
+                    source.to_string(),
+                ));
             }
 
             let def = {
@@ -495,10 +506,11 @@ pub fn evaluate_ast(
                         .map(|c| heap.borrow_mut().insert_string(c.to_string()))
                         .unwrap_or(Value::Null))
                 }
-                _ => Err(RuntimeError::from(anyhow!(
-                    "expected a record, list, string, but got a {}",
-                    val.get_type()
-                ))),
+                _ => Err(RuntimeError::with_span(
+                    format!("expected a record, list, or string, but got a {}", val.get_type()),
+                    expr.span,
+                    source.to_string(),
+                )),
             }
         }
         Expr::DotAccess { expr, field } => {
@@ -510,7 +522,11 @@ pub fn evaluate_ast(
                     let record = record.reify(borrowed_heap).as_record()?;
                     Ok(record.get(field).copied().unwrap_or(Value::Null))
                 }
-                _ => Err(RuntimeError::from(anyhow!("expected a record, but got a {}", val.get_type()))),
+                _ => Err(RuntimeError::with_span(
+                    format!("expected a record, but got a {}", val.get_type()),
+                    expr.span,
+                    source.to_string(),
+                )),
             }
         }
         Expr::BinaryOp { op, left, right } => {
@@ -535,7 +551,11 @@ pub fn evaluate_ast(
                             (1..(n as u64) + 1).map(|x| x as f64).product::<f64>(),
                         ))
                     } else {
-                        Err(RuntimeError::from(anyhow!("factorial only works on non-negative integers"))).into()
+                        Err(RuntimeError::with_span(
+                            "factorial only works on non-negative integers".to_string(),
+                            expr.span,
+                            source.to_string(),
+                        ))
                     }
                 }
             }
@@ -547,7 +567,11 @@ pub fn evaluate_ast(
                 List(pointer) => Ok(Spread(IterablePointer::List(pointer))),
                 Value::String(pointer) => Ok(Spread(IterablePointer::String(pointer))),
                 Value::Record(pointer) => Ok(Spread(IterablePointer::Record(pointer))),
-                _ => Err(RuntimeError::from(anyhow!("expected a list, record, or string"))),
+                _ => Err(RuntimeError::with_span(
+                    "expected a list, record, or string".to_string(),
+                    expr.span,
+                    source.to_string(),
+                )),
             }
         }
     }
@@ -759,10 +783,15 @@ fn evaluate_binary_op_ast(
         _ => {} // Continue to regular operator handling
     }
 
+    // Create a combined span for the entire binary operation
+    let op_span = Span::new(left.span.start_byte, right.span.end_byte, left.span.start_line, left.span.start_col);
+
     match (lhs, rhs) {
-        (_, Value::List(_)) if op == BinaryOp::Into => Err(RuntimeError::from(anyhow!(
-            "'into' operator requires a function on the right side, not a list"
-        ))),
+        (_, Value::List(_)) if op == BinaryOp::Into => Err(RuntimeError::with_span(
+            "'into' operator requires a function on the right side, not a list".to_string(),
+            op_span,
+            source.to_string(),
+        )),
         (Value::List(list_l), Value::List(list_r)) => {
             let (l_vec, r_vec) = {
                 let borrowed_heap = &heap.borrow();
@@ -773,9 +802,11 @@ fn evaluate_binary_op_ast(
             };
 
             if l_vec.len() != r_vec.len() {
-                return Err(RuntimeError::from(anyhow!(
-                    "left- and right-hand-side lists must be the same length"
-                )));
+                return Err(RuntimeError::with_span(
+                    "left- and right-hand-side lists must be the same length".to_string(),
+                    op_span,
+                    source.to_string(),
+                ));
             }
 
             match op {
@@ -860,6 +891,7 @@ fn evaluate_binary_op_ast(
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Add => {
+                    let source_owned = source.to_string();
                     let mapped_list = l_vec
                         .iter()
                         .zip(&r_vec)
@@ -878,7 +910,11 @@ fn evaluate_binary_op_ast(
                             (Value::Number(_), Value::Number(_)) => {
                                 Ok(Number(l.as_number()? + r.as_number()?))
                             }
-                            _ => Err(RuntimeError::from(anyhow!("can't add {} and {}", l.get_type(), r.get_type()))),
+                            _ => Err(RuntimeError::with_span(
+                                format!("can't add {} and {}", l.get_type(), r.get_type()),
+                                op_span,
+                                source_owned.clone(),
+                            )),
                         })
                         .collect::<Result<Vec<Value>, RuntimeError>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
@@ -932,15 +968,17 @@ fn evaluate_binary_op_ast(
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Via => {
+                    let source_owned = source.to_string();
                     let mapped_list = l_vec
                         .iter()
                         .zip(&r_vec)
                         .map(|(l, r)| {
                             if !r.is_lambda() && !r.is_built_in() {
-                                return Err(RuntimeError::from(anyhow!(
-                                    "right-hand iterable contains non-function {}",
-                                    r.stringify_internal(&heap.borrow())
-                                )));
+                                return Err(RuntimeError::with_span(
+                                    format!("right-hand iterable contains non-function {}", r.stringify_internal(&heap.borrow())),
+                                    op_span,
+                                    source_owned.clone(),
+                                ));
                             }
 
                             let def = {
@@ -1104,6 +1142,7 @@ fn evaluate_binary_op_ast(
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Add => {
+                    let source_owned = source.to_string();
                     let mapped_list = if is_list_first {
                         l_vec
                             .iter()
@@ -1122,11 +1161,11 @@ fn evaluate_binary_op_ast(
                                 (Value::Number(_), Value::Number(_)) => {
                                     Ok(Number(v.as_number()? + scalar.as_number()?))
                                 }
-                                _ => Err(RuntimeError::from(anyhow!(
-                                    "can't add {} and {}",
-                                    v.get_type(),
-                                    scalar.get_type()
-                                ))),
+                                _ => Err(RuntimeError::with_span(
+                                    format!("can't add {} and {}", v.get_type(), scalar.get_type()),
+                                    op_span,
+                                    source_owned.clone(),
+                                )),
                             })
                             .collect::<Result<Vec<Value>, RuntimeError>>()?
                     } else {
@@ -1147,11 +1186,11 @@ fn evaluate_binary_op_ast(
                                 (Value::Number(_), Value::Number(_)) => {
                                     Ok(Number(scalar.as_number()? + v.as_number()?))
                                 }
-                                _ => Err(RuntimeError::from(anyhow!(
-                                    "can't add {} and {}",
-                                    scalar.get_type(),
-                                    v.get_type()
-                                ))),
+                                _ => Err(RuntimeError::with_span(
+                                    format!("can't add {} and {}", scalar.get_type(), v.get_type()),
+                                    op_span,
+                                    source_owned.clone(),
+                                )),
                             })
                             .collect::<Result<Vec<Value>, RuntimeError>>()?
                     };
@@ -1249,10 +1288,11 @@ fn evaluate_binary_op_ast(
                 BinaryOp::Via => {
                     if is_list_first {
                         if !scalar.is_callable() {
-                            return Err(RuntimeError::from(anyhow!(
-                                "can't call a non-function: {}",
-                                scalar.stringify_internal(&heap.borrow())
-                            )));
+                            return Err(RuntimeError::with_span(
+                                format!("can't call a non-function: {}", scalar.stringify_internal(&heap.borrow())),
+                                op_span,
+                                source.to_string(),
+                            ));
                         }
 
                         let list = heap.borrow_mut().insert_list(l_vec.clone());
@@ -1270,16 +1310,21 @@ fn evaluate_binary_op_ast(
 
                         Ok(heap.borrow_mut().insert_list(mapped_list))
                     } else {
-                        Err(RuntimeError::from(anyhow!("map operator requires function on right side"))).into()
+                        Err(RuntimeError::with_span(
+                            "map operator requires function on right side".to_string(),
+                            op_span,
+                            source.to_string(),
+                        ))
                     }
                 }
                 BinaryOp::Into => {
                     if is_list_first {
                         if !scalar.is_callable() {
-                            return Err(RuntimeError::from(anyhow!(
-                                "can't call a non-function: {}",
-                                scalar.stringify_internal(&heap.borrow())
-                            )));
+                            return Err(RuntimeError::with_span(
+                                format!("can't call a non-function: {}", scalar.stringify_internal(&heap.borrow())),
+                                op_span,
+                                source.to_string(),
+                            ));
                         }
 
                         let list = heap.borrow_mut().insert_list(l_vec.clone());
@@ -1303,7 +1348,11 @@ fn evaluate_binary_op_ast(
                                 source
                         ).map_err(Into::into)
                     } else {
-                        Err(RuntimeError::from(anyhow!("'into' operator requires function on right side"))).into()
+                        Err(RuntimeError::with_span(
+                            "'into' operator requires function on right side".to_string(),
+                            op_span,
+                            source.to_string(),
+                        ))
                     }
                 }
                 BinaryOp::DotEqual
@@ -1370,20 +1419,21 @@ fn evaluate_binary_op_ast(
             }
             BinaryOp::Via => {
                 if !rhs.is_callable() {
-                    return Err(RuntimeError::from(anyhow!(
-                        "can't call a non-function ({} is of type {})",
-                        rhs.stringify_internal(&heap.borrow()),
-                        rhs.get_type()
-                    )));
+                    return Err(RuntimeError::with_span(
+                        format!("can't call a non-function ({} is of type {})", rhs.stringify_internal(&heap.borrow()), rhs.get_type()),
+                        op_span,
+                        source.to_string(),
+                    ));
                 }
 
                 let def = { get_function_def(&rhs, &heap.borrow()) };
 
                 if def.is_none() {
-                    return Err(RuntimeError::from(anyhow!(
-                        "unknown function: {}",
-                        rhs.stringify_internal(&heap.borrow())
-                    )));
+                    return Err(RuntimeError::with_span(
+                        format!("unknown function: {}", rhs.stringify_internal(&heap.borrow())),
+                        op_span,
+                        source.to_string(),
+                    ));
                 }
 
                 def.unwrap().call(
@@ -1397,20 +1447,21 @@ fn evaluate_binary_op_ast(
             }
             BinaryOp::Into => {
                 if !rhs.is_callable() {
-                    return Err(RuntimeError::from(anyhow!(
-                        "can't call a non-function ({} is of type {})",
-                        rhs.stringify_internal(&heap.borrow()),
-                        rhs.get_type()
-                    )));
+                    return Err(RuntimeError::with_span(
+                        format!("can't call a non-function ({} is of type {})", rhs.stringify_internal(&heap.borrow()), rhs.get_type()),
+                        op_span,
+                        source.to_string(),
+                    ));
                 }
 
                 let def = { get_function_def(&rhs, &heap.borrow()) };
 
                 if def.is_none() {
-                    return Err(RuntimeError::from(anyhow!(
-                        "unknown function: {}",
-                        rhs.stringify_internal(&heap.borrow())
-                    )));
+                    return Err(RuntimeError::with_span(
+                        format!("unknown function: {}", rhs.stringify_internal(&heap.borrow())),
+                        op_span,
+                        source.to_string(),
+                    ));
                 }
 
                 def.unwrap().call(
