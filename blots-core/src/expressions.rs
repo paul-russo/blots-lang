@@ -2906,6 +2906,50 @@ mod tests {
     }
 
     #[test]
+    fn equality_comparison_lambdas_structural() {
+        // Test structural equality of inline lambdas (not via variable assignment)
+        // This ensures that lambdas are compared by their AST structure, not by their source spans
+
+        // Identical inline lambdas should be equal
+        let result = parse_and_evaluate("(x => x + 2) == (x => x + 2)", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        // Different bodies should not be equal
+        let result = parse_and_evaluate("(x => x + 2) == (x => x + 3)", None, None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        // Different parameter names should not be equal
+        let result = parse_and_evaluate("(x => x + 2) == (y => y + 2)", None, None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        // Different arities should not be equal
+        let result = parse_and_evaluate("(x => x + 2) == ((x, y) => x + 2)", None, None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        // More complex inline lambda comparison
+        let result = parse_and_evaluate(
+            "(x => x * 2 + 1) == (x => x * 2 + 1)",
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        // Lambdas with conditionals
+        let result = parse_and_evaluate(
+            "((x, y) => if x > 0 then x + y else x - y) == ((x, y) => if x > 0 then x + y else x - y)",
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        // Works with both == and .== operators
+        let result = parse_and_evaluate("(x => x + 2) .== (x => x + 2)", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
     fn equality_comparison_mixed_types() {
         // Different types are never equal
         let result = parse_and_evaluate("1 == \"1\"", None, None).unwrap();

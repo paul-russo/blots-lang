@@ -33,10 +33,21 @@ impl Span {
 }
 
 /// Wrapper type that attaches source location information to any AST node
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Note: PartialEq is manually implemented to compare only the node content,
+/// ignoring spans. This ensures structural equality for AST nodes regardless
+/// of their source location.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Spanned<T> {
     pub node: T,
     pub span: Span,
+}
+
+impl<T: PartialEq> PartialEq for Spanned<T> {
+    fn eq(&self, other: &Self) -> bool {
+        // Only compare the node content, ignore the span
+        self.node == other.node
+    }
 }
 
 impl<T> Spanned<T> {
