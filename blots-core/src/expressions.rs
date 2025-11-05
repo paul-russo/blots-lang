@@ -325,7 +325,13 @@ pub fn evaluate_ast(
             // Capture variables used in the lambda body
             let mut captured_scope = HashMap::new();
             let mut referenced_vars = Vec::new();
-            collect_free_variables(body, &mut referenced_vars, &mut HashSet::new());
+
+            // Initialize bound set with lambda parameters to exclude them from free variables
+            let mut bound = HashSet::new();
+            for arg in args {
+                bound.insert(arg.get_name().to_string());
+            }
+            collect_free_variables(body, &mut referenced_vars, &mut bound);
 
             let current_bindings = bindings.borrow();
             for var in referenced_vars {

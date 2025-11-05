@@ -591,3 +591,266 @@ mod lambda_error_context_tests {
         assert!(error.to_string().contains("undefined_nested"));
     }
 }
+
+// Tests for lambda parameter isolation
+// Ensures that lambda parameters are not incorrectly captured from outer scope
+#[cfg(test)]
+mod lambda_parameter_isolation_tests {
+    use crate::expressions::evaluate_pairs;
+    use crate::heap::Heap;
+    use crate::parser::{Rule, get_pairs};
+    use crate::values::{SerializableValue, Value};
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    fn parse_and_evaluate(
+        code: &str,
+        heap: Option<Rc<RefCell<Heap>>>,
+        bindings: Option<Rc<RefCell<HashMap<String, Value>>>>,
+    ) -> Result<Value, crate::error::RuntimeError> {
+        let pairs = get_pairs(code).map_err(|e| crate::error::RuntimeError::new(e.to_string()))?;
+
+        let heap = heap.unwrap_or_else(|| Rc::new(RefCell::new(Heap::new())));
+        let bindings = bindings.unwrap_or_else(|| Rc::new(RefCell::new(HashMap::new())));
+
+        let mut result = Value::Null;
+        for pair in pairs {
+            match pair.as_rule() {
+                Rule::statement => {
+                    if let Some(inner_pair) = pair.into_inner().next() {
+                        match inner_pair.as_rule() {
+                            Rule::expression | Rule::assignment => {
+                                result = evaluate_pairs(
+                                    inner_pair.into_inner(),
+                                    Rc::clone(&heap),
+                                    Rc::clone(&bindings),
+                                    0,
+                                    code,
+                                )?;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Rule::EOI => {}
+                _ => {}
+            }
+        }
+        Ok(result)
+    }
+
+    #[test]
+    fn test_lambda_parameters_not_captured_from_outer_scope() {
+        // Regression test for bug where lambda parameters were incorrectly captured
+        // from outer scope instead of being excluded from closure
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // Define x in outer scope
+        parse_and_evaluate("x = 42", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
+
+        // Define a lambda with parameter x - should NOT capture outer x
+        parse_and_evaluate("f = x => x + 1", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
+            .unwrap();
+
+        // Get the lambda value and check its scope
+        let f_value = bindings.borrow().get("f").cloned().unwrap();
+        {
+            let heap_ref = heap.borrow();
+            let lambda_def = f_value.as_lambda(&heap_ref).unwrap();
+
+            // The lambda's scope should NOT contain x
+            assert!(
+                !lambda_def.scope.contains_key("x"),
+                "Lambda should not capture its own parameter 'x' from outer scope"
+            );
+        }
+
+        // Call f(10) should return 11, not 43 (which would happen if outer x was captured)
+        let result = parse_and_evaluate("f(10)", Some(heap), Some(bindings)).unwrap();
+        assert_eq!(result, Value::Number(11.0));
+    }
+
+    #[test]
+    fn test_lambda_multiple_parameters_not_captured() {
+        // Test that all lambda parameters are excluded from closure
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // Define variables in outer scope with same names as parameters
+        parse_and_evaluate("a = 1", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
+        parse_and_evaluate("b = 2", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
+
+        // Define lambda with parameters a and b
+        parse_and_evaluate("add = (a, b) => a + b", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
+            .unwrap();
+
+        // Get the lambda value and check its scope
+        let add_value = bindings.borrow().get("add").cloned().unwrap();
+        {
+            let heap_ref = heap.borrow();
+            let lambda_def = add_value.as_lambda(&heap_ref).unwrap();
+
+            // The lambda's scope should NOT contain a or b
+            assert!(
+                !lambda_def.scope.contains_key("a"),
+                "Lambda should not capture its parameter 'a'"
+            );
+            assert!(
+                !lambda_def.scope.contains_key("b"),
+                "Lambda should not capture its parameter 'b'"
+            );
+        }
+
+        // Call add(10, 20) should return 30, not 3 (which would use captured values)
+        let result = parse_and_evaluate("add(10, 20)", Some(heap), Some(bindings)).unwrap();
+        assert_eq!(result, Value::Number(30.0));
+    }
+
+    #[test]
+    fn test_nested_lambda_parameters_not_captured() {
+        // Test that nested lambdas don't capture their own parameters
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // Define x in outer scope
+        parse_and_evaluate("x = 100", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
+
+        // Define nested lambda - inner lambda should not capture its own x parameter
+        parse_and_evaluate(
+            "outer = x => (y => x + y)",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+
+        // Get outer lambda and check its scope
+        let outer_value = bindings.borrow().get("outer").cloned().unwrap();
+        {
+            let heap_ref = heap.borrow();
+            let outer_lambda = outer_value.as_lambda(&heap_ref).unwrap();
+
+            // Outer lambda should NOT capture x from global scope
+            assert!(
+                !outer_lambda.scope.contains_key("x"),
+                "Outer lambda should not capture its own parameter 'x'"
+            );
+        }
+
+        // Call outer(5) to get inner lambda
+        parse_and_evaluate("inner = outer(5)", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
+            .unwrap();
+
+        // Call inner(3) should return 8 (5 + 3), not 103 (100 + 3)
+        let result = parse_and_evaluate("inner(3)", Some(heap), Some(bindings)).unwrap();
+        assert_eq!(result, Value::Number(8.0));
+    }
+
+    #[test]
+    fn test_lambda_serialization_preserves_parameter_names() {
+        // Test that when serializing lambdas, parameter names are not substituted
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // Define x in outer scope
+        parse_and_evaluate("x = 42", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
+
+        // Define lambda with parameter x
+        parse_and_evaluate(
+            "increment = x => x + 1",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+
+        // Get the lambda and serialize it
+        let increment_value = bindings.borrow().get("increment").cloned().unwrap();
+        let serialized = increment_value
+            .to_serializable_value(&heap.borrow())
+            .unwrap();
+
+        // Check that the serialized body contains "x", not "42"
+        if let SerializableValue::Lambda(lambda_def) = serialized {
+            assert!(
+                lambda_def.body.contains("x"),
+                "Serialized lambda body should contain parameter name 'x', got: {}",
+                lambda_def.body
+            );
+            assert!(
+                !lambda_def.body.contains("42"),
+                "Serialized lambda body should not contain value '42', got: {}",
+                lambda_def.body
+            );
+            assert_eq!(
+                lambda_def.body, "x + 1",
+                "Serialized lambda body should be 'x + 1', got: {}",
+                lambda_def.body
+            );
+        } else {
+            panic!("Expected Lambda, got: {:?}", serialized);
+        }
+    }
+
+    #[test]
+    fn test_curried_function_captures_correctly() {
+        // Test that curried functions capture outer parameters but not their own
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // Define curried add function
+        parse_and_evaluate(
+            "curry_add = x => y => x + y",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+
+        // Call curry_add(5) to get a partially applied function
+        parse_and_evaluate(
+            "add_five = curry_add(5)",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+
+        // Get add_five and check its scope
+        let add_five_value = bindings.borrow().get("add_five").cloned().unwrap();
+        {
+            let heap_ref = heap.borrow();
+            let add_five_lambda = add_five_value.as_lambda(&heap_ref).unwrap();
+
+            // add_five should capture x=5 from outer scope
+            assert!(
+                add_five_lambda.scope.contains_key("x"),
+                "add_five should capture 'x' from outer scope"
+            );
+            assert_eq!(
+                add_five_lambda.scope.get("x").unwrap().as_number().unwrap(),
+                5.0
+            );
+
+            // but should NOT capture its own parameter y
+            assert!(
+                !add_five_lambda.scope.contains_key("y"),
+                "add_five should not capture its own parameter 'y'"
+            );
+        }
+
+        // Serialize and check body
+        let serialized = add_five_value
+            .to_serializable_value(&heap.borrow())
+            .unwrap();
+
+        if let SerializableValue::Lambda(lambda_def) = serialized {
+            // Body should be "5 + y" (x captured as 5, y preserved as parameter)
+            assert_eq!(
+                lambda_def.body, "5 + y",
+                "Serialized body should be '5 + y', got: {}",
+                lambda_def.body
+            );
+        } else {
+            panic!("Expected Lambda, got: {:?}", serialized);
+        }
+    }
+}
