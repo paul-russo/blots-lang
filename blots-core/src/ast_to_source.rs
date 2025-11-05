@@ -342,7 +342,11 @@ fn serializable_value_to_source(value: &SerializableValue) -> String {
                 .collect();
             format!("{{{}}}", entries_str.join(", "))
         }
-        SerializableValue::Lambda(_) => "<function>".to_string(),
+        SerializableValue::Lambda(lambda_def) => {
+            let args_str: Vec<String> = lambda_def.args.iter().map(lambda_arg_to_source).collect();
+            // Wrap in parentheses so it can be used in call expressions
+            format!("(({}) => {})", args_str.join(", "), lambda_def.body)
+        }
         SerializableValue::BuiltIn(name) => name.clone(),
     }
 }
