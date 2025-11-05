@@ -8,7 +8,7 @@ resolver = "2"
 
 [workspace.package]
 rust-version = "1.89"
-version = "0.8.9"
+version = "0.8.10"
 authors = ["Paul Russo <paul@paulrusso.me>"]
 edition = "2024"
 repository = "https://github.com/paul-russo/blots-lang"
@@ -17,7 +17,7 @@ license = "MIT"
 
 [workspace.dependencies]
 # Internal crates - these will use path during development, version during publishing
-blots-core = { path = "blots-core", version = "0.8.9" }
+blots-core = { path = "blots-core", version = "0.8.10" }
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(wasm_bindgen_unstable_test_coverage)'] }
