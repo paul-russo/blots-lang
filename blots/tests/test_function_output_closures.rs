@@ -183,3 +183,42 @@ fn test_rest_arg_function() {
     let func_src = parse_function_output(&output);
     assert_eq!(func_src, "(x, ...rest) => [x, ...rest]");
 }
+
+#[test]
+fn test_higher_order_function_compose() {
+    let code = r#"
+compose = (f, g) => x => f(g(x))
+double = x => x * 2
+add_one = x => x + 1
+output composed = compose(add_one, double)
+"#;
+    let output = run_blots_eval(code);
+    let func_src = parse_function_output(&output);
+    assert_eq!(func_src, "(x) => ((x) => x + 1)(((x) => x * 2)(x))");
+}
+
+#[test]
+fn test_higher_order_function_with_multiple_captures() {
+    let code = r#"
+make_adder = base => x => base + x
+add_five = make_adder(5)
+add_ten = make_adder(10)
+combiner = (f, g) => x => f(x) + g(x)
+output combined = combiner(add_five, add_ten)
+"#;
+    let output = run_blots_eval(code);
+    let func_src = parse_function_output(&output);
+    assert_eq!(func_src, "(x) => ((x) => 5 + x)(x) + ((x) => 10 + x)(x)");
+}
+
+#[test]
+fn test_curry_function() {
+    let code = r#"
+curry = (f) => x => y => f(x, y)
+add = (a, b) => a + b
+output curried_add = curry(add)
+"#;
+    let output = run_blots_eval(code);
+    let func_src = parse_function_output(&output);
+    assert_eq!(func_src, "(x) => (y) => ((a, b) => a + b)(x, y)");
+}
