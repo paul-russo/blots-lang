@@ -964,7 +964,20 @@ impl Value {
                     }
                 }
                 result.push_str(") => ");
-                result.push_str(&crate::ast_to_source::expr_to_source(&lambda.body));
+
+                // Convert scope to SerializableValues and inline them
+                let serializable_scope: IndexMap<String, SerializableValue> = lambda
+                    .scope
+                    .iter()
+                    .filter_map(|(k, v)| {
+                        SerializableValue::from_value(v, heap).ok().map(|sv| (k.clone(), sv))
+                    })
+                    .collect();
+
+                result.push_str(&crate::ast_to_source::expr_to_source_with_scope(
+                    &lambda.body,
+                    &serializable_scope,
+                ));
                 result
             }
             Value::BuiltIn(built_in) => {

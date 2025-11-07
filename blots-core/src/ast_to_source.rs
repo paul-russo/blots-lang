@@ -60,7 +60,12 @@ pub fn expr_to_source(spanned_expr: &SpannedExpr) -> String {
         Expr::Assignment { ident, value } => format!("{} = {}", ident, expr_to_source(value)),
         Expr::Call { func, args } => {
             let args_str: Vec<String> = args.iter().map(expr_to_source).collect();
-            format!("{}({})", expr_to_source(func), args_str.join(", "))
+            let func_str = match &func.node {
+                // Wrap lambdas in parentheses when used in call position
+                Expr::Lambda { .. } => format!("({})", expr_to_source(func)),
+                _ => expr_to_source(func),
+            };
+            format!("{}({})", func_str, args_str.join(", "))
         }
         Expr::Access { expr, index } => {
             format!("{}[{}]", expr_to_source(expr), expr_to_source(index))
@@ -271,11 +276,14 @@ pub fn expr_to_source_with_scope(
                 .iter()
                 .map(|e| expr_to_source_with_scope(e, scope))
                 .collect();
-            format!(
-                "{}({})",
-                expr_to_source_with_scope(func, scope),
-                args_str.join(", ")
-            )
+            let func_str = match &func.node {
+                // Wrap lambdas in parentheses when used in call position
+                Expr::Lambda { .. } => {
+                    format!("({})", expr_to_source_with_scope(func, scope))
+                }
+                _ => expr_to_source_with_scope(func, scope),
+            };
+            format!("{}({})", func_str, args_str.join(", "))
         }
         Expr::Access { expr, index } => {
             format!(
@@ -347,7 +355,11 @@ fn serializable_value_to_source(value: &SerializableValue) -> String {
                 .collect();
             format!("{{{}}}", entries_str.join(", "))
         }
-        SerializableValue::Lambda(_) => "<function>".to_string(),
+        SerializableValue::Lambda(lambda_def) => {
+            let args_str: Vec<String> = lambda_def.args.iter().map(lambda_arg_to_source).collect();
+            // Wrap in parentheses so it can be used in call expressions
+            format!("(({}) => {})", args_str.join(", "), lambda_def.body)
+        }
         SerializableValue::BuiltIn(name) => name.clone(),
     }
 }
