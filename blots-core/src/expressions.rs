@@ -2047,6 +2047,101 @@ mod tests {
     }
 
     #[test]
+    fn conditional_expression_with_boolean_operators_and_newlines() {
+        let code = "if true && false || (5 > 3 && 2 < 10)
+  then 42
+  else 0";
+        let result = parse_and_evaluate(code, None, None).unwrap();
+        assert_eq!(result, Value::Number(42.0));
+    }
+
+    #[test]
+    fn conditional_expression_with_function_call_in_condition() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let code = "if max(10, 20) == 20
+  then \"correct\"
+  else \"wrong\"";
+        let result = parse_and_evaluate(code, Some(Rc::clone(&heap)), None).unwrap();
+        assert!(matches!(result, Value::String(_)));
+        assert_eq!(result.as_string(&heap.borrow()).unwrap(), "correct");
+    }
+
+    #[test]
+    fn conditional_expression_with_list_operations_in_condition() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let code = "if sum([1, 2, 3]) == 6
+  then \"sum is six\"
+  else \"sum is not six\"";
+        let result = parse_and_evaluate(code, Some(Rc::clone(&heap)), None).unwrap();
+        assert!(matches!(result, Value::String(_)));
+        assert_eq!(result.as_string(&heap.borrow()).unwrap(), "sum is six");
+    }
+
+    #[test]
+    fn conditional_expression_with_record_access_in_condition() {
+        let code = "if (x = {foo: 42, bar: 10}).foo > x.bar
+  then x.foo
+  else x.bar";
+        let result = parse_and_evaluate(code, None, None).unwrap();
+        assert_eq!(result, Value::Number(42.0));
+    }
+
+    #[test]
+    fn conditional_expression_with_nested_conditionals_and_newlines() {
+        let code = "if 5 > 3
+  then if 10 < 20
+    then 1
+    else 2
+  else 3";
+        let result = parse_and_evaluate(code, None, None).unwrap();
+        assert_eq!(result, Value::Number(1.0));
+    }
+
+    #[test]
+    fn conditional_expression_with_arithmetic_precedence_in_condition() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let code = "if 2 + 3 * 4 == 14
+  then \"correct precedence\"
+  else \"wrong precedence\"";
+        let result = parse_and_evaluate(code, Some(Rc::clone(&heap)), None).unwrap();
+        assert!(matches!(result, Value::String(_)));
+        assert_eq!(result.as_string(&heap.borrow()).unwrap(), "correct precedence");
+    }
+
+    #[test]
+    fn conditional_expression_with_lambda_in_condition() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let code = "if (f = x => x > 5)(10)
+  then \"greater\"
+  else \"not greater\"";
+        let result = parse_and_evaluate(code, Some(Rc::clone(&heap)), None).unwrap();
+        assert!(matches!(result, Value::String(_)));
+        assert_eq!(result.as_string(&heap.borrow()).unwrap(), "greater");
+    }
+
+    #[test]
+    fn conditional_expression_with_negation_and_newlines() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let code = "if !(5 < 3)
+  then \"correct\"
+  else \"incorrect\"";
+        let result = parse_and_evaluate(code, Some(Rc::clone(&heap)), None).unwrap();
+        assert!(matches!(result, Value::String(_)));
+        assert_eq!(result.as_string(&heap.borrow()).unwrap(), "correct");
+    }
+
+    #[test]
+    fn conditional_expression_with_natural_operators_and_newlines() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let code = "if 5 > 3 and 10 < 20
+  then \"both true\"
+  else \"at least one false\"";
+        let result = parse_and_evaluate(code, Some(Rc::clone(&heap)), None).unwrap();
+        assert!(matches!(result, Value::String(_)));
+        assert_eq!(result.as_string(&heap.borrow()).unwrap(), "both true");
+    }
+
+    #[test]
     fn factorial_of_integer() {
         let result = parse_and_evaluate("5!", None, None).unwrap();
         assert_eq!(result, Value::Number(120.0));
