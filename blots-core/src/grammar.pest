@@ -83,7 +83,7 @@ record_pair        = !{ record_key ~ ":" ~ NEWLINE* ~ expression }
 record_shorthand   =  { identifier }
 record             = !{ "{}" | "{" ~ NEWLINE* ~ ((record_pair | record_shorthand | spread_expression) ~ ("," ~ NEWLINE* ~ (record_pair | record_shorthand | spread_expression))*)? ~ ("," ~ NEWLINE)? ~ NEWLINE* ~ "}" }
 
-conditional = ${ "if" ~ WHITESPACE+ ~ expression ~ WHITESPACE+ ~ "then" ~ (WHITESPACE | NEWLINE)+ ~ expression ~ (WHITESPACE | NEWLINE)+ ~ "else" ~ (WHITESPACE | NEWLINE)+ ~ expression }
+conditional = ${ "if" ~ WHITESPACE+ ~ expression ~ (WHITESPACE | NEWLINE)+ ~ "then" ~ (WHITESPACE | NEWLINE)+ ~ expression ~ (WHITESPACE | NEWLINE)+ ~ "else" ~ (WHITESPACE | NEWLINE)+ ~ expression }
 
 expression        = ${ prefix_usage* ~ term ~ postfix_op* ~ (infix_usage ~ prefix_usage* ~ term ~ postfix_op*)* }
 nested_expression = _{ "(" ~ (WHITESPACE | NEWLINE)* ~ expression ~ (WHITESPACE | NEWLINE)* ~ ")" }

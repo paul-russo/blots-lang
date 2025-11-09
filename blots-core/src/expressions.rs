@@ -1999,6 +1999,54 @@ mod tests {
     }
 
     #[test]
+    fn conditional_expression_with_newline_before_then() {
+        let result = parse_and_evaluate("if true \n then 5 else 10", None, None).unwrap();
+        assert_eq!(result, Value::Number(5.0));
+    }
+
+    #[test]
+    fn conditional_expression_with_newline_after_then() {
+        let result = parse_and_evaluate("if true then \n 5 else 10", None, None).unwrap();
+        assert_eq!(result, Value::Number(5.0));
+    }
+
+    #[test]
+    fn conditional_expression_with_newline_before_else() {
+        let result = parse_and_evaluate("if false then 5 \n else 10", None, None).unwrap();
+        assert_eq!(result, Value::Number(10.0));
+    }
+
+    #[test]
+    fn conditional_expression_with_newline_after_else() {
+        let result = parse_and_evaluate("if false then 5 else \n 10", None, None).unwrap();
+        assert_eq!(result, Value::Number(10.0));
+    }
+
+    #[test]
+    fn conditional_expression_with_multiple_newlines() {
+        let result = parse_and_evaluate("if true \n\n then \n 5 \n else \n 10", None, None).unwrap();
+        assert_eq!(result, Value::Number(5.0));
+    }
+
+    #[test]
+    fn conditional_expression_multiline_formatted() {
+        let code = "if 5 < 10
+  then 1
+  else 0";
+        let result = parse_and_evaluate(code, None, None).unwrap();
+        assert_eq!(result, Value::Number(1.0));
+    }
+
+    #[test]
+    fn conditional_expression_with_complex_condition_and_newlines() {
+        let code = "if 2 + 3 == 5
+  then 100
+  else 200";
+        let result = parse_and_evaluate(code, None, None).unwrap();
+        assert_eq!(result, Value::Number(100.0));
+    }
+
+    #[test]
     fn factorial_of_integer() {
         let result = parse_and_evaluate("5!", None, None).unwrap();
         assert_eq!(result, Value::Number(120.0));
