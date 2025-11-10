@@ -99,7 +99,7 @@ dependencies = [
 
 [[package]]
 name = "blots"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "blots-core",
@@ -115,7 +115,7 @@ dependencies = [
 
 [[package]]
 name = "blots-core"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "ariadne",
@@ -132,7 +132,7 @@ dependencies = [
 
 [[package]]
 name = "blots-wasm"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "blots-core",
