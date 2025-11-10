@@ -295,6 +295,7 @@ x = 42 // This is also a comment
 - `ceil(x)` - returns the smallest integer greater than or equal to x (e.g. `2.1` becomes `3`)
 - `round(x)` - returns x rounded to the nearest integer (e.g. `2.7` becomes `3`)
 - `trunc(x)` - returns the integer part of x (removes fractional part) (e.g. `2.7` becomes `2` and `-2.7` becomes `-2`)
+- `random(seed)` - returns a pseudo-random number in the range [0, 1) based on the given seed. The same seed always produces the same result, making it deterministic and reproducible. Use different seeds to generate different random numbers (e.g., `random(42)` always returns the same value, while `[1, 2, 3, 4, 5] via random` generates five different random numbers)
 
 #### Aggregate Functions
 - `min(list)` - returns the minimum given value from a list

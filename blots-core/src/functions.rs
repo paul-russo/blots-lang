@@ -42,6 +42,7 @@ pub enum BuiltInFunction {
     Ceil,
     Round,
     Trunc,
+    Random,
 
     // Aggregate functions
     Min,
@@ -130,6 +131,7 @@ impl BuiltInFunction {
             "ceil" => Some(Self::Ceil),
             "round" => Some(Self::Round),
             "trunc" => Some(Self::Trunc),
+            "random" => Some(Self::Random),
             "min" => Some(Self::Min),
             "max" => Some(Self::Max),
             "avg" => Some(Self::Avg),
@@ -197,6 +199,7 @@ impl BuiltInFunction {
             Self::Ceil => "ceil",
             Self::Round => "round",
             Self::Trunc => "trunc",
+            Self::Random => "random",
             Self::Min => "min",
             Self::Max => "max",
             Self::Avg => "avg",
@@ -262,7 +265,8 @@ impl BuiltInFunction {
             | Self::Abs
             | Self::Floor
             | Self::Ceil
-            | Self::Trunc => FunctionArity::Exact(1),
+            | Self::Trunc
+            | Self::Random => FunctionArity::Exact(1),
 
             // Round can take 1 or 2 arguments
             Self::Round => FunctionArity::Between(1, 2),
@@ -344,6 +348,12 @@ impl BuiltInFunction {
             Self::Floor => Ok(Value::Number(args[0].as_number()?.floor())),
             Self::Ceil => Ok(Value::Number(args[0].as_number()?.ceil())),
             Self::Trunc => Ok(Value::Number(args[0].as_number()?.trunc())),
+
+            Self::Random => {
+                let seed = args[0].as_number()? as u64;
+                let mut rng = fastrand::Rng::with_seed(seed);
+                Ok(Value::Number(rng.f64()))
+            }
 
             Self::Round => {
                 let num = args[0].as_number()?;
@@ -1279,6 +1289,7 @@ impl BuiltInFunction {
             Self::Ceil,
             Self::Round,
             Self::Trunc,
+            Self::Random,
             Self::Min,
             Self::Max,
             Self::Avg,
@@ -1793,6 +1804,87 @@ mod tests {
             } else {
                 panic!("Expected number result");
             }
+        }
+    }
+
+    #[test]
+    fn test_random_function_deterministic() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let random_fn = BuiltInFunction::Random;
+
+        // Test that same seed produces same result
+        let seed = 42.0;
+        let args1 = vec![Value::Number(seed)];
+        let result1 = random_fn
+            .call(args1, heap.clone(), bindings.clone(), 0, "")
+            .unwrap();
+
+        let args2 = vec![Value::Number(seed)];
+        let result2 = random_fn
+            .call(args2, heap.clone(), bindings.clone(), 0, "")
+            .unwrap();
+
+        assert_eq!(result1, result2, "Same seed should produce same result");
+    }
+
+    #[test]
+    fn test_random_function_different_seeds() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let random_fn = BuiltInFunction::Random;
+
+        // Test that different seeds produce different results
+        let args1 = vec![Value::Number(42.0)];
+        let result1 = random_fn
+            .call(args1, heap.clone(), bindings.clone(), 0, "")
+            .unwrap();
+
+        let args2 = vec![Value::Number(100.0)];
+        let result2 = random_fn
+            .call(args2, heap.clone(), bindings.clone(), 0, "")
+            .unwrap();
+
+        assert_ne!(result1, result2, "Different seeds should produce different results");
+    }
+
+    #[test]
+    fn test_random_function_range() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let random_fn = BuiltInFunction::Random;
+
+        // Test that output is in range [0, 1)
+        for seed in [0.0, 1.0, 42.0, 100.0, 999.0, 12345.0] {
+            let args = vec![Value::Number(seed)];
+            let result = random_fn
+                .call(args, heap.clone(), bindings.clone(), 0, "")
+                .unwrap();
+
+            if let Value::Number(num) = result {
+                assert!(num >= 0.0 && num < 1.0, "Random value {} should be in range [0, 1)", num);
+            } else {
+                panic!("Expected number result");
+            }
+        }
+    }
+
+    #[test]
+    fn test_random_function_negative_seed() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let random_fn = BuiltInFunction::Random;
+
+        // Test with negative seeds (they get cast to u64)
+        let args = vec![Value::Number(-42.0)];
+        let result = random_fn
+            .call(args, heap.clone(), bindings.clone(), 0, "")
+            .unwrap();
+
+        if let Value::Number(num) = result {
+            assert!(num >= 0.0 && num < 1.0, "Random value {} should be in range [0, 1)", num);
+        } else {
+            panic!("Expected number result");
         }
     }
 

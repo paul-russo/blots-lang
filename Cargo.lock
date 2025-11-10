@@ -121,6 +121,7 @@ dependencies = [
  "ariadne",
  "base64",
  "dyn-fmt",
+ "fastrand",
  "indexmap",
  "pest",
  "pest_derive",
