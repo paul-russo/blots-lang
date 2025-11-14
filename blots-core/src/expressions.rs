@@ -31,7 +31,8 @@ static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
             | Op::infix(Rule::or, Assoc::Left)
             | Op::infix(Rule::natural_or, Assoc::Left)
             | Op::infix(Rule::via, Assoc::Left)
-            | Op::infix(Rule::into, Assoc::Left))
+            | Op::infix(Rule::into, Assoc::Left)
+            | Op::infix(Rule::where_, Assoc::Left))
         .op(Op::infix(Rule::equal, Assoc::Left)
             | Op::infix(Rule::not_equal, Assoc::Left)
             | Op::infix(Rule::less, Assoc::Left)
@@ -1018,6 +1019,13 @@ fn evaluate_binary_op_ast(
                     // This should never be reached due to early check above
                     unreachable!("Into operator should not reach list-to-list evaluation")
                 }
+                BinaryOp::Where => {
+                    Err(RuntimeError::with_span(
+                        "where operator requires a function on the right side".to_string(),
+                        op_span,
+                        source.clone(),
+                    ))
+                }
                 BinaryOp::DotEqual
                 | BinaryOp::DotNotEqual
                 | BinaryOp::DotLess
@@ -1366,6 +1374,38 @@ fn evaluate_binary_op_ast(
                         ))
                     }
                 }
+                BinaryOp::Where => {
+                    if is_list_first {
+                        if !scalar.is_callable() {
+                            return Err(RuntimeError::with_span(
+                                format!("can't call a non-function: {}", scalar.stringify_internal(&heap.borrow())),
+                                op_span,
+                                source.clone(),
+                            ));
+                        }
+
+                        let list = heap.borrow_mut().insert_list(l_vec.clone());
+
+                        let call_result = get_built_in_function_def_by_ident("filter").unwrap().call(
+                            scalar,
+                            vec![list, scalar],
+                            Rc::clone(&heap),
+                            Rc::clone(&bindings),
+                            call_depth,
+                                &source
+                        ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source.clone()))?;
+
+                        let filtered_list = { call_result.as_list(&heap.borrow())?.clone() };
+
+                        Ok(heap.borrow_mut().insert_list(filtered_list))
+                    } else {
+                        Err(RuntimeError::with_span(
+                            "where operator requires function on right side".to_string(),
+                            op_span,
+                            source.clone(),
+                        ))
+                    }
+                }
                 BinaryOp::DotEqual
                 | BinaryOp::DotNotEqual
                 | BinaryOp::DotLess
@@ -1483,6 +1523,13 @@ fn evaluate_binary_op_ast(
                     call_depth,
                                 &source
                 ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source.clone()))
+            }
+            BinaryOp::Where => {
+                Err(RuntimeError::with_span(
+                    "where operator requires a list on the left side".to_string(),
+                    op_span,
+                    source.clone(),
+                ))
             }
             BinaryOp::DotEqual
             | BinaryOp::DotNotEqual
@@ -1764,6 +1811,7 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> AnyhowResult<SpannedExpr> {
                 Rule::natural_or => BinaryOp::NaturalOr,
                 Rule::via => BinaryOp::Via,
                 Rule::into => BinaryOp::Into,
+                Rule::where_ => BinaryOp::Where,
                 Rule::coalesce => BinaryOp::Coalesce,
                 _ => unreachable!(),
             };

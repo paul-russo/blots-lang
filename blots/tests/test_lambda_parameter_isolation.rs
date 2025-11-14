@@ -147,7 +147,7 @@ fn test_multiple_lambdas_same_parameter_name() {
 #[test]
 fn test_lambda_with_list_operations_preserves_parameters() {
     // Test that lambda parameters in list operations are preserved
-    let code = "x = 50\noutput mapper = x => x via (y => y * 2)";
+    let code = "x = 50\noutput mapper = x => (x via y => y * 2)";
     let output = run_blots_eval(code);
     let func_src = parse_function_output(&output);
 

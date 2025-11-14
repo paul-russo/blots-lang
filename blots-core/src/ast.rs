@@ -197,6 +197,7 @@ pub enum BinaryOp {
     // Special
     Via,
     Into,
+    Where,
     Coalesce,
 }
 

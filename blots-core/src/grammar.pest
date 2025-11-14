@@ -12,7 +12,12 @@ null = { "null" }
 string_value = @{ (!PEEK ~ ANY)* }
 string       = ${ PUSH("\"" | "'") ~ string_value ~ POP }
 
-lambda        = ${ argument_list ~ WHITESPACE* ~ "=>" ~ (WHITESPACE | NEWLINE)* ~ expression }
+lambda        = ${ argument_list ~ WHITESPACE* ~ "=>" ~ (WHITESPACE | NEWLINE)* ~ lambda_expression }
+lambda_expression = ${ prefix_usage* ~ lambda_term ~ postfix_op* ~ (lambda_infix_usage ~ prefix_usage* ~ lambda_term ~ postfix_op*)* }
+lambda_term = _{ conditional | do_block | lambda | assignment | list | record | bool | string | null | input_reference | identifier | number | nested_expression }
+lambda_infix_usage = _{ (WHITESPACE | NEWLINE)+ ~ lambda_natural_infix_op ~ WHITESPACE+ | (WHITESPACE | NEWLINE)* ~ infix_op ~ (WHITESPACE | NEWLINE)* }
+lambda_natural_infix_op = _{ natural_and | natural_or }
+
 argument_list = !{ argument | "(" ~ NEWLINE* ~ (argument ~ ("," ~ NEWLINE* ~ argument)*)? ~ ("," ~ NEWLINE)? ~ NEWLINE* ~ ")" }
 argument      = _{ optional_arg | required_arg | rest_arg }
 required_arg  =  { identifier }
@@ -47,11 +52,12 @@ and        =  { "&&" }
 or         =  { "||" }
 coalesce   =  { "??" }
 
-natural_infix_op = _{ natural_and | natural_or | via | into }
+natural_infix_op = _{ natural_and | natural_or | via | into | where_ }
 natural_and      =  { "and" }
 natural_or       =  { "or" }
 via              =  { "via" }
 into             =  { "into" }
+where_           =  { "where" }
 
 infix_usage = _{ (WHITESPACE | NEWLINE)+ ~ natural_infix_op ~ WHITESPACE+ | (WHITESPACE | NEWLINE)* ~ infix_op ~ (WHITESPACE | NEWLINE)* }
 

@@ -84,7 +84,7 @@ fn test_builtin_function_output() {
 
 #[test]
 fn test_closure_with_list() {
-    let code = "arr = [1, 2, 3]\noutput f = x => arr via (y => y * x)";
+    let code = "arr = [1, 2, 3]\noutput f = x => (arr via y => y * x)";
     let output = run_blots_eval(code);
     let func_src = parse_function_output(&output);
     assert_eq!(func_src, "(x) => [1, 2, 3] via (y) => y * x");
@@ -137,7 +137,7 @@ fn test_list_of_records_with_closures() {
 #[test]
 fn test_via_operator_with_closures() {
     let code =
-        "base = 100\nmultipliers = [1, 2, 3]\noutput f = () => multipliers via (m => m * base)";
+        "base = 100\nmultipliers = [1, 2, 3]\noutput f = () => (multipliers via m => m * base)";
     let output = run_blots_eval(code);
     let func_src = parse_function_output(&output);
     assert_eq!(func_src, "() => [1, 2, 3] via (m) => m * 100");

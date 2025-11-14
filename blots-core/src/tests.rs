@@ -854,3 +854,301 @@ mod lambda_parameter_isolation_tests {
         }
     }
 }
+
+// Tests for the where operator
+#[cfg(test)]
+mod where_operator_tests {
+    use crate::expressions::evaluate_pairs;
+    use crate::heap::{Heap, HeapPointer};
+    use crate::parser::{Rule, get_pairs};
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    fn parse_and_evaluate(code: &str) -> Result<(Value, Rc<RefCell<Heap>>), crate::error::RuntimeError> {
+        let pairs = get_pairs(code).map_err(|e| crate::error::RuntimeError::new(e.to_string()))?;
+
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        let mut result = Value::Null;
+        for pair in pairs {
+            match pair.as_rule() {
+                Rule::statement => {
+                    if let Some(inner_pair) = pair.into_inner().next() {
+                        match inner_pair.as_rule() {
+                            Rule::expression | Rule::assignment => {
+                                result = evaluate_pairs(
+                                    inner_pair.into_inner(),
+                                    Rc::clone(&heap),
+                                    Rc::clone(&bindings),
+                                    0,
+                                    code,
+                                )?;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Rule::EOI => {}
+                _ => {}
+            }
+        }
+        Ok((result, heap))
+    }
+
+    #[test]
+    fn test_where_basic_filtering() {
+        let (result, heap) = parse_and_evaluate("[1, 2, 3, 4, 5] where x => x > 3").unwrap();
+        let borrowed_heap = heap.borrow();
+        let list = result.as_list(&borrowed_heap).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0], Value::Number(4.0));
+        assert_eq!(list[1], Value::Number(5.0));
+    }
+
+    #[test]
+    fn test_where_with_index() {
+        let (result, heap) = parse_and_evaluate("[10, 20, 30, 40] where (val, idx) => idx > 0").unwrap();
+        let borrowed_heap = heap.borrow();
+        let list = result.as_list(&borrowed_heap).unwrap();
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0], Value::Number(20.0));
+        assert_eq!(list[1], Value::Number(30.0));
+        assert_eq!(list[2], Value::Number(40.0));
+    }
+
+    #[test]
+    fn test_where_empty_list() {
+        let (result, heap) = parse_and_evaluate("[] where x => x > 3").unwrap();
+        let borrowed_heap = heap.borrow();
+        let list = result.as_list(&borrowed_heap).unwrap();
+        assert_eq!(list.len(), 0);
+    }
+
+    #[test]
+    fn test_where_all_filtered_out() {
+        let (result, heap) = parse_and_evaluate("[1, 2, 3] where x => x > 10").unwrap();
+        let borrowed_heap = heap.borrow();
+        let list = result.as_list(&borrowed_heap).unwrap();
+        assert_eq!(list.len(), 0);
+    }
+
+    #[test]
+    fn test_where_none_filtered_out() {
+        let (result, heap) = parse_and_evaluate("[1, 2, 3] where x => true").unwrap();
+        let borrowed_heap = heap.borrow();
+        let list = result.as_list(&borrowed_heap).unwrap();
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0], Value::Number(1.0));
+        assert_eq!(list[1], Value::Number(2.0));
+        assert_eq!(list[2], Value::Number(3.0));
+    }
+
+    #[test]
+    fn test_where_scalar_error() {
+        let result = parse_and_evaluate("5 where x => x > 3");
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("where operator requires a list on the left side"));
+    }
+
+    #[test]
+    fn test_where_non_function_error() {
+        let result = parse_and_evaluate("[1, 2, 3] where 5");
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("can't call a non-function"));
+    }
+
+    #[test]
+    fn test_where_non_boolean_return_error() {
+        let result = parse_and_evaluate("[1, 2, 3] where x => x");
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("expected a boolean"));
+    }
+
+    #[test]
+    fn test_where_with_string_comparison() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let pairs = crate::parser::get_pairs("[\"apple\", \"banana\", \"cherry\"] where s => s == \"banana\"").unwrap();
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        let mut result = Value::Null;
+        for pair in pairs {
+            if let crate::parser::Rule::statement = pair.as_rule() {
+                if let Some(inner_pair) = pair.into_inner().next() {
+                    if let crate::parser::Rule::expression = inner_pair.as_rule() {
+                        result = crate::expressions::evaluate_pairs(
+                            inner_pair.into_inner(),
+                            Rc::clone(&heap),
+                            Rc::clone(&bindings),
+                            0,
+                            "[\"apple\", \"banana\", \"cherry\"] where s => s == \"banana\"",
+                        ).unwrap();
+                    }
+                }
+            }
+        }
+
+        let borrowed_heap = heap.borrow();
+        let list = result.as_list(&borrowed_heap).unwrap();
+        assert_eq!(list.len(), 1);
+
+        if let Value::String(s) = list[0] {
+            let string_value = s.reify(&borrowed_heap).as_string().unwrap();
+            assert_eq!(string_value, "banana");
+        } else {
+            panic!("Expected string value");
+        }
+    }
+
+    #[test]
+    fn test_where_complex_predicate() {
+        let (result, heap) = parse_and_evaluate("[1, 2, 3, 4, 5, 6] where x => x % 2 == 0").unwrap();
+        let borrowed_heap = heap.borrow();
+        let list = result.as_list(&borrowed_heap).unwrap();
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0], Value::Number(2.0));
+        assert_eq!(list[1], Value::Number(4.0));
+        assert_eq!(list[2], Value::Number(6.0));
+    }
+
+    #[test]
+    fn test_where_with_built_in_function() {
+        let (result, heap) = parse_and_evaluate("[1, -2, 3, -4, 5] where x => x > 0").unwrap();
+        let borrowed_heap = heap.borrow();
+        let list = result.as_list(&borrowed_heap).unwrap();
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0], Value::Number(1.0));
+        assert_eq!(list[1], Value::Number(3.0));
+        assert_eq!(list[2], Value::Number(5.0));
+    }
+}
+
+// Tests for flat chaining of via/into/where operators
+#[cfg(test)]
+mod flat_chaining_tests {
+    use crate::expressions::evaluate_pairs;
+    use crate::heap::Heap;
+    use crate::parser::{Rule, get_pairs};
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    fn parse_and_evaluate(code: &str) -> Result<(Value, Rc<RefCell<Heap>>), crate::error::RuntimeError> {
+        let pairs = get_pairs(code).map_err(|e| crate::error::RuntimeError::new(e.to_string()))?;
+
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        let mut result = Value::Null;
+        for pair in pairs {
+            match pair.as_rule() {
+                Rule::statement => {
+                    if let Some(inner_pair) = pair.into_inner().next() {
+                        match inner_pair.as_rule() {
+                            Rule::expression | Rule::assignment => {
+                                result = evaluate_pairs(
+                                    inner_pair.into_inner(),
+                                    Rc::clone(&heap),
+                                    Rc::clone(&bindings),
+                                    0,
+                                    code,
+                                )?;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Rule::EOI => {}
+                _ => {}
+            }
+        }
+        Ok((result, heap))
+    }
+
+    #[test]
+    fn test_via_then_where() {
+        let (result, heap) = parse_and_evaluate("[1, 2, 3, 4, 5] via x => x * 2 where y => y > 5").unwrap();
+        let borrowed_heap = heap.borrow();
+        let list = result.as_list(&borrowed_heap).unwrap();
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0], Value::Number(6.0));
+        assert_eq!(list[1], Value::Number(8.0));
+        assert_eq!(list[2], Value::Number(10.0));
+    }
+
+    #[test]
+    fn test_where_then_via() {
+        let (result, heap) = parse_and_evaluate("[1, 2, 3, 4, 5] where x => x > 3 via y => y * 10").unwrap();
+        let borrowed_heap = heap.borrow();
+        let list = result.as_list(&borrowed_heap).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0], Value::Number(40.0));
+        assert_eq!(list[1], Value::Number(50.0));
+    }
+
+    #[test]
+    fn test_via_where_via_chain() {
+        let (result, heap) = parse_and_evaluate("[1, 2, 3, 4, 5, 6] via x => x * 2 where y => y > 5 via z => z + 1").unwrap();
+        let borrowed_heap = heap.borrow();
+        let list = result.as_list(&borrowed_heap).unwrap();
+        assert_eq!(list.len(), 4);
+        assert_eq!(list[0], Value::Number(7.0));
+        assert_eq!(list[1], Value::Number(9.0));
+        assert_eq!(list[2], Value::Number(11.0));
+        assert_eq!(list[3], Value::Number(13.0));
+    }
+
+    #[test]
+    fn test_via_where_into() {
+        let (result, _heap) = parse_and_evaluate("[1, 2, 3, 4, 5] via x => x * 2 where x => x > 5 into sum").unwrap();
+        assert_eq!(result, Value::Number(24.0));
+    }
+
+    #[test]
+    fn test_where_with_index_then_via() {
+        let (result, heap) = parse_and_evaluate("[10, 20, 30, 40] where (val, idx) => idx > 0 via x => x / 10").unwrap();
+        let borrowed_heap = heap.borrow();
+        let list = result.as_list(&borrowed_heap).unwrap();
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0], Value::Number(2.0));
+        assert_eq!(list[1], Value::Number(3.0));
+        assert_eq!(list[2], Value::Number(4.0));
+    }
+
+    #[test]
+    fn test_nested_via_requires_parens() {
+        // This should work with parens
+        let (result, heap) = parse_and_evaluate("[[1, 2], [3, 4]] via row => (row via x => x * 10)").unwrap();
+        let borrowed_heap = heap.borrow();
+        let outer_list = result.as_list(&borrowed_heap).unwrap();
+        assert_eq!(outer_list.len(), 2);
+
+        let first_row = outer_list[0].as_list(&borrowed_heap).unwrap();
+        assert_eq!(first_row[0], Value::Number(10.0));
+        assert_eq!(first_row[1], Value::Number(20.0));
+
+        let second_row = outer_list[1].as_list(&borrowed_heap).unwrap();
+        assert_eq!(second_row[0], Value::Number(30.0));
+        assert_eq!(second_row[1], Value::Number(40.0));
+    }
+
+    #[test]
+    fn test_complex_chain_with_different_param_names() {
+        let (result, heap) = parse_and_evaluate(
+            "[1, 2, 3, 4, 5, 6, 7, 8, 9, 10] where a => a % 2 == 0 via b => b * 3 where c => c > 10"
+        ).unwrap();
+        let borrowed_heap = heap.borrow();
+        let list = result.as_list(&borrowed_heap).unwrap();
+        assert_eq!(list.len(), 4);
+        assert_eq!(list[0], Value::Number(12.0)); // 4 * 3
+        assert_eq!(list[1], Value::Number(18.0)); // 6 * 3
+        assert_eq!(list[2], Value::Number(24.0)); // 8 * 3
+        assert_eq!(list[3], Value::Number(30.0)); // 10 * 3
+    }
+}
