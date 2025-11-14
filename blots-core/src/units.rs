@@ -121,7 +121,7 @@ impl Unit {
     }
 
     pub fn matches_exact(&self, identifier: &str) -> bool {
-        self.identifiers.iter().any(|&i| i == identifier)
+        self.identifiers.contains(&identifier)
     }
 
     pub fn convert_to_base(&self, value: f64) -> f64 {
@@ -432,7 +432,7 @@ pub fn get_all_units() -> Vec<Unit> {
             &["square miles", "mi²", "mi2", "square mile"],
             2_589_988.110_336,
         ),
-        Unit::new_linear(UnitCategory::Area, &["acres", "acre", "ac"], 4046.856_422_4),
+        Unit::new_linear(UnitCategory::Area, &["acres", "acre", "ac"], 4_046.856_422_4),
         Unit::new_linear(UnitCategory::Area, &["ares", "are", "a"], 100.0),
         Unit::new_linear(UnitCategory::Area, &["hectares", "hectare", "ha"], 10000.0),
         Unit::new_linear(
