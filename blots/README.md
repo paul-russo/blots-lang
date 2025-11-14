@@ -135,6 +135,55 @@ The `via` operator takes a value and sends it through a function, applying the f
 ['hello', 'world'] into head // 'hello' (because head(['hello', 'world']) = 'hello')
 ```
 
+### `where`
+
+The `where` operator filters a list based on a predicate function. It's analogous to `filter` in the same way that `via` is analogous to `map`. The predicate function must return a boolean value, and only elements for which the predicate returns `true` are included in the result. For example:
+
+```blots
+[1, 2, 3, 4, 5] where x => x > 3           // [4, 5]
+[1, 2, 3, 4, 5] where x => x % 2 == 0      // [2, 4]
+["apple", "banana", "cherry"] where s => s == "banana"  // ["banana"]
+```
+
+The predicate function can accept either one argument (the element) or two arguments (the element and its index):
+
+```blots
+[10, 20, 30, 40] where (val, idx) => idx > 0       // [20, 30, 40] (filters out the first element)
+[10, 20, 30, 40] where (val, idx) => idx % 2 == 0  // [10, 30] (keeps elements at even indices)
+```
+
+Important notes about `where`:
+- The left side must be a list (using `where` with a scalar will result in an error)
+- The right side must be a function that returns a boolean value
+- If the predicate returns a non-boolean value, the program will error
+- The `where` operator only works with lists, unlike `via` which also works with scalars
+
+### Chaining `via`, `into`, and `where`
+
+These operators can be naturally chained together:
+
+```blots
+// Chaining works intuitively at the top level
+[1,2,3] via x => x * 2 where y => y > 2  // [4, 6]
+
+// Chain as many operations as you want
+[1,2,3,4,5,6] via x => x * 2 where y => y > 5 via z => z + 1  // [7, 9, 11, 13]
+
+// Or assign intermediate results for clarity
+doubled = [1,2,3] via x => x * 2
+doubled where x => x > 2  // [4, 6]
+```
+
+**Note:** If you need to use `via`, `into`, or `where` *inside* a lambda body (not at the top level), you must wrap the expression in parentheses:
+
+```blots
+// ❌ This won't parse (via/into/where not allowed in lambda bodies without parens)
+[[1,2,3], [4,5,6]] via list => list via x => x * 2
+
+// ✅ Use parentheses to enable via/into/where inside lambda bodies
+[[1,2,3], [4,5,6]] via list => (list via x => x * 2)  // [[2,4,6], [8,10,12]]
+```
+
 ### `do` Blocks
 
 Blots is an expression-oriented language, in the sense that every statement in a Blots program should evaluate to a useful value. This works well with a functional approach, where you compose functions to compute values. However, sometimes it's more intuitive to represent a computation as a series of discrete steps that happen one after another, instead of composing functions. For these cases, you can use `do` blocks to create an expression whose final value is the result of imperative code with intermediate variables:
@@ -375,7 +424,7 @@ The `convert` function supports 200+ units across 19 categories:
 - **Temperature**: Celsius, Fahrenheit, Kelvin
 - **Volume**: liters, gallons, cubic meters, cups, pints, quarts, etc.
 
-Units can be specified by full name or abbreviation and are case-insensitive. Metric units support both American ("meter") and British ("metre") spellings.
+Units can be specified by full name or abbreviation and comparisons default to case-insensitive matching. Metric units support both American ("meter") and British ("metre") spellings. When multiple units share the same lowercase alias (for example `mA` vs `MA`), `convert` returns an ambiguous-unit error; provide the canonical casing shown below to disambiguate.
 
 Examples:
 ```blots
