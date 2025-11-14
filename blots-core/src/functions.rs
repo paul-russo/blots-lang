@@ -1028,7 +1028,7 @@ impl BuiltInFunction {
             // Higher-order functions
             Self::Map => {
                 let func = &args[1];
-                let (list, func_accepts_two_args) = {
+                let (list, func_def, func_accepts_two_args) = {
                     let borrowed_heap = &heap.borrow();
                     let list = args[0].as_list(borrowed_heap)?.clone();
                     let func_def = get_function_def(func, borrowed_heap)
@@ -1037,14 +1037,11 @@ impl BuiltInFunction {
                     // Check if the function can accept 2 arguments (element, index)
                     let accepts_two = func_def.arity().can_accept(2);
 
-                    (list, accepts_two)
+                    (list, func_def, accepts_two)
                 };
 
                 let mut mapped_list = vec![];
                 for (idx, item) in list.iter().enumerate() {
-                    let func_def = get_function_def(func, &heap.borrow())
-                        .ok_or_else(|| anyhow!("second argument must be a function"))?;
-
                     let args = if func_accepts_two_args {
                         vec![*item, Value::Number(idx as f64)]
                     } else {
@@ -1067,7 +1064,7 @@ impl BuiltInFunction {
 
             Self::Filter => {
                 let func = &args[1];
-                let (list, func_accepts_two_args) = {
+                let (list, func_def, func_accepts_two_args) = {
                     let borrowed_heap = &heap.borrow();
                     let list = args[0].as_list(borrowed_heap)?.clone();
                     let func_def = get_function_def(func, borrowed_heap)
@@ -1076,14 +1073,11 @@ impl BuiltInFunction {
                     // Check if the function can accept 2 arguments (element, index)
                     let accepts_two = func_def.arity().can_accept(2);
 
-                    (list, accepts_two)
+                    (list, func_def, accepts_two)
                 };
 
                 let mut filtered_list = vec![];
                 for (idx, item) in list.iter().enumerate() {
-                    let func_def = get_function_def(func, &heap.borrow())
-                        .ok_or_else(|| anyhow!("second argument must be a function"))?;
-
                     let args = if func_accepts_two_args {
                         vec![*item, Value::Number(idx as f64)]
                     } else {
@@ -1109,7 +1103,7 @@ impl BuiltInFunction {
             Self::Reduce => {
                 let func = &args[1];
                 let initial = args[2];
-                let (list, func_accepts_three_args) = {
+                let (list, func_def, func_accepts_three_args) = {
                     let borrowed_heap = &heap.borrow();
                     let list = args[0].as_list(borrowed_heap)?.clone();
                     let func_def = get_function_def(func, borrowed_heap)
@@ -1118,14 +1112,11 @@ impl BuiltInFunction {
                     // Check if the function can accept 3 arguments (accumulator, element, index)
                     let accepts_three = func_def.arity().can_accept(3);
 
-                    (list, accepts_three)
+                    (list, func_def, accepts_three)
                 };
 
                 let mut accumulator = initial;
                 for (idx, item) in list.iter().enumerate() {
-                    let func_def = get_function_def(func, &heap.borrow())
-                        .ok_or_else(|| anyhow!("second argument must be a function"))?;
-
                     let args = if func_accepts_three_args {
                         vec![accumulator, *item, Value::Number(idx as f64)]
                     } else {
@@ -1147,7 +1138,7 @@ impl BuiltInFunction {
 
             Self::Every => {
                 let func = &args[1];
-                let (list, func_accepts_two_args) = {
+                let (list, func_def, func_accepts_two_args) = {
                     let borrowed_heap = &heap.borrow();
                     let list = args[0].as_list(borrowed_heap)?.clone();
                     let func_def = get_function_def(func, borrowed_heap)
@@ -1156,13 +1147,10 @@ impl BuiltInFunction {
                     // Check if the function can accept 2 arguments (element, index)
                     let accepts_two = func_def.arity().can_accept(2);
 
-                    (list, accepts_two)
+                    (list, func_def, accepts_two)
                 };
 
                 for (idx, item) in list.iter().enumerate() {
-                    let func_def = get_function_def(func, &heap.borrow())
-                        .ok_or_else(|| anyhow!("second argument must be a function"))?;
-
                     let args = if func_accepts_two_args {
                         vec![*item, Value::Number(idx as f64)]
                     } else {
@@ -1187,7 +1175,7 @@ impl BuiltInFunction {
 
             Self::Some => {
                 let func = &args[1];
-                let (list, func_accepts_two_args) = {
+                let (list, func_def, func_accepts_two_args) = {
                     let borrowed_heap = &heap.borrow();
                     let list = args[0].as_list(borrowed_heap)?.clone();
                     let func_def = get_function_def(func, borrowed_heap)
@@ -1196,13 +1184,10 @@ impl BuiltInFunction {
                     // Check if the function can accept 2 arguments (element, index)
                     let accepts_two = func_def.arity().can_accept(2);
 
-                    (list, accepts_two)
+                    (list, func_def, accepts_two)
                 };
 
                 for (idx, item) in list.iter().enumerate() {
-                    let func_def = get_function_def(func, &heap.borrow())
-                        .ok_or_else(|| anyhow!("second argument must be a function"))?;
-
                     let args = if func_accepts_two_args {
                         vec![*item, Value::Number(idx as f64)]
                     } else {
@@ -1233,12 +1218,12 @@ impl BuiltInFunction {
                 };
 
                 list.sort_by(|a, b| {
-                    let func_def_a = get_function_def(func, &heap.borrow());
-                    let func_def_b = get_function_def(func, &heap.borrow());
+                    // Only look up the function once, not twice
+                    let func_def = get_function_def(func, &heap.borrow());
 
-                    match (func_def_a, func_def_b) {
-                        (Some(fd_a), Some(fd_b)) => {
-                            let result_a = fd_a.call(
+                    match func_def {
+                        Some(fd) => {
+                            let result_a = fd.call(
                                 Value::Null,
                                 vec![*a],
                                 Rc::clone(&heap),
@@ -1246,7 +1231,7 @@ impl BuiltInFunction {
                                 call_depth + 1,
                                 source,
                             );
-                            let result_b = fd_b.call(
+                            let result_b = fd.call(
                                 Value::Null,
                                 vec![*b],
                                 Rc::clone(&heap),
