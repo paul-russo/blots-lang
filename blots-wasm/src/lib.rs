@@ -1,6 +1,7 @@
 use anyhow::Result;
 use blots_core::{
-    expressions::evaluate_pairs,
+    expressions::{evaluate_pairs, pairs_to_expr},
+    formatter::format_expr,
     functions::get_built_in_function_idents,
     heap::{CONSTANTS, Heap},
     parser::{Rule, Token, get_pairs, get_tokens},
@@ -280,4 +281,31 @@ fn evaluate_single_inline_expression(
     ExpressionResult::Error {
         error: "No expression found".to_string(),
     }
+}
+
+#[wasm_bindgen]
+pub fn format_blots(source: &str, max_columns: Option<usize>) -> Result<JsValue, JsError> {
+    // Parse the source code to AST
+    let pairs = get_pairs(source).map_err(|e| JsError::new(&format!("Parsing error: {}", e)))?;
+
+    // Extract the expression from the statement wrapper
+    let expr = pairs
+        .into_iter()
+        .find_map(|pair| {
+            if pair.as_rule() == Rule::statement {
+                pair.into_inner()
+                    .next()
+                    .and_then(|inner_pair| pairs_to_expr(inner_pair.into_inner()).ok())
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| JsError::new("No expression found in source"))?;
+
+    // Format the expression
+    let formatted = format_expr(&expr, max_columns);
+
+    // Return the formatted string
+    let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+    Ok(formatted.serialize(&serializer)?)
 }
