@@ -288,24 +288,37 @@ pub fn format_blots(source: &str, max_columns: Option<usize>) -> Result<JsValue,
     // Parse the source code to AST
     let pairs = get_pairs(source).map_err(|e| JsError::new(&format!("Parsing error: {}", e)))?;
 
-    // Extract the expression from the statement wrapper
-    let expr = pairs
-        .into_iter()
-        .find_map(|pair| {
-            if pair.as_rule() == Rule::statement {
-                pair.into_inner()
-                    .next()
-                    .and_then(|inner_pair| pairs_to_expr(inner_pair.into_inner()).ok())
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| JsError::new("No expression found in source"))?;
+    // Format all statements (expressions and comments)
+    let mut formatted_statements = Vec::new();
 
-    // Format the expression
-    let formatted = format_expr(&expr, max_columns);
+    for pair in pairs {
+        if pair.as_rule() == Rule::statement {
+            if let Some(inner_pair) = pair.into_inner().next() {
+                match inner_pair.as_rule() {
+                    Rule::comment => {
+                        // Preserve comments as-is
+                        formatted_statements.push(inner_pair.as_str().to_string());
+                    }
+                    _ => {
+                        // Format as expression
+                        let expr = pairs_to_expr(inner_pair.into_inner())
+                            .map_err(|e| JsError::new(&format!("AST conversion error: {}", e)))?;
+                        let formatted = format_expr(&expr, max_columns);
+                        formatted_statements.push(formatted);
+                    }
+                }
+            }
+        }
+    }
+
+    if formatted_statements.is_empty() {
+        return Err(JsError::new("No statements found in source"));
+    }
+
+    // Join all formatted statements with newlines
+    let result = formatted_statements.join("\n");
 
     // Return the formatted string
     let serializer = serde_wasm_bindgen::Serializer::json_compatible();
-    Ok(formatted.serialize(&serializer)?)
+    Ok(result.serialize(&serializer)?)
 }

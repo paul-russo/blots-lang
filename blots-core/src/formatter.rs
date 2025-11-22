@@ -470,4 +470,109 @@ mod tests {
         assert!(formatted.contains("do {"));
         assert!(formatted.contains("return"));
     }
+
+    #[test]
+    fn test_multiple_statements() {
+        use crate::parser::Rule;
+
+        let source = "x = [1, 2, 3, 4, 5]\ny = {name: \"Alice\", age: 30}\nz = x + y";
+        let pairs = get_pairs(source).unwrap();
+
+        let mut formatted_statements = Vec::new();
+
+        for pair in pairs {
+            if pair.as_rule() == Rule::statement {
+                if let Some(inner_pair) = pair.into_inner().next() {
+                    if let Ok(expr) = pairs_to_expr(inner_pair.into_inner()) {
+                        let formatted = format_expr(&expr, Some(80));
+                        formatted_statements.push(formatted);
+                    }
+                }
+            }
+        }
+
+        // Should have formatted all 3 statements
+        assert_eq!(formatted_statements.len(), 3);
+        assert_eq!(formatted_statements[0], "x = [1, 2, 3, 4, 5]");
+        assert_eq!(formatted_statements[1], "y = {name: \"Alice\", age: 30}");
+        assert_eq!(formatted_statements[2], "z = x + y");
+    }
+
+    #[test]
+    fn test_comments_are_preserved() {
+        use crate::parser::Rule;
+
+        let source = "// Comment 1\nx = [1, 2, 3]\n// Comment 2\ny = x + 1";
+        let pairs = get_pairs(source).unwrap();
+
+        let mut formatted_statements = Vec::new();
+
+        for pair in pairs {
+            if pair.as_rule() == Rule::statement {
+                if let Some(inner_pair) = pair.into_inner().next() {
+                    match inner_pair.as_rule() {
+                        Rule::comment => {
+                            // Preserve comment as-is
+                            formatted_statements.push(inner_pair.as_str().to_string());
+                        }
+                        _ => {
+                            // Format as expression
+                            if let Ok(expr) = pairs_to_expr(inner_pair.into_inner()) {
+                                let formatted = format_expr(&expr, Some(80));
+                                formatted_statements.push(formatted);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // All 4 items should be preserved
+        assert_eq!(formatted_statements.len(), 4);
+        assert_eq!(formatted_statements[0], "// Comment 1");
+        assert_eq!(formatted_statements[1], "x = [1, 2, 3]");
+        assert_eq!(formatted_statements[2], "// Comment 2");
+        assert_eq!(formatted_statements[3], "y = x + 1");
+    }
+
+    #[test]
+    fn test_comments_with_formatted_code() {
+        use crate::parser::Rule;
+
+        let source = "// Configuration\nconfig = {name: \"test\", debug: true}\n// Process data\nresult = [1, 2, 3]";
+        let pairs = get_pairs(source).unwrap();
+
+        let mut formatted_statements = Vec::new();
+
+        for pair in pairs {
+            if pair.as_rule() == Rule::statement {
+                if let Some(inner_pair) = pair.into_inner().next() {
+                    match inner_pair.as_rule() {
+                        Rule::comment => {
+                            formatted_statements.push(inner_pair.as_str().to_string());
+                        }
+                        _ => {
+                            if let Ok(expr) = pairs_to_expr(inner_pair.into_inner()) {
+                                let formatted = format_expr(&expr, Some(80));
+                                formatted_statements.push(formatted);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let result = formatted_statements.join("\n");
+
+        // Should have 4 statements: 2 comments + 2 expressions
+        assert_eq!(formatted_statements.len(), 4);
+        assert_eq!(formatted_statements[0], "// Configuration");
+        assert!(formatted_statements[1].starts_with("config = "));
+        assert_eq!(formatted_statements[2], "// Process data");
+        assert_eq!(formatted_statements[3], "result = [1, 2, 3]");
+
+        // Verify the full result preserves comments
+        assert!(result.contains("// Configuration"));
+        assert!(result.contains("// Process data"));
+    }
 }

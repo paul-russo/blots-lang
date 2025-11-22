@@ -1,6 +1,7 @@
 WHITESPACE = _{ " " | "\t" }
-NEWLINE    = _{ comment? ~ ("\r\n" | "\n") }
-comment    = _{ "//" ~ (!NEWLINE ~ ANY)* }
+NEWLINE    = _{ inline_comment? ~ ("\r\n" | "\n") }
+inline_comment = _{ "//" ~ (!NEWLINE ~ ANY)* }
+comment    = @{ "//" ~ (!NEWLINE ~ ANY)* }
 
 number  = @{ (integer ~ ("_"+ ~ integer)* ~ ("." ~ ASCII_DIGIT+)? | !integer ~ "." ~ ASCII_DIGIT+) ~ (^"e" ~ integer)? }
 integer = _{ ("+" | "-")? ~ ASCII_DIGIT+ }
