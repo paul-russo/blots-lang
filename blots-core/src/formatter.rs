@@ -575,4 +575,143 @@ mod tests {
         assert!(result.contains("// Configuration"));
         assert!(result.contains("// Process data"));
     }
+
+    #[test]
+    fn test_output_declaration_with_assignment() {
+        use crate::parser::Rule;
+
+        let source = "output result = 42";
+        let pairs = get_pairs(source).unwrap();
+
+        let mut formatted_statements = Vec::new();
+
+        for pair in pairs {
+            if pair.as_rule() == Rule::statement {
+                if let Some(inner_pair) = pair.into_inner().next() {
+                    match inner_pair.as_rule() {
+                        Rule::output_declaration => {
+                            // Should preserve the output keyword
+                            let mut inner = inner_pair.into_inner();
+                            let assignment_or_ident = inner.next().unwrap();
+
+                            let formatted = if assignment_or_ident.as_rule() == Rule::assignment {
+                                // Extract identifier and value from assignment
+                                let mut assignment_inner = assignment_or_ident.into_inner();
+                                let ident = assignment_inner.next().unwrap().as_str();
+                                let value_expr = pairs_to_expr(assignment_inner.next().unwrap().into_inner()).unwrap();
+                                let value_formatted = format_expr(&value_expr, Some(80));
+                                format!("{} = {}", ident, value_formatted)
+                            } else {
+                                assignment_or_ident.as_str().to_string()
+                            };
+
+                            formatted_statements.push(format!("output {}", formatted));
+                        }
+                        _ => {
+                            if let Ok(expr) = pairs_to_expr(inner_pair.into_inner()) {
+                                let formatted = format_expr(&expr, Some(80));
+                                formatted_statements.push(formatted);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        assert_eq!(formatted_statements.len(), 1);
+        assert_eq!(formatted_statements[0], "output result = 42");
+    }
+
+    #[test]
+    fn test_output_statement_separate() {
+        use crate::parser::Rule;
+
+        let source = "result = 42\noutput result";
+        let pairs = get_pairs(source).unwrap();
+
+        let mut formatted_statements = Vec::new();
+
+        for pair in pairs {
+            if pair.as_rule() == Rule::statement {
+                if let Some(inner_pair) = pair.into_inner().next() {
+                    match inner_pair.as_rule() {
+                        Rule::output_declaration => {
+                            // Should preserve the output keyword
+                            let mut inner = inner_pair.into_inner();
+                            let assignment_or_ident = inner.next().unwrap();
+
+                            let formatted = if assignment_or_ident.as_rule() == Rule::assignment {
+                                // Extract identifier and value from assignment
+                                let mut assignment_inner = assignment_or_ident.into_inner();
+                                let ident = assignment_inner.next().unwrap().as_str();
+                                let value_expr = pairs_to_expr(assignment_inner.next().unwrap().into_inner()).unwrap();
+                                let value_formatted = format_expr(&value_expr, Some(80));
+                                format!("{} = {}", ident, value_formatted)
+                            } else {
+                                assignment_or_ident.as_str().to_string()
+                            };
+
+                            formatted_statements.push(format!("output {}", formatted));
+                        }
+                        _ => {
+                            if let Ok(expr) = pairs_to_expr(inner_pair.into_inner()) {
+                                let formatted = format_expr(&expr, Some(80));
+                                formatted_statements.push(formatted);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        assert_eq!(formatted_statements.len(), 2);
+        assert_eq!(formatted_statements[0], "result = 42");
+        assert_eq!(formatted_statements[1], "output result");
+    }
+
+    #[test]
+    fn test_output_with_complex_expression() {
+        use crate::parser::Rule;
+
+        let source = "output total = [1, 2, 3] into sum";
+        let pairs = get_pairs(source).unwrap();
+
+        let mut formatted_statements = Vec::new();
+
+        for pair in pairs {
+            if pair.as_rule() == Rule::statement {
+                if let Some(inner_pair) = pair.into_inner().next() {
+                    match inner_pair.as_rule() {
+                        Rule::output_declaration => {
+                            // Should preserve the output keyword
+                            let mut inner = inner_pair.into_inner();
+                            let assignment_or_ident = inner.next().unwrap();
+
+                            let formatted = if assignment_or_ident.as_rule() == Rule::assignment {
+                                // Extract identifier and value from assignment
+                                let mut assignment_inner = assignment_or_ident.into_inner();
+                                let ident = assignment_inner.next().unwrap().as_str();
+                                let value_expr = pairs_to_expr(assignment_inner.next().unwrap().into_inner()).unwrap();
+                                let value_formatted = format_expr(&value_expr, Some(80));
+                                format!("{} = {}", ident, value_formatted)
+                            } else {
+                                assignment_or_ident.as_str().to_string()
+                            };
+
+                            formatted_statements.push(format!("output {}", formatted));
+                        }
+                        _ => {
+                            if let Ok(expr) = pairs_to_expr(inner_pair.into_inner()) {
+                                let formatted = format_expr(&expr, Some(80));
+                                formatted_statements.push(formatted);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        assert_eq!(formatted_statements.len(), 1);
+        assert_eq!(formatted_statements[0], "output total = [1, 2, 3] into sum");
+    }
 }

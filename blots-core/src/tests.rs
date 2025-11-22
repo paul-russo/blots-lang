@@ -468,6 +468,56 @@ mod input_reference_tests {
         let result = parse_and_evaluate("#my_value", Some(heap), Some(bindings)).unwrap();
         assert_eq!(result, Value::Number(123.0));
     }
+
+    #[test]
+    fn test_multiline_evaluation_with_inputs() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        setup_inputs(&heap, &bindings);
+
+        // Test multiple statements with inputs
+        let code = "a = #x * 2\nb = #y + 10\na + b";
+        let result = parse_and_evaluate(code, Some(heap), Some(bindings)).unwrap();
+        // a = 42 * 2 = 84, b = 10 + 10 = 20, result = 84 + 20 = 104
+        assert_eq!(result, Value::Number(104.0));
+    }
+
+    #[test]
+    fn test_multiline_evaluation_with_comments() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        setup_inputs(&heap, &bindings);
+
+        // Test multiple statements with comments interspersed
+        let code = "// Calculate doubled value\na = #x * 2\n// Calculate offset\nb = #y + 10\n// Return sum\na + b";
+        let result = parse_and_evaluate(code, Some(heap), Some(bindings)).unwrap();
+        // a = 42 * 2 = 84, b = 10 + 10 = 20, result = 84 + 20 = 104
+        assert_eq!(result, Value::Number(104.0));
+    }
+
+    #[test]
+    fn test_multiline_with_blank_lines_and_comments() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        setup_inputs(&heap, &bindings);
+
+        // Test with blank lines and comments
+        let code = "x = #x * 2\ny = #y + 10\n\n// hi\nx + y";
+        let result = parse_and_evaluate(code, Some(heap), Some(bindings)).unwrap();
+        // x = 42 * 2 = 84, y = 10 + 10 = 20, result = 84 + 20 = 104
+        assert_eq!(result, Value::Number(104.0));
+    }
+
+    #[test]
+    fn test_comment_only_lines() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(RefCell::new(HashMap::new()));
+
+        // Test with just comments and a final expression
+        let code = "// First comment\n// Second comment\n42";
+        let result = parse_and_evaluate(code, Some(heap), Some(bindings)).unwrap();
+        assert_eq!(result, Value::Number(42.0));
+    }
 }
 
 // Tests for lambda error reporting across contexts
