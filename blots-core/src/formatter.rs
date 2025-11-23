@@ -103,13 +103,13 @@ fn format_multiline(expr: &SpannedExpr, max_cols: usize, indent: usize) -> Strin
 fn format_assignment_multiline(ident: &str, value: &SpannedExpr, max_cols: usize, indent: usize) -> String {
     // The assignment itself doesn't add indentation, but the value might need it
     // Format as: ident = <formatted_value>
-    // where the formatted value can use the available space
+    // The value should be formatted at the same indentation level, not pushed over
 
     let prefix = format!("{} = ", ident);
-    let prefix_len = indent + prefix.len();
 
-    // Format the value with remaining space
-    let formatted_value = format_expr_impl(value, max_cols, prefix_len);
+    // Format the value at the current indentation level
+    // (not at prefix_len which would cause excessive indentation)
+    let formatted_value = format_expr_impl(value, max_cols, indent);
 
     format!("{}{}", prefix, formatted_value)
 }
@@ -1062,5 +1062,29 @@ mod tests {
 
         assert_eq!(result.lines().count(), 6); // 3 statements + 1 blank + 2 blanks
         assert_eq!(result, "x = 1\n\ny = 2\n\n\nz = 3");
+    }
+
+    #[test]
+    fn test_assignment_with_long_list_indentation() {
+        use crate::parser::Rule;
+
+        // Test that assignments with lists don't have excessive indentation
+        let source = "ingredients = [{name: \"sugar\", amount: 1}, {name: \"flour\", amount: 2}]";
+        let pairs = get_pairs(source).unwrap();
+
+        for pair in pairs {
+            if pair.as_rule() == Rule::statement {
+                if let Some(inner_pair) = pair.into_inner().next() {
+                    if let Ok(expr) = pairs_to_expr(inner_pair.into_inner()) {
+                        let formatted = format_expr(&expr, Some(40));
+                        println!("Formatted:\n{}", formatted);
+
+                        // The list items should be indented by 2 spaces, not pushed over by the "ingredients = " prefix
+                        assert!(formatted.contains("[\n  {"));
+                        assert!(!formatted.contains("            ")); // Should not have excessive indentation
+                    }
+                }
+            }
+        }
     }
 }
