@@ -56,7 +56,7 @@ fn format_single_line(expr: &SpannedExpr) -> String {
             format!("[{}]", items_str.join(", "))
         }
         Expr::Record(entries) => {
-            let entries_str: Vec<String> = entries.iter().map(|e| format_record_entry_single_line(e)).collect();
+            let entries_str: Vec<String> = entries.iter().map(format_record_entry_single_line).collect();
             format!("{{{}}}", entries_str.join(", "))
         }
         // For everything else, use the existing expr_to_source
@@ -126,7 +126,7 @@ fn format_list_multiline(items: &[SpannedExpr], max_cols: usize, indent: usize) 
     let mut result = "[".to_string();
 
     for item in items.iter() {
-        result.push_str("\n");
+        result.push('\n');
         result.push_str(&indent_str);
         result.push_str(&format_expr_impl(item, max_cols, inner_indent));
 
@@ -134,7 +134,7 @@ fn format_list_multiline(items: &[SpannedExpr], max_cols: usize, indent: usize) 
         result.push(',');
     }
 
-    result.push_str("\n");
+    result.push('\n');
     result.push_str(&make_indent(indent));
     result.push(']');
 
@@ -153,7 +153,7 @@ fn format_record_multiline(entries: &[RecordEntry], max_cols: usize, indent: usi
     let mut result = "{".to_string();
 
     for entry in entries {
-        result.push_str("\n");
+        result.push('\n');
         result.push_str(&indent_str);
         result.push_str(&format_record_entry(entry, max_cols, inner_indent));
 
@@ -161,7 +161,7 @@ fn format_record_multiline(entries: &[RecordEntry], max_cols: usize, indent: usi
         result.push(',');
     }
 
-    result.push_str("\n");
+    result.push('\n');
     result.push_str(&make_indent(indent));
     result.push('}');
 
@@ -272,7 +272,7 @@ fn format_call_multiline(func: &SpannedExpr, args: &[SpannedExpr], max_cols: usi
     let mut result = format!("{}(", func_str);
 
     for (i, arg) in args.iter().enumerate() {
-        result.push_str("\n");
+        result.push('\n');
         result.push_str(&indent_str);
         result.push_str(&format_expr_impl(arg, max_cols, inner_indent));
 
@@ -284,7 +284,7 @@ fn format_call_multiline(func: &SpannedExpr, args: &[SpannedExpr], max_cols: usi
         }
     }
 
-    result.push_str("\n");
+    result.push('\n');
     result.push_str(&make_indent(indent));
     result.push(')');
 
@@ -323,24 +323,24 @@ fn format_do_block_multiline(statements: &[DoStatement], return_expr: &SpannedEx
     for stmt in statements {
         match stmt {
             DoStatement::Expression(e) => {
-                result.push_str("\n");
+                result.push('\n');
                 result.push_str(&indent_str);
                 // Do blocks use unlimited line length for now
                 result.push_str(&format_expr_impl(e, usize::MAX, inner_indent));
             }
             DoStatement::Comment(c) => {
-                result.push_str("\n");
+                result.push('\n');
                 result.push_str(&indent_str);
                 result.push_str(c);
             }
         }
     }
 
-    result.push_str("\n");
+    result.push('\n');
     result.push_str(&indent_str);
     result.push_str("return ");
     result.push_str(&format_expr_impl(return_expr, usize::MAX, inner_indent));
-    result.push_str("\n");
+    result.push('\n');
     result.push_str(&make_indent(indent));
     result.push('}');
 
