@@ -23,6 +23,7 @@ release version:
 # Run tests
 test:
     cargo test
+    cd blots-wasm && wasm-pack test --headless --chrome
     UV_CACHE_DIR=.uv-cache uv run --python 3.11 --with pint python scripts/check_unit_conversions.py
 
 # Clean build artifacts
