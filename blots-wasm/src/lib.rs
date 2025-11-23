@@ -1,7 +1,7 @@
 use anyhow::Result;
 use blots_core::{
     expressions::{evaluate_pairs, pairs_to_expr},
-    formatter::format_expr,
+    formatter::{format_expr, join_statements_with_spacing},
     functions::get_built_in_function_idents,
     heap::{CONSTANTS, Heap},
     parser::{Rule, Token, get_pairs, get_tokens},
@@ -299,6 +299,8 @@ pub fn format_blots(source: &str, max_columns: Option<usize>) -> Result<JsValue,
 
     for pair in pairs {
         if pair.as_rule() == Rule::statement {
+            let start_line = pair.as_span().start_pos().line_col().0;
+            let end_line = pair.as_span().end_pos().line_col().0;
             let mut inner_pairs = pair.into_inner();
 
             if let Some(first_pair) = inner_pairs.next() {
@@ -316,15 +318,17 @@ pub fn format_blots(source: &str, max_columns: Option<usize>) -> Result<JsValue,
                 };
 
                 // Check for end-of-line comment (second element in statement)
-                if let Some(eol_comment) = inner_pairs.next() {
+                let final_formatted = if let Some(eol_comment) = inner_pairs.next() {
                     if eol_comment.as_rule() == Rule::comment {
-                        formatted_statements.push(format!("{}  {}", formatted, eol_comment.as_str()));
+                        format!("{}  {}", formatted, eol_comment.as_str())
                     } else {
-                        formatted_statements.push(formatted);
+                        formatted
                     }
                 } else {
-                    formatted_statements.push(formatted);
-                }
+                    formatted
+                };
+
+                formatted_statements.push((final_formatted, start_line, end_line));
             }
         }
     }
@@ -333,8 +337,8 @@ pub fn format_blots(source: &str, max_columns: Option<usize>) -> Result<JsValue,
         return Err(JsError::new("No statements found in source"));
     }
 
-    // Join all formatted statements with newlines
-    let result = formatted_statements.join("\n");
+    // Join all formatted statements with appropriate spacing (preserving up to 1 empty line)
+    let result = join_statements_with_spacing(&formatted_statements);
 
     // Return the formatted string
     let serializer = serde_wasm_bindgen::Serializer::json_compatible();
@@ -429,6 +433,34 @@ mod tests {
         assert_eq!(lines[0], "// standalone comment");
         assert_eq!(lines[1], "x = 1  // end-of-line comment");
         assert_eq!(lines[2], "y = 2");
+    }
+
+    #[wasm_bindgen_test]
+    fn test_format_blots_preserves_empty_lines() {
+        let source = "x = 1\n\ny = 2\n\n\n\nz = 3";
+        let result = format_blots(source, Some(80)).unwrap();
+        let formatted: String = serde_wasm_bindgen::from_value(result).unwrap();
+
+        // Should preserve up to 2 empty lines between statements
+        // 1 empty line between x and y (preserved)
+        // 4 empty lines between y and z (capped at 2)
+        assert_eq!(formatted, "x = 1\n\ny = 2\n\n\nz = 3");
+
+        let lines: Vec<&str> = formatted.lines().collect();
+        assert_eq!(lines.len(), 6); // 3 statements + 1 blank + 2 blanks
+    }
+
+    #[wasm_bindgen_test]
+    fn test_format_blots_no_empty_lines() {
+        let source = "x = 1\ny = 2\nz = 3";
+        let result = format_blots(source, Some(80)).unwrap();
+        let formatted: String = serde_wasm_bindgen::from_value(result).unwrap();
+
+        // Should NOT add empty lines when there were none
+        assert_eq!(formatted, "x = 1\ny = 2\nz = 3");
+
+        let lines: Vec<&str> = formatted.lines().collect();
+        assert_eq!(lines.len(), 3);
     }
 
     // ============================================================================

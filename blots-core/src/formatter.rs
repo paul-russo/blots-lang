@@ -393,6 +393,46 @@ fn make_indent(indent: usize) -> String {
     " ".repeat(indent)
 }
 
+/// Join formatted statements with appropriate spacing based on their original positions
+/// Preserves up to 2 empty lines between statements
+pub fn join_statements_with_spacing(
+    statements: &[(String, usize, usize)], // (formatted_statement, start_line, end_line)
+) -> String {
+    if statements.is_empty() {
+        return String::new();
+    }
+
+    let mut result = String::new();
+
+    for (i, (stmt, _start_line, end_line)) in statements.iter().enumerate() {
+        result.push_str(stmt);
+
+        // Add newlines between statements
+        if i < statements.len() - 1 {
+            let next_start_line = statements[i + 1].1;
+
+            // Calculate how many lines apart they are
+            // If they're on consecutive lines (end_line = 1, next_start = 2), gap = 0
+            // If there's one empty line (end_line = 1, next_start = 3), gap = 1
+            // If there's two empty lines (end_line = 1, next_start = 4), gap = 2
+            let line_gap = next_start_line.saturating_sub(*end_line).saturating_sub(1);
+
+            // Preserve up to 2 empty lines (which means up to 3 newlines total)
+            // 0 empty lines = 1 newline
+            // 1 empty line = 2 newlines
+            // 2 empty lines = 3 newlines
+            // 3+ empty lines = 3 newlines (capped at 2)
+            let newlines = std::cmp::min(line_gap + 1, 3);
+
+            for _ in 0..newlines {
+                result.push('\n');
+            }
+        }
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -979,5 +1019,48 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_empty_lines_between_statements() {
+        use crate::parser::Rule;
+
+        // Test that empty lines between statements are preserved (up to 2)
+        let source = "x = 1\n\ny = 2\n\n\n\nz = 3";
+        let pairs = get_pairs(source).unwrap();
+
+        let mut statements_with_positions = Vec::new();
+
+        for pair in pairs {
+            if pair.as_rule() == Rule::statement {
+                let start_line = pair.as_span().start_pos().line_col().0;
+                let end_line = pair.as_span().end_pos().line_col().0;
+
+                if let Some(inner_pair) = pair.into_inner().next() {
+                    if let Ok(expr) = pairs_to_expr(inner_pair.into_inner()) {
+                        let formatted = format_expr(&expr, Some(80));
+                        statements_with_positions.push((formatted, start_line, end_line));
+                    }
+                }
+            }
+        }
+
+        println!("Statement positions: {:?}", statements_with_positions);
+
+        // Use the new helper function to join with spacing
+        let result = join_statements_with_spacing(&statements_with_positions);
+        println!("Output with preserved spacing:\n{}", result);
+
+        // We want to preserve 1 empty line between x and y, and cap at 2 between y and z
+        // So it should be:
+        // x = 1
+        // <blank>
+        // y = 2
+        // <blank>
+        // <blank>
+        // z = 3
+
+        assert_eq!(result.lines().count(), 6); // 3 statements + 1 blank + 2 blanks
+        assert_eq!(result, "x = 1\n\ny = 2\n\n\nz = 3");
     }
 }
