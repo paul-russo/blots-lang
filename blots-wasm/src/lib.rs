@@ -299,19 +299,31 @@ pub fn format_blots(source: &str, max_columns: Option<usize>) -> Result<JsValue,
 
     for pair in pairs {
         if pair.as_rule() == Rule::statement {
-            if let Some(inner_pair) = pair.into_inner().next() {
-                match inner_pair.as_rule() {
+            let mut inner_pairs = pair.into_inner();
+
+            if let Some(first_pair) = inner_pairs.next() {
+                let formatted = match first_pair.as_rule() {
                     Rule::comment => {
-                        // Preserve comments as-is
-                        formatted_statements.push(inner_pair.as_str().to_string());
+                        // Standalone comment
+                        first_pair.as_str().to_string()
                     }
                     _ => {
                         // Format as expression
-                        let expr = pairs_to_expr(inner_pair.into_inner())
+                        let expr = pairs_to_expr(first_pair.into_inner())
                             .map_err(|e| JsError::new(&format!("AST conversion error: {}", e)))?;
-                        let formatted = format_expr(&expr, max_columns);
+                        format_expr(&expr, max_columns)
+                    }
+                };
+
+                // Check for end-of-line comment (second element in statement)
+                if let Some(eol_comment) = inner_pairs.next() {
+                    if eol_comment.as_rule() == Rule::comment {
+                        formatted_statements.push(format!("{}  {}", formatted, eol_comment.as_str()));
+                    } else {
                         formatted_statements.push(formatted);
                     }
+                } else {
+                    formatted_statements.push(formatted);
                 }
             }
         }
@@ -394,6 +406,29 @@ mod tests {
         assert_eq!(lines[0], "x = 1");
         assert_eq!(lines[1], "y = 2");
         assert_eq!(lines[2], "z = x + y");
+    }
+
+    #[wasm_bindgen_test]
+    fn test_format_blots_end_of_line_comments() {
+        let source = "x = 5  // this is a comment\ny = 10";
+        let result = format_blots(source, Some(80)).unwrap();
+        let formatted: String = serde_wasm_bindgen::from_value(result).unwrap();
+        let lines: Vec<&str> = formatted.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "x = 5  // this is a comment");
+        assert_eq!(lines[1], "y = 10");
+    }
+
+    #[wasm_bindgen_test]
+    fn test_format_blots_mixed_comments() {
+        let source = "// standalone comment\nx = 1  // end-of-line comment\ny = 2";
+        let result = format_blots(source, Some(80)).unwrap();
+        let formatted: String = serde_wasm_bindgen::from_value(result).unwrap();
+        let lines: Vec<&str> = formatted.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "// standalone comment");
+        assert_eq!(lines[1], "x = 1  // end-of-line comment");
+        assert_eq!(lines[2], "y = 2");
     }
 
     // ============================================================================

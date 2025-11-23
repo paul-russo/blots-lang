@@ -714,4 +714,200 @@ mod tests {
         assert_eq!(formatted_statements.len(), 1);
         assert_eq!(formatted_statements[0], "output total = [1, 2, 3] into sum");
     }
+
+    #[test]
+    fn test_end_of_line_comments() {
+        use crate::parser::Rule;
+
+        let source = "x = 5  // this is an end-of-line comment\ny = 10";
+        let pairs = get_pairs(source).unwrap();
+
+        let mut formatted_statements = Vec::new();
+
+        for pair in pairs {
+            if pair.as_rule() == Rule::statement {
+                let mut inner_pairs = pair.into_inner();
+
+                if let Some(first_pair) = inner_pairs.next() {
+                    let formatted = match first_pair.as_rule() {
+                        Rule::comment => first_pair.as_str().to_string(),
+                        _ => {
+                            if let Ok(expr) = pairs_to_expr(first_pair.into_inner()) {
+                                format_expr(&expr, Some(80))
+                            } else {
+                                continue;
+                            }
+                        }
+                    };
+
+                    // Check for end-of-line comment (second element in statement)
+                    if let Some(eol_comment) = inner_pairs.next() {
+                        if eol_comment.as_rule() == Rule::comment {
+                            formatted_statements.push(format!("{}  {}", formatted, eol_comment.as_str()));
+                        } else {
+                            formatted_statements.push(formatted);
+                        }
+                    } else {
+                        formatted_statements.push(formatted);
+                    }
+                }
+            }
+        }
+
+        assert_eq!(formatted_statements.len(), 2);
+        assert_eq!(formatted_statements[0], "x = 5  // this is an end-of-line comment");
+        assert_eq!(formatted_statements[1], "y = 10");
+    }
+
+    #[test]
+    fn test_multiple_end_of_line_comments() {
+        use crate::parser::Rule;
+
+        let source = "a = 1  // comment 1\nb = 2  // comment 2\nc = 3";
+        let pairs = get_pairs(source).unwrap();
+
+        let mut formatted_statements = Vec::new();
+
+        for pair in pairs {
+            if pair.as_rule() == Rule::statement {
+                let mut inner_pairs = pair.into_inner();
+
+                if let Some(first_pair) = inner_pairs.next() {
+                    let formatted = match first_pair.as_rule() {
+                        Rule::comment => first_pair.as_str().to_string(),
+                        _ => {
+                            if let Ok(expr) = pairs_to_expr(first_pair.into_inner()) {
+                                format_expr(&expr, Some(80))
+                            } else {
+                                continue;
+                            }
+                        }
+                    };
+
+                    // Check for end-of-line comment
+                    if let Some(eol_comment) = inner_pairs.next() {
+                        if eol_comment.as_rule() == Rule::comment {
+                            formatted_statements.push(format!("{}  {}", formatted, eol_comment.as_str()));
+                        } else {
+                            formatted_statements.push(formatted);
+                        }
+                    } else {
+                        formatted_statements.push(formatted);
+                    }
+                }
+            }
+        }
+
+        assert_eq!(formatted_statements.len(), 3);
+        assert_eq!(formatted_statements[0], "a = 1  // comment 1");
+        assert_eq!(formatted_statements[1], "b = 2  // comment 2");
+        assert_eq!(formatted_statements[2], "c = 3");
+    }
+
+    #[test]
+    fn test_eol_comments_not_joined_with_next_line() {
+        use crate::parser::Rule;
+
+        // Ensure statements with EOL comments remain on their own line
+        let source = "x = 1  // first value\ny = 2  // second value\nz = x + y";
+        let pairs = get_pairs(source).unwrap();
+
+        let mut formatted_statements = Vec::new();
+
+        for pair in pairs {
+            if pair.as_rule() == Rule::statement {
+                let mut inner_pairs = pair.into_inner();
+
+                if let Some(first_pair) = inner_pairs.next() {
+                    let formatted = match first_pair.as_rule() {
+                        Rule::comment => first_pair.as_str().to_string(),
+                        _ => {
+                            if let Ok(expr) = pairs_to_expr(first_pair.into_inner()) {
+                                format_expr(&expr, Some(80))
+                            } else {
+                                continue;
+                            }
+                        }
+                    };
+
+                    // Check for end-of-line comment
+                    if let Some(eol_comment) = inner_pairs.next() {
+                        if eol_comment.as_rule() == Rule::comment {
+                            formatted_statements.push(format!("{}  {}", formatted, eol_comment.as_str()));
+                        } else {
+                            formatted_statements.push(formatted);
+                        }
+                    } else {
+                        formatted_statements.push(formatted);
+                    }
+                }
+            }
+        }
+
+        // Join with newlines - each statement should be on its own line
+        let result = formatted_statements.join("\n");
+
+        assert_eq!(formatted_statements.len(), 3);
+        // Verify no statement got joined into one line
+        assert_eq!(result.lines().count(), 3);
+        assert_eq!(formatted_statements[0], "x = 1  // first value");
+        assert_eq!(formatted_statements[1], "y = 2  // second value");
+        assert_eq!(formatted_statements[2], "z = x + y");
+
+        // Ensure the result doesn't contain any line with multiple statements
+        for line in result.lines() {
+            // Count equals signs - should only be 1 per line
+            assert_eq!(line.matches('=').count(), 1, "Line should not contain multiple statements: {}", line);
+        }
+    }
+
+    #[test]
+    fn test_eol_comments_with_line_breaking() {
+        use crate::parser::Rule;
+
+        // Test that expressions can still be broken across lines when they have EOL comments
+        let source = "longRecord = {name: \"Alice\", age: 30, email: \"alice@example.com\", address: \"123 Main St\"}  // user data";
+        let pairs = get_pairs(source).unwrap();
+
+        let mut formatted_statements = Vec::new();
+
+        for pair in pairs {
+            if pair.as_rule() == Rule::statement {
+                let mut inner_pairs = pair.into_inner();
+
+                if let Some(first_pair) = inner_pairs.next() {
+                    let formatted = match first_pair.as_rule() {
+                        Rule::comment => first_pair.as_str().to_string(),
+                        _ => {
+                            if let Ok(expr) = pairs_to_expr(first_pair.into_inner()) {
+                                // Use a shorter line limit to force breaking
+                                format_expr(&expr, Some(40))
+                            } else {
+                                continue;
+                            }
+                        }
+                    };
+
+                    // Check for end-of-line comment
+                    if let Some(eol_comment) = inner_pairs.next() {
+                        if eol_comment.as_rule() == Rule::comment {
+                            formatted_statements.push(format!("{}  {}", formatted, eol_comment.as_str()));
+                        } else {
+                            formatted_statements.push(formatted);
+                        }
+                    } else {
+                        formatted_statements.push(formatted);
+                    }
+                }
+            }
+        }
+
+        assert_eq!(formatted_statements.len(), 1);
+        let result = &formatted_statements[0];
+
+        // The comment should be at the end
+        assert!(result.ends_with("// user data"));
+        // The expression should be formatted (likely multi-line)
+        assert!(result.contains("longRecord = "));
+    }
 }
