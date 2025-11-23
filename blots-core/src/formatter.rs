@@ -79,6 +79,9 @@ fn format_record_entry_single_line(entry: &RecordEntry) -> String {
 /// Format an expression across multiple lines
 fn format_multiline(expr: &SpannedExpr, max_cols: usize, indent: usize) -> String {
     match &expr.node {
+        Expr::Assignment { ident, value } => {
+            format_assignment_multiline(ident, value, max_cols, indent)
+        }
         Expr::List(items) => format_list_multiline(items, max_cols, indent),
         Expr::Record(entries) => format_record_multiline(entries, max_cols, indent),
         Expr::Conditional { condition, then_expr, else_expr } => {
@@ -94,6 +97,21 @@ fn format_multiline(expr: &SpannedExpr, max_cols: usize, indent: usize) -> Strin
         // For other expression types, fall back to single-line
         _ => expr_to_source(expr),
     }
+}
+
+/// Format an assignment with line breaks
+fn format_assignment_multiline(ident: &str, value: &SpannedExpr, max_cols: usize, indent: usize) -> String {
+    // The assignment itself doesn't add indentation, but the value might need it
+    // Format as: ident = <formatted_value>
+    // where the formatted value can use the available space
+
+    let prefix = format!("{} = ", ident);
+    let prefix_len = indent + prefix.len();
+
+    // Format the value with remaining space
+    let formatted_value = format_expr_impl(value, max_cols, prefix_len);
+
+    format!("{}{}", prefix, formatted_value)
 }
 
 /// Format a list with line breaks
@@ -909,5 +927,57 @@ mod tests {
         assert!(result.ends_with("// user data"));
         // The expression should be formatted (likely multi-line)
         assert!(result.contains("longRecord = "));
+    }
+
+    #[test]
+    fn test_actual_line_breaking_behavior() {
+        use crate::parser::Rule;
+
+        // Test what actually happens with long lines
+        let source = "x = {name: \"Alice\", age: 30, email: \"alice@example.com\", address: \"123 Main St\", city: \"Springfield\"}";
+        let pairs = get_pairs(source).unwrap();
+
+        for pair in pairs {
+            if pair.as_rule() == Rule::statement {
+                if let Some(inner_pair) = pair.into_inner().next() {
+                    if let Ok(expr) = pairs_to_expr(inner_pair.into_inner()) {
+                        let formatted = format_expr(&expr, Some(40));
+                        println!("Formatted output:\n{}", formatted);
+                        println!("Line count: {}", formatted.lines().count());
+
+                        // Check if it's actually breaking lines
+                        if formatted.lines().count() > 1 {
+                            println!("✓ Lines were broken");
+                        } else {
+                            println!("✗ No line breaking occurred - output is {} chars", formatted.len());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_multiline_input_gets_collapsed() {
+        use crate::parser::Rule;
+
+        // Test if multiline input gets collapsed to a single line
+        let source = "x = [\n  1,\n  2,\n  3\n]";
+        let pairs = get_pairs(source).unwrap();
+
+        for pair in pairs {
+            if pair.as_rule() == Rule::statement {
+                if let Some(inner_pair) = pair.into_inner().next() {
+                    if let Ok(expr) = pairs_to_expr(inner_pair.into_inner()) {
+                        let formatted = format_expr(&expr, Some(80));
+                        println!("Input:\n{}", source);
+                        println!("Output:\n{}", formatted);
+
+                        // Currently it collapses to single line
+                        assert_eq!(formatted, "x = [1, 2, 3]");
+                    }
+                }
+            }
+        }
     }
 }
