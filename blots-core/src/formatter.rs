@@ -44,6 +44,9 @@ fn format_expr_impl(expr: &SpannedExpr, max_cols: usize, indent: usize) -> Strin
 /// Format an expression on a single line (respecting our formatting rules)
 fn format_single_line(expr: &SpannedExpr) -> String {
     match &expr.node {
+        Expr::Output { expr: inner_expr } => {
+            format!("output {}", format_single_line(inner_expr))
+        }
         Expr::Lambda { args, body } => {
             let args_str: Vec<String> = args.iter().map(lambda_arg_to_str).collect();
             let args_part = if args.len() == 1 && matches!(args[0], LambdaArg::Required(_)) {
@@ -89,6 +92,11 @@ fn format_record_entry_single_line(entry: &RecordEntry) -> String {
 /// Format an expression across multiple lines
 fn format_multiline(expr: &SpannedExpr, max_cols: usize, indent: usize) -> String {
     match &expr.node {
+        Expr::Output { expr: inner_expr } => {
+            // Format as "output " + formatted inner expression
+            let formatted_inner = format_expr_impl(inner_expr, max_cols, indent);
+            format!("output {}", formatted_inner)
+        }
         Expr::Assignment { ident, value } => {
             format_assignment_multiline(ident, value, max_cols, indent)
         }

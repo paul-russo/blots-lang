@@ -363,6 +363,10 @@ pub fn evaluate_ast(
             bindings.borrow_mut().insert(ident.clone(), val);
             Ok(val)
         }
+        Expr::Output { expr: inner_expr } => {
+            // Output is just an annotation - evaluate the inner expression
+            evaluate_ast(inner_expr, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone())
+        }
         Expr::Conditional {
             condition,
             then_expr,

@@ -59,6 +59,7 @@ pub fn expr_to_source(spanned_expr: &SpannedExpr) -> String {
             result
         }
         Expr::Assignment { ident, value } => format!("{} = {}", ident, expr_to_source(value)),
+        Expr::Output { expr } => format!("output {}", expr_to_source(expr)),
         Expr::Call { func, args } => {
             let args_str: Vec<String> = args.iter().map(expr_to_source).collect();
             let func_str = match &func.node {
@@ -315,6 +316,9 @@ pub fn expr_to_source_with_scope(
         Expr::Spread(expr) => format!("...{}", expr_to_source_with_scope(expr, scope)),
         Expr::Assignment { ident, value } => {
             format!("{} = {}", ident, expr_to_source_with_scope(value, scope))
+        }
+        Expr::Output { expr } => {
+            format!("output {}", expr_to_source_with_scope(expr, scope))
         }
         Expr::Call { func, args } => {
             let args_str: Vec<String> = args

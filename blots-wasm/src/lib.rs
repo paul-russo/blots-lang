@@ -1,5 +1,6 @@
 use anyhow::Result;
 use blots_core::{
+    ast::{Expr, Spanned},
     expressions::{evaluate_pairs, pairs_to_expr},
     formatter::{format_expr, join_statements_with_spacing},
     functions::get_built_in_function_idents,
@@ -310,10 +311,13 @@ pub fn format_blots(source: &str, max_columns: Option<usize>) -> Result<JsValue,
                         first_pair.as_str().to_string()
                     }
                     Rule::output_declaration => {
-                        // Output declaration: "output " + expression
-                        let expr = pairs_to_expr(first_pair.into_inner())
+                        // Output declaration - wrap in Output expression
+                        let inner_expr = pairs_to_expr(first_pair.into_inner())
                             .map_err(|e| JsError::new(&format!("AST conversion error: {}", e)))?;
-                        format!("output {}", format_expr(&expr, max_columns))
+                        let output_expr = Spanned::dummy(Expr::Output {
+                            expr: Box::new(inner_expr),
+                        });
+                        format_expr(&output_expr, max_columns)
                     }
                     _ => {
                         // Format as expression

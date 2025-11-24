@@ -2,6 +2,7 @@ mod cli;
 mod commands;
 mod highlighter;
 
+use blots_core::ast::{Expr, Spanned};
 use blots_core::expressions::{evaluate_pairs, pairs_to_expr, validate_portable_value};
 use blots_core::formatter::format_expr;
 use blots_core::heap::Heap;
@@ -259,11 +260,13 @@ fn main() -> ! {
                                 }
                             }
                             Rule::output_declaration => {
-                                // Output declarations: "output " + expression
                                 match pairs_to_expr(inner_pair.into_inner()) {
-                                    Ok(expr) => {
-                                        let formatted = format_expr(&expr, None);
-                                        formatted_output.push_str("output ");
+                                    Ok(inner_expr) => {
+                                        // Wrap in Output expression
+                                        let output_expr = Spanned::dummy(Expr::Output {
+                                            expr: Box::new(inner_expr),
+                                        });
+                                        let formatted = format_expr(&output_expr, None);
                                         formatted_output.push_str(&formatted);
                                         formatted_output.push('\n');
                                     }

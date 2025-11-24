@@ -107,6 +107,10 @@ pub enum Expr {
         value: Box<SpannedExpr>,
     },
 
+    Output {
+        expr: Box<SpannedExpr>,
+    },
+
     Call {
         func: Box<SpannedExpr>,
         args: Vec<SpannedExpr>,
