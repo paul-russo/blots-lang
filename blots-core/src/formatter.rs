@@ -18,12 +18,22 @@ fn format_expr_impl(expr: &SpannedExpr, max_cols: usize, indent: usize) -> Strin
         return format_lambda(args, body, max_cols, indent);
     }
 
+    // Special handling for do blocks - they're inherently multi-line
+    // but we want to check if the opening fits on the current line
+    if let Expr::DoBlock { .. } = &expr.node {
+        return format_multiline(expr, max_cols, indent);
+    }
+
     // First, try single-line formatting using our custom formatter
     let single_line = format_single_line(expr);
-    let current_line_length = indent + single_line.len();
 
-    // If it fits on one line, use it
-    if current_line_length <= max_cols {
+    // For expressions with do blocks inside, we can't use single_line.len()
+    // because it already contains newlines. Instead, check the first line only.
+    let first_line = single_line.lines().next().unwrap_or(&single_line);
+    let current_line_length = indent + first_line.len();
+
+    // If the first line fits and there are no newlines, use single-line format
+    if !single_line.contains('\n') && current_line_length <= max_cols {
         return single_line;
     }
 
@@ -197,11 +207,18 @@ fn format_lambda(args: &[LambdaArg], body: &SpannedExpr, max_cols: usize, indent
         format!("({}) =>", args_str.join(", "))
     };
 
-    // Try single-line first
+    // Special handling for do blocks - keep "=> do {" together
+    if let Expr::DoBlock { .. } = &body.node {
+        let body_formatted = format_expr_impl(body, max_cols, indent);
+        return format!("{} {}", args_part, body_formatted);
+    }
+
+    // Try single-line first for other body types
     let single_line_body = format_expr_impl(body, max_cols, indent);
     let single_line = format!("{} {}", args_part, single_line_body);
 
-    if indent + single_line.len() <= max_cols {
+    // Check only if it's actually single-line and fits
+    if !single_line.contains('\n') && indent + single_line.len() <= max_cols {
         return single_line;
     }
 
@@ -302,7 +319,38 @@ fn format_binary_op_multiline(
     let op_str = binary_op_str(op);
     let left_str = format_expr_impl(left, max_cols, indent);
 
-    // Break before the operator
+    // Special handling for via/into/where with lambda on the right
+    // Try to keep "via lambda" together on the same line
+    if matches!(op, BinaryOp::Via | BinaryOp::Into | BinaryOp::Where)
+        && let Expr::Lambda { .. } = &right.node {
+            // Format the right side (lambda with possible do block)
+            let right_str = format_expr_impl(right, max_cols, indent);
+
+            // Check if the first line of the whole expression fits
+            // (for lambdas with do blocks, this would be "left via i => do {")
+            let first_line_of_right = right_str.lines().next().unwrap_or(&right_str);
+            let first_line_combined = format!("{} {} {}", left_str, op_str, first_line_of_right);
+
+            if indent + first_line_combined.len() <= max_cols {
+                // The opening line fits! Return the full formatted expression
+                // If right_str is multi-line, this will preserve that structure
+                if right_str.contains('\n') {
+                    // Multi-line lambda (like with do block)
+                    let remaining_lines = right_str.lines().skip(1).collect::<Vec<_>>().join("\n");
+                    return format!("{} {} {}\n{}", left_str, op_str, first_line_of_right, remaining_lines);
+                } else {
+                    // Single-line lambda
+                    return format!("{} {} {}", left_str, op_str, right_str);
+                }
+            }
+
+            // If it doesn't fit, break after the operator
+            let continued_indent = indent;
+            let right_formatted = format_expr_impl(right, max_cols, continued_indent);
+            return format!("{} {}\n{}{}", left_str, op_str, make_indent(continued_indent), right_formatted);
+        }
+
+    // Default: break before the operator with indentation
     let right_indent = indent + INDENT_SIZE;
     format!(
         "{}\n{}{} {}",
