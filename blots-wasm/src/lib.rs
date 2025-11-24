@@ -309,6 +309,12 @@ pub fn format_blots(source: &str, max_columns: Option<usize>) -> Result<JsValue,
                         // Standalone comment
                         first_pair.as_str().to_string()
                     }
+                    Rule::output_declaration => {
+                        // Output declaration: "output " + expression
+                        let expr = pairs_to_expr(first_pair.into_inner())
+                            .map_err(|e| JsError::new(&format!("AST conversion error: {}", e)))?;
+                        format!("output {}", format_expr(&expr, max_columns))
+                    }
                     _ => {
                         // Format as expression
                         let expr = pairs_to_expr(first_pair.into_inner())
@@ -461,6 +467,35 @@ mod tests {
 
         let lines: Vec<&str> = formatted.lines().collect();
         assert_eq!(lines.len(), 3);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_format_blots_preserves_output_keyword() {
+        let source = "output x = 42\noutput y = [1, 2, 3]\nz = 10";
+        let result = format_blots(source, Some(80)).unwrap();
+        let formatted: String = serde_wasm_bindgen::from_value(result).unwrap();
+
+        // Output keywords should be preserved
+        assert!(formatted.contains("output x = 42"));
+        assert!(formatted.contains("output y = [1, 2, 3]"));
+        assert!(formatted.contains("z = 10"));
+
+        let lines: Vec<&str> = formatted.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "output x = 42");
+        assert_eq!(lines[1], "output y = [1, 2, 3]");
+        assert_eq!(lines[2], "z = 10");
+    }
+
+    #[wasm_bindgen_test]
+    fn test_format_blots_output_with_via() {
+        let source = "output result = items via i => i * 2";
+        let result = format_blots(source, Some(80)).unwrap();
+        let formatted: String = serde_wasm_bindgen::from_value(result).unwrap();
+
+        // Output keyword should be preserved with via expression
+        assert!(formatted.contains("output result = items via"));
+        assert!(formatted.starts_with("output result"));
     }
 
     // ============================================================================
