@@ -2,7 +2,8 @@ mod cli;
 mod commands;
 mod highlighter;
 
-use blots_core::expressions::{evaluate_pairs, validate_portable_value};
+use blots_core::expressions::{evaluate_pairs, pairs_to_expr, validate_portable_value};
+use blots_core::formatter::format_expr;
 use blots_core::heap::Heap;
 use blots_core::parser::{Rule, get_pairs};
 use blots_core::values::{SerializableValue, Value};
@@ -207,6 +208,96 @@ fn main() -> ! {
             }
         }
         std::process::exit(0);
+    }
+
+    // Handle formatting
+    if !ARGS.format.is_empty() {
+        if ARGS.format.len() != 2 {
+            eprintln!("Error: --format requires exactly 2 arguments: INPUT and OUTPUT");
+            std::process::exit(1);
+        }
+
+        let input_path = &ARGS.format[0];
+        let output_path = &ARGS.format[1];
+
+        // Read input file
+        let source = match fs::read_to_string(input_path) {
+            Ok(content) => content,
+            Err(e) => {
+                eprintln!("Error reading input file '{}': {}", input_path, e);
+                std::process::exit(1);
+            }
+        };
+
+        // Parse the source
+        let pairs = match get_pairs(&source) {
+            Ok(pairs) => pairs,
+            Err(e) => {
+                eprintln!("Parse error: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        // Format each statement
+        let mut formatted_output = String::new();
+        for pair in pairs {
+            match pair.as_rule() {
+                Rule::statement => {
+                    if let Some(inner_pair) = pair.into_inner().next() {
+                        match inner_pair.as_rule() {
+                            Rule::expression => {
+                                match pairs_to_expr(inner_pair.into_inner()) {
+                                    Ok(expr) => {
+                                        let formatted = format_expr(&expr, None);
+                                        formatted_output.push_str(&formatted);
+                                        formatted_output.push('\n');
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Error converting to AST: {}", e);
+                                        std::process::exit(1);
+                                    }
+                                }
+                            }
+                            Rule::output_declaration => {
+                                // Output declarations: "output " + expression
+                                match pairs_to_expr(inner_pair.into_inner()) {
+                                    Ok(expr) => {
+                                        let formatted = format_expr(&expr, None);
+                                        formatted_output.push_str("output ");
+                                        formatted_output.push_str(&formatted);
+                                        formatted_output.push('\n');
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Error converting to AST: {}", e);
+                                        std::process::exit(1);
+                                    }
+                                }
+                            }
+                            Rule::comment => {
+                                // Preserve comments as-is
+                                formatted_output.push_str(inner_pair.as_str());
+                                formatted_output.push('\n');
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Rule::EOI => {}
+                _ => {}
+            }
+        }
+
+        // Write to output file
+        match fs::write(output_path, formatted_output) {
+            Ok(_) => {
+                println!("Formatted {} -> {}", input_path, output_path);
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("Error writing output file '{}': {}", output_path, e);
+                std::process::exit(1);
+            }
+        }
     }
 
     // Save output path for REPL mode (before args is moved)

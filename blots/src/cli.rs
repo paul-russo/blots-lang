@@ -23,4 +23,8 @@ pub struct Args {
     /// Generate shell completions for the specified shell.
     #[arg(long, value_name = "SHELL")]
     pub completions: Option<Shell>,
+
+    /// Format a Blots source file. Takes input and output file paths.
+    #[arg(short = 'f', long, value_names = ["INPUT", "OUTPUT"], num_args = 2, group = "source")]
+    pub format: Vec<String>,
 }

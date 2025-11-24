@@ -6,6 +6,7 @@ use crate::{
     },
     heap::{Heap, HeapPointer, HeapValue, IterablePointer, RecordPointer},
     parser::Rule,
+    precedence::PRATT,
     values::{
         LambdaArg, LambdaDef,
         Value::{self, Bool, List, Number, Spread},
@@ -13,52 +14,12 @@ use crate::{
 };
 use anyhow::{Result as AnyhowResult, anyhow};
 use indexmap::IndexMap;
-use pest::{
-    iterators::{Pair, Pairs},
-    pratt_parser::{Assoc, Op, PrattParser},
-};
+use pest::iterators::{Pair, Pairs};
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
     rc::Rc,
-    sync::LazyLock,
 };
-
-static PRATT: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
-    PrattParser::new()
-        .op(Op::infix(Rule::and, Assoc::Left)
-            | Op::infix(Rule::natural_and, Assoc::Left)
-            | Op::infix(Rule::or, Assoc::Left)
-            | Op::infix(Rule::natural_or, Assoc::Left)
-            | Op::infix(Rule::via, Assoc::Left)
-            | Op::infix(Rule::into, Assoc::Left)
-            | Op::infix(Rule::where_, Assoc::Left))
-        .op(Op::infix(Rule::equal, Assoc::Left)
-            | Op::infix(Rule::not_equal, Assoc::Left)
-            | Op::infix(Rule::less, Assoc::Left)
-            | Op::infix(Rule::less_eq, Assoc::Left)
-            | Op::infix(Rule::greater, Assoc::Left)
-            | Op::infix(Rule::greater_eq, Assoc::Left)
-            | Op::infix(Rule::dot_equal, Assoc::Left)
-            | Op::infix(Rule::dot_not_equal, Assoc::Left)
-            | Op::infix(Rule::dot_less, Assoc::Left)
-            | Op::infix(Rule::dot_less_eq, Assoc::Left)
-            | Op::infix(Rule::dot_greater, Assoc::Left)
-            | Op::infix(Rule::dot_greater_eq, Assoc::Left))
-        .op(Op::infix(Rule::add, Assoc::Left) | Op::infix(Rule::subtract, Assoc::Left))
-        .op(Op::infix(Rule::multiply, Assoc::Left)
-            | Op::infix(Rule::divide, Assoc::Left)
-            | Op::infix(Rule::modulo, Assoc::Left))
-        .op(Op::infix(Rule::power, Assoc::Right) | Op::infix(Rule::coalesce, Assoc::Left))
-        .op(Op::prefix(Rule::negation)
-            | Op::prefix(Rule::spread_operator)
-            | Op::prefix(Rule::invert)
-            | Op::prefix(Rule::natural_not))
-        .op(Op::postfix(Rule::factorial))
-        .op(Op::postfix(Rule::access)
-            | Op::postfix(Rule::dot_access)
-            | Op::postfix(Rule::call_list))
-});
 
 /// Parse pairs into AST and evaluate
 pub fn evaluate_pairs(

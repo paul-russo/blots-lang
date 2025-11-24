@@ -1,4 +1,5 @@
 use crate::ast::{BinaryOp, DoStatement, Expr, PostfixOp, RecordEntry, RecordKey, SpannedExpr, UnaryOp};
+use crate::precedence::{operator_info, Assoc};
 use crate::values::{LambdaArg, SerializableValue};
 use indexmap::IndexMap;
 
@@ -73,12 +74,17 @@ pub fn expr_to_source(spanned_expr: &SpannedExpr) -> String {
         Expr::DotAccess { expr, field } => format!("{}.{}", expr_to_source(expr), field),
         Expr::BinaryOp { op, left, right } => {
             let op_str = binary_op_to_source(op);
-            format!(
-                "{} {} {}",
-                expr_to_source(left),
-                op_str,
+            let left_str = if needs_parens_in_binop(op, left, true) {
+                format!("({})", expr_to_source(left))
+            } else {
+                expr_to_source(left)
+            };
+            let right_str = if needs_parens_in_binop(op, right, false) {
+                format!("({})", expr_to_source(right))
+            } else {
                 expr_to_source(right)
-            )
+            };
+            format!("{} {} {}", left_str, op_str, right_str)
         }
         Expr::UnaryOp { op, expr } => {
             let op_str = unary_op_to_source(op);
@@ -143,6 +149,39 @@ fn binary_op_to_source(op: &BinaryOp) -> &'static str {
         BinaryOp::Into => "into",
         BinaryOp::Where => "where",
         BinaryOp::Coalesce => "??",
+    }
+}
+
+/// Check if a child expression needs parentheses when used in a binary operation
+fn needs_parens_in_binop(parent_op: &BinaryOp, child_expr: &SpannedExpr, is_left: bool) -> bool {
+    match &child_expr.node {
+        Expr::BinaryOp { op: child_op, .. } => {
+            let (parent_prec, parent_assoc) = operator_info(parent_op);
+            let (child_prec, _child_assoc) = operator_info(child_op);
+
+            // Need parentheses if child has lower precedence
+            if child_prec < parent_prec {
+                return true;
+            }
+
+            // For same precedence, need parentheses on right side for:
+            // - Right-associative operators (e.g., power)
+            // - Non-associative operators (subtraction, division)
+            if child_prec == parent_prec && !is_left {
+                match parent_assoc {
+                    Assoc::Right => return true,
+                    Assoc::Left => {
+                        // For left-associative operators, right side needs parens for non-associative ones
+                        if matches!(parent_op, BinaryOp::Subtract | BinaryOp::Divide | BinaryOp::Modulo) {
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            false
+        }
+        _ => false,
     }
 }
 
@@ -249,12 +288,17 @@ pub fn expr_to_source_with_scope(
         }
         Expr::BinaryOp { op, left, right } => {
             let op_str = binary_op_to_source(op);
-            format!(
-                "{} {} {}",
-                expr_to_source_with_scope(left, scope),
-                op_str,
+            let left_str = if needs_parens_in_binop(op, left, true) {
+                format!("({})", expr_to_source_with_scope(left, scope))
+            } else {
+                expr_to_source_with_scope(left, scope)
+            };
+            let right_str = if needs_parens_in_binop(op, right, false) {
+                format!("({})", expr_to_source_with_scope(right, scope))
+            } else {
                 expr_to_source_with_scope(right, scope)
-            )
+            };
+            format!("{} {} {}", left_str, op_str, right_str)
         }
         Expr::UnaryOp { op, expr } => {
             let op_str = match op {

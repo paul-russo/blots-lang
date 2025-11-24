@@ -92,7 +92,7 @@ fn format_multiline(expr: &SpannedExpr, max_cols: usize, indent: usize) -> Strin
             format_binary_op_multiline(op, left, right, max_cols, indent)
         }
         Expr::DoBlock { statements, return_expr } => {
-            format_do_block_multiline(statements, return_expr, indent)
+            format_do_block_multiline(statements, return_expr, max_cols, indent)
         }
         // For other expression types, fall back to single-line
         _ => expr_to_source(expr),
@@ -314,7 +314,7 @@ fn format_binary_op_multiline(
 }
 
 /// Format a do block (always multi-line)
-fn format_do_block_multiline(statements: &[DoStatement], return_expr: &SpannedExpr, indent: usize) -> String {
+fn format_do_block_multiline(statements: &[DoStatement], return_expr: &SpannedExpr, max_cols: usize, indent: usize) -> String {
     let inner_indent = indent + INDENT_SIZE;
     let indent_str = make_indent(inner_indent);
 
@@ -325,8 +325,7 @@ fn format_do_block_multiline(statements: &[DoStatement], return_expr: &SpannedEx
             DoStatement::Expression(e) => {
                 result.push('\n');
                 result.push_str(&indent_str);
-                // Do blocks use unlimited line length for now
-                result.push_str(&format_expr_impl(e, usize::MAX, inner_indent));
+                result.push_str(&format_expr_impl(e, max_cols, inner_indent));
             }
             DoStatement::Comment(c) => {
                 result.push('\n');
@@ -339,7 +338,7 @@ fn format_do_block_multiline(statements: &[DoStatement], return_expr: &SpannedEx
     result.push('\n');
     result.push_str(&indent_str);
     result.push_str("return ");
-    result.push_str(&format_expr_impl(return_expr, usize::MAX, inner_indent));
+    result.push_str(&format_expr_impl(return_expr, max_cols, inner_indent));
     result.push('\n');
     result.push_str(&make_indent(indent));
     result.push('}');

@@ -10,6 +10,7 @@ pub mod expressions;
 pub mod functions;
 pub mod heap;
 pub mod parser;
+pub mod precedence;
 pub mod stats;
 pub mod tests;
 pub mod units;
