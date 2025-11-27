@@ -18,6 +18,16 @@ use crate::stats::FunctionCallStats;
 pub static FUNCTION_CALLS: LazyLock<Mutex<Vec<FunctionCallStats>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 
+#[cfg(not(target_arch = "wasm32"))]
+pub fn get_function_call_stats() -> Vec<FunctionCallStats> {
+    FUNCTION_CALLS.lock().unwrap().clone()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn clear_function_call_stats() {
+    FUNCTION_CALLS.lock().unwrap().clear();
+}
+
 // Cache built-in function names since they're static
 pub static BUILTIN_FUNCTION_NAMES: LazyLock<Vec<&'static str>> =
     LazyLock::new(BuiltInFunction::all_names);

@@ -5,8 +5,10 @@ mod highlighter;
 use blots_core::ast::{Expr, Spanned};
 use blots_core::expressions::{evaluate_pairs, pairs_to_expr, validate_portable_value};
 use blots_core::formatter::format_expr;
+use blots_core::functions::{clear_function_call_stats, get_function_call_stats};
 use blots_core::heap::Heap;
 use blots_core::parser::{Rule, get_pairs};
+use blots_core::stats::ProfilingSummary;
 use blots_core::values::{SerializableValue, Value};
 use clap::{CommandFactory, Parser};
 use clap_complete::{Shell, generate, shells::*};
@@ -318,6 +320,12 @@ fn main() -> ! {
     let bindings = Rc::new(RefCell::new(HashMap::new()));
     let mut outputs: IndexMap<String, SerializableValue> = IndexMap::new();
 
+    // Clear profiling stats if profiling is enabled
+    #[cfg(not(target_arch = "wasm32"))]
+    if ARGS.profile {
+        clear_function_call_stats();
+    }
+
     // Collect inputs
     // Parse inputs from stdin and/or -i flag
     let mut inputs_map: IndexMap<String, Value> = IndexMap::new();
@@ -383,6 +391,16 @@ fn main() -> ! {
             eprintln!("{}", e);
             std::process::exit(1);
         }
+        
+        #[cfg(not(target_arch = "wasm32"))]
+        if ARGS.profile {
+            let stats = get_function_call_stats();
+            if !stats.is_empty() {
+                let summary = ProfilingSummary::from_stats(&stats);
+                summary.print_summary();
+            }
+        }
+        
         write_outputs(&outputs, ARGS.output.as_ref());
         std::process::exit(0);
     }
@@ -405,6 +423,16 @@ fn main() -> ! {
             eprintln!("{}", e);
             std::process::exit(1);
         }
+        
+        #[cfg(not(target_arch = "wasm32"))]
+        if ARGS.profile {
+            let stats = get_function_call_stats();
+            if !stats.is_empty() {
+                let summary = ProfilingSummary::from_stats(&stats);
+                summary.print_summary();
+            }
+        }
+        
         write_outputs(&outputs, ARGS.output.as_ref());
         std::process::exit(0);
     }

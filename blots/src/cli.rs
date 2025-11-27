@@ -27,4 +27,8 @@ pub struct Args {
     /// Format a Blots source file. Takes input and output file paths.
     #[arg(short = 'f', long, value_names = ["INPUT", "OUTPUT"], num_args = 2, group = "source")]
     pub format: Vec<String>,
+
+    /// Enable performance profiling (shows function call statistics)
+    #[arg(long)]
+    pub profile: bool,
 }
