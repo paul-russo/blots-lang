@@ -1,4 +1,5 @@
 use crate::{
+    environment::Environment,
     expressions::evaluate_ast,
     heap::{Heap, HeapPointer, IterablePointer},
     units,
@@ -338,7 +339,7 @@ impl BuiltInFunction {
         &self,
         args: Vec<Value>,
         heap: Rc<RefCell<Heap>>,
-        bindings: Rc<RefCell<HashMap<String, Value>>>,
+        bindings: Rc<Environment>,
         call_depth: usize,
         source: &str,
     ) -> Result<Value> {
@@ -1452,7 +1453,7 @@ impl FunctionDef {
         this_value: Value,
         args: Vec<Value>,
         heap: Rc<RefCell<Heap>>,
-        bindings: Rc<RefCell<HashMap<String, Value>>>,
+        bindings: Rc<Environment>,
         call_depth: usize,
         source: &str,
     ) -> Result<Value> {
@@ -1479,38 +1480,38 @@ impl FunctionDef {
                 #[cfg(not(target_arch = "wasm32"))]
                 let start_var_env = std::time::Instant::now();
 
-                // Start with current environment as fallback for late binding
-                let mut new_bindings = bindings.borrow().clone();
+                // Build local bindings for this call (O(1) - no clone of parent environment!)
+                let mut local_bindings = HashMap::new();
 
-                // Override with captured scope (captured variables take precedence)
+                // Add captured scope (captured variables take precedence over parent env)
                 for (key, value) in scope {
-                    new_bindings.insert(key.clone(), *value);
+                    local_bindings.insert(key.clone(), *value);
                 }
 
                 // Add self-reference if named
                 if let Some(fn_name) = name {
-                    new_bindings.insert(fn_name.clone(), this_value);
+                    local_bindings.insert(fn_name.clone(), this_value);
                 }
 
-                // Preserve inputs if present
-                if let Some(inputs) = new_bindings.get("inputs").copied() {
-                    new_bindings.insert(String::from("inputs"), inputs);
+                // Preserve inputs if present in parent
+                if let Some(inputs) = bindings.get("inputs") {
+                    local_bindings.insert(String::from("inputs"), inputs);
                 }
 
                 // Add function arguments (highest precedence)
                 for (idx, expected_arg) in expected_args.iter().enumerate() {
                     match expected_arg {
                         LambdaArg::Required(arg_name) => {
-                            new_bindings.insert(arg_name.clone(), args[idx]);
+                            local_bindings.insert(arg_name.clone(), args[idx]);
                         }
                         LambdaArg::Optional(arg_name) => {
-                            new_bindings.insert(
+                            local_bindings.insert(
                                 arg_name.clone(),
                                 args.get(idx).copied().unwrap_or(Value::Null),
                             );
                         }
                         LambdaArg::Rest(arg_name) => {
-                            new_bindings.insert(
+                            local_bindings.insert(
                                 arg_name.clone(),
                                 heap.borrow_mut()
                                     .insert_list(args.iter().skip(idx).copied().collect()),
@@ -1522,10 +1523,13 @@ impl FunctionDef {
                 #[cfg(not(target_arch = "wasm32"))]
                 let end_var_env = std::time::Instant::now();
 
+                // Create new environment that extends parent (O(1) instead of O(n) clone!)
+                let new_env = Rc::new(Environment::extend_with(Rc::clone(&bindings), local_bindings));
+
                 let return_value = evaluate_ast(
                     body,
                     Rc::clone(&heap),
-                    Rc::new(RefCell::new(new_bindings)),
+                    new_env,
                     call_depth + 1,
                     lambda_source.clone(),
                 )
@@ -1587,15 +1591,15 @@ pub fn get_function_def(value: &Value, heap: &Heap) -> Option<FunctionDef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::environment::Environment;
     use std::cell::RefCell;
-    use std::collections::HashMap;
     use std::rc::Rc;
 
     #[test]
     fn test_range_function() {
         // Test single argument
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         let range_fn = BuiltInFunction::Range;
 
         // Test range(4) - exclusive, so [0, 1, 2, 3]
@@ -1615,7 +1619,7 @@ mod tests {
     fn test_range_function_two_args() {
         // Test two arguments
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         let range_fn = BuiltInFunction::Range;
 
         // Test range(4, 10) - exclusive, so [4, 5, 6, 7, 8, 9]
@@ -1634,7 +1638,7 @@ mod tests {
     #[test]
     fn test_round_function_single_arg() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         let round_fn = BuiltInFunction::Round;
 
         // Test basic rounding
@@ -1668,7 +1672,7 @@ mod tests {
     #[test]
     fn test_round_function_with_decimal_places() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         let round_fn = BuiltInFunction::Round;
 
         // Test rounding to decimal places
@@ -1712,7 +1716,7 @@ mod tests {
     #[test]
     fn test_round_function_negative_decimal_places() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         let round_fn = BuiltInFunction::Round;
 
         // Test rounding to tens, hundreds, etc.
@@ -1749,7 +1753,7 @@ mod tests {
     #[test]
     fn test_round_function_edge_cases() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         let round_fn = BuiltInFunction::Round;
 
         // Test edge cases
@@ -1805,7 +1809,7 @@ mod tests {
     #[test]
     fn test_random_function_deterministic() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         let random_fn = BuiltInFunction::Random;
 
         // Test that same seed produces same result
@@ -1826,7 +1830,7 @@ mod tests {
     #[test]
     fn test_random_function_different_seeds() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         let random_fn = BuiltInFunction::Random;
 
         // Test that different seeds produce different results
@@ -1846,7 +1850,7 @@ mod tests {
     #[test]
     fn test_random_function_range() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         let random_fn = BuiltInFunction::Random;
 
         // Test that output is in range [0, 1)
@@ -1867,7 +1871,7 @@ mod tests {
     #[test]
     fn test_random_function_negative_seed() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         let random_fn = BuiltInFunction::Random;
 
         // Test with negative seeds (they get cast to u64)
@@ -1888,7 +1892,7 @@ mod tests {
         use crate::values::LambdaDef;
 
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Create a list [10, 20, 30]
         let list = heap.borrow_mut().insert_list(vec![
@@ -1943,7 +1947,7 @@ mod tests {
         use crate::values::LambdaDef;
 
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Create a list [10, 20, 30, 40]
         let list = heap.borrow_mut().insert_list(vec![
@@ -1996,7 +2000,7 @@ mod tests {
         use crate::values::LambdaDef;
 
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Create a list [10, 20, 30]
         let list = heap.borrow_mut().insert_list(vec![
@@ -2053,7 +2057,7 @@ mod tests {
         use crate::values::LambdaDef;
 
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Create a list [10, 20, 30]
         let list = heap.borrow_mut().insert_list(vec![
@@ -2101,7 +2105,7 @@ mod tests {
     #[test]
     fn test_convert_length() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         let convert_fn = BuiltInFunction::Convert;
 
         // Test km to m
@@ -2130,7 +2134,7 @@ mod tests {
     #[test]
     fn test_convert_temperature() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         let convert_fn = BuiltInFunction::Convert;
 
         // Test 0°C to °F (should be 32°F)
@@ -2159,7 +2163,7 @@ mod tests {
     #[test]
     fn test_convert_mass() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         let convert_fn = BuiltInFunction::Convert;
 
         // Test 1 kg to lbs
@@ -2177,7 +2181,7 @@ mod tests {
     #[test]
     fn test_convert_information_storage() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         let convert_fn = BuiltInFunction::Convert;
 
         // Test 1 kibibyte to bytes
@@ -2193,7 +2197,7 @@ mod tests {
     #[test]
     fn test_convert_same_unit() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         let convert_fn = BuiltInFunction::Convert;
 
         // Test converting to same unit
@@ -2209,7 +2213,7 @@ mod tests {
     #[test]
     fn test_convert_incompatible_units() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         let convert_fn = BuiltInFunction::Convert;
 
         // Test incompatible units
@@ -2224,7 +2228,7 @@ mod tests {
     #[test]
     fn test_convert_unknown_unit() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         let convert_fn = BuiltInFunction::Convert;
 
         // Test unknown unit
@@ -2239,7 +2243,7 @@ mod tests {
     #[test]
     fn test_convert_case_insensitive() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         let convert_fn = BuiltInFunction::Convert;
 
         // Test case insensitivity

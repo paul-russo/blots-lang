@@ -1,6 +1,7 @@
 use anyhow::Result;
 use blots_core::{
     ast::{Expr, Spanned},
+    environment::Environment,
     expressions::{evaluate_pairs, pairs_to_expr},
     formatter::{format_expr, join_statements_with_spacing},
     functions::get_built_in_function_idents,
@@ -35,13 +36,11 @@ pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
         .map(|(key, value)| (key, value.to_value(&mut heap.borrow_mut()).unwrap()))
         .collect();
 
-    let bindings = Rc::new(RefCell::new(HashMap::new()));
-    {
-        bindings.borrow_mut().insert(
-            String::from("inputs"),
-            heap.borrow_mut().insert_record(inputs),
-        );
-    }
+    let bindings = Rc::new(Environment::new());
+    bindings.insert(
+        String::from("inputs"),
+        heap.borrow_mut().insert_record(inputs),
+    );
 
     let expr_owned = String::from(expr);
     let pairs =
@@ -115,9 +114,8 @@ pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
         .collect();
 
     let bindings_serializable = bindings
-        .borrow()
         .iter()
-        .map(|(k, v)| (k.clone(), v.to_serializable_value(&heap.borrow()).unwrap()))
+        .map(|(k, v)| (k, v.to_serializable_value(&heap.borrow()).unwrap()))
         .collect();
 
     // Use json_compatible serializer to ensure Records are serialized as JSON objects
@@ -226,19 +224,17 @@ fn evaluate_single_inline_expression(
         .map(|(key, value)| (key.clone(), value.to_value(&mut heap.borrow_mut()).unwrap()))
         .collect();
 
-    let bindings = Rc::new(RefCell::new(HashMap::new()));
+    let bindings = Rc::new(Environment::new());
 
     // Add inputs record
-    {
-        bindings.borrow_mut().insert(
-            String::from("inputs"),
-            heap.borrow_mut().insert_record(inputs.clone()),
-        );
-    }
+    bindings.insert(
+        String::from("inputs"),
+        heap.borrow_mut().insert_record(inputs.clone()),
+    );
 
     // Inject all input values directly into bindings for inline access
     for (key, value) in inputs {
-        bindings.borrow_mut().insert(key, value);
+        bindings.insert(key, value);
     }
 
     // Parse the expression

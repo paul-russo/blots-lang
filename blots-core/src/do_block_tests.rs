@@ -1,23 +1,23 @@
 // Tests for do block shadowing behavior
 #[cfg(test)]
 mod do_block_shadowing_tests {
+    use crate::environment::Environment;
     use crate::expressions::evaluate_pairs;
     use crate::heap::Heap;
     use crate::parser::{Rule, get_pairs};
     use crate::values::Value;
     use std::cell::RefCell;
-    use std::collections::HashMap;
     use std::rc::Rc;
 
     fn parse_and_evaluate(
         code: &str,
         heap: Option<Rc<RefCell<Heap>>>,
-        bindings: Option<Rc<RefCell<HashMap<String, Value>>>>,
+        bindings: Option<Rc<Environment>>,
     ) -> Result<Value, crate::error::RuntimeError> {
         let pairs = get_pairs(code).map_err(|e| crate::error::RuntimeError::new(e.to_string()))?;
 
         let heap = heap.unwrap_or_else(|| Rc::new(RefCell::new(Heap::new())));
-        let bindings = bindings.unwrap_or_else(|| Rc::new(RefCell::new(HashMap::new())));
+        let bindings = bindings.unwrap_or_else(|| Rc::new(Environment::new()));
 
         let mut result = Value::Null;
         for pair in pairs {
@@ -49,7 +49,7 @@ mod do_block_shadowing_tests {
     fn test_do_block_allows_shadowing() {
         // Test that do blocks can shadow outer variables
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Define outer g = 25
         let _ = parse_and_evaluate("g = 25", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
@@ -84,7 +84,7 @@ mod do_block_shadowing_tests {
     fn test_do_block_shadowing_preserves_outer() {
         // Test that shadowing in do block doesn't affect outer variable
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Define outer x = 10
         let _ = parse_and_evaluate("x = 10", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
@@ -112,7 +112,7 @@ mod do_block_shadowing_tests {
     fn test_nested_do_blocks_shadowing() {
         // Test that nested do blocks can each shadow variables
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Define outer z = 1
         let _ = parse_and_evaluate("z = 1", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
@@ -133,7 +133,7 @@ mod do_block_shadowing_tests {
     fn test_do_block_multiple_shadowings() {
         // Test that do blocks can shadow multiple variables
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Define outer a and b
         let _ = parse_and_evaluate("a = 1", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
@@ -156,7 +156,7 @@ mod do_block_shadowing_tests {
     fn test_do_block_function_capture_with_shadowing() {
         // Test that functions defined in do blocks capture the shadowed value
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Define outer v = 5
         let _ = parse_and_evaluate("v = 5", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))

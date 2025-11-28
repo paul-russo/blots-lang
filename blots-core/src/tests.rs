@@ -1,23 +1,23 @@
 // Tests for late binding in function calls
 #[cfg(test)]
 mod late_binding_tests {
+    use crate::environment::Environment;
     use crate::expressions::evaluate_pairs;
     use crate::heap::Heap;
     use crate::parser::{Rule, get_pairs};
     use crate::values::Value;
     use std::cell::RefCell;
-    use std::collections::HashMap;
     use std::rc::Rc;
 
     fn parse_and_evaluate(
         code: &str,
         heap: Option<Rc<RefCell<Heap>>>,
-        bindings: Option<Rc<RefCell<HashMap<String, Value>>>>,
+        bindings: Option<Rc<Environment>>,
     ) -> Result<Value, crate::error::RuntimeError> {
         let pairs = get_pairs(code).map_err(|e| crate::error::RuntimeError::new(e.to_string()))?;
 
         let heap = heap.unwrap_or_else(|| Rc::new(RefCell::new(Heap::new())));
-        let bindings = bindings.unwrap_or_else(|| Rc::new(RefCell::new(HashMap::new())));
+        let bindings = bindings.unwrap_or_else(|| Rc::new(Environment::new()));
 
         let mut result = Value::Null;
         for pair in pairs {
@@ -49,7 +49,7 @@ mod late_binding_tests {
     fn test_late_binding_simple() {
         // Test that functions can reference variables defined after the function
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Define function that references g
         let _ = parse_and_evaluate(
@@ -77,7 +77,7 @@ mod late_binding_tests {
     fn test_late_binding_with_closure() {
         // Test that captured variables take precedence over late binding
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Define y = 10
         let _ = parse_and_evaluate("y = 10", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
@@ -109,7 +109,7 @@ mod late_binding_tests {
     fn test_late_binding_chain() {
         // Test chained late binding
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Define f that calls g
         let _ = parse_and_evaluate(
@@ -145,7 +145,7 @@ mod late_binding_tests {
     fn test_late_binding_with_recursion() {
         // Test that recursion still works with late binding
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Define factorial
         let _ = parse_and_evaluate(
@@ -165,7 +165,7 @@ mod late_binding_tests {
     fn test_late_binding_undefined_still_fails() {
         // Test that truly undefined variables still cause errors
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Define function that references undefined h
         let _ = parse_and_evaluate(
@@ -192,7 +192,7 @@ mod late_binding_tests {
         // Test that late binding uses the current definition
         // Since Blots doesn't allow reassignment, we'll test with nested scopes
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Define f that calls g
         let _ = parse_and_evaluate(
@@ -217,7 +217,7 @@ mod late_binding_tests {
 
         // Test with a different g in a new context
         let new_heap = Rc::new(RefCell::new(Heap::new()));
-        let new_bindings = Rc::new(RefCell::new(HashMap::new()));
+        let new_bindings = Rc::new(Environment::new());
 
         // Define f that calls g in new context
         let _ = parse_and_evaluate(
@@ -244,7 +244,7 @@ mod late_binding_tests {
     fn test_argument_shadows_late_binding() {
         // Test that function arguments shadow late-bound variables
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Define g = 100
         let _ = parse_and_evaluate(
@@ -272,24 +272,24 @@ mod late_binding_tests {
 // Tests for input reference syntax (#field)
 #[cfg(test)]
 mod input_reference_tests {
+    use crate::environment::Environment;
     use crate::expressions::evaluate_pairs;
     use crate::heap::{Heap, HeapPointer};
     use crate::parser::{Rule, get_pairs};
     use crate::values::Value;
     use indexmap::IndexMap;
     use std::cell::RefCell;
-    use std::collections::HashMap;
     use std::rc::Rc;
 
     fn parse_and_evaluate(
         code: &str,
         heap: Option<Rc<RefCell<Heap>>>,
-        bindings: Option<Rc<RefCell<HashMap<String, Value>>>>,
+        bindings: Option<Rc<Environment>>,
     ) -> Result<Value, crate::error::RuntimeError> {
         let pairs = get_pairs(code).map_err(|e| crate::error::RuntimeError::new(e.to_string()))?;
 
         let heap = heap.unwrap_or_else(|| Rc::new(RefCell::new(Heap::new())));
-        let bindings = bindings.unwrap_or_else(|| Rc::new(RefCell::new(HashMap::new())));
+        let bindings = bindings.unwrap_or_else(|| Rc::new(Environment::new()));
 
         let mut result = Value::Null;
         for pair in pairs {
@@ -317,7 +317,7 @@ mod input_reference_tests {
         Ok(result)
     }
 
-    fn setup_inputs(heap: &Rc<RefCell<Heap>>, bindings: &Rc<RefCell<HashMap<String, Value>>>) {
+    fn setup_inputs(heap: &Rc<RefCell<Heap>>, bindings: &Rc<Environment>) {
         // Create an inputs record with test data
         let mut inputs_map = IndexMap::new();
         inputs_map.insert("x".to_string(), Value::Number(42.0));
@@ -328,15 +328,13 @@ mod input_reference_tests {
         );
 
         let inputs_value = heap.borrow_mut().insert_record(inputs_map);
-        bindings
-            .borrow_mut()
-            .insert("inputs".to_string(), inputs_value);
+        bindings.insert("inputs".to_string(), inputs_value);
     }
 
     #[test]
     fn test_input_reference_simple() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         setup_inputs(&heap, &bindings);
 
         let result = parse_and_evaluate("#x", Some(heap), Some(bindings)).unwrap();
@@ -346,7 +344,7 @@ mod input_reference_tests {
     #[test]
     fn test_input_reference_string() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         setup_inputs(&heap, &bindings);
 
         let result = parse_and_evaluate("#name", Some(Rc::clone(&heap)), Some(bindings)).unwrap();
@@ -363,7 +361,7 @@ mod input_reference_tests {
     #[test]
     fn test_input_reference_in_expression() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         setup_inputs(&heap, &bindings);
 
         let result = parse_and_evaluate("#x + #y", Some(heap), Some(bindings)).unwrap();
@@ -374,7 +372,7 @@ mod input_reference_tests {
     fn test_input_reference_equivalence() {
         // Test that #field is equivalent to inputs.field
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         setup_inputs(&heap, &bindings);
 
         let result1 =
@@ -387,7 +385,7 @@ mod input_reference_tests {
     #[test]
     fn test_input_reference_in_function() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         setup_inputs(&heap, &bindings);
 
         // Define a function that uses input reference
@@ -405,7 +403,7 @@ mod input_reference_tests {
     #[test]
     fn test_input_reference_multiple_uses() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         setup_inputs(&heap, &bindings);
 
         let result = parse_and_evaluate("#x + #x * #y", Some(heap), Some(bindings)).unwrap();
@@ -417,7 +415,7 @@ mod input_reference_tests {
     fn test_input_reference_missing_field() {
         // Missing fields should return null, consistent with inputs.field behavior
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         setup_inputs(&heap, &bindings);
 
         let result = parse_and_evaluate("#missing", Some(heap), Some(bindings)).unwrap();
@@ -427,7 +425,7 @@ mod input_reference_tests {
     #[test]
     fn test_input_reference_no_inputs() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         // Don't setup inputs
 
         let result = parse_and_evaluate("#x", Some(heap), Some(bindings));
@@ -439,7 +437,7 @@ mod input_reference_tests {
     #[test]
     fn test_input_reference_in_conditional() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         setup_inputs(&heap, &bindings);
 
         let result = parse_and_evaluate(
@@ -455,15 +453,13 @@ mod input_reference_tests {
     #[test]
     fn test_input_reference_with_underscore() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Create inputs with underscore field
         let mut inputs_map = IndexMap::new();
         inputs_map.insert("my_value".to_string(), Value::Number(123.0));
         let inputs_value = heap.borrow_mut().insert_record(inputs_map);
-        bindings
-            .borrow_mut()
-            .insert("inputs".to_string(), inputs_value);
+        bindings.insert("inputs".to_string(), inputs_value);
 
         let result = parse_and_evaluate("#my_value", Some(heap), Some(bindings)).unwrap();
         assert_eq!(result, Value::Number(123.0));
@@ -472,7 +468,7 @@ mod input_reference_tests {
     #[test]
     fn test_multiline_evaluation_with_inputs() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         setup_inputs(&heap, &bindings);
 
         // Test multiple statements with inputs
@@ -485,7 +481,7 @@ mod input_reference_tests {
     #[test]
     fn test_multiline_evaluation_with_comments() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         setup_inputs(&heap, &bindings);
 
         // Test multiple statements with comments interspersed
@@ -498,7 +494,7 @@ mod input_reference_tests {
     #[test]
     fn test_multiline_with_blank_lines_and_comments() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         setup_inputs(&heap, &bindings);
 
         // Test with blank lines and comments
@@ -511,7 +507,7 @@ mod input_reference_tests {
     #[test]
     fn test_comment_only_lines() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Test with just comments and a final expression
         let code = "// First comment\n// Second comment\n42";
@@ -523,23 +519,23 @@ mod input_reference_tests {
 // Tests for lambda error reporting across contexts
 #[cfg(test)]
 mod lambda_error_context_tests {
+    use crate::environment::Environment;
     use crate::expressions::evaluate_pairs;
     use crate::heap::Heap;
     use crate::parser::{Rule, get_pairs};
     use crate::values::Value;
     use std::cell::RefCell;
-    use std::collections::HashMap;
     use std::rc::Rc;
 
     fn parse_and_evaluate(
         code: &str,
         heap: Option<Rc<RefCell<Heap>>>,
-        bindings: Option<Rc<RefCell<HashMap<String, Value>>>>,
+        bindings: Option<Rc<Environment>>,
     ) -> Result<Value, crate::error::RuntimeError> {
         let pairs = get_pairs(code).map_err(|e| crate::error::RuntimeError::new(e.to_string()))?;
 
         let heap = heap.unwrap_or_else(|| Rc::new(RefCell::new(Heap::new())));
-        let bindings = bindings.unwrap_or_else(|| Rc::new(RefCell::new(HashMap::new())));
+        let bindings = bindings.unwrap_or_else(|| Rc::new(Environment::new()));
 
         let mut result = Value::Null;
         for pair in pairs {
@@ -572,7 +568,7 @@ mod lambda_error_context_tests {
         // Test that when a lambda is defined in one context and called in another,
         // errors in the lambda body still reference the original source
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Define a lambda that will error (references undefined variable)
         let lambda_definition = "f = x => x + undefined_var";
@@ -597,7 +593,7 @@ mod lambda_error_context_tests {
     fn test_lambda_error_with_multiple_calls() {
         // Test that multiple calls to the same lambda all report errors correctly
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Define a lambda with a division by zero
         let lambda_def = "divide = (a, b) => a / b";
@@ -620,7 +616,7 @@ mod lambda_error_context_tests {
     fn test_nested_lambda_error_reporting() {
         // Test that nested lambdas report errors correctly
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Define a lambda that returns another lambda
         let outer_lambda = "outer = x => (y => x + y + undefined_nested)";
@@ -646,23 +642,23 @@ mod lambda_error_context_tests {
 // Ensures that lambda parameters are not incorrectly captured from outer scope
 #[cfg(test)]
 mod lambda_parameter_isolation_tests {
+    use crate::environment::Environment;
     use crate::expressions::evaluate_pairs;
     use crate::heap::Heap;
     use crate::parser::{Rule, get_pairs};
     use crate::values::{SerializableValue, Value};
     use std::cell::RefCell;
-    use std::collections::HashMap;
     use std::rc::Rc;
 
     fn parse_and_evaluate(
         code: &str,
         heap: Option<Rc<RefCell<Heap>>>,
-        bindings: Option<Rc<RefCell<HashMap<String, Value>>>>,
+        bindings: Option<Rc<Environment>>,
     ) -> Result<Value, crate::error::RuntimeError> {
         let pairs = get_pairs(code).map_err(|e| crate::error::RuntimeError::new(e.to_string()))?;
 
         let heap = heap.unwrap_or_else(|| Rc::new(RefCell::new(Heap::new())));
-        let bindings = bindings.unwrap_or_else(|| Rc::new(RefCell::new(HashMap::new())));
+        let bindings = bindings.unwrap_or_else(|| Rc::new(Environment::new()));
 
         let mut result = Value::Null;
         for pair in pairs {
@@ -695,7 +691,7 @@ mod lambda_parameter_isolation_tests {
         // Regression test for bug where lambda parameters were incorrectly captured
         // from outer scope instead of being excluded from closure
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Define x in outer scope
         parse_and_evaluate("x = 42", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
@@ -705,7 +701,7 @@ mod lambda_parameter_isolation_tests {
             .unwrap();
 
         // Get the lambda value and check its scope
-        let f_value = bindings.borrow().get("f").cloned().unwrap();
+        let f_value = bindings.get("f").unwrap();
         {
             let heap_ref = heap.borrow();
             let lambda_def = f_value.as_lambda(&heap_ref).unwrap();
@@ -726,7 +722,7 @@ mod lambda_parameter_isolation_tests {
     fn test_lambda_multiple_parameters_not_captured() {
         // Test that all lambda parameters are excluded from closure
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Define variables in outer scope with same names as parameters
         parse_and_evaluate("a = 1", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
@@ -737,7 +733,7 @@ mod lambda_parameter_isolation_tests {
             .unwrap();
 
         // Get the lambda value and check its scope
-        let add_value = bindings.borrow().get("add").cloned().unwrap();
+        let add_value = bindings.get("add").unwrap();
         {
             let heap_ref = heap.borrow();
             let lambda_def = add_value.as_lambda(&heap_ref).unwrap();
@@ -762,7 +758,7 @@ mod lambda_parameter_isolation_tests {
     fn test_nested_lambda_parameters_not_captured() {
         // Test that nested lambdas don't capture their own parameters
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Define x in outer scope
         parse_and_evaluate("x = 100", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
@@ -776,7 +772,7 @@ mod lambda_parameter_isolation_tests {
         .unwrap();
 
         // Get outer lambda and check its scope
-        let outer_value = bindings.borrow().get("outer").cloned().unwrap();
+        let outer_value = bindings.get("outer").unwrap();
         {
             let heap_ref = heap.borrow();
             let outer_lambda = outer_value.as_lambda(&heap_ref).unwrap();
@@ -801,7 +797,7 @@ mod lambda_parameter_isolation_tests {
     fn test_lambda_serialization_preserves_parameter_names() {
         // Test that when serializing lambdas, parameter names are not substituted
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Define x in outer scope
         parse_and_evaluate("x = 42", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
@@ -815,7 +811,7 @@ mod lambda_parameter_isolation_tests {
         .unwrap();
 
         // Get the lambda and serialize it
-        let increment_value = bindings.borrow().get("increment").cloned().unwrap();
+        let increment_value = bindings.get("increment").unwrap();
         let serialized = increment_value
             .to_serializable_value(&heap.borrow())
             .unwrap();
@@ -846,7 +842,7 @@ mod lambda_parameter_isolation_tests {
     fn test_curried_function_captures_correctly() {
         // Test that curried functions capture outer parameters but not their own
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Define curried add function
         parse_and_evaluate(
@@ -865,7 +861,7 @@ mod lambda_parameter_isolation_tests {
         .unwrap();
 
         // Get add_five and check its scope
-        let add_five_value = bindings.borrow().get("add_five").cloned().unwrap();
+        let add_five_value = bindings.get("add_five").unwrap();
         {
             let heap_ref = heap.borrow();
             let add_five_lambda = add_five_value.as_lambda(&heap_ref).unwrap();
@@ -908,19 +904,19 @@ mod lambda_parameter_isolation_tests {
 // Tests for the where operator
 #[cfg(test)]
 mod where_operator_tests {
+    use crate::environment::Environment;
     use crate::expressions::evaluate_pairs;
     use crate::heap::{Heap, HeapPointer};
     use crate::parser::{Rule, get_pairs};
     use crate::values::Value;
     use std::cell::RefCell;
-    use std::collections::HashMap;
     use std::rc::Rc;
 
     fn parse_and_evaluate(code: &str) -> Result<(Value, Rc<RefCell<Heap>>), crate::error::RuntimeError> {
         let pairs = get_pairs(code).map_err(|e| crate::error::RuntimeError::new(e.to_string()))?;
 
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         let mut result = Value::Null;
         for pair in pairs {
@@ -1024,7 +1020,7 @@ mod where_operator_tests {
     fn test_where_with_string_comparison() {
         let heap = Rc::new(RefCell::new(Heap::new()));
         let pairs = crate::parser::get_pairs("[\"apple\", \"banana\", \"cherry\"] where s => s == \"banana\"").unwrap();
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         let mut result = Value::Null;
         for pair in pairs {
@@ -1081,19 +1077,19 @@ mod where_operator_tests {
 // Tests for flat chaining of via/into/where operators
 #[cfg(test)]
 mod flat_chaining_tests {
+    use crate::environment::Environment;
     use crate::expressions::evaluate_pairs;
     use crate::heap::Heap;
     use crate::parser::{Rule, get_pairs};
     use crate::values::Value;
     use std::cell::RefCell;
-    use std::collections::HashMap;
     use std::rc::Rc;
 
     fn parse_and_evaluate(code: &str) -> Result<(Value, Rc<RefCell<Heap>>), crate::error::RuntimeError> {
         let pairs = get_pairs(code).map_err(|e| crate::error::RuntimeError::new(e.to_string()))?;
 
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         let mut result = Value::Null;
         for pair in pairs {

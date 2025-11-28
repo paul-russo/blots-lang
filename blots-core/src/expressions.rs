@@ -1,5 +1,6 @@
 use crate::{
     ast::{BinaryOp, DoStatement, Expr, PostfixOp, RecordEntry, RecordKey, Span, Spanned, SpannedExpr, UnaryOp},
+    environment::Environment,
     error::RuntimeError,
     functions::{
         BuiltInFunction, get_built_in_function_def_by_ident, get_function_def, is_built_in_function,
@@ -25,7 +26,7 @@ use std::{
 pub fn evaluate_pairs(
     pairs: Pairs<Rule>,
     heap: Rc<RefCell<Heap>>,
-    bindings: Rc<RefCell<HashMap<String, Value>>>,
+    bindings: Rc<Environment>,
     call_depth: usize,
     source: &str,
 ) -> Result<Value, RuntimeError> {
@@ -82,7 +83,7 @@ fn flatten_spread_value(
 fn evaluate_do_block_expr(
     expr: &SpannedExpr,
     heap: Rc<RefCell<Heap>>,
-    bindings: Rc<RefCell<HashMap<String, Value>>>,
+    bindings: Rc<Environment>,
     call_depth: usize,
     source: Rc<str>,
 ) -> Result<Value, RuntimeError> {
@@ -111,7 +112,7 @@ fn evaluate_do_block_expr(
             }
         }
 
-        bindings.borrow_mut().insert(ident.clone(), val);
+        bindings.insert(ident.clone(), val);
         return Ok(val);
     }
 
@@ -122,7 +123,7 @@ fn evaluate_do_block_expr(
 pub fn evaluate_ast(
     expr: &SpannedExpr,
     heap: Rc<RefCell<Heap>>,
-    bindings: Rc<RefCell<HashMap<String, Value>>>,
+    bindings: Rc<Environment>,
     call_depth: usize,
     source: Rc<str>,
 ) -> Result<Value, RuntimeError> {
@@ -136,9 +137,7 @@ pub fn evaluate_ast(
             "inf" => Ok(Number(f64::INFINITY)),
             "constants" => Ok(Value::Record(RecordPointer::new(0))),
             _ => bindings
-                .borrow()
                 .get(ident)
-                .copied()
                 .ok_or_else(|| {
                     RuntimeError::with_span(
                         format!("unknown identifier: {}", ident),
@@ -150,9 +149,7 @@ pub fn evaluate_ast(
         Expr::InputReference(field) => {
             // Desugar #field to inputs.field
             let inputs_value = bindings
-                .borrow()
                 .get("inputs")
-                .copied()
                 .ok_or(anyhow!("inputs not found (required for #{} syntax)", field))?;
 
             match inputs_value {
@@ -226,9 +223,7 @@ pub fn evaluate_ast(
                     }
                     RecordKey::Shorthand(ident) => {
                         let value = bindings
-                            .borrow()
                             .get(ident)
-                            .copied()
                             .ok_or(anyhow!("unknown identifier: {}", ident))?;
                         record.insert(ident.clone(), value);
                     }
@@ -295,10 +290,11 @@ pub fn evaluate_ast(
             }
             collect_free_variables(body, &mut referenced_vars, &mut bound);
 
-            let current_bindings = bindings.borrow();
             for var in referenced_vars {
-                if current_bindings.contains_key(&var) && !is_built_in_function(&var) {
-                    captured_scope.insert(var.clone(), current_bindings[&var]);
+                if let Some(value) = bindings.get(&var) {
+                    if !is_built_in_function(&var) {
+                        captured_scope.insert(var.clone(), value);
+                    }
                 }
             }
 
@@ -340,7 +336,7 @@ pub fn evaluate_ast(
             }
 
             // Check if the variable already exists (immutability check)
-            if bindings.borrow().contains_key(ident) {
+            if bindings.contains_key(ident) {
                 return Err(RuntimeError::with_span(
                     format!("{} is already defined, and cannot be reassigned", ident),
                     expr.span,
@@ -360,7 +356,7 @@ pub fn evaluate_ast(
                 }
             }
 
-            bindings.borrow_mut().insert(ident.clone(), val);
+            bindings.insert(ident.clone(), val);
             Ok(val)
         }
         Expr::Output { expr: inner_expr } => {
@@ -390,9 +386,8 @@ pub fn evaluate_ast(
             statements,
             return_expr,
         } => {
-            // Create new scope from current bindings
-            let new_bindings = bindings.borrow().clone();
-            let block_bindings = Rc::new(RefCell::new(new_bindings));
+            // Create new scope that extends current bindings (O(1) instead of clone)
+            let block_bindings = Rc::new(Environment::extend(Rc::clone(&bindings)));
 
             // Execute statements with shadowing allowed
             for stmt in statements {
@@ -649,7 +644,7 @@ fn collect_free_variables(expr: &SpannedExpr, vars: &mut Vec<String>, bound: &mu
 pub fn validate_portable_value(
     value: &Value,
     heap: &Heap,
-    bindings: &HashMap<String, Value>,
+    bindings: &Environment,
 ) -> AnyhowResult<()> {
     match value {
         Value::Lambda(lambda_ptr) => {
@@ -720,7 +715,7 @@ fn evaluate_binary_op_ast(
     left: &SpannedExpr,
     right: &SpannedExpr,
     heap: Rc<RefCell<Heap>>,
-    bindings: Rc<RefCell<HashMap<String, Value>>>,
+    bindings: Rc<Environment>,
     call_depth: usize,
     source: Rc<str>,
 ) -> Result<Value, RuntimeError> {
@@ -1797,7 +1792,7 @@ mod tests {
     fn parse_and_evaluate(
         input: &str,
         heap: Option<Rc<RefCell<Heap>>>,
-        bindings: Option<Rc<RefCell<HashMap<String, Value>>>>,
+        bindings: Option<Rc<Environment>>,
     ) -> Result<Value, RuntimeError> {
         let binding = input.to_string();
         let mut pairs = get_pairs(&binding).unwrap();
@@ -1805,7 +1800,7 @@ mod tests {
         evaluate_pairs(
             expr,
             heap.unwrap_or(Rc::new(RefCell::new(Heap::new()))),
-            bindings.unwrap_or(Rc::new(RefCell::new(HashMap::new()))),
+            bindings.unwrap_or(Rc::new(Environment::new())),
             0,
             &binding,
         )
@@ -2196,25 +2191,25 @@ mod tests {
 
     #[test]
     fn variable_assignment() {
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         let result = parse_and_evaluate("x = 5", None, Some(Rc::clone(&bindings))).unwrap();
 
         assert_eq!(result, Value::Number(5.0));
-        assert_eq!(bindings.borrow().get("x").unwrap(), &Value::Number(5.0));
+        assert_eq!(bindings.get("x").unwrap(), Value::Number(5.0));
     }
 
     #[test]
     fn variable_assignment_with_expression() {
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         let result = parse_and_evaluate("x = 5 + 2", None, Some(Rc::clone(&bindings))).unwrap();
         assert_eq!(result, Value::Number(7.0));
-        assert_eq!(bindings.borrow().get("x").unwrap(), &Value::Number(7.0));
+        assert_eq!(bindings.get("x").unwrap(), Value::Number(7.0));
     }
 
     #[test]
     fn variable_assignment_with_lambda() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         let result = parse_and_evaluate(
             "f = x => x + 1",
             Some(Rc::clone(&heap)),
@@ -2245,15 +2240,15 @@ mod tests {
             }
         }
         assert_eq!(
-            bindings.borrow().get("f").unwrap(),
-            &Value::Lambda(LambdaPointer::new(1))
+            bindings.get("f").unwrap(),
+            Value::Lambda(LambdaPointer::new(1))
         );
     }
 
     #[test]
     fn variable_assignment_with_lambda_and_call() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         let _ = parse_and_evaluate(
             "f = x => x + 1",
             Some(Rc::clone(&heap)),
@@ -2269,7 +2264,7 @@ mod tests {
     #[test]
     fn variable_assignment_with_lambda_and_call_with_multiple_args() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         let _ = parse_and_evaluate(
             "f = (x, y) => x + y",
             Some(Rc::clone(&heap)),
@@ -2289,7 +2284,7 @@ mod tests {
     #[test]
     fn variable_assignment_with_lambda_and_call_with_multiple_args_and_expression() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         let _ = parse_and_evaluate(
             "f = (x, y) => x + y",
             Some(Rc::clone(&heap)),
@@ -2715,7 +2710,7 @@ mod tests {
     #[test]
     fn variable_immutability_prevents_reassignment() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // First assignment should succeed
         let result1 =
@@ -2743,7 +2738,7 @@ mod tests {
     #[test]
     fn variable_immutability_allows_shadowing_in_nested_scopes() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Assign x in outer scope
         let result1 =
@@ -2773,7 +2768,7 @@ mod tests {
     #[test]
     fn variable_immutability_in_do_blocks() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Assign x in outer scope
         let result1 =
@@ -2813,7 +2808,7 @@ mod tests {
     #[test]
     fn variable_immutability_different_variables() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Multiple different variables should work
         let result1 =
@@ -2836,7 +2831,7 @@ mod tests {
     #[test]
     fn variable_immutability_with_complex_types() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // List assignment
         let result1 = parse_and_evaluate(
@@ -2974,7 +2969,7 @@ mod tests {
     #[test]
     fn equality_comparison_lambdas() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Lambdas with same structure are equal
         parse_and_evaluate(
@@ -3169,7 +3164,7 @@ mod tests {
     fn late_binding_unbound_variable_succeeds() {
         // Functions now use late binding - definition succeeds
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         let result = parse_and_evaluate("f = x => x + y", Some(heap), Some(bindings));
         // Definition should succeed (error only on call if y not bound)
         assert!(result.is_ok());
@@ -3179,7 +3174,7 @@ mod tests {
     fn early_binding_bound_variable_succeeds() {
         // Should succeed - y is bound before function definition
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // First bind y
         let _ = parse_and_evaluate("y = 5", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
@@ -3202,7 +3197,7 @@ mod tests {
     fn early_binding_builtin_function_succeeds() {
         // Should succeed - using built-in functions
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
         let result = parse_and_evaluate(
             "h = x => sin(x)",
             Some(Rc::clone(&heap)),
@@ -3219,7 +3214,7 @@ mod tests {
     fn late_binding_nested_function_succeeds() {
         // Should succeed with late binding - nested function can reference z defined later
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Define outer function with nested inner that references z
         let result = parse_and_evaluate(
@@ -3246,7 +3241,7 @@ mod tests {
     fn early_binding_all_variables_bound() {
         // Should succeed - all variables bound
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Bind a and b
         let _ = parse_and_evaluate("a = 10", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
@@ -3271,7 +3266,7 @@ mod tests {
     fn early_binding_parameter_shadows_outer() {
         // Should succeed - lambda parameter shadows outer variable
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Bind outer x
         let _ = parse_and_evaluate(
@@ -3298,7 +3293,7 @@ mod tests {
     fn early_binding_do_block_internal_binding() {
         // Should succeed - variable bound inside lambda's do block
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Define function with do block that binds y internally
         let result = parse_and_evaluate(
@@ -3317,7 +3312,7 @@ mod tests {
     fn early_binding_do_block_nested_scope() {
         // Should succeed - variable bound in do block before inner function definition
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         let result = parse_and_evaluate(
             "later_func = do { c = 30; f = x => x + c; return f(10) }",
@@ -3336,7 +3331,7 @@ mod tests {
     fn late_binding_do_block_forward_reference_succeeds() {
         // Should succeed with late binding - do block variables are available
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         let result = parse_and_evaluate(
             "g = x => do { f = y => y + z; z = 10; return f(x) }",
@@ -3354,7 +3349,7 @@ mod tests {
     fn early_binding_do_block_multiple_assignments() {
         // Should succeed - multiple assignments in do block
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         let result = parse_and_evaluate(
             "calc = x => do { a = 2; b = 3; c = 4; return x * a + b * c }",
@@ -3372,7 +3367,7 @@ mod tests {
     fn late_binding_multiple_unbound_variables_succeeds() {
         // Should succeed with late binding - function can reference y and z defined later
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         let result = parse_and_evaluate(
             "f = x => x + y + z",
@@ -3396,7 +3391,7 @@ mod tests {
     fn late_binding_with_optional_args_succeeds() {
         // Should succeed with late binding - function with optional args can reference z defined later
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         let result = parse_and_evaluate(
             "f = (x, y?) => x + z",
@@ -3422,7 +3417,7 @@ mod tests {
     fn late_binding_with_rest_args_succeeds() {
         // Should succeed with late binding - function with rest args can reference y defined later
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         let result = parse_and_evaluate(
             "f = (x, ...rest) => x + y",
@@ -3444,7 +3439,7 @@ mod tests {
     fn recursion_self_reference_allowed() {
         // Should succeed - recursive functions can reference themselves
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Define recursive factorial
         let result = parse_and_evaluate(
@@ -3463,7 +3458,7 @@ mod tests {
     fn recursion_fibonacci() {
         // Should succeed - another recursive function example
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Define recursive fibonacci
         let result = parse_and_evaluate(
@@ -3482,7 +3477,7 @@ mod tests {
     fn recursion_in_do_block() {
         // Should succeed - recursion defined in do block
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         let result = parse_and_evaluate(
             "result = do { factorial = n => if n <= 1 then 1 else n * factorial(n - 1); return factorial(4) }",
@@ -3500,7 +3495,7 @@ mod tests {
     fn mutual_recursion_succeeds() {
         // Should succeed with late binding - mutual recursion now works
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // Define isEven that references isOdd
         let result = parse_and_evaluate(
@@ -3551,7 +3546,7 @@ mod tests {
     fn recursion_only_for_lambdas() {
         // Non-lambda assignments should not get special treatment
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(RefCell::new(HashMap::new()));
+        let bindings = Rc::new(Environment::new());
 
         // This should fail because x is not bound
         let result = parse_and_evaluate("y = x + 1", Some(heap), Some(bindings));

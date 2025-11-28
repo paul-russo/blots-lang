@@ -3,6 +3,7 @@ mod commands;
 mod highlighter;
 
 use blots_core::ast::{Expr, Spanned};
+use blots_core::environment::Environment;
 use blots_core::expressions::{evaluate_pairs, pairs_to_expr, validate_portable_value};
 use blots_core::formatter::format_expr;
 use blots_core::functions::{clear_function_call_stats, get_function_call_stats};
@@ -18,7 +19,6 @@ use highlighter::BlotsHighlighter;
 use indexmap::IndexMap;
 use rustyline::Editor;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
 use std::rc::Rc;
@@ -97,7 +97,7 @@ fn write_outputs(outputs: &IndexMap<String, SerializableValue>, output_path: Opt
 fn evaluate_source(
     source: &str,
     heap: &Rc<RefCell<Heap>>,
-    bindings: &Rc<RefCell<HashMap<String, Value>>>,
+    bindings: &Rc<Environment>,
     outputs: &mut IndexMap<String, SerializableValue>,
 ) -> Result<(), String> {
     let pairs = get_pairs(source).map_err(|e| format!("Parse error: {}", e))?;
@@ -135,12 +135,12 @@ fn evaluate_source(
                             match pair.as_rule() {
                                 Rule::identifier => {
                                     let identifier = pair.as_str();
-                                    if let Some(value) = bindings.borrow().get(identifier) {
+                                    if let Some(value) = bindings.get(identifier) {
                                         // Validate that the value is portable
                                         if let Err(e) = validate_portable_value(
-                                            value,
+                                            &value,
                                             &heap.borrow(),
-                                            &bindings.borrow(),
+                                            &*bindings,
                                         ) {
                                             eprintln!("[output error] {}", e);
                                             std::process::exit(1);
@@ -159,7 +159,7 @@ fn evaluate_source(
                                             if let Err(e) = validate_portable_value(
                                                 value,
                                                 &heap.borrow(),
-                                                &bindings.borrow(),
+                                                &*bindings,
                                             ) {
                                                 eprintln!("[output error] {}", e);
                                                 std::process::exit(1);
@@ -317,7 +317,7 @@ fn main() -> ! {
 
     // Set up our memory
     let heap = Rc::new(RefCell::new(Heap::new()));
-    let bindings = Rc::new(RefCell::new(HashMap::new()));
+    let bindings = Rc::new(Environment::new());
     let mut outputs: IndexMap<String, SerializableValue> = IndexMap::new();
 
     // Clear profiling stats if profiling is enabled
@@ -372,9 +372,7 @@ fn main() -> ! {
 
     let inputs_record = { heap.borrow_mut().insert_record(inputs_map) };
 
-    bindings
-        .borrow_mut()
-        .insert("inputs".to_string(), inputs_record);
+    bindings.insert("inputs".to_string(), inputs_record);
 
     // Check if we should evaluate from stdin with -e flag
     if ARGS.evaluate && ARGS.file_or_source.is_none() {
@@ -639,12 +637,12 @@ fn main() -> ! {
                                     Rule::identifier => {
                                         // output x - reference existing binding
                                         let identifier = pair.as_str();
-                                        if let Some(value) = bindings.borrow().get(identifier) {
+                                        if let Some(value) = bindings.get(identifier) {
                                             // Validate that the value is portable
                                             if let Err(e) = validate_portable_value(
-                                                value,
+                                                &value,
                                                 &heap.borrow(),
-                                                &bindings.borrow(),
+                                                &*bindings,
                                             ) {
                                                 eprintln!("[output error] {}", e);
                                             } else if let Ok(serializable) =
@@ -666,7 +664,7 @@ fn main() -> ! {
                                                 if let Err(e) = validate_portable_value(
                                                     value,
                                                     &heap.borrow(),
-                                                    &bindings.borrow(),
+                                                    &*bindings,
                                                 ) {
                                                     eprintln!("[output error] {}", e);
                                                 } else if let Ok(serializable) =

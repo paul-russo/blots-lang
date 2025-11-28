@@ -1,6 +1,6 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::rc::Rc;
 
-use blots_core::{functions::BUILTIN_FUNCTION_NAMES, values::Value};
+use blots_core::{environment::Environment, functions::BUILTIN_FUNCTION_NAMES};
 use regex::Regex;
 use rustyline::{
     Context, Helper, completion::Completer, highlight::Highlighter, hint::Hinter,
@@ -16,11 +16,11 @@ pub struct BlotsHighlighter {
     string_regex: Regex,
     number_regex: Regex,
     input_reference_regex: Regex,
-    bindings: Rc<RefCell<HashMap<String, Value>>>,
+    bindings: Rc<Environment>,
 }
 
 impl BlotsHighlighter {
-    pub fn new(bindings: Rc<RefCell<HashMap<String, Value>>>) -> Self {
+    pub fn new(bindings: Rc<Environment>) -> Self {
         Self {
             // Comments: // to end of line
             comment_regex: Regex::new(r"//.*$").unwrap(),
@@ -195,7 +195,6 @@ impl Completer for BlotsHighlighter {
             // First, collect completions from bindings (higher priority)
             let mut completions: Vec<String> = self
                 .bindings
-                .borrow()
                 .keys()
                 .filter(|key| key.starts_with(last_word))
                 .map(|key| key[rel_pos..].to_string())
