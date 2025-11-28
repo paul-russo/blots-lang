@@ -253,29 +253,55 @@ fn format_conditional_multiline(
     // Try to fit "if <condition> then" on one line
     let if_then_prefix = format!("if {} then", cond_str);
 
+    let inner_indent = indent + INDENT_SIZE;
+
     if indent + if_then_prefix.len() <= max_cols {
         // Put then/else clauses on new lines
-        let inner_indent = indent + INDENT_SIZE;
-        format!(
-            "{}\n{}{}\nelse\n{}{}",
-            if_then_prefix,
-            make_indent(inner_indent),
-            format_expr_impl(then_expr, max_cols, inner_indent),
-            make_indent(inner_indent),
-            format_expr_impl(else_expr, max_cols, inner_indent)
-        )
+        // Check if else_expr is another conditional (else-if chain)
+        if let Expr::Conditional { condition: else_cond, then_expr: else_then, else_expr: else_else } = &else_expr.node {
+            // Format as "else if" at the same indentation level (not nested)
+            let else_if_part = format_conditional_multiline(else_cond, else_then, else_else, max_cols, indent);
+            format!(
+                "{}\n{}{}\nelse {}",
+                if_then_prefix,
+                make_indent(inner_indent),
+                format_expr_impl(then_expr, max_cols, inner_indent),
+                else_if_part
+            )
+        } else {
+            format!(
+                "{}\n{}{}\nelse\n{}{}",
+                if_then_prefix,
+                make_indent(inner_indent),
+                format_expr_impl(then_expr, max_cols, inner_indent),
+                make_indent(inner_indent),
+                format_expr_impl(else_expr, max_cols, inner_indent)
+            )
+        }
     } else {
         // Everything on separate lines
-        let inner_indent = indent + INDENT_SIZE;
-        format!(
-            "if\n{}{}\nthen\n{}{}\nelse\n{}{}",
-            make_indent(inner_indent),
-            format_expr_impl(condition, max_cols, inner_indent),
-            make_indent(inner_indent),
-            format_expr_impl(then_expr, max_cols, inner_indent),
-            make_indent(inner_indent),
-            format_expr_impl(else_expr, max_cols, inner_indent)
-        )
+        // Check if else_expr is another conditional (else-if chain)
+        if let Expr::Conditional { condition: else_cond, then_expr: else_then, else_expr: else_else } = &else_expr.node {
+            let else_if_part = format_conditional_multiline(else_cond, else_then, else_else, max_cols, indent);
+            format!(
+                "if\n{}{}\nthen\n{}{}\nelse {}",
+                make_indent(inner_indent),
+                format_expr_impl(condition, max_cols, inner_indent),
+                make_indent(inner_indent),
+                format_expr_impl(then_expr, max_cols, inner_indent),
+                else_if_part
+            )
+        } else {
+            format!(
+                "if\n{}{}\nthen\n{}{}\nelse\n{}{}",
+                make_indent(inner_indent),
+                format_expr_impl(condition, max_cols, inner_indent),
+                make_indent(inner_indent),
+                format_expr_impl(then_expr, max_cols, inner_indent),
+                make_indent(inner_indent),
+                format_expr_impl(else_expr, max_cols, inner_indent)
+            )
+        }
     }
 }
 
@@ -1139,6 +1165,49 @@ mod tests {
                         assert!(!formatted.contains("            ")); // Should not have excessive indentation
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn test_else_if_chain_stays_flat() {
+        // Test that else-if chains don't create staircase indentation
+        let source = "x = if a then 1 else if b then 2 else if c then 3 else 4";
+        let expr = parse_test_expr(source);
+        let formatted = format_expr(&expr, Some(40));
+        println!("Formatted:\n{}", formatted);
+
+        // All "else if" should be at the same indentation level (no staircase)
+        // Count how many times we see "else if" - should be 2
+        let else_if_count = formatted.matches("else if").count();
+        assert_eq!(else_if_count, 2, "Should have 2 'else if' clauses");
+
+        // Check that there's no increasing indentation (staircase pattern)
+        // The then branches should be indented by 2 spaces
+        for line in formatted.lines() {
+            let leading_spaces = line.len() - line.trim_start().len();
+            // No line should be indented more than 2 spaces
+            assert!(leading_spaces <= 2, "Line has too much indentation: '{}'", line);
+        }
+    }
+
+    #[test]
+    fn test_long_else_if_chain() {
+        // Test with a longer else-if chain similar to the user's tax bracket example
+        let source = "tax = if income <= 10000 then income * 0.1 else if income <= 50000 then 1000 + (income - 10000) * 0.2 else if income <= 100000 then 9000 + (income - 50000) * 0.3 else 24000 + (income - 100000) * 0.4";
+        let expr = parse_test_expr(source);
+        let formatted = format_expr(&expr, Some(60));
+        println!("Formatted:\n{}", formatted);
+
+        // Should have 3 'else if' or 'else' clauses and all at the same level
+        let else_count = formatted.matches("\nelse").count();
+        assert!(else_count >= 3, "Should have at least 3 else/else-if clauses, found {}", else_count);
+
+        // Verify no staircase - each "else if" should start at column 0
+        for line in formatted.lines() {
+            if line.starts_with("else") {
+                // "else" and "else if" should start at the beginning of the line
+                assert!(line.starts_with("else"), "else clause should start at column 0: '{}'", line);
             }
         }
     }
