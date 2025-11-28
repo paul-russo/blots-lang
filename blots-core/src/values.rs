@@ -16,10 +16,6 @@ use crate::{
 /// - Very small values (< 0.0001) or extremely large values (>= 1e15) use scientific notation
 /// - Standard numbers preserve up to 15 significant digits with thousand separators
 pub fn format_display_number(value: f64) -> String {
-    if value == 0.0 {
-        return "0".to_string();
-    }
-
     // Handle special values
     if value.is_nan() {
         return "NaN".to_string();
@@ -30,6 +26,10 @@ pub fn format_display_number(value: f64) -> String {
         } else {
             "-Infinity".to_string()
         };
+    }
+    // Handle zero specially to avoid "0e0" from scientific notation path
+    if value == 0.0 {
+        return value.to_string();
     }
 
     let abs_value = value.abs();
@@ -1256,7 +1256,7 @@ mod tests {
     #[test]
     fn test_format_display_number_zero() {
         assert_eq!(format_display_number(0.0), "0");
-        assert_eq!(format_display_number(-0.0), "0");
+        assert_eq!(format_display_number(-0.0), "-0"); // -0 is preserved
     }
 
     #[test]
@@ -1325,5 +1325,17 @@ mod tests {
 
         // stringify_for_display uses fancy formatting (for format)
         assert_eq!(value.stringify_for_display(&heap), "1,234,567.89");
+    }
+
+    #[test]
+    fn test_stringify_negative_zero() {
+        use crate::heap::Heap;
+
+        let heap = Heap::new();
+        let neg_zero = Value::Number(-0.0);
+
+        // Both stringify methods should preserve -0
+        assert_eq!(neg_zero.stringify_internal(&heap), "-0");
+        assert_eq!(neg_zero.stringify_for_display(&heap), "-0");
     }
 }
