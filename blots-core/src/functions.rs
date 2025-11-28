@@ -900,7 +900,7 @@ impl BuiltInFunction {
                     let borrowed_heap = &heap.borrow();
                     &args[1..]
                         .iter()
-                        .map(|v| v.stringify_internal(borrowed_heap))
+                        .map(|v| v.stringify_for_display(borrowed_heap))
                         .collect::<Vec<String>>()
                 };
 

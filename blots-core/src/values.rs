@@ -12,6 +12,203 @@ use crate::{
     },
 };
 
+/// Format a number for display output, matching the JS displayNumber function:
+/// - Very small values (< 0.0001) or extremely large values (>= 1e15) use scientific notation
+/// - Standard numbers preserve up to 15 significant digits with thousand separators
+pub fn format_display_number(value: f64) -> String {
+    if value == 0.0 {
+        return "0".to_string();
+    }
+
+    // Handle special values
+    if value.is_nan() {
+        return "NaN".to_string();
+    }
+    if value.is_infinite() {
+        return if value.is_sign_positive() {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        };
+    }
+
+    let abs_value = value.abs();
+
+    // Very small values (< 0.0001) or extremely large values (>= 1e15) -> Scientific notation
+    if abs_value < 0.0001 || abs_value >= 1e15 {
+        return format_scientific(value);
+    }
+
+    // Standard numbers - preserve 15 digits of precision with thousand separators
+    format_standard(value)
+}
+
+/// Format a number in scientific notation with up to 15 significant digits
+fn format_scientific(value: f64) -> String {
+    // Format with up to 15 significant digits in scientific notation
+    let formatted = format!("{:.14e}", value);
+
+    // Parse and clean up the result
+    if let Some((mantissa_str, exp_str)) = formatted.split_once('e') {
+        let mantissa: f64 = mantissa_str.parse().unwrap_or(value);
+        let exp: i32 = exp_str.parse().unwrap_or(0);
+
+        // Format mantissa, removing trailing zeros
+        let mantissa_formatted = format_mantissa(mantissa);
+
+        format!("{}e{}", mantissa_formatted, exp)
+    } else {
+        formatted
+    }
+}
+
+/// Format the mantissa part, removing unnecessary trailing zeros
+fn format_mantissa(mantissa: f64) -> String {
+    // Format with enough precision
+    let s = format!("{:.14}", mantissa);
+
+    // Remove trailing zeros after decimal point
+    let s = s.trim_end_matches('0');
+    // Remove trailing decimal point if no decimals left
+    let s = s.trim_end_matches('.');
+
+    s.to_string()
+}
+
+/// Format a standard number with thousand separators and up to 15 significant digits
+fn format_standard(value: f64) -> String {
+    // For integers that fit in i64 range, handle them directly without float rounding
+    // This avoids floating point precision issues with large integers
+    if value.fract() == 0.0 && value.abs() < 9007199254740992.0 {
+        // Can be exactly represented as i64
+        let int_val = value as i64;
+        return format_integer_with_separators(int_val);
+    }
+
+    // Round to 15 significant figures for non-integers
+    let rounded = round_to_significant_figures(value, 15);
+
+    // Format the number, preserving significant digits
+    let formatted = format_float_significant(rounded, 15);
+
+    // Add thousand separators to the integer part
+    add_thousand_separators(&formatted)
+}
+
+/// Round a number to n significant figures
+fn round_to_significant_figures(value: f64, sig_figs: u32) -> f64 {
+    if value == 0.0 {
+        return 0.0;
+    }
+
+    let magnitude = value.abs().log10().floor() as i32;
+    let scale = 10_f64.powi(sig_figs as i32 - 1 - magnitude);
+    (value * scale).round() / scale
+}
+
+/// Format a float with up to n significant figures, removing trailing zeros
+fn format_float_significant(value: f64, max_sig_figs: usize) -> String {
+    // Determine how many decimal places we need
+    let abs_value = value.abs();
+    let magnitude = if abs_value >= 1.0 {
+        abs_value.log10().floor() as i32 + 1
+    } else {
+        // For numbers < 1, count leading zeros
+        -(abs_value.log10().floor() as i32)
+    };
+
+    // Calculate decimal places needed for significant figures
+    let decimal_places = if abs_value >= 1.0 {
+        (max_sig_figs as i32 - magnitude).max(0) as usize
+    } else {
+        // For numbers < 1, we need more decimal places
+        (max_sig_figs as i32 + magnitude - 1).max(0) as usize
+    };
+
+    let formatted = format!("{:.prec$}", value, prec = decimal_places);
+
+    // Remove trailing zeros after decimal point, but keep at least one decimal if there is a decimal point
+    if formatted.contains('.') {
+        let trimmed = formatted.trim_end_matches('0');
+        if trimmed.ends_with('.') {
+            trimmed.trim_end_matches('.').to_string()
+        } else {
+            trimmed.to_string()
+        }
+    } else {
+        formatted
+    }
+}
+
+/// Format an integer with thousand separators (commas)
+fn format_integer_with_separators(value: i64) -> String {
+    let is_negative = value < 0;
+    let abs_str = value.abs().to_string();
+
+    let with_commas: String = abs_str
+        .chars()
+        .rev()
+        .enumerate()
+        .flat_map(|(i, c)| {
+            if i > 0 && i % 3 == 0 {
+                vec![',', c]
+            } else {
+                vec![c]
+            }
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+
+    if is_negative {
+        format!("-{}", with_commas)
+    } else {
+        with_commas
+    }
+}
+
+/// Add thousand separators to the integer part of a formatted float string
+fn add_thousand_separators(s: &str) -> String {
+    let is_negative = s.starts_with('-');
+    let s = if is_negative { &s[1..] } else { s };
+
+    let (int_part, dec_part) = if let Some(dot_pos) = s.find('.') {
+        (&s[..dot_pos], Some(&s[dot_pos..]))
+    } else {
+        (s, None)
+    };
+
+    // Add commas to integer part
+    let int_with_commas: String = int_part
+        .chars()
+        .rev()
+        .enumerate()
+        .flat_map(|(i, c)| {
+            if i > 0 && i % 3 == 0 {
+                vec![',', c]
+            } else {
+                vec![c]
+            }
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+
+    let result = if let Some(dec) = dec_part {
+        format!("{}{}", int_with_commas, dec)
+    } else {
+        int_with_commas
+    };
+
+    if is_negative {
+        format!("-{}", result)
+    } else {
+        result
+    }
+}
+
 #[derive(Debug)]
 pub enum FunctionArity {
     Exact(usize),
@@ -908,14 +1105,20 @@ impl Value {
     /// Value::String, which is returned without wrapping quotes. Use this for string
     /// concatenation, formatting, etc. Don't use this for displaying values to the user.
     pub fn stringify_internal(&self, heap: &Heap) -> String {
-        self.stringify(heap, false)
+        self.stringify(heap, false, false)
     }
 
     pub fn stringify_external(&self, heap: &Heap) -> String {
-        self.stringify(heap, true)
+        self.stringify(heap, true, false)
     }
 
-    fn stringify(&self, heap: &Heap, wrap_strings: bool) -> String {
+    /// Stringify the value with display formatting (thousand separators, scientific notation).
+    /// Use this for user-facing output like the format() function.
+    pub fn stringify_for_display(&self, heap: &Heap) -> String {
+        self.stringify(heap, false, true)
+    }
+
+    fn stringify(&self, heap: &Heap, wrap_strings: bool, display_format: bool) -> String {
         match self {
             Value::String(p) => p
                 .reify(heap)
@@ -933,7 +1136,7 @@ impl Value {
                 let list = p.reify(heap).as_list().unwrap();
 
                 for (i, value) in list.iter().enumerate() {
-                    result.push_str(&value.stringify(heap, wrap_strings));
+                    result.push_str(&value.stringify(heap, wrap_strings, display_format));
                     if i < list.len() - 1 {
                         result.push_str(", ");
                     }
@@ -946,7 +1149,7 @@ impl Value {
                 let record = p.reify(heap).as_record().unwrap();
 
                 for (i, (key, value)) in record.iter().enumerate() {
-                    result.push_str(&format!("{}: {}", key, value.stringify(heap, wrap_strings)));
+                    result.push_str(&format!("{}: {}", key, value.stringify(heap, wrap_strings, display_format)));
                     if i < record.len() - 1 {
                         result.push_str(", ");
                     }
@@ -990,7 +1193,7 @@ impl Value {
                     result.push_str(
                         &list
                             .iter()
-                            .map(|v| v.stringify(heap, wrap_strings))
+                            .map(|v| v.stringify(heap, wrap_strings, display_format))
                             .collect::<String>(),
                     );
                     result
@@ -1007,7 +1210,7 @@ impl Value {
                         result.push_str(&format!(
                             "{}: {}",
                             key,
-                            value.stringify(heap, wrap_strings)
+                            value.stringify(heap, wrap_strings, display_format)
                         ));
                         if i < record.len() - 1 {
                             result.push_str(", ");
@@ -1017,7 +1220,15 @@ impl Value {
                     result
                 }
             },
-            Value::Bool(_) | Value::Number(_) | Value::Null => format!("{}", self),
+            Value::Number(n) => {
+                if display_format {
+                    format_display_number(*n)
+                } else {
+                    n.to_string()
+                }
+            }
+            Value::Bool(b) => b.to_string(),
+            Value::Null => "null".to_string(),
         }
     }
 }
@@ -1025,7 +1236,7 @@ impl Value {
 impl Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Value::Number(n) => write!(f, "{}", n),
+            Value::Number(n) => write!(f, "{}", format_display_number(*n)),
             Value::List(p) => write!(f, "{}", p),
             Value::Spread(p) => write!(f, "...{}", p),
             Value::Bool(b) => write!(f, "{}", b),
@@ -1035,5 +1246,84 @@ impl Display for Value {
             Value::BuiltIn(built_in) => write!(f, "{} (built-in)", built_in.name()),
             Value::Record(p) => write!(f, "{}", p),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_display_number_zero() {
+        assert_eq!(format_display_number(0.0), "0");
+        assert_eq!(format_display_number(-0.0), "0");
+    }
+
+    #[test]
+    fn test_format_display_number_integers() {
+        assert_eq!(format_display_number(1.0), "1");
+        assert_eq!(format_display_number(123.0), "123");
+        assert_eq!(format_display_number(1234.0), "1,234");
+        assert_eq!(format_display_number(1234567.0), "1,234,567");
+        assert_eq!(format_display_number(-1234567.0), "-1,234,567");
+    }
+
+    #[test]
+    fn test_format_display_number_large_integers() {
+        assert_eq!(format_display_number(999999999999999.0), "999,999,999,999,999");
+        assert_eq!(format_display_number(100000000000000.0), "100,000,000,000,000");
+    }
+
+    #[test]
+    fn test_format_display_number_decimals() {
+        assert_eq!(format_display_number(3.14159), "3.14159");
+        assert_eq!(format_display_number(1234.56), "1,234.56");
+        assert_eq!(format_display_number(0.5), "0.5");
+        assert_eq!(format_display_number(0.0001), "0.0001");
+    }
+
+    #[test]
+    fn test_format_display_number_scientific_small() {
+        // Numbers < 0.0001 should use scientific notation
+        assert_eq!(format_display_number(0.00001), "1e-5");
+        assert_eq!(format_display_number(0.00001234), "1.234e-5");
+        assert_eq!(format_display_number(1e-10), "1e-10");
+    }
+
+    #[test]
+    fn test_format_display_number_scientific_large() {
+        // Numbers >= 1e15 should use scientific notation
+        assert_eq!(format_display_number(1e15), "1e15");
+        assert_eq!(format_display_number(1.5e15), "1.5e15");
+        assert_eq!(format_display_number(1e20), "1e20");
+    }
+
+    #[test]
+    fn test_format_display_number_special_values() {
+        assert_eq!(format_display_number(f64::NAN), "NaN");
+        assert_eq!(format_display_number(f64::INFINITY), "Infinity");
+        assert_eq!(format_display_number(f64::NEG_INFINITY), "-Infinity");
+    }
+
+    #[test]
+    fn test_format_display_number_negative() {
+        assert_eq!(format_display_number(-3.14), "-3.14");
+        assert_eq!(format_display_number(-1234.56), "-1,234.56");
+        assert_eq!(format_display_number(-0.00001), "-1e-5");
+        assert_eq!(format_display_number(-1e15), "-1e15");
+    }
+
+    #[test]
+    fn test_stringify_internal_vs_display() {
+        use crate::heap::Heap;
+
+        let heap = Heap::new();
+        let value = Value::Number(1234567.89);
+
+        // stringify_internal uses plain formatting (for to_string)
+        assert_eq!(value.stringify_internal(&heap), "1234567.89");
+
+        // stringify_for_display uses fancy formatting (for format)
+        assert_eq!(value.stringify_for_display(&heap), "1,234,567.89");
     }
 }
