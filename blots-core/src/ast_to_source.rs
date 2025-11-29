@@ -154,7 +154,7 @@ fn binary_op_to_source(op: &BinaryOp) -> &'static str {
 }
 
 /// Check if a child expression needs parentheses when used in a binary operation
-fn needs_parens_in_binop(parent_op: &BinaryOp, child_expr: &SpannedExpr, is_left: bool) -> bool {
+pub fn needs_parens_in_binop(parent_op: &BinaryOp, child_expr: &SpannedExpr, is_left: bool) -> bool {
     match &child_expr.node {
         Expr::BinaryOp { op: child_op, .. } => {
             let (parent_prec, parent_assoc) = operator_info(parent_op);

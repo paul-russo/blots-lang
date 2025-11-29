@@ -1,5 +1,5 @@
 use crate::ast::{BinaryOp, DoStatement, Expr, RecordEntry, RecordKey, SpannedExpr};
-use crate::ast_to_source::{expr_to_source};
+use crate::ast_to_source::{expr_to_source, needs_parens_in_binop};
 use crate::values::LambdaArg;
 
 const DEFAULT_MAX_COLUMNS: usize = 80;
@@ -351,7 +351,17 @@ fn format_binary_op_multiline(
     indent: usize,
 ) -> String {
     let op_str = binary_op_str(op);
+
+    // Check if operands need parentheses based on precedence
+    let left_needs_parens = needs_parens_in_binop(op, left, true);
+    let right_needs_parens = needs_parens_in_binop(op, right, false);
+
     let left_str = format_expr_impl(left, max_cols, indent);
+    let left_str = if left_needs_parens {
+        format!("({})", left_str)
+    } else {
+        left_str
+    };
 
     // Special handling for via/into/where with lambda on the right
     // Try to keep "via lambda" together on the same line
@@ -359,6 +369,11 @@ fn format_binary_op_multiline(
         && let Expr::Lambda { .. } = &right.node {
             // Format the right side (lambda with possible do block)
             let right_str = format_expr_impl(right, max_cols, indent);
+            let right_str = if right_needs_parens {
+                format!("({})", right_str)
+            } else {
+                right_str
+            };
 
             // Check if the first line of the whole expression fits
             // (for lambdas with do blocks, this would be "left via i => do {")
@@ -381,17 +396,28 @@ fn format_binary_op_multiline(
             // If it doesn't fit, break after the operator
             let continued_indent = indent;
             let right_formatted = format_expr_impl(right, max_cols, continued_indent);
+            let right_formatted = if right_needs_parens {
+                format!("({})", right_formatted)
+            } else {
+                right_formatted
+            };
             return format!("{} {}\n{}{}", left_str, op_str, make_indent(continued_indent), right_formatted);
         }
 
     // Default: break before the operator with indentation
     let right_indent = indent + INDENT_SIZE;
+    let right_str = format_expr_impl(right, max_cols, right_indent);
+    let right_str = if right_needs_parens {
+        format!("({})", right_str)
+    } else {
+        right_str
+    };
     format!(
         "{}\n{}{} {}",
         left_str,
         make_indent(right_indent),
         op_str,
-        format_expr_impl(right, max_cols, right_indent)
+        right_str
     )
 }
 
@@ -1210,5 +1236,44 @@ mod tests {
                 assert!(line.starts_with("else"), "else clause should start at column 0: '{}'", line);
             }
         }
+    }
+
+    #[test]
+    fn test_multiline_preserves_precedence_parentheses() {
+        // Test that multiline formatting preserves necessary parentheses for precedence
+        // This is the loan amortization formula: loan * numerator / denominator
+        // The denominator needs parens because subtraction has lower precedence than division
+        let source = "result = amount * (rate * (1 + rate) ^ n) / ((1 + rate) ^ n - 1)";
+        let expr = parse_test_expr(source);
+        let formatted = format_expr(&expr, Some(40));
+        println!("Formatted:\n{}", formatted);
+
+        // The denominator ((1 + rate) ^ n - 1) must be wrapped in parentheses
+        // because subtraction has lower precedence than division
+        assert!(
+            formatted.contains("/ ((1 + rate) ^ n - 1)"),
+            "Denominator should be wrapped in parentheses to preserve precedence. Got:\n{}",
+            formatted
+        );
+    }
+
+    #[test]
+    fn test_multiline_division_with_subtraction() {
+        // Simpler test: a / (b - c) should preserve the parens
+        let source = "x = a / (b - c)";
+        let expr = parse_test_expr(source);
+        let formatted = format_expr(&expr, Some(80));
+
+        assert_eq!(formatted, "x = a / (b - c)");
+    }
+
+    #[test]
+    fn test_multiline_multiplication_with_addition() {
+        // a * (b + c) should preserve the parens
+        let source = "x = a * (b + c)";
+        let expr = parse_test_expr(source);
+        let formatted = format_expr(&expr, Some(80));
+
+        assert_eq!(formatted, "x = a * (b + c)");
     }
 }
