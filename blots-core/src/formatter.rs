@@ -262,18 +262,20 @@ fn format_conditional_multiline(
             // Format as "else if" at the same indentation level (not nested)
             let else_if_part = format_conditional_multiline(else_cond, else_then, else_else, max_cols, indent);
             format!(
-                "{}\n{}{}\nelse {}",
+                "{}\n{}{}\n{}else {}",
                 if_then_prefix,
                 make_indent(inner_indent),
                 format_expr_impl(then_expr, max_cols, inner_indent),
+                make_indent(indent),
                 else_if_part
             )
         } else {
             format!(
-                "{}\n{}{}\nelse\n{}{}",
+                "{}\n{}{}\n{}else\n{}{}",
                 if_then_prefix,
                 make_indent(inner_indent),
                 format_expr_impl(then_expr, max_cols, inner_indent),
+                make_indent(indent),
                 make_indent(inner_indent),
                 format_expr_impl(else_expr, max_cols, inner_indent)
             )
@@ -284,20 +286,24 @@ fn format_conditional_multiline(
         if let Expr::Conditional { condition: else_cond, then_expr: else_then, else_expr: else_else } = &else_expr.node {
             let else_if_part = format_conditional_multiline(else_cond, else_then, else_else, max_cols, indent);
             format!(
-                "if\n{}{}\nthen\n{}{}\nelse {}",
+                "if\n{}{}\n{}then\n{}{}\n{}else {}",
                 make_indent(inner_indent),
                 format_expr_impl(condition, max_cols, inner_indent),
+                make_indent(indent),
                 make_indent(inner_indent),
                 format_expr_impl(then_expr, max_cols, inner_indent),
+                make_indent(indent),
                 else_if_part
             )
         } else {
             format!(
-                "if\n{}{}\nthen\n{}{}\nelse\n{}{}",
+                "if\n{}{}\n{}then\n{}{}\n{}else\n{}{}",
                 make_indent(inner_indent),
                 format_expr_impl(condition, max_cols, inner_indent),
+                make_indent(indent),
                 make_indent(inner_indent),
                 format_expr_impl(then_expr, max_cols, inner_indent),
+                make_indent(indent),
                 make_indent(inner_indent),
                 format_expr_impl(else_expr, max_cols, inner_indent)
             )
@@ -393,7 +399,7 @@ fn format_binary_op_multiline(
                 }
             }
 
-            // If it doesn't fit, break after the operator
+            // If it doesn't fit, break before the operator (keep operator with right operand)
             let continued_indent = indent;
             let right_formatted = format_expr_impl(right, max_cols, continued_indent);
             let right_formatted = if right_needs_parens {
@@ -401,7 +407,7 @@ fn format_binary_op_multiline(
             } else {
                 right_formatted
             };
-            return format!("{} {}\n{}{}", left_str, op_str, make_indent(continued_indent), right_formatted);
+            return format!("{}\n{}{} {}", left_str, make_indent(continued_indent), op_str, right_formatted);
         }
 
     // Default: break before the operator with indentation
@@ -1275,5 +1281,52 @@ mod tests {
         let formatted = format_expr(&expr, Some(80));
 
         assert_eq!(formatted, "x = a * (b + c)");
+    }
+
+    #[test]
+    fn test_else_indented_in_lambda_body() {
+        // When a conditional is inside a lambda body, the else keyword should be
+        // indented to match the if, not placed at column 0
+        let source = "is_positive = n => if n > 0 then true else false";
+        let expr = parse_test_expr(source);
+        let formatted = format_expr(&expr, Some(30)); // Force multiline
+
+        // The else should be indented, not at column 0
+        for line in formatted.lines() {
+            if line.trim().starts_with("else") {
+                let leading_spaces = line.len() - line.trim_start().len();
+                assert!(
+                    leading_spaces > 0,
+                    "else should be indented in lambda body, got: '{}'",
+                    line
+                );
+            }
+        }
+
+        // Verify the formatted output is still valid syntax by re-parsing
+        let reparsed = parse_test_expr(&formatted);
+        assert!(matches!(reparsed.node, Expr::Assignment { .. }));
+    }
+
+    #[test]
+    fn test_via_breaks_before_operator_not_after() {
+        // When a via expression is too long, it should break BEFORE the operator,
+        // not after (breaking after would leave 'via' at end of line, which is a parse error)
+        let source = "result = [1, 2, 3, 4, 5] via (x) => x * 2";
+        let expr = parse_test_expr(source);
+        let formatted = format_expr(&expr, Some(30)); // Force multiline
+
+        // If it breaks, 'via' should be at the start of a line, not at the end
+        for line in formatted.lines() {
+            assert!(
+                !line.trim_end().ends_with("via"),
+                "via should not be at end of line (would be parse error), got: '{}'",
+                line
+            );
+        }
+
+        // Verify the formatted output is still valid syntax by re-parsing
+        let reparsed = parse_test_expr(&formatted);
+        assert!(matches!(reparsed.node, Expr::Assignment { .. }));
     }
 }
