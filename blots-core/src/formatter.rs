@@ -1,5 +1,5 @@
 use crate::ast::{BinaryOp, DoStatement, Expr, RecordEntry, RecordKey, SpannedExpr};
-use crate::ast_to_source::{expr_to_source, needs_parens_in_binop};
+use crate::ast_to_source::{expr_to_source, format_record_key, needs_parens_in_binop};
 use crate::values::LambdaArg;
 
 const DEFAULT_MAX_COLUMNS: usize = 80;
@@ -80,7 +80,7 @@ fn format_single_line(expr: &SpannedExpr) -> String {
 /// Format a record entry on a single line
 fn format_record_entry_single_line(entry: &RecordEntry) -> String {
     match &entry.key {
-        RecordKey::Static(key) => format!("{}: {}", key, format_single_line(&entry.value)),
+        RecordKey::Static(key) => format!("{}: {}", format_record_key(key), format_single_line(&entry.value)),
         RecordKey::Dynamic(key_expr) => {
             format!("[{}]: {}", format_single_line(key_expr), format_single_line(&entry.value))
         }
@@ -190,7 +190,7 @@ fn format_record_multiline(entries: &[RecordEntry], max_cols: usize, indent: usi
 fn format_record_entry(entry: &RecordEntry, max_cols: usize, indent: usize) -> String {
     match &entry.key {
         RecordKey::Static(key) => {
-            format!("{}: {}", key, format_expr_impl(&entry.value, max_cols, indent))
+            format!("{}: {}", format_record_key(key), format_expr_impl(&entry.value, max_cols, indent))
         }
         RecordKey::Dynamic(key_expr) => {
             format!(
@@ -1324,6 +1324,59 @@ mod tests {
                 line
             );
         }
+
+        // Verify the formatted output is still valid syntax by re-parsing
+        let reparsed = parse_test_expr(&formatted);
+        assert!(matches!(reparsed.node, Expr::Assignment { .. }));
+    }
+
+    #[test]
+    fn test_record_keys_with_spaces_preserve_quotes() {
+        // Record keys with spaces need to be quoted to be valid syntax
+        let source = r#"x = {"my key": 1, "another-key": 2}"#;
+        let expr = parse_test_expr(source);
+        let formatted = format_expr(&expr, Some(80));
+
+        // The formatted output should preserve the quotes around keys with spaces/dashes
+        assert!(
+            formatted.contains(r#""my key""#),
+            "Key with spaces should remain quoted, got: {}",
+            formatted
+        );
+        assert!(
+            formatted.contains(r#""another-key""#),
+            "Key with dashes should remain quoted, got: {}",
+            formatted
+        );
+
+        // Verify the formatted output is still valid syntax by re-parsing
+        let reparsed = parse_test_expr(&formatted);
+        assert!(matches!(reparsed.node, Expr::Assignment { .. }));
+    }
+
+    #[test]
+    fn test_record_keys_valid_identifiers_no_quotes() {
+        // Record keys that are valid identifiers should NOT have quotes
+        let source = r#"x = {name: "Alice", age: 30}"#;
+        let expr = parse_test_expr(source);
+        let formatted = format_expr(&expr, Some(80));
+
+        // Valid identifier keys should not be quoted
+        assert_eq!(formatted, r#"x = {name: "Alice", age: 30}"#);
+    }
+
+    #[test]
+    fn test_record_keys_starting_with_number_need_quotes() {
+        // Record keys starting with a number are not valid identifiers
+        let source = r#"x = {"123abc": 1}"#;
+        let expr = parse_test_expr(source);
+        let formatted = format_expr(&expr, Some(80));
+
+        assert!(
+            formatted.contains(r#""123abc""#),
+            "Key starting with number should remain quoted, got: {}",
+            formatted
+        );
 
         // Verify the formatted output is still valid syntax by re-parsing
         let reparsed = parse_test_expr(&formatted);

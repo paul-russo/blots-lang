@@ -3,6 +3,47 @@ use crate::precedence::{operator_info, Assoc};
 use crate::values::{LambdaArg, SerializableValue};
 use indexmap::IndexMap;
 
+/// Reserved words that cannot be used as unquoted identifiers
+const RESERVED_WORDS: &[&str] = &[
+    "if", "then", "else", "true", "false", "null", "and", "or", "not", "do", "return", "output",
+];
+
+/// Check if a string is a valid unquoted identifier in Blots.
+/// Valid identifiers:
+/// - Must start with ASCII letter or underscore
+/// - Can contain ASCII letters, digits, or underscores
+/// - Cannot be a reserved word
+pub fn is_valid_identifier(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+
+    // Check if it's a reserved word
+    if RESERVED_WORDS.contains(&s) {
+        return false;
+    }
+
+    let mut chars = s.chars();
+
+    // First character must be ASCII letter or underscore
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+
+    // Rest must be ASCII letters, digits, or underscores
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Format a record key, adding quotes if necessary
+pub fn format_record_key(key: &str) -> String {
+    if is_valid_identifier(key) {
+        key.to_string()
+    } else {
+        format!("\"{}\"", key.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
 pub fn expr_to_source(spanned_expr: &SpannedExpr) -> String {
     match &spanned_expr.node {
         Expr::Number(n) => {
@@ -109,7 +150,7 @@ fn lambda_arg_to_source(arg: &LambdaArg) -> String {
 
 fn record_entry_to_source(entry: &RecordEntry) -> String {
     match &entry.key {
-        RecordKey::Static(key) => format!("{}: {}", key, expr_to_source(&entry.value)),
+        RecordKey::Static(key) => format!("{}: {}", format_record_key(key), expr_to_source(&entry.value)),
         RecordKey::Dynamic(key_expr) => {
             format!(
                 "[{}]: {}",
@@ -355,7 +396,7 @@ fn record_entry_to_source_with_scope(
         RecordKey::Static(key) => {
             format!(
                 "{}: {}",
-                key,
+                format_record_key(key),
                 expr_to_source_with_scope(&entry.value, scope)
             )
         }
@@ -368,6 +409,7 @@ fn record_entry_to_source_with_scope(
         }
         RecordKey::Shorthand(name) => {
             // For shorthand, check if the value is in scope
+            // Note: shorthand keys are always valid identifiers (they come from variable names)
             if let Some(value) = scope.get(name) {
                 format!("{}: {}", name, serializable_value_to_source(value))
             } else {
@@ -400,7 +442,7 @@ fn serializable_value_to_source(value: &SerializableValue) -> String {
         SerializableValue::Record(fields) => {
             let entries_str: Vec<String> = fields
                 .iter()
-                .map(|(k, v)| format!("{}: {}", k, serializable_value_to_source(v)))
+                .map(|(k, v)| format!("{}: {}", format_record_key(k), serializable_value_to_source(v)))
                 .collect();
             format!("{{{}}}", entries_str.join(", "))
         }
