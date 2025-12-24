@@ -2,9 +2,7 @@ use crate::{
     ast::{BinaryOp, DoStatement, Expr, PostfixOp, RecordEntry, RecordKey, Span, Spanned, SpannedExpr, UnaryOp},
     environment::Environment,
     error::RuntimeError,
-    functions::{
-        BuiltInFunction, get_built_in_function_def_by_ident, get_function_def, is_built_in_function,
-    },
+    functions::{BuiltInFunction, get_function_def, is_built_in_function},
     heap::{Heap, HeapPointer, HeapValue, IterablePointer, RecordPointer},
     parser::Rule,
     precedence::PRATT,
@@ -970,7 +968,11 @@ fn evaluate_binary_op_ast(
                                 Rc::clone(&bindings),
                                 call_depth,
                                 &source,
-                            ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source_owned.clone()))
+                            )
+                            .map_err(|e| {
+                                RuntimeError::from(anyhow!("in \"via\" callback: {}", e))
+                                    .with_call_site(op_span, source_owned.clone())
+                            })
                         })
                         .collect::<Result<Vec<Value>, RuntimeError>>()?;
                     Ok(heap.borrow_mut().insert_list(mapped_list))
@@ -1274,23 +1276,47 @@ fn evaluate_binary_op_ast(
                             ));
                         }
 
-                        let list = heap.borrow_mut().insert_list(l_vec.clone());
+                        let source_owned = source.clone();
+                        let (def, func_accepts_two_args) = {
+                            let borrowed_heap = &heap.borrow();
+                            let def = get_function_def(&scalar, borrowed_heap).ok_or_else(|| {
+                                anyhow!(
+                                    "unknown function: {}",
+                                    scalar.stringify_internal(borrowed_heap)
+                                )
+                            })?;
+                            let accepts_two = def.arity().can_accept(2);
+                            (def, accepts_two)
+                        };
 
-                        let call_result = get_built_in_function_def_by_ident("map").unwrap().call(
-                            scalar,
-                            vec![list, scalar],
-                            Rc::clone(&heap),
-                            Rc::clone(&bindings),
-                            call_depth,
-                                &source
-                        ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source.clone()))?;
-
-                        let mapped_list = { call_result.as_list(&heap.borrow())?.clone() };
+                        let mapped_list = l_vec
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, item)| {
+                                let args = if func_accepts_two_args {
+                                    vec![*item, Value::Number(idx as f64)]
+                                } else {
+                                    vec![*item]
+                                };
+                                def.call(
+                                    scalar,
+                                    args,
+                                    Rc::clone(&heap),
+                                    Rc::clone(&bindings),
+                                    call_depth,
+                                    &source,
+                                )
+                                .map_err(|e| {
+                                    RuntimeError::from(anyhow!("in \"via\" callback: {}", e))
+                                        .with_call_site(op_span, source_owned.clone())
+                                })
+                            })
+                            .collect::<Result<Vec<Value>, RuntimeError>>()?;
 
                         Ok(heap.borrow_mut().insert_list(mapped_list))
                     } else {
                         Err(RuntimeError::with_span(
-                            "map operator requires function on right side".to_string(),
+                            "via operator requires function on right side".to_string(),
                             op_span,
                             source.clone(),
                         ))
@@ -1324,8 +1350,12 @@ fn evaluate_binary_op_ast(
                             Rc::clone(&heap),
                             Rc::clone(&bindings),
                             call_depth,
-                                &source
-                        ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source.clone()))
+                            &source,
+                        )
+                        .map_err(|e| {
+                            RuntimeError::from(anyhow!("in \"into\" callback: {}", e))
+                                .with_call_site(op_span, source.clone())
+                        })
                     } else {
                         Err(RuntimeError::with_span(
                             "'into' operator requires function on right side".to_string(),
@@ -1344,18 +1374,48 @@ fn evaluate_binary_op_ast(
                             ));
                         }
 
-                        let list = heap.borrow_mut().insert_list(l_vec.clone());
+                        let source_owned = source.clone();
+                        let (def, func_accepts_two_args) = {
+                            let borrowed_heap = &heap.borrow();
+                            let def = get_function_def(&scalar, borrowed_heap).ok_or_else(|| {
+                                anyhow!(
+                                    "unknown function: {}",
+                                    scalar.stringify_internal(borrowed_heap)
+                                )
+                            })?;
+                            let accepts_two = def.arity().can_accept(2);
+                            (def, accepts_two)
+                        };
 
-                        let call_result = get_built_in_function_def_by_ident("filter").unwrap().call(
-                            scalar,
-                            vec![list, scalar],
-                            Rc::clone(&heap),
-                            Rc::clone(&bindings),
-                            call_depth,
-                                &source
-                        ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source.clone()))?;
+                        let mut filtered_list = vec![];
+                        for (idx, item) in l_vec.iter().enumerate() {
+                            let args = if func_accepts_two_args {
+                                vec![*item, Value::Number(idx as f64)]
+                            } else {
+                                vec![*item]
+                            };
 
-                        let filtered_list = { call_result.as_list(&heap.borrow())?.clone() };
+                            let result = def
+                                .call(
+                                    scalar,
+                                    args,
+                                    Rc::clone(&heap),
+                                    Rc::clone(&bindings),
+                                    call_depth,
+                                    &source,
+                                )
+                                .map_err(|e| {
+                                    RuntimeError::from(anyhow!("in \"where\" callback: {}", e))
+                                        .with_call_site(op_span, source_owned.clone())
+                                })?;
+
+                            if result.as_bool().map_err(|e| {
+                                RuntimeError::from(anyhow!("in \"where\" callback: {}", e))
+                                    .with_call_site(op_span, source_owned.clone())
+                            })? {
+                                filtered_list.push(*item);
+                            }
+                        }
 
                         Ok(heap.borrow_mut().insert_list(filtered_list))
                     } else {
@@ -1447,14 +1507,19 @@ fn evaluate_binary_op_ast(
                     ));
                 }
 
-                def.unwrap().call(
-                    rhs,
-                    vec![lhs],
-                    Rc::clone(&heap),
-                    Rc::clone(&bindings),
-                    call_depth,
-                                &source
-                ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source.clone()))
+                def.unwrap()
+                    .call(
+                        rhs,
+                        vec![lhs],
+                        Rc::clone(&heap),
+                        Rc::clone(&bindings),
+                        call_depth,
+                        &source,
+                    )
+                    .map_err(|e| {
+                        RuntimeError::from(anyhow!("in \"via\" callback: {}", e))
+                            .with_call_site(op_span, source.clone())
+                    })
             }
             BinaryOp::Into => {
                 if !rhs.is_callable() {
@@ -1475,14 +1540,19 @@ fn evaluate_binary_op_ast(
                     ));
                 }
 
-                def.unwrap().call(
-                    rhs,
-                    vec![lhs],
-                    Rc::clone(&heap),
-                    Rc::clone(&bindings),
-                    call_depth,
-                                &source
-                ).map_err(|e| RuntimeError::from(e).with_call_site(op_span, source.clone()))
+                def.unwrap()
+                    .call(
+                        rhs,
+                        vec![lhs],
+                        Rc::clone(&heap),
+                        Rc::clone(&bindings),
+                        call_depth,
+                        &source,
+                    )
+                    .map_err(|e| {
+                        RuntimeError::from(anyhow!("in \"into\" callback: {}", e))
+                            .with_call_site(op_span, source.clone())
+                    })
             }
             BinaryOp::Where => {
                 Err(RuntimeError::with_span(

@@ -1198,3 +1198,300 @@ mod flat_chaining_tests {
         assert_eq!(list[3], Value::Number(30.0)); // 10 * 3
     }
 }
+
+// Tests for via and into operator error messages
+#[cfg(test)]
+mod via_into_error_message_tests {
+    use crate::environment::Environment;
+    use crate::expressions::evaluate_pairs;
+    use crate::heap::Heap;
+    use crate::parser::{Rule, get_pairs};
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    fn parse_and_evaluate(code: &str) -> Result<Value, crate::error::RuntimeError> {
+        let pairs = get_pairs(code).map_err(|e| crate::error::RuntimeError::new(e.to_string()))?;
+
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        let mut result = Value::Null;
+        for pair in pairs {
+            match pair.as_rule() {
+                Rule::statement => {
+                    if let Some(inner_pair) = pair.into_inner().next() {
+                        match inner_pair.as_rule() {
+                            Rule::expression | Rule::assignment => {
+                                result = evaluate_pairs(
+                                    inner_pair.into_inner(),
+                                    Rc::clone(&heap),
+                                    Rc::clone(&bindings),
+                                    0,
+                                    code,
+                                )?;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Rule::EOI => {}
+                _ => {}
+            }
+        }
+        Ok(result)
+    }
+
+    #[test]
+    fn test_via_callback_error_message_with_list() {
+        // Test that via errors say "in via callback" not "in built-in function map"
+        let result = parse_and_evaluate("[1, 2, null] via x => x + 1");
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("in \"via\" callback"),
+            "Error should mention 'via callback', got: {}",
+            error_msg
+        );
+        assert!(
+            !error_msg.contains("in built-in function \"map\""),
+            "Error should not mention 'built-in function map', got: {}",
+            error_msg
+        );
+    }
+
+    #[test]
+    fn test_via_callback_error_message_scalar() {
+        // Test scalar via also shows "via callback" context
+        let result = parse_and_evaluate("null via x => x + 1");
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("in \"via\" callback"),
+            "Error should mention 'via callback', got: {}",
+            error_msg
+        );
+    }
+
+    #[test]
+    fn test_via_callback_error_message_list_to_list() {
+        // Test list-to-list via (zipped) also shows "via callback" context
+        let result = parse_and_evaluate("[1, 2] via [x => x + 1, x => x + null]");
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("in \"via\" callback"),
+            "Error should mention 'via callback', got: {}",
+            error_msg
+        );
+    }
+
+    #[test]
+    fn test_via_callback_error_includes_function_context() {
+        // Test that the error also includes the function name context
+        let result = parse_and_evaluate("[1, 2, null] via x => x + 1");
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("in anonymous function"),
+            "Error should mention 'anonymous function', got: {}",
+            error_msg
+        );
+    }
+
+    #[test]
+    fn test_via_callback_error_with_named_function() {
+        // Test that named functions show their name in the error
+        let result = parse_and_evaluate("add_one = x => x + 1\n[1, 2, null] via add_one");
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("in \"via\" callback"),
+            "Error should mention 'via callback', got: {}",
+            error_msg
+        );
+        assert!(
+            error_msg.contains("function \"add_one\""),
+            "Error should mention function name, got: {}",
+            error_msg
+        );
+    }
+
+    #[test]
+    fn test_via_callback_error_with_index_parameter() {
+        // Test that via with index parameter also shows proper error context
+        let result = parse_and_evaluate("[1, 2, null] via (x, idx) => x + idx");
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("in \"via\" callback"),
+            "Error should mention 'via callback', got: {}",
+            error_msg
+        );
+    }
+
+    #[test]
+    fn test_via_with_index_parameter_works() {
+        // Test that via with index parameter actually works (regression test)
+        let (result, heap) = {
+            let pairs = crate::parser::get_pairs("[10, 20, 30] via (x, idx) => x + idx").unwrap();
+            let heap = Rc::new(RefCell::new(crate::heap::Heap::new()));
+            let bindings = Rc::new(Environment::new());
+            let mut result = Value::Null;
+            for pair in pairs {
+                if let crate::parser::Rule::statement = pair.as_rule() {
+                    if let Some(inner_pair) = pair.into_inner().next() {
+                        result = crate::expressions::evaluate_pairs(
+                            inner_pair.into_inner(),
+                            Rc::clone(&heap),
+                            Rc::clone(&bindings),
+                            0,
+                            "[10, 20, 30] via (x, idx) => x + idx",
+                        )
+                        .unwrap();
+                    }
+                }
+            }
+            (result, heap)
+        };
+        let borrowed_heap = heap.borrow();
+        let list = result.as_list(&borrowed_heap).unwrap();
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0], Value::Number(10.0)); // 10 + 0
+        assert_eq!(list[1], Value::Number(21.0)); // 20 + 1
+        assert_eq!(list[2], Value::Number(32.0)); // 30 + 2
+    }
+
+    #[test]
+    fn test_into_callback_error_message_with_list() {
+        // Test that into errors say "in into callback"
+        let result = parse_and_evaluate("[1, 2, 3] into list => list + \"oops\"");
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("in \"into\" callback"),
+            "Error should mention 'into callback', got: {}",
+            error_msg
+        );
+    }
+
+    #[test]
+    fn test_into_callback_error_message_scalar() {
+        // Test scalar into also shows "into callback" context
+        let result = parse_and_evaluate("5 into x => x + \"oops\"");
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("in \"into\" callback"),
+            "Error should mention 'into callback', got: {}",
+            error_msg
+        );
+    }
+
+    #[test]
+    fn test_into_callback_error_includes_function_context() {
+        // Test that the error also includes the function name context
+        let result = parse_and_evaluate("[1, 2, 3] into list => list + \"oops\"");
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("in anonymous function"),
+            "Error should mention 'anonymous function', got: {}",
+            error_msg
+        );
+    }
+
+    #[test]
+    fn test_into_callback_error_with_named_function() {
+        // Test that named functions show their name in the error
+        let result = parse_and_evaluate("bad_fn = list => list + \"oops\"\n[1, 2, 3] into bad_fn");
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("in \"into\" callback"),
+            "Error should mention 'into callback', got: {}",
+            error_msg
+        );
+        assert!(
+            error_msg.contains("function \"bad_fn\""),
+            "Error should mention function name, got: {}",
+            error_msg
+        );
+    }
+
+    #[test]
+    fn test_where_callback_error_message_with_list() {
+        // Test that where errors say "in where callback" not "in built-in function filter"
+        // Use x + 1 > 0 because x > 0 with null returns false (doesn't error)
+        let result = parse_and_evaluate("[1, 2, null] where x => x + 1 > 0");
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("in \"where\" callback"),
+            "Error should mention 'where callback', got: {}",
+            error_msg
+        );
+        assert!(
+            !error_msg.contains("in built-in function \"filter\""),
+            "Error should not mention 'built-in function filter', got: {}",
+            error_msg
+        );
+    }
+
+    #[test]
+    fn test_where_callback_error_includes_function_context() {
+        // Test that the error also includes the function name context
+        let result = parse_and_evaluate("[1, 2, null] where x => x + 1 > 0");
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("in anonymous function"),
+            "Error should mention 'anonymous function', got: {}",
+            error_msg
+        );
+    }
+
+    #[test]
+    fn test_where_callback_error_with_named_function() {
+        // Test that named functions show their name in the error
+        let result = parse_and_evaluate("is_positive = x => x + 1 > 0\n[1, 2, null] where is_positive");
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("in \"where\" callback"),
+            "Error should mention 'where callback', got: {}",
+            error_msg
+        );
+        assert!(
+            error_msg.contains("function \"is_positive\""),
+            "Error should mention function name, got: {}",
+            error_msg
+        );
+    }
+
+    #[test]
+    fn test_where_callback_error_with_index_parameter() {
+        // Test that where with index parameter also shows proper error context
+        let result = parse_and_evaluate("[1, 2, null] where (x, idx) => x + 1 > idx");
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("in \"where\" callback"),
+            "Error should mention 'where callback', got: {}",
+            error_msg
+        );
+    }
+
+    #[test]
+    fn test_where_callback_error_on_non_boolean_return() {
+        // Test that where errors on non-boolean return include "where callback" context
+        let result = parse_and_evaluate("[1, 2, 3] where x => x * 2");
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("in \"where\" callback"),
+            "Error should mention 'where callback', got: {}",
+            error_msg
+        );
+    }
+}
