@@ -140,7 +140,7 @@ fn evaluate_source(
                                         if let Err(e) = validate_portable_value(
                                             &value,
                                             &heap.borrow(),
-                                            &*bindings,
+                                            bindings,
                                         ) {
                                             eprintln!("[output error] {}", e);
                                             std::process::exit(1);
@@ -159,7 +159,7 @@ fn evaluate_source(
                                             if let Err(e) = validate_portable_value(
                                                 value,
                                                 &heap.borrow(),
-                                                &*bindings,
+                                                bindings,
                                             ) {
                                                 eprintln!("[output error] {}", e);
                                                 std::process::exit(1);
@@ -248,19 +248,17 @@ fn main() -> ! {
                 Rule::statement => {
                     if let Some(inner_pair) = pair.into_inner().next() {
                         match inner_pair.as_rule() {
-                            Rule::expression => {
-                                match pairs_to_expr(inner_pair.into_inner()) {
-                                    Ok(expr) => {
-                                        let formatted = format_expr(&expr, None);
-                                        formatted_output.push_str(&formatted);
-                                        formatted_output.push('\n');
-                                    }
-                                    Err(e) => {
-                                        eprintln!("Error converting to AST: {}", e);
-                                        std::process::exit(1);
-                                    }
+                            Rule::expression => match pairs_to_expr(inner_pair.into_inner()) {
+                                Ok(expr) => {
+                                    let formatted = format_expr(&expr, None);
+                                    formatted_output.push_str(&formatted);
+                                    formatted_output.push('\n');
                                 }
-                            }
+                                Err(e) => {
+                                    eprintln!("Error converting to AST: {}", e);
+                                    std::process::exit(1);
+                                }
+                            },
                             Rule::output_declaration => {
                                 match pairs_to_expr(inner_pair.into_inner()) {
                                     Ok(inner_expr) => {
@@ -389,7 +387,7 @@ fn main() -> ! {
             eprintln!("{}", e);
             std::process::exit(1);
         }
-        
+
         #[cfg(not(target_arch = "wasm32"))]
         if ARGS.profile {
             let stats = get_function_call_stats();
@@ -398,7 +396,7 @@ fn main() -> ! {
                 summary.print_summary();
             }
         }
-        
+
         write_outputs(&outputs, ARGS.output.as_ref());
         std::process::exit(0);
     }
@@ -421,7 +419,7 @@ fn main() -> ! {
             eprintln!("{}", e);
             std::process::exit(1);
         }
-        
+
         #[cfg(not(target_arch = "wasm32"))]
         if ARGS.profile {
             let stats = get_function_call_stats();
@@ -430,7 +428,7 @@ fn main() -> ! {
                 summary.print_summary();
             }
         }
-        
+
         write_outputs(&outputs, ARGS.output.as_ref());
         std::process::exit(0);
     }
@@ -642,7 +640,7 @@ fn main() -> ! {
                                             if let Err(e) = validate_portable_value(
                                                 &value,
                                                 &heap.borrow(),
-                                                &*bindings,
+                                                &bindings,
                                             ) {
                                                 eprintln!("[output error] {}", e);
                                             } else if let Ok(serializable) =
@@ -664,7 +662,7 @@ fn main() -> ! {
                                                 if let Err(e) = validate_portable_value(
                                                     value,
                                                     &heap.borrow(),
-                                                    &*bindings,
+                                                    &bindings,
                                                 ) {
                                                     eprintln!("[output error] {}", e);
                                                 } else if let Ok(serializable) =

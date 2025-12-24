@@ -69,7 +69,10 @@ fn format_single_line(expr: &SpannedExpr) -> String {
             format!("[{}]", items_str.join(", "))
         }
         Expr::Record(entries) => {
-            let entries_str: Vec<String> = entries.iter().map(format_record_entry_single_line).collect();
+            let entries_str: Vec<String> = entries
+                .iter()
+                .map(format_record_entry_single_line)
+                .collect();
             format!("{{{}}}", entries_str.join(", "))
         }
         // For everything else, use the existing expr_to_source
@@ -80,9 +83,17 @@ fn format_single_line(expr: &SpannedExpr) -> String {
 /// Format a record entry on a single line
 fn format_record_entry_single_line(entry: &RecordEntry) -> String {
     match &entry.key {
-        RecordKey::Static(key) => format!("{}: {}", format_record_key(key), format_single_line(&entry.value)),
+        RecordKey::Static(key) => format!(
+            "{}: {}",
+            format_record_key(key),
+            format_single_line(&entry.value)
+        ),
         RecordKey::Dynamic(key_expr) => {
-            format!("[{}]: {}", format_single_line(key_expr), format_single_line(&entry.value))
+            format!(
+                "[{}]: {}",
+                format_single_line(key_expr),
+                format_single_line(&entry.value)
+            )
         }
         RecordKey::Shorthand(name) => name.clone(),
         RecordKey::Spread(expr) => format_single_line(expr),
@@ -102,23 +113,31 @@ fn format_multiline(expr: &SpannedExpr, max_cols: usize, indent: usize) -> Strin
         }
         Expr::List(items) => format_list_multiline(items, max_cols, indent),
         Expr::Record(entries) => format_record_multiline(entries, max_cols, indent),
-        Expr::Conditional { condition, then_expr, else_expr } => {
-            format_conditional_multiline(condition, then_expr, else_expr, max_cols, indent)
-        }
+        Expr::Conditional {
+            condition,
+            then_expr,
+            else_expr,
+        } => format_conditional_multiline(condition, then_expr, else_expr, max_cols, indent),
         Expr::Call { func, args } => format_call_multiline(func, args, max_cols, indent),
         Expr::BinaryOp { op, left, right } => {
             format_binary_op_multiline(op, left, right, max_cols, indent)
         }
-        Expr::DoBlock { statements, return_expr } => {
-            format_do_block_multiline(statements, return_expr, max_cols, indent)
-        }
+        Expr::DoBlock {
+            statements,
+            return_expr,
+        } => format_do_block_multiline(statements, return_expr, max_cols, indent),
         // For other expression types, fall back to single-line
         _ => expr_to_source(expr),
     }
 }
 
 /// Format an assignment with line breaks
-fn format_assignment_multiline(ident: &str, value: &SpannedExpr, max_cols: usize, indent: usize) -> String {
+fn format_assignment_multiline(
+    ident: &str,
+    value: &SpannedExpr,
+    max_cols: usize,
+    indent: usize,
+) -> String {
     // The assignment itself doesn't add indentation, but the value might need it
     // Format as: ident = <formatted_value>
     // The value should be formatted at the same indentation level, not pushed over
@@ -190,7 +209,11 @@ fn format_record_multiline(entries: &[RecordEntry], max_cols: usize, indent: usi
 fn format_record_entry(entry: &RecordEntry, max_cols: usize, indent: usize) -> String {
     match &entry.key {
         RecordKey::Static(key) => {
-            format!("{}: {}", format_record_key(key), format_expr_impl(&entry.value, max_cols, indent))
+            format!(
+                "{}: {}",
+                format_record_key(key),
+                format_expr_impl(&entry.value, max_cols, indent)
+            )
         }
         RecordKey::Dynamic(key_expr) => {
             format!(
@@ -258,9 +281,15 @@ fn format_conditional_multiline(
     if indent + if_then_prefix.len() <= max_cols {
         // Put then/else clauses on new lines
         // Check if else_expr is another conditional (else-if chain)
-        if let Expr::Conditional { condition: else_cond, then_expr: else_then, else_expr: else_else } = &else_expr.node {
+        if let Expr::Conditional {
+            condition: else_cond,
+            then_expr: else_then,
+            else_expr: else_else,
+        } = &else_expr.node
+        {
             // Format as "else if" at the same indentation level (not nested)
-            let else_if_part = format_conditional_multiline(else_cond, else_then, else_else, max_cols, indent);
+            let else_if_part =
+                format_conditional_multiline(else_cond, else_then, else_else, max_cols, indent);
             format!(
                 "{}\n{}{}\n{}else {}",
                 if_then_prefix,
@@ -283,8 +312,14 @@ fn format_conditional_multiline(
     } else {
         // Everything on separate lines
         // Check if else_expr is another conditional (else-if chain)
-        if let Expr::Conditional { condition: else_cond, then_expr: else_then, else_expr: else_else } = &else_expr.node {
-            let else_if_part = format_conditional_multiline(else_cond, else_then, else_else, max_cols, indent);
+        if let Expr::Conditional {
+            condition: else_cond,
+            then_expr: else_then,
+            else_expr: else_else,
+        } = &else_expr.node
+        {
+            let else_if_part =
+                format_conditional_multiline(else_cond, else_then, else_else, max_cols, indent);
             format!(
                 "if\n{}{}\n{}then\n{}{}\n{}else {}",
                 make_indent(inner_indent),
@@ -312,7 +347,12 @@ fn format_conditional_multiline(
 }
 
 /// Format a function call with line breaks
-fn format_call_multiline(func: &SpannedExpr, args: &[SpannedExpr], max_cols: usize, indent: usize) -> String {
+fn format_call_multiline(
+    func: &SpannedExpr,
+    args: &[SpannedExpr],
+    max_cols: usize,
+    indent: usize,
+) -> String {
     let func_str = match &func.node {
         Expr::Lambda { .. } => format!("({})", format_expr_impl(func, max_cols, indent)),
         _ => format_expr_impl(func, max_cols, indent),
@@ -372,43 +412,53 @@ fn format_binary_op_multiline(
     // Special handling for via/into/where with lambda on the right
     // Try to keep "via lambda" together on the same line
     if matches!(op, BinaryOp::Via | BinaryOp::Into | BinaryOp::Where)
-        && let Expr::Lambda { .. } = &right.node {
-            // Format the right side (lambda with possible do block)
-            let right_str = format_expr_impl(right, max_cols, indent);
-            let right_str = if right_needs_parens {
-                format!("({})", right_str)
+        && let Expr::Lambda { .. } = &right.node
+    {
+        // Format the right side (lambda with possible do block)
+        let right_str = format_expr_impl(right, max_cols, indent);
+        let right_str = if right_needs_parens {
+            format!("({})", right_str)
+        } else {
+            right_str
+        };
+
+        // Check if the first line of the whole expression fits
+        // (for lambdas with do blocks, this would be "left via i => do {")
+        let first_line_of_right = right_str.lines().next().unwrap_or(&right_str);
+        let first_line_combined = format!("{} {} {}", left_str, op_str, first_line_of_right);
+
+        if indent + first_line_combined.len() <= max_cols {
+            // The opening line fits! Return the full formatted expression
+            // If right_str is multi-line, this will preserve that structure
+            if right_str.contains('\n') {
+                // Multi-line lambda (like with do block)
+                let remaining_lines = right_str.lines().skip(1).collect::<Vec<_>>().join("\n");
+                return format!(
+                    "{} {} {}\n{}",
+                    left_str, op_str, first_line_of_right, remaining_lines
+                );
             } else {
-                right_str
-            };
-
-            // Check if the first line of the whole expression fits
-            // (for lambdas with do blocks, this would be "left via i => do {")
-            let first_line_of_right = right_str.lines().next().unwrap_or(&right_str);
-            let first_line_combined = format!("{} {} {}", left_str, op_str, first_line_of_right);
-
-            if indent + first_line_combined.len() <= max_cols {
-                // The opening line fits! Return the full formatted expression
-                // If right_str is multi-line, this will preserve that structure
-                if right_str.contains('\n') {
-                    // Multi-line lambda (like with do block)
-                    let remaining_lines = right_str.lines().skip(1).collect::<Vec<_>>().join("\n");
-                    return format!("{} {} {}\n{}", left_str, op_str, first_line_of_right, remaining_lines);
-                } else {
-                    // Single-line lambda
-                    return format!("{} {} {}", left_str, op_str, right_str);
-                }
+                // Single-line lambda
+                return format!("{} {} {}", left_str, op_str, right_str);
             }
-
-            // If it doesn't fit, break before the operator (keep operator with right operand)
-            let continued_indent = indent;
-            let right_formatted = format_expr_impl(right, max_cols, continued_indent);
-            let right_formatted = if right_needs_parens {
-                format!("({})", right_formatted)
-            } else {
-                right_formatted
-            };
-            return format!("{}\n{}{} {}", left_str, make_indent(continued_indent), op_str, right_formatted);
         }
+
+        // If it doesn't fit, break before the operator (keep operator with right operand)
+        let continued_indent = indent;
+        let right_formatted = format_expr_impl(right, max_cols, continued_indent);
+        let right_formatted = if right_needs_parens {
+            format!("({})", right_formatted)
+        } else {
+            right_formatted
+        };
+        return format!(
+            "{}\n{}{} {}",
+            left_str,
+            make_indent(continued_indent),
+            op_str,
+            right_formatted
+        );
+    }
 
     // Default: break before the operator with indentation
     let right_indent = indent + INDENT_SIZE;
@@ -428,7 +478,12 @@ fn format_binary_op_multiline(
 }
 
 /// Format a do block (always multi-line)
-fn format_do_block_multiline(statements: &[DoStatement], return_expr: &SpannedExpr, max_cols: usize, indent: usize) -> String {
+fn format_do_block_multiline(
+    statements: &[DoStatement],
+    return_expr: &SpannedExpr,
+    max_cols: usize,
+    indent: usize,
+) -> String {
     let inner_indent = indent + INDENT_SIZE;
     let indent_str = make_indent(inner_indent);
 
@@ -549,8 +604,8 @@ pub fn join_statements_with_spacing(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::get_pairs;
     use crate::expressions::pairs_to_expr;
+    use crate::parser::get_pairs;
 
     fn parse_test_expr(source: &str) -> SpannedExpr {
         use crate::parser::Rule;
@@ -593,7 +648,9 @@ mod tests {
 
     #[test]
     fn test_format_long_record() {
-        let expr = parse_test_expr("{name: \"Alice\", age: 30, email: \"alice@example.com\", address: \"123 Main St\"}");
+        let expr = parse_test_expr(
+            "{name: \"Alice\", age: 30, email: \"alice@example.com\", address: \"123 Main St\"}",
+        );
         let formatted = format_expr(&expr, Some(40));
         assert!(formatted.contains("\n"));
         assert!(formatted.contains("{\n"));
@@ -601,7 +658,8 @@ mod tests {
 
     #[test]
     fn test_format_conditional() {
-        let expr = parse_test_expr("if very_long_condition_variable > 100 then \"yes\" else \"no\"");
+        let expr =
+            parse_test_expr("if very_long_condition_variable > 100 then \"yes\" else \"no\"");
         let formatted = format_expr(&expr, Some(30));
         assert!(formatted.contains("\n"));
     }
@@ -769,7 +827,9 @@ mod tests {
                                 // Extract identifier and value from assignment
                                 let mut assignment_inner = assignment_or_ident.into_inner();
                                 let ident = assignment_inner.next().unwrap().as_str();
-                                let value_expr = pairs_to_expr(assignment_inner.next().unwrap().into_inner()).unwrap();
+                                let value_expr =
+                                    pairs_to_expr(assignment_inner.next().unwrap().into_inner())
+                                        .unwrap();
                                 let value_formatted = format_expr(&value_expr, Some(80));
                                 format!("{} = {}", ident, value_formatted)
                             } else {
@@ -815,7 +875,9 @@ mod tests {
                                 // Extract identifier and value from assignment
                                 let mut assignment_inner = assignment_or_ident.into_inner();
                                 let ident = assignment_inner.next().unwrap().as_str();
-                                let value_expr = pairs_to_expr(assignment_inner.next().unwrap().into_inner()).unwrap();
+                                let value_expr =
+                                    pairs_to_expr(assignment_inner.next().unwrap().into_inner())
+                                        .unwrap();
                                 let value_formatted = format_expr(&value_expr, Some(80));
                                 format!("{} = {}", ident, value_formatted)
                             } else {
@@ -862,7 +924,9 @@ mod tests {
                                 // Extract identifier and value from assignment
                                 let mut assignment_inner = assignment_or_ident.into_inner();
                                 let ident = assignment_inner.next().unwrap().as_str();
-                                let value_expr = pairs_to_expr(assignment_inner.next().unwrap().into_inner()).unwrap();
+                                let value_expr =
+                                    pairs_to_expr(assignment_inner.next().unwrap().into_inner())
+                                        .unwrap();
                                 let value_formatted = format_expr(&value_expr, Some(80));
                                 format!("{} = {}", ident, value_formatted)
                             } else {
@@ -914,7 +978,11 @@ mod tests {
                     // Check for end-of-line comment (second element in statement)
                     if let Some(eol_comment) = inner_pairs.next() {
                         if eol_comment.as_rule() == Rule::comment {
-                            formatted_statements.push(format!("{}  {}", formatted, eol_comment.as_str()));
+                            formatted_statements.push(format!(
+                                "{}  {}",
+                                formatted,
+                                eol_comment.as_str()
+                            ));
                         } else {
                             formatted_statements.push(formatted);
                         }
@@ -926,7 +994,10 @@ mod tests {
         }
 
         assert_eq!(formatted_statements.len(), 2);
-        assert_eq!(formatted_statements[0], "x = 5  // this is an end-of-line comment");
+        assert_eq!(
+            formatted_statements[0],
+            "x = 5  // this is an end-of-line comment"
+        );
         assert_eq!(formatted_statements[1], "y = 10");
     }
 
@@ -958,7 +1029,11 @@ mod tests {
                     // Check for end-of-line comment
                     if let Some(eol_comment) = inner_pairs.next() {
                         if eol_comment.as_rule() == Rule::comment {
-                            formatted_statements.push(format!("{}  {}", formatted, eol_comment.as_str()));
+                            formatted_statements.push(format!(
+                                "{}  {}",
+                                formatted,
+                                eol_comment.as_str()
+                            ));
                         } else {
                             formatted_statements.push(formatted);
                         }
@@ -1004,7 +1079,11 @@ mod tests {
                     // Check for end-of-line comment
                     if let Some(eol_comment) = inner_pairs.next() {
                         if eol_comment.as_rule() == Rule::comment {
-                            formatted_statements.push(format!("{}  {}", formatted, eol_comment.as_str()));
+                            formatted_statements.push(format!(
+                                "{}  {}",
+                                formatted,
+                                eol_comment.as_str()
+                            ));
                         } else {
                             formatted_statements.push(formatted);
                         }
@@ -1028,7 +1107,12 @@ mod tests {
         // Ensure the result doesn't contain any line with multiple statements
         for line in result.lines() {
             // Count equals signs - should only be 1 per line
-            assert_eq!(line.matches('=').count(), 1, "Line should not contain multiple statements: {}", line);
+            assert_eq!(
+                line.matches('=').count(),
+                1,
+                "Line should not contain multiple statements: {}",
+                line
+            );
         }
     }
 
@@ -1062,7 +1146,11 @@ mod tests {
                     // Check for end-of-line comment
                     if let Some(eol_comment) = inner_pairs.next() {
                         if eol_comment.as_rule() == Rule::comment {
-                            formatted_statements.push(format!("{}  {}", formatted, eol_comment.as_str()));
+                            formatted_statements.push(format!(
+                                "{}  {}",
+                                formatted,
+                                eol_comment.as_str()
+                            ));
                         } else {
                             formatted_statements.push(formatted);
                         }
@@ -1102,7 +1190,10 @@ mod tests {
                         if formatted.lines().count() > 1 {
                             println!("✓ Lines were broken");
                         } else {
-                            println!("✗ No line breaking occurred - output is {} chars", formatted.len());
+                            println!(
+                                "✗ No line breaking occurred - output is {} chars",
+                                formatted.len()
+                            );
                         }
                     }
                 }
@@ -1219,7 +1310,11 @@ mod tests {
         for line in formatted.lines() {
             let leading_spaces = line.len() - line.trim_start().len();
             // No line should be indented more than 2 spaces
-            assert!(leading_spaces <= 2, "Line has too much indentation: '{}'", line);
+            assert!(
+                leading_spaces <= 2,
+                "Line has too much indentation: '{}'",
+                line
+            );
         }
     }
 
@@ -1233,13 +1328,21 @@ mod tests {
 
         // Should have 3 'else if' or 'else' clauses and all at the same level
         let else_count = formatted.matches("\nelse").count();
-        assert!(else_count >= 3, "Should have at least 3 else/else-if clauses, found {}", else_count);
+        assert!(
+            else_count >= 3,
+            "Should have at least 3 else/else-if clauses, found {}",
+            else_count
+        );
 
         // Verify no staircase - each "else if" should start at column 0
         for line in formatted.lines() {
             if line.starts_with("else") {
                 // "else" and "else if" should start at the beginning of the line
-                assert!(line.starts_with("else"), "else clause should start at column 0: '{}'", line);
+                assert!(
+                    line.starts_with("else"),
+                    "else clause should start at column 0: '{}'",
+                    line
+                );
             }
         }
     }

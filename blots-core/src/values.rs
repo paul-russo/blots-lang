@@ -35,7 +35,7 @@ pub fn format_display_number(value: f64) -> String {
     let abs_value = value.abs();
 
     // Very small values (< 0.0001) or extremely large values (>= 1e15) -> Scientific notation
-    if abs_value < 0.0001 || abs_value >= 1e15 {
+    if !(0.0001..1e15).contains(&abs_value) {
         return format_scientific(value);
     }
 
@@ -736,7 +736,7 @@ impl SerializableValue {
                     args: s_lambda.args.clone(),
                     body: body_ast,
                     scope,
-                    source: Rc::from(""),  // Deserialized lambdas don't have original source
+                    source: Rc::from(""), // Deserialized lambdas don't have original source
                 };
 
                 Ok(heap.insert_lambda(lambda))
@@ -1149,7 +1149,11 @@ impl Value {
                 let record = p.reify(heap).as_record().unwrap();
 
                 for (i, (key, value)) in record.iter().enumerate() {
-                    result.push_str(&format!("{}: {}", key, value.stringify(heap, wrap_strings, display_format)));
+                    result.push_str(&format!(
+                        "{}: {}",
+                        key,
+                        value.stringify(heap, wrap_strings, display_format)
+                    ));
                     if i < record.len() - 1 {
                         result.push_str(", ");
                     }
@@ -1173,7 +1177,9 @@ impl Value {
                     .scope
                     .iter()
                     .filter_map(|(k, v)| {
-                        SerializableValue::from_value(v, heap).ok().map(|sv| (k.clone(), sv))
+                        SerializableValue::from_value(v, heap)
+                            .ok()
+                            .map(|sv| (k.clone(), sv))
                     })
                     .collect();
 
@@ -1270,8 +1276,14 @@ mod tests {
 
     #[test]
     fn test_format_display_number_large_integers() {
-        assert_eq!(format_display_number(999999999999999.0), "999,999,999,999,999");
-        assert_eq!(format_display_number(100000000000000.0), "100,000,000,000,000");
+        assert_eq!(
+            format_display_number(999999999999999.0),
+            "999,999,999,999,999"
+        );
+        assert_eq!(
+            format_display_number(100000000000000.0),
+            "100,000,000,000,000"
+        );
     }
 
     #[test]

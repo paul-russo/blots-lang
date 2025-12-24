@@ -1,5 +1,7 @@
-use crate::ast::{BinaryOp, DoStatement, Expr, PostfixOp, RecordEntry, RecordKey, SpannedExpr, UnaryOp};
-use crate::precedence::{operator_info, Assoc};
+use crate::ast::{
+    BinaryOp, DoStatement, Expr, PostfixOp, RecordEntry, RecordKey, SpannedExpr, UnaryOp,
+};
+use crate::precedence::{Assoc, operator_info};
 use crate::values::{LambdaArg, SerializableValue};
 use indexmap::IndexMap;
 
@@ -150,7 +152,11 @@ fn lambda_arg_to_source(arg: &LambdaArg) -> String {
 
 fn record_entry_to_source(entry: &RecordEntry) -> String {
     match &entry.key {
-        RecordKey::Static(key) => format!("{}: {}", format_record_key(key), expr_to_source(&entry.value)),
+        RecordKey::Static(key) => format!(
+            "{}: {}",
+            format_record_key(key),
+            expr_to_source(&entry.value)
+        ),
         RecordKey::Dynamic(key_expr) => {
             format!(
                 "[{}]: {}",
@@ -195,7 +201,11 @@ fn binary_op_to_source(op: &BinaryOp) -> &'static str {
 }
 
 /// Check if a child expression needs parentheses when used in a binary operation
-pub fn needs_parens_in_binop(parent_op: &BinaryOp, child_expr: &SpannedExpr, is_left: bool) -> bool {
+pub fn needs_parens_in_binop(
+    parent_op: &BinaryOp,
+    child_expr: &SpannedExpr,
+    is_left: bool,
+) -> bool {
     match &child_expr.node {
         Expr::BinaryOp { op: child_op, .. } => {
             let (parent_prec, parent_assoc) = operator_info(parent_op);
@@ -214,7 +224,10 @@ pub fn needs_parens_in_binop(parent_op: &BinaryOp, child_expr: &SpannedExpr, is_
                     Assoc::Right => return true,
                     Assoc::Left => {
                         // For left-associative operators, right side needs parens for non-associative ones
-                        if matches!(parent_op, BinaryOp::Subtract | BinaryOp::Divide | BinaryOp::Modulo) {
+                        if matches!(
+                            parent_op,
+                            BinaryOp::Subtract | BinaryOp::Divide | BinaryOp::Modulo
+                        ) {
                             return true;
                         }
                     }
@@ -442,7 +455,13 @@ fn serializable_value_to_source(value: &SerializableValue) -> String {
         SerializableValue::Record(fields) => {
             let entries_str: Vec<String> = fields
                 .iter()
-                .map(|(k, v)| format!("{}: {}", format_record_key(k), serializable_value_to_source(v)))
+                .map(|(k, v)| {
+                    format!(
+                        "{}: {}",
+                        format_record_key(k),
+                        serializable_value_to_source(v)
+                    )
+                })
                 .collect();
             format!("{{{}}}", entries_str.join(", "))
         }

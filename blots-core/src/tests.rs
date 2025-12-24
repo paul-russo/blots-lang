@@ -572,8 +572,12 @@ mod lambda_error_context_tests {
 
         // Define a lambda that will error (references undefined variable)
         let lambda_definition = "f = x => x + undefined_var";
-        parse_and_evaluate(lambda_definition, Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
-            .unwrap();
+        parse_and_evaluate(
+            lambda_definition,
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
 
         // Call the lambda in a completely different source context
         let call_code = "f(5)";
@@ -597,8 +601,12 @@ mod lambda_error_context_tests {
 
         // Define a lambda with a division by zero
         let lambda_def = "divide = (a, b) => a / b";
-        parse_and_evaluate(lambda_def, Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
-            .unwrap();
+        parse_and_evaluate(
+            lambda_def,
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
 
         // First call - should succeed
         let call1 = "divide(10, 2)";
@@ -620,13 +628,21 @@ mod lambda_error_context_tests {
 
         // Define a lambda that returns another lambda
         let outer_lambda = "outer = x => (y => x + y + undefined_nested)";
-        parse_and_evaluate(outer_lambda, Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
-            .unwrap();
+        parse_and_evaluate(
+            outer_lambda,
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
 
         // Call outer to get inner lambda
         let get_inner = "inner = outer(5)";
-        parse_and_evaluate(get_inner, Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
-            .unwrap();
+        parse_and_evaluate(
+            get_inner,
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
 
         // Call inner lambda - should error
         let call_inner = "inner(10)";
@@ -697,8 +713,12 @@ mod lambda_parameter_isolation_tests {
         parse_and_evaluate("x = 42", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
 
         // Define a lambda with parameter x - should NOT capture outer x
-        parse_and_evaluate("f = x => x + 1", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
-            .unwrap();
+        parse_and_evaluate(
+            "f = x => x + 1",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
 
         // Get the lambda value and check its scope
         let f_value = bindings.get("f").unwrap();
@@ -729,8 +749,12 @@ mod lambda_parameter_isolation_tests {
         parse_and_evaluate("b = 2", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
 
         // Define lambda with parameters a and b
-        parse_and_evaluate("add = (a, b) => a + b", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
-            .unwrap();
+        parse_and_evaluate(
+            "add = (a, b) => a + b",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
 
         // Get the lambda value and check its scope
         let add_value = bindings.get("add").unwrap();
@@ -761,7 +785,12 @@ mod lambda_parameter_isolation_tests {
         let bindings = Rc::new(Environment::new());
 
         // Define x in outer scope
-        parse_and_evaluate("x = 100", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
+        parse_and_evaluate(
+            "x = 100",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
 
         // Define nested lambda - inner lambda should not capture its own x parameter
         parse_and_evaluate(
@@ -785,8 +814,12 @@ mod lambda_parameter_isolation_tests {
         }
 
         // Call outer(5) to get inner lambda
-        parse_and_evaluate("inner = outer(5)", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
-            .unwrap();
+        parse_and_evaluate(
+            "inner = outer(5)",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
 
         // Call inner(3) should return 8 (5 + 3), not 103 (100 + 3)
         let result = parse_and_evaluate("inner(3)", Some(heap), Some(bindings)).unwrap();
@@ -912,7 +945,9 @@ mod where_operator_tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    fn parse_and_evaluate(code: &str) -> Result<(Value, Rc<RefCell<Heap>>), crate::error::RuntimeError> {
+    fn parse_and_evaluate(
+        code: &str,
+    ) -> Result<(Value, Rc<RefCell<Heap>>), crate::error::RuntimeError> {
         let pairs = get_pairs(code).map_err(|e| crate::error::RuntimeError::new(e.to_string()))?;
 
         let heap = Rc::new(RefCell::new(Heap::new()));
@@ -956,7 +991,8 @@ mod where_operator_tests {
 
     #[test]
     fn test_where_with_index() {
-        let (result, heap) = parse_and_evaluate("[10, 20, 30, 40] where (val, idx) => idx > 0").unwrap();
+        let (result, heap) =
+            parse_and_evaluate("[10, 20, 30, 40] where (val, idx) => idx > 0").unwrap();
         let borrowed_heap = heap.borrow();
         let list = result.as_list(&borrowed_heap).unwrap();
         assert_eq!(list.len(), 3);
@@ -1019,7 +1055,10 @@ mod where_operator_tests {
     #[test]
     fn test_where_with_string_comparison() {
         let heap = Rc::new(RefCell::new(Heap::new()));
-        let pairs = crate::parser::get_pairs("[\"apple\", \"banana\", \"cherry\"] where s => s == \"banana\"").unwrap();
+        let pairs = crate::parser::get_pairs(
+            "[\"apple\", \"banana\", \"cherry\"] where s => s == \"banana\"",
+        )
+        .unwrap();
         let bindings = Rc::new(Environment::new());
 
         let mut result = Value::Null;
@@ -1033,7 +1072,8 @@ mod where_operator_tests {
                             Rc::clone(&bindings),
                             0,
                             "[\"apple\", \"banana\", \"cherry\"] where s => s == \"banana\"",
-                        ).unwrap();
+                        )
+                        .unwrap();
                     }
                 }
             }
@@ -1053,7 +1093,8 @@ mod where_operator_tests {
 
     #[test]
     fn test_where_complex_predicate() {
-        let (result, heap) = parse_and_evaluate("[1, 2, 3, 4, 5, 6] where x => x % 2 == 0").unwrap();
+        let (result, heap) =
+            parse_and_evaluate("[1, 2, 3, 4, 5, 6] where x => x % 2 == 0").unwrap();
         let borrowed_heap = heap.borrow();
         let list = result.as_list(&borrowed_heap).unwrap();
         assert_eq!(list.len(), 3);
@@ -1085,7 +1126,9 @@ mod flat_chaining_tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    fn parse_and_evaluate(code: &str) -> Result<(Value, Rc<RefCell<Heap>>), crate::error::RuntimeError> {
+    fn parse_and_evaluate(
+        code: &str,
+    ) -> Result<(Value, Rc<RefCell<Heap>>), crate::error::RuntimeError> {
         let pairs = get_pairs(code).map_err(|e| crate::error::RuntimeError::new(e.to_string()))?;
 
         let heap = Rc::new(RefCell::new(Heap::new()));
@@ -1119,7 +1162,8 @@ mod flat_chaining_tests {
 
     #[test]
     fn test_via_then_where() {
-        let (result, heap) = parse_and_evaluate("[1, 2, 3, 4, 5] via x => x * 2 where y => y > 5").unwrap();
+        let (result, heap) =
+            parse_and_evaluate("[1, 2, 3, 4, 5] via x => x * 2 where y => y > 5").unwrap();
         let borrowed_heap = heap.borrow();
         let list = result.as_list(&borrowed_heap).unwrap();
         assert_eq!(list.len(), 3);
@@ -1130,7 +1174,8 @@ mod flat_chaining_tests {
 
     #[test]
     fn test_where_then_via() {
-        let (result, heap) = parse_and_evaluate("[1, 2, 3, 4, 5] where x => x > 3 via y => y * 10").unwrap();
+        let (result, heap) =
+            parse_and_evaluate("[1, 2, 3, 4, 5] where x => x > 3 via y => y * 10").unwrap();
         let borrowed_heap = heap.borrow();
         let list = result.as_list(&borrowed_heap).unwrap();
         assert_eq!(list.len(), 2);
@@ -1140,7 +1185,9 @@ mod flat_chaining_tests {
 
     #[test]
     fn test_via_where_via_chain() {
-        let (result, heap) = parse_and_evaluate("[1, 2, 3, 4, 5, 6] via x => x * 2 where y => y > 5 via z => z + 1").unwrap();
+        let (result, heap) =
+            parse_and_evaluate("[1, 2, 3, 4, 5, 6] via x => x * 2 where y => y > 5 via z => z + 1")
+                .unwrap();
         let borrowed_heap = heap.borrow();
         let list = result.as_list(&borrowed_heap).unwrap();
         assert_eq!(list.len(), 4);
@@ -1152,13 +1199,16 @@ mod flat_chaining_tests {
 
     #[test]
     fn test_via_where_into() {
-        let (result, _heap) = parse_and_evaluate("[1, 2, 3, 4, 5] via x => x * 2 where x => x > 5 into sum").unwrap();
+        let (result, _heap) =
+            parse_and_evaluate("[1, 2, 3, 4, 5] via x => x * 2 where x => x > 5 into sum").unwrap();
         assert_eq!(result, Value::Number(24.0));
     }
 
     #[test]
     fn test_where_with_index_then_via() {
-        let (result, heap) = parse_and_evaluate("[10, 20, 30, 40] where (val, idx) => idx > 0 via x => x / 10").unwrap();
+        let (result, heap) =
+            parse_and_evaluate("[10, 20, 30, 40] where (val, idx) => idx > 0 via x => x / 10")
+                .unwrap();
         let borrowed_heap = heap.borrow();
         let list = result.as_list(&borrowed_heap).unwrap();
         assert_eq!(list.len(), 3);
@@ -1170,7 +1220,8 @@ mod flat_chaining_tests {
     #[test]
     fn test_nested_via_requires_parens() {
         // This should work with parens
-        let (result, heap) = parse_and_evaluate("[[1, 2], [3, 4]] via row => (row via x => x * 10)").unwrap();
+        let (result, heap) =
+            parse_and_evaluate("[[1, 2], [3, 4]] via row => (row via x => x * 10)").unwrap();
         let borrowed_heap = heap.borrow();
         let outer_list = result.as_list(&borrowed_heap).unwrap();
         assert_eq!(outer_list.len(), 2);
@@ -1454,7 +1505,8 @@ mod via_into_error_message_tests {
     #[test]
     fn test_where_callback_error_with_named_function() {
         // Test that named functions show their name in the error
-        let result = parse_and_evaluate("is_positive = x => x + 1 > 0\n[1, 2, null] where is_positive");
+        let result =
+            parse_and_evaluate("is_positive = x => x + 1 > 0\n[1, 2, null] where is_positive");
         assert!(result.is_err());
         let error_msg = result.unwrap_err().to_string();
         assert!(

@@ -16,8 +16,10 @@ impl FunctionCallStats {
     }
 
     pub fn var_env_duration_ms(&self) -> Option<f64> {
-        self.start_var_env
-            .and_then(|start| self.end_var_env.map(|end| (end - start).as_secs_f64() * 1_000.0))
+        self.start_var_env.and_then(|start| {
+            self.end_var_env
+                .map(|end| (end - start).as_secs_f64() * 1_000.0)
+        })
     }
 
     pub fn body_duration_ms(&self) -> f64 {
@@ -71,14 +73,16 @@ pub struct CallStats {
 
 impl ProfilingSummary {
     pub fn from_stats(stats: &[FunctionCallStats]) -> Self {
-        let mut summary = ProfilingSummary::default();
-        summary.total_calls = stats.len();
+        let mut summary = ProfilingSummary {
+            total_calls: stats.len(),
+            ..Default::default()
+        };
 
         let mut calls_by_name: HashMap<String, Vec<&FunctionCallStats>> = HashMap::new();
         for stat in stats {
             calls_by_name
                 .entry(stat.name.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(stat);
         }
 
@@ -140,7 +144,8 @@ impl ProfilingSummary {
         println!("  Built-in calls: {}", self.builtin_calls);
         println!();
         println!("Total time: {:.3}ms", self.total_time_ms);
-        println!("  Variable environment setup: {:.3}ms ({:.1}%)", 
+        println!(
+            "  Variable environment setup: {:.3}ms ({:.1}%)",
             self.var_env_time_ms,
             if self.total_time_ms > 0.0 {
                 (self.var_env_time_ms / self.total_time_ms) * 100.0
@@ -148,7 +153,8 @@ impl ProfilingSummary {
                 0.0
             }
         );
-        println!("  Function body execution: {:.3}ms ({:.1}%)",
+        println!(
+            "  Function body execution: {:.3}ms ({:.1}%)",
             self.body_time_ms,
             if self.total_time_ms > 0.0 {
                 (self.body_time_ms / self.total_time_ms) * 100.0
@@ -162,7 +168,7 @@ impl ProfilingSummary {
             println!("Top functions by total time:");
             let mut sorted: Vec<_> = self.calls_by_name.iter().collect();
             sorted.sort_by(|a, b| b.1.total_ms.partial_cmp(&a.1.total_ms).unwrap());
-            
+
             for (name, stats) in sorted.iter().take(10) {
                 let var_env_pct = if stats.total_ms > 0.0 {
                     (stats.var_env_ms / stats.total_ms) * 100.0
@@ -176,8 +182,10 @@ impl ProfilingSummary {
                 if stats.var_env_ms > 0.0 {
                     println!(
                         "    └─ var_env: {:.3}ms ({:.1}%), body: {:.3}ms ({:.1}%)",
-                        stats.var_env_ms, var_env_pct,
-                        stats.body_ms, 100.0 - var_env_pct
+                        stats.var_env_ms,
+                        var_env_pct,
+                        stats.body_ms,
+                        100.0 - var_env_pct
                     );
                 }
             }

@@ -1524,7 +1524,10 @@ impl FunctionDef {
                 let end_var_env = std::time::Instant::now();
 
                 // Create new environment that extends parent (O(1) instead of O(n) clone!)
-                let new_env = Rc::new(Environment::extend_with(Rc::clone(&bindings), local_bindings));
+                let new_env = Rc::new(Environment::extend_with(
+                    Rc::clone(&bindings),
+                    local_bindings,
+                ));
 
                 let return_value = evaluate_ast(
                     body,
@@ -1844,7 +1847,10 @@ mod tests {
             .call(args2, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
 
-        assert_ne!(result1, result2, "Different seeds should produce different results");
+        assert_ne!(
+            result1, result2,
+            "Different seeds should produce different results"
+        );
     }
 
     #[test]
@@ -1861,7 +1867,11 @@ mod tests {
                 .unwrap();
 
             if let Value::Number(num) = result {
-                assert!(num >= 0.0 && num < 1.0, "Random value {} should be in range [0, 1)", num);
+                assert!(
+                    num >= 0.0 && num < 1.0,
+                    "Random value {} should be in range [0, 1)",
+                    num
+                );
             } else {
                 panic!("Expected number result");
             }
@@ -1881,7 +1891,11 @@ mod tests {
             .unwrap();
 
         if let Value::Number(num) = result {
-            assert!(num >= 0.0 && num < 1.0, "Random value {} should be in range [0, 1)", num);
+            assert!(
+                num >= 0.0 && num < 1.0,
+                "Random value {} should be in range [0, 1)",
+                num
+            );
         } else {
             panic!("Expected number result");
         }

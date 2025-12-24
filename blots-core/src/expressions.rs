@@ -1,5 +1,8 @@
 use crate::{
-    ast::{BinaryOp, DoStatement, Expr, PostfixOp, RecordEntry, RecordKey, Span, Spanned, SpannedExpr, UnaryOp},
+    ast::{
+        BinaryOp, DoStatement, Expr, PostfixOp, RecordEntry, RecordKey, Span, Spanned, SpannedExpr,
+        UnaryOp,
+    },
     environment::Environment,
     error::RuntimeError,
     functions::{BuiltInFunction, get_function_def, is_built_in_function},
@@ -100,7 +103,13 @@ fn evaluate_do_block_expr(
         }
 
         // Evaluate the value (allow shadowing - no check for existing binding)
-        let val = evaluate_ast(value, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone())?;
+        let val = evaluate_ast(
+            value,
+            Rc::clone(&heap),
+            Rc::clone(&bindings),
+            call_depth,
+            source.clone(),
+        )?;
 
         // Set lambda name if assigning a lambda
         if let Value::Lambda(lambda_ptr) = val {
@@ -134,15 +143,13 @@ pub fn evaluate_ast(
             "infinity" => Ok(Number(f64::INFINITY)),
             "inf" => Ok(Number(f64::INFINITY)),
             "constants" => Ok(Value::Record(RecordPointer::new(0))),
-            _ => bindings
-                .get(ident)
-                .ok_or_else(|| {
-                    RuntimeError::with_span(
-                        format!("unknown identifier: {}", ident),
-                        expr.span,
-                        source.clone(),
-                    )
-                }),
+            _ => bindings.get(ident).ok_or_else(|| {
+                RuntimeError::with_span(
+                    format!("unknown identifier: {}", ident),
+                    expr.span,
+                    source.clone(),
+                )
+            }),
         },
         Expr::InputReference(field) => {
             // Desugar #field to inputs.field
@@ -168,7 +175,15 @@ pub fn evaluate_ast(
         Expr::List(exprs) => {
             let values = exprs
                 .iter()
-                .map(|e| evaluate_ast(e, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone()))
+                .map(|e| {
+                    evaluate_ast(
+                        e,
+                        Rc::clone(&heap),
+                        Rc::clone(&bindings),
+                        call_depth,
+                        source.clone(),
+                    )
+                })
                 .collect::<Result<Vec<Value>, RuntimeError>>()?;
 
             // Flatten spreads
@@ -289,10 +304,10 @@ pub fn evaluate_ast(
             collect_free_variables(body, &mut referenced_vars, &mut bound);
 
             for var in referenced_vars {
-                if let Some(value) = bindings.get(&var) {
-                    if !is_built_in_function(&var) {
-                        captured_scope.insert(var.clone(), value);
-                    }
+                if let Some(value) = bindings.get(&var)
+                    && !is_built_in_function(&var)
+                {
+                    captured_scope.insert(var.clone(), value);
                 }
             }
 
@@ -309,7 +324,10 @@ pub fn evaluate_ast(
         Expr::Assignment { ident, value } => {
             if is_built_in_function(ident) {
                 return Err(RuntimeError::with_span(
-                    format!("{} is the name of a built-in function, and cannot be reassigned", ident),
+                    format!(
+                        "{} is the name of a built-in function, and cannot be reassigned",
+                        ident
+                    ),
                     expr.span,
                     source.clone(),
                 ));
@@ -342,7 +360,13 @@ pub fn evaluate_ast(
                 ));
             }
 
-            let val = evaluate_ast(value, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone())?;
+            let val = evaluate_ast(
+                value,
+                Rc::clone(&heap),
+                Rc::clone(&bindings),
+                call_depth,
+                source.clone(),
+            )?;
 
             // Set lambda name if assigning a lambda
             if let Value::Lambda(lambda_ptr) = val {
@@ -359,7 +383,13 @@ pub fn evaluate_ast(
         }
         Expr::Output { expr: inner_expr } => {
             // Output is just an annotation - evaluate the inner expression
-            evaluate_ast(inner_expr, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone())
+            evaluate_ast(
+                inner_expr,
+                Rc::clone(&heap),
+                Rc::clone(&bindings),
+                call_depth,
+                source.clone(),
+            )
         }
         Expr::Conditional {
             condition,
@@ -404,13 +434,33 @@ pub fn evaluate_ast(
             }
 
             // Return the final expression
-            evaluate_do_block_expr(return_expr, heap, block_bindings, call_depth, source.clone())
+            evaluate_do_block_expr(
+                return_expr,
+                heap,
+                block_bindings,
+                call_depth,
+                source.clone(),
+            )
         }
         Expr::Call { func, args } => {
-            let func_val = evaluate_ast(func, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone())?;
+            let func_val = evaluate_ast(
+                func,
+                Rc::clone(&heap),
+                Rc::clone(&bindings),
+                call_depth,
+                source.clone(),
+            )?;
             let arg_vals_raw = args
                 .iter()
-                .map(|arg| evaluate_ast(arg, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone()))
+                .map(|arg| {
+                    evaluate_ast(
+                        arg,
+                        Rc::clone(&heap),
+                        Rc::clone(&bindings),
+                        call_depth,
+                        source.clone(),
+                    )
+                })
                 .collect::<Result<Vec<_>, RuntimeError>>()?;
 
             // Flatten any spread arguments
@@ -428,7 +478,10 @@ pub fn evaluate_ast(
 
             if !func_val.is_lambda() && !func_val.is_built_in() {
                 return Err(RuntimeError::with_span(
-                    format!("can't call a non-function: {}", func_val.stringify_internal(&heap.borrow())),
+                    format!(
+                        "can't call a non-function: {}",
+                        func_val.stringify_internal(&heap.borrow())
+                    ),
                     expr.span,
                     source.clone(),
                 ));
@@ -448,8 +501,20 @@ pub fn evaluate_ast(
                 .map_err(|e| RuntimeError::from(e).with_call_site(expr.span, source.clone()))
         }
         Expr::Access { expr, index } => {
-            let val = evaluate_ast(expr, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone())?;
-            let idx_val = evaluate_ast(index, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone())?;
+            let val = evaluate_ast(
+                expr,
+                Rc::clone(&heap),
+                Rc::clone(&bindings),
+                call_depth,
+                source.clone(),
+            )?;
+            let idx_val = evaluate_ast(
+                index,
+                Rc::clone(&heap),
+                Rc::clone(&bindings),
+                call_depth,
+                source.clone(),
+            )?;
 
             match val {
                 Value::Record(record) => {
@@ -477,14 +542,23 @@ pub fn evaluate_ast(
                         .unwrap_or(Value::Null))
                 }
                 _ => Err(RuntimeError::with_span(
-                    format!("expected a record, list, or string, but got a {}", val.get_type()),
+                    format!(
+                        "expected a record, list, or string, but got a {}",
+                        val.get_type()
+                    ),
                     expr.span,
                     source.clone(),
                 )),
             }
         }
         Expr::DotAccess { expr, field } => {
-            let val = evaluate_ast(expr, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone())?;
+            let val = evaluate_ast(
+                expr,
+                Rc::clone(&heap),
+                Rc::clone(&bindings),
+                call_depth,
+                source.clone(),
+            )?;
             let borrowed_heap = &heap.borrow();
 
             match val {
@@ -717,8 +791,20 @@ fn evaluate_binary_op_ast(
     call_depth: usize,
     source: Rc<str>,
 ) -> Result<Value, RuntimeError> {
-    let lhs = evaluate_ast(left, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone())?;
-    let rhs = evaluate_ast(right, Rc::clone(&heap), Rc::clone(&bindings), call_depth, source.clone())?;
+    let lhs = evaluate_ast(
+        left,
+        Rc::clone(&heap),
+        Rc::clone(&bindings),
+        call_depth,
+        source.clone(),
+    )?;
+    let rhs = evaluate_ast(
+        right,
+        Rc::clone(&heap),
+        Rc::clone(&bindings),
+        call_depth,
+        source.clone(),
+    )?;
 
     // Handle dot operators first - they never broadcast
     match op {
@@ -754,7 +840,12 @@ fn evaluate_binary_op_ast(
     }
 
     // Create a combined span for the entire binary operation
-    let op_span = Span::new(left.span.start_byte, right.span.end_byte, left.span.start_line, left.span.start_col);
+    let op_span = Span::new(
+        left.span.start_byte,
+        right.span.end_byte,
+        left.span.start_line,
+        left.span.start_col,
+    );
 
     match (lhs, rhs) {
         (_, Value::List(_)) if op == BinaryOp::Into => Err(RuntimeError::with_span(
@@ -945,7 +1036,10 @@ fn evaluate_binary_op_ast(
                         .map(|(l, r)| {
                             if !r.is_lambda() && !r.is_built_in() {
                                 return Err(RuntimeError::with_span(
-                                    format!("right-hand iterable contains non-function {}", r.stringify_internal(&heap.borrow())),
+                                    format!(
+                                        "right-hand iterable contains non-function {}",
+                                        r.stringify_internal(&heap.borrow())
+                                    ),
                                     op_span,
                                     source_owned.clone(),
                                 ));
@@ -981,13 +1075,11 @@ fn evaluate_binary_op_ast(
                     // This should never be reached due to early check above
                     unreachable!("Into operator should not reach list-to-list evaluation")
                 }
-                BinaryOp::Where => {
-                    Err(RuntimeError::with_span(
-                        "where operator requires a function on the right side".to_string(),
-                        op_span,
-                        source.clone(),
-                    ))
-                }
+                BinaryOp::Where => Err(RuntimeError::with_span(
+                    "where operator requires a function on the right side".to_string(),
+                    op_span,
+                    source.clone(),
+                )),
                 BinaryOp::DotEqual
                 | BinaryOp::DotNotEqual
                 | BinaryOp::DotLess
@@ -1270,7 +1362,10 @@ fn evaluate_binary_op_ast(
                     if is_list_first {
                         if !scalar.is_callable() {
                             return Err(RuntimeError::with_span(
-                                format!("can't call a non-function: {}", scalar.stringify_internal(&heap.borrow())),
+                                format!(
+                                    "can't call a non-function: {}",
+                                    scalar.stringify_internal(&heap.borrow())
+                                ),
                                 op_span,
                                 source.clone(),
                             ));
@@ -1279,12 +1374,13 @@ fn evaluate_binary_op_ast(
                         let source_owned = source.clone();
                         let (def, func_accepts_two_args) = {
                             let borrowed_heap = &heap.borrow();
-                            let def = get_function_def(&scalar, borrowed_heap).ok_or_else(|| {
-                                anyhow!(
-                                    "unknown function: {}",
-                                    scalar.stringify_internal(borrowed_heap)
-                                )
-                            })?;
+                            let def =
+                                get_function_def(&scalar, borrowed_heap).ok_or_else(|| {
+                                    anyhow!(
+                                        "unknown function: {}",
+                                        scalar.stringify_internal(borrowed_heap)
+                                    )
+                                })?;
                             let accepts_two = def.arity().can_accept(2);
                             (def, accepts_two)
                         };
@@ -1326,7 +1422,10 @@ fn evaluate_binary_op_ast(
                     if is_list_first {
                         if !scalar.is_callable() {
                             return Err(RuntimeError::with_span(
-                                format!("can't call a non-function: {}", scalar.stringify_internal(&heap.borrow())),
+                                format!(
+                                    "can't call a non-function: {}",
+                                    scalar.stringify_internal(&heap.borrow())
+                                ),
                                 op_span,
                                 source.clone(),
                             ));
@@ -1368,7 +1467,10 @@ fn evaluate_binary_op_ast(
                     if is_list_first {
                         if !scalar.is_callable() {
                             return Err(RuntimeError::with_span(
-                                format!("can't call a non-function: {}", scalar.stringify_internal(&heap.borrow())),
+                                format!(
+                                    "can't call a non-function: {}",
+                                    scalar.stringify_internal(&heap.borrow())
+                                ),
                                 op_span,
                                 source.clone(),
                             ));
@@ -1377,12 +1479,13 @@ fn evaluate_binary_op_ast(
                         let source_owned = source.clone();
                         let (def, func_accepts_two_args) = {
                             let borrowed_heap = &heap.borrow();
-                            let def = get_function_def(&scalar, borrowed_heap).ok_or_else(|| {
-                                anyhow!(
-                                    "unknown function: {}",
-                                    scalar.stringify_internal(borrowed_heap)
-                                )
-                            })?;
+                            let def =
+                                get_function_def(&scalar, borrowed_heap).ok_or_else(|| {
+                                    anyhow!(
+                                        "unknown function: {}",
+                                        scalar.stringify_internal(borrowed_heap)
+                                    )
+                                })?;
                             let accepts_two = def.arity().can_accept(2);
                             (def, accepts_two)
                         };
@@ -1491,7 +1594,11 @@ fn evaluate_binary_op_ast(
             BinaryOp::Via => {
                 if !rhs.is_callable() {
                     return Err(RuntimeError::with_span(
-                        format!("can't call a non-function ({} is of type {})", rhs.stringify_internal(&heap.borrow()), rhs.get_type()),
+                        format!(
+                            "can't call a non-function ({} is of type {})",
+                            rhs.stringify_internal(&heap.borrow()),
+                            rhs.get_type()
+                        ),
                         op_span,
                         source.clone(),
                     ));
@@ -1501,7 +1608,10 @@ fn evaluate_binary_op_ast(
 
                 if def.is_none() {
                     return Err(RuntimeError::with_span(
-                        format!("unknown function: {}", rhs.stringify_internal(&heap.borrow())),
+                        format!(
+                            "unknown function: {}",
+                            rhs.stringify_internal(&heap.borrow())
+                        ),
                         op_span,
                         source.clone(),
                     ));
@@ -1524,7 +1634,11 @@ fn evaluate_binary_op_ast(
             BinaryOp::Into => {
                 if !rhs.is_callable() {
                     return Err(RuntimeError::with_span(
-                        format!("can't call a non-function ({} is of type {})", rhs.stringify_internal(&heap.borrow()), rhs.get_type()),
+                        format!(
+                            "can't call a non-function ({} is of type {})",
+                            rhs.stringify_internal(&heap.borrow()),
+                            rhs.get_type()
+                        ),
                         op_span,
                         source.clone(),
                     ));
@@ -1534,7 +1648,10 @@ fn evaluate_binary_op_ast(
 
                 if def.is_none() {
                     return Err(RuntimeError::with_span(
-                        format!("unknown function: {}", rhs.stringify_internal(&heap.borrow())),
+                        format!(
+                            "unknown function: {}",
+                            rhs.stringify_internal(&heap.borrow())
+                        ),
                         op_span,
                         source.clone(),
                     ));
@@ -1554,13 +1671,11 @@ fn evaluate_binary_op_ast(
                             .with_call_site(op_span, source.clone())
                     })
             }
-            BinaryOp::Where => {
-                Err(RuntimeError::with_span(
-                    "where operator requires a list on the left side".to_string(),
-                    op_span,
-                    source.clone(),
-                ))
-            }
+            BinaryOp::Where => Err(RuntimeError::with_span(
+                "where operator requires a list on the left side".to_string(),
+                op_span,
+                source.clone(),
+            )),
             BinaryOp::DotEqual
             | BinaryOp::DotNotEqual
             | BinaryOp::DotLess
@@ -1587,232 +1702,263 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> AnyhowResult<SpannedExpr> {
         .map_primary(|primary| {
             let span = span_from_pair(&primary);
             match primary.as_rule() {
-            Rule::number => {
-                let value = primary
-                    .as_str()
-                    .replace("_", "")
-                    .parse::<f64>()
-                    .map_err(anyhow::Error::from)?;
-                Ok(Spanned::new(Expr::Number(value), span))
-            },
-            Rule::list => {
-                let list_pairs = primary.into_inner();
-                let elements = list_pairs
-                    .into_iter()
-                    .map(|pair| pairs_to_expr(pair.into_inner()))
-                    .collect::<AnyhowResult<Vec<SpannedExpr>>>()?;
-                Ok(Spanned::new(Expr::List(elements), span))
-            }
-            Rule::record => {
-                let record_pairs = primary.into_inner();
-                let mut entries = Vec::new();
+                Rule::number => {
+                    let value = primary
+                        .as_str()
+                        .replace("_", "")
+                        .parse::<f64>()
+                        .map_err(anyhow::Error::from)?;
+                    Ok(Spanned::new(Expr::Number(value), span))
+                }
+                Rule::list => {
+                    let list_pairs = primary.into_inner();
+                    let elements = list_pairs
+                        .into_iter()
+                        .map(|pair| pairs_to_expr(pair.into_inner()))
+                        .collect::<AnyhowResult<Vec<SpannedExpr>>>()?;
+                    Ok(Spanned::new(Expr::List(elements), span))
+                }
+                Rule::record => {
+                    let record_pairs = primary.into_inner();
+                    let mut entries = Vec::new();
 
-                for pair in record_pairs {
-                    match pair.as_rule() {
-                        Rule::record_pair => {
-                            let mut inner_pairs = pair.into_inner();
-                            let key_pair = inner_pairs.next().unwrap();
-                            let key = match key_pair.as_rule() {
-                                Rule::record_key_static => {
-                                    let inner_key_pair = key_pair.into_inner().next().unwrap();
-                                    match inner_key_pair.as_rule() {
-                                        Rule::identifier => {
-                                            RecordKey::Static(inner_key_pair.as_str().to_string())
+                    for pair in record_pairs {
+                        match pair.as_rule() {
+                            Rule::record_pair => {
+                                let mut inner_pairs = pair.into_inner();
+                                let key_pair = inner_pairs.next().unwrap();
+                                let key = match key_pair.as_rule() {
+                                    Rule::record_key_static => {
+                                        let inner_key_pair = key_pair.into_inner().next().unwrap();
+                                        match inner_key_pair.as_rule() {
+                                            Rule::identifier => RecordKey::Static(
+                                                inner_key_pair.as_str().to_string(),
+                                            ),
+                                            Rule::string => RecordKey::Static(
+                                                inner_key_pair.into_inner().as_str().to_string(),
+                                            ),
+                                            _ => unreachable!(),
                                         }
-                                        Rule::string => RecordKey::Static(
-                                            inner_key_pair.into_inner().as_str().to_string(),
-                                        ),
-                                        _ => unreachable!(),
+                                    }
+                                    Rule::record_key_dynamic => RecordKey::Dynamic(Box::new(
+                                        pairs_to_expr(key_pair.into_inner())?,
+                                    )),
+                                    _ => unreachable!(),
+                                };
+
+                                let value =
+                                    pairs_to_expr(inner_pairs.next().unwrap().into_inner())?;
+                                entries.push(RecordEntry { key, value });
+                            }
+                            Rule::record_shorthand => {
+                                let ident = pair.into_inner().next().unwrap().as_str().to_string();
+                                entries.push(RecordEntry {
+                                    key: RecordKey::Shorthand(ident),
+                                    value: Spanned::dummy(Expr::Null), // Will be resolved during evaluation
+                                });
+                            }
+                            Rule::spread_expression => {
+                                let spread_expr = pairs_to_expr(pair.into_inner())?;
+                                entries.push(RecordEntry {
+                                    key: RecordKey::Spread(Box::new(spread_expr)),
+                                    value: Spanned::dummy(Expr::Null), // Will be resolved during evaluation
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    Ok(Spanned::new(Expr::Record(entries), span))
+                }
+                Rule::bool => {
+                    let bool_str = primary.as_str();
+                    let value = match bool_str {
+                        "true" => true,
+                        "false" => false,
+                        _ => unreachable!(),
+                    };
+                    Ok(Spanned::new(Expr::Bool(value), span))
+                }
+                Rule::null => Ok(Spanned::new(Expr::Null, span)),
+                Rule::string => {
+                    let value = primary.into_inner().as_str().to_string();
+                    Ok(Spanned::new(Expr::String(value), span))
+                }
+                Rule::assignment => {
+                    let mut inner_pairs = primary.into_inner();
+                    let ident = inner_pairs.next().unwrap().as_str().to_string();
+                    let value = Box::new(pairs_to_expr(inner_pairs.next().unwrap().into_inner())?);
+                    Ok(Spanned::new(Expr::Assignment { ident, value }, span))
+                }
+                Rule::lambda => {
+                    let mut inner_pairs = primary.into_inner();
+                    let arg_list = inner_pairs.next().unwrap();
+                    let body_pairs = inner_pairs.next().unwrap();
+
+                    let mut args = Vec::new();
+                    for arg_pair in arg_list.into_inner() {
+                        match arg_pair.as_rule() {
+                            Rule::required_arg => {
+                                args.push(LambdaArg::Required(
+                                    arg_pair.into_inner().as_str().to_string(),
+                                ));
+                            }
+                            Rule::optional_arg => {
+                                args.push(LambdaArg::Optional(
+                                    arg_pair.into_inner().as_str().to_string(),
+                                ));
+                            }
+                            Rule::rest_arg => {
+                                args.push(LambdaArg::Rest(
+                                    arg_pair.into_inner().as_str().to_string(),
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    let body = Box::new(pairs_to_expr(body_pairs.into_inner())?);
+                    Ok(Spanned::new(Expr::Lambda { args, body }, span))
+                }
+                Rule::conditional => {
+                    let mut inner_pairs = primary.into_inner();
+                    let condition =
+                        Box::new(pairs_to_expr(inner_pairs.next().unwrap().into_inner())?);
+                    let then_expr =
+                        Box::new(pairs_to_expr(inner_pairs.next().unwrap().into_inner())?);
+                    let else_expr =
+                        Box::new(pairs_to_expr(inner_pairs.next().unwrap().into_inner())?);
+                    Ok(Spanned::new(
+                        Expr::Conditional {
+                            condition,
+                            then_expr,
+                            else_expr,
+                        },
+                        span,
+                    ))
+                }
+                Rule::do_block => {
+                    let inner_pairs = primary.into_inner();
+                    let mut statements = Vec::new();
+                    let mut return_expr = Box::new(Spanned::dummy(Expr::Null));
+
+                    for pair in inner_pairs {
+                        match pair.as_rule() {
+                            Rule::do_statement => {
+                                if let Some(inner) = pair.into_inner().next() {
+                                    if inner.as_rule() == Rule::expression {
+                                        statements.push(DoStatement::Expression(pairs_to_expr(
+                                            inner.into_inner(),
+                                        )?));
+                                    } else if inner.as_rule() == Rule::comment {
+                                        statements
+                                            .push(DoStatement::Comment(inner.as_str().to_string()));
                                     }
                                 }
-                                Rule::record_key_dynamic => RecordKey::Dynamic(Box::new(
-                                    pairs_to_expr(key_pair.into_inner())?,
-                                )),
-                                _ => unreachable!(),
-                            };
-
-                            let value = pairs_to_expr(inner_pairs.next().unwrap().into_inner())?;
-                            entries.push(RecordEntry { key, value });
-                        }
-                        Rule::record_shorthand => {
-                            let ident = pair.into_inner().next().unwrap().as_str().to_string();
-                            entries.push(RecordEntry {
-                                key: RecordKey::Shorthand(ident),
-                                value: Spanned::dummy(Expr::Null), // Will be resolved during evaluation
-                            });
-                        }
-                        Rule::spread_expression => {
-                            let spread_expr = pairs_to_expr(pair.into_inner())?;
-                            entries.push(RecordEntry {
-                                key: RecordKey::Spread(Box::new(spread_expr)),
-                                value: Spanned::dummy(Expr::Null), // Will be resolved during evaluation
-                            });
-                        }
-                        _ => {}
-                    }
-                }
-
-                Ok(Spanned::new(Expr::Record(entries), span))
-            }
-            Rule::bool => {
-                let bool_str = primary.as_str();
-                let value = match bool_str {
-                    "true" => true,
-                    "false" => false,
-                    _ => unreachable!(),
-                };
-                Ok(Spanned::new(Expr::Bool(value), span))
-            }
-            Rule::null => Ok(Spanned::new(Expr::Null, span)),
-            Rule::string => {
-                let value = primary.into_inner().as_str().to_string();
-                Ok(Spanned::new(Expr::String(value), span))
-            }
-            Rule::assignment => {
-                let mut inner_pairs = primary.into_inner();
-                let ident = inner_pairs.next().unwrap().as_str().to_string();
-                let value = Box::new(pairs_to_expr(inner_pairs.next().unwrap().into_inner())?);
-                Ok(Spanned::new(Expr::Assignment { ident, value }, span))
-            }
-            Rule::lambda => {
-                let mut inner_pairs = primary.into_inner();
-                let arg_list = inner_pairs.next().unwrap();
-                let body_pairs = inner_pairs.next().unwrap();
-
-                let mut args = Vec::new();
-                for arg_pair in arg_list.into_inner() {
-                    match arg_pair.as_rule() {
-                        Rule::required_arg => {
-                            args.push(LambdaArg::Required(
-                                arg_pair.into_inner().as_str().to_string(),
-                            ));
-                        }
-                        Rule::optional_arg => {
-                            args.push(LambdaArg::Optional(
-                                arg_pair.into_inner().as_str().to_string(),
-                            ));
-                        }
-                        Rule::rest_arg => {
-                            args.push(LambdaArg::Rest(arg_pair.into_inner().as_str().to_string()));
-                        }
-                        _ => {}
-                    }
-                }
-
-                let body = Box::new(pairs_to_expr(body_pairs.into_inner())?);
-                Ok(Spanned::new(Expr::Lambda { args, body }, span))
-            }
-            Rule::conditional => {
-                let mut inner_pairs = primary.into_inner();
-                let condition = Box::new(pairs_to_expr(inner_pairs.next().unwrap().into_inner())?);
-                let then_expr = Box::new(pairs_to_expr(inner_pairs.next().unwrap().into_inner())?);
-                let else_expr = Box::new(pairs_to_expr(inner_pairs.next().unwrap().into_inner())?);
-                Ok(Spanned::new(Expr::Conditional {
-                    condition,
-                    then_expr,
-                    else_expr,
-                }, span))
-            }
-            Rule::do_block => {
-                let inner_pairs = primary.into_inner();
-                let mut statements = Vec::new();
-                let mut return_expr = Box::new(Spanned::dummy(Expr::Null));
-
-                for pair in inner_pairs {
-                    match pair.as_rule() {
-                        Rule::do_statement => {
-                            if let Some(inner) = pair.into_inner().next() {
-                                if inner.as_rule() == Rule::expression {
-                                    statements.push(DoStatement::Expression(pairs_to_expr(
-                                        inner.into_inner(),
-                                    )?));
-                                } else if inner.as_rule() == Rule::comment {
-                                    statements
-                                        .push(DoStatement::Comment(inner.as_str().to_string()));
-                                }
                             }
+                            Rule::return_statement => {
+                                let return_expr_pair = pair.into_inner().next().unwrap();
+                                return_expr =
+                                    Box::new(pairs_to_expr(return_expr_pair.into_inner())?);
+                            }
+                            _ => {}
                         }
-                        Rule::return_statement => {
-                            let return_expr_pair = pair.into_inner().next().unwrap();
-                            return_expr = Box::new(pairs_to_expr(return_expr_pair.into_inner())?);
-                        }
-                        _ => {}
+                    }
+
+                    Ok(Spanned::new(
+                        Expr::DoBlock {
+                            statements,
+                            return_expr,
+                        },
+                        span,
+                    ))
+                }
+                Rule::identifier => {
+                    let ident = primary.as_str();
+
+                    // Check if it's a built-in function
+                    if let Some(built_in) = BuiltInFunction::from_ident(ident) {
+                        Ok(Spanned::new(Expr::BuiltIn(built_in), span))
+                    } else {
+                        Ok(Spanned::new(Expr::Identifier(ident.to_string()), span))
                     }
                 }
-
-                Ok(Spanned::new(Expr::DoBlock {
-                    statements,
-                    return_expr,
-                }, span))
-            }
-            Rule::identifier => {
-                let ident = primary.as_str();
-
-                // Check if it's a built-in function
-                if let Some(built_in) = BuiltInFunction::from_ident(ident) {
-                    Ok(Spanned::new(Expr::BuiltIn(built_in), span))
-                } else {
-                    Ok(Spanned::new(Expr::Identifier(ident.to_string()), span))
+                Rule::input_reference => {
+                    // Strip the leading '#' and create an InputReference
+                    let field = primary.as_str()[1..].to_string();
+                    Ok(Spanned::new(Expr::InputReference(field), span))
                 }
+                Rule::expression => pairs_to_expr(primary.into_inner()),
+                _ => unreachable!("{}", primary.as_str()),
             }
-            Rule::input_reference => {
-                // Strip the leading '#' and create an InputReference
-                let field = primary.as_str()[1..].to_string();
-                Ok(Spanned::new(Expr::InputReference(field), span))
-            }
-            Rule::expression => pairs_to_expr(primary.into_inner()),
-            _ => unreachable!("{}", primary.as_str()),
-        }
         })
         .map_prefix(|op, rhs| {
             let span = span_from_pair(&op);
             match op.as_rule() {
-            Rule::negation => Ok(Spanned::new(Expr::UnaryOp {
-                op: UnaryOp::Negate,
-                expr: Box::new(rhs?),
-            }, span)),
-            Rule::spread_operator => Ok(Spanned::new(Expr::Spread(Box::new(rhs?)), span)),
-            Rule::invert | Rule::natural_not => Ok(Spanned::new(Expr::UnaryOp {
-                op: UnaryOp::Not,
-                expr: Box::new(rhs?),
-            }, span)),
-            _ => unreachable!(),
-        }
+                Rule::negation => Ok(Spanned::new(
+                    Expr::UnaryOp {
+                        op: UnaryOp::Negate,
+                        expr: Box::new(rhs?),
+                    },
+                    span,
+                )),
+                Rule::spread_operator => Ok(Spanned::new(Expr::Spread(Box::new(rhs?)), span)),
+                Rule::invert | Rule::natural_not => Ok(Spanned::new(
+                    Expr::UnaryOp {
+                        op: UnaryOp::Not,
+                        expr: Box::new(rhs?),
+                    },
+                    span,
+                )),
+                _ => unreachable!(),
+            }
         })
         .map_postfix(|lhs, op| {
             let span = span_from_pair(&op);
             match op.as_rule() {
-            Rule::factorial => Ok(Spanned::new(Expr::PostfixOp {
-                op: PostfixOp::Factorial,
-                expr: Box::new(lhs?),
-            }, span)),
-            Rule::access => {
-                let index_expr = pairs_to_expr(op.into_inner())?;
-                Ok(Spanned::new(Expr::Access {
-                    expr: Box::new(lhs?),
-                    index: Box::new(index_expr),
-                }, span))
+                Rule::factorial => Ok(Spanned::new(
+                    Expr::PostfixOp {
+                        op: PostfixOp::Factorial,
+                        expr: Box::new(lhs?),
+                    },
+                    span,
+                )),
+                Rule::access => {
+                    let index_expr = pairs_to_expr(op.into_inner())?;
+                    Ok(Spanned::new(
+                        Expr::Access {
+                            expr: Box::new(lhs?),
+                            index: Box::new(index_expr),
+                        },
+                        span,
+                    ))
+                }
+                Rule::dot_access => {
+                    let field = op.into_inner().as_str().to_string();
+                    Ok(Spanned::new(
+                        Expr::DotAccess {
+                            expr: Box::new(lhs?),
+                            field,
+                        },
+                        span,
+                    ))
+                }
+                Rule::call_list => {
+                    let call_list = op.into_inner();
+                    let args = call_list
+                        .into_iter()
+                        .map(|arg| pairs_to_expr(arg.into_inner()))
+                        .collect::<AnyhowResult<Vec<SpannedExpr>>>()?;
+                    Ok(Spanned::new(
+                        Expr::Call {
+                            func: Box::new(lhs?),
+                            args,
+                        },
+                        span,
+                    ))
+                }
+                _ => unreachable!(),
             }
-            Rule::dot_access => {
-                let field = op.into_inner().as_str().to_string();
-                Ok(Spanned::new(Expr::DotAccess {
-                    expr: Box::new(lhs?),
-                    field,
-                }, span))
-            }
-            Rule::call_list => {
-                let call_list = op.into_inner();
-                let args = call_list
-                    .into_iter()
-                    .map(|arg| pairs_to_expr(arg.into_inner()))
-                    .collect::<AnyhowResult<Vec<SpannedExpr>>>()?;
-                Ok(Spanned::new(Expr::Call {
-                    func: Box::new(lhs?),
-                    args,
-                }, span))
-            }
-            _ => unreachable!(),
-        }
         })
         .map_infix(|lhs, op, rhs| {
             let span = span_from_pair(&op);
@@ -1845,11 +1991,14 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> AnyhowResult<SpannedExpr> {
                 Rule::coalesce => BinaryOp::Coalesce,
                 _ => unreachable!(),
             };
-            Ok(Spanned::new(Expr::BinaryOp {
-                op: op_type,
-                left: Box::new(lhs?),
-                right: Box::new(rhs?),
-            }, span))
+            Ok(Spanned::new(
+                Expr::BinaryOp {
+                    op: op_type,
+                    left: Box::new(lhs?),
+                    right: Box::new(rhs?),
+                },
+                span,
+            ))
         })
         .parse(pairs)
 }
@@ -2102,7 +2251,8 @@ mod tests {
 
     #[test]
     fn conditional_expression_with_multiple_newlines() {
-        let result = parse_and_evaluate("if true \n\n then \n 5 \n else \n 10", None, None).unwrap();
+        let result =
+            parse_and_evaluate("if true \n\n then \n 5 \n else \n 10", None, None).unwrap();
         assert_eq!(result, Value::Number(5.0));
     }
 
@@ -2183,7 +2333,10 @@ mod tests {
   else \"wrong precedence\"";
         let result = parse_and_evaluate(code, Some(Rc::clone(&heap)), None).unwrap();
         assert!(matches!(result, Value::String(_)));
-        assert_eq!(result.as_string(&heap.borrow()).unwrap(), "correct precedence");
+        assert_eq!(
+            result.as_string(&heap.borrow()).unwrap(),
+            "correct precedence"
+        );
     }
 
     #[test]
@@ -3154,12 +3307,8 @@ mod tests {
         assert_eq!(result, Value::Bool(false));
 
         // More complex inline lambda comparison
-        let result = parse_and_evaluate(
-            "(x => x * 2 + 1) == (x => x * 2 + 1)",
-            None,
-            None,
-        )
-        .unwrap();
+        let result =
+            parse_and_evaluate("(x => x * 2 + 1) == (x => x * 2 + 1)", None, None).unwrap();
         assert_eq!(result, Value::Bool(true));
 
         // Lambdas with conditionals

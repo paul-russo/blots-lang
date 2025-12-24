@@ -65,8 +65,7 @@ impl fmt::Display for RuntimeError {
 
             // Build label - don't set color in WASM builds as it may override config
             #[cfg(target_arch = "wasm32")]
-            let label = Label::new(span.start_byte..span.end_byte)
-                .with_message(&self.message);
+            let label = Label::new(span.start_byte..span.end_byte).with_message(&self.message);
 
             #[cfg(not(target_arch = "wasm32"))]
             let label = Label::new(span.start_byte..span.end_byte)

@@ -94,11 +94,14 @@ pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
                         start_line_col.0, start_line_col.1, end_line_col.0, end_line_col.1
                     );
 
-                    let value =
-                        evaluate_pairs(inner_pairs, Rc::clone(&heap), Rc::clone(&bindings), 0, expr)
-                            .map_err(|error| {
-                                JsError::new(&format!("Evaluation error: {}", error))
-                            })?;
+                    let value = evaluate_pairs(
+                        inner_pairs,
+                        Rc::clone(&heap),
+                        Rc::clone(&bindings),
+                        0,
+                        expr,
+                    )
+                    .map_err(|error| JsError::new(&format!("Evaluation error: {}", error)))?;
 
                     values.insert(col_id, value);
                 }
@@ -255,7 +258,13 @@ fn evaluate_single_inline_expression(
                 if let Some(inner_pair) = pair.into_inner().next() {
                     let inner_pairs = inner_pair.into_inner();
 
-                    match evaluate_pairs(inner_pairs, Rc::clone(&heap), Rc::clone(&bindings), 0, expr) {
+                    match evaluate_pairs(
+                        inner_pairs,
+                        Rc::clone(&heap),
+                        Rc::clone(&bindings),
+                        0,
+                        expr,
+                    ) {
                         Ok(value) => match value.to_serializable_value(&heap.borrow()) {
                             Ok(serializable) => {
                                 return ExpressionResult::Value {
@@ -541,7 +550,10 @@ mod tests {
 
         let result = evaluate(source, inputs).unwrap();
         let result_obj: serde_json::Value = serde_wasm_bindgen::from_value(result).unwrap();
-        assert_eq!(result_obj["bindings"]["result"]["Number"], serde_json::json!(10));
+        assert_eq!(
+            result_obj["bindings"]["result"]["Number"],
+            serde_json::json!(10)
+        );
     }
 
     #[wasm_bindgen_test]
@@ -573,7 +585,10 @@ mod tests {
         // Check the output
         assert_eq!(result_obj["outputs"], serde_json::json!(["result"]));
         // x = 5 * 2 = 10, y = 3 + 10 = 13, result = 10 + 13 = 23
-        assert_eq!(result_obj["bindings"]["result"]["Number"], serde_json::json!(23));
+        assert_eq!(
+            result_obj["bindings"]["result"]["Number"],
+            serde_json::json!(23)
+        );
 
         // Check intermediate bindings
         assert_eq!(result_obj["bindings"]["x"]["Number"], serde_json::json!(10));
@@ -595,7 +610,10 @@ mod tests {
         // Check the output
         assert_eq!(result_obj["outputs"], serde_json::json!(["result"]));
         // x = 5 * 2 = 10, y = 3 + 10 = 13, result = 10 + 13 = 23
-        assert_eq!(result_obj["bindings"]["result"]["Number"], serde_json::json!(23));
+        assert_eq!(
+            result_obj["bindings"]["result"]["Number"],
+            serde_json::json!(23)
+        );
     }
 
     #[wasm_bindgen_test]
@@ -707,18 +725,25 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn test_evaluate_inline_expressions_with_inputs() {
-        let expressions = serde_wasm_bindgen::to_value(&vec!["\"Hello, \" + name", "age >= 18"]).unwrap();
+        let expressions =
+            serde_wasm_bindgen::to_value(&vec!["\"Hello, \" + name", "age >= 18"]).unwrap();
         // Create inputs using SerializableValue directly
         use indexmap::IndexMap;
         let mut inputs_map: IndexMap<String, SerializableValue> = IndexMap::new();
-        inputs_map.insert("name".to_string(), SerializableValue::String("Alice".to_string()));
+        inputs_map.insert(
+            "name".to_string(),
+            SerializableValue::String("Alice".to_string()),
+        );
         inputs_map.insert("age".to_string(), SerializableValue::Number(30.0));
         let inputs = serde_wasm_bindgen::to_value(&inputs_map).unwrap();
 
         let result = evaluate_inline_expressions(expressions, inputs).unwrap();
         let results: Vec<serde_json::Value> = serde_wasm_bindgen::from_value(result).unwrap();
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0]["value"]["String"], serde_json::json!("Hello, Alice"));
+        assert_eq!(
+            results[0]["value"]["String"],
+            serde_json::json!("Hello, Alice")
+        );
         assert_eq!(results[1]["value"]["Bool"], serde_json::json!(true));
     }
 }

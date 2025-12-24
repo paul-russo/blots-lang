@@ -89,7 +89,10 @@ pub fn build_pratt_parser() -> PrattParser<Rule> {
 
     for &(prec, assoc, _binop, rule) in PRECEDENCE_TABLE {
         // Find or create the group for this precedence/associativity
-        if let Some(group) = precedence_groups.iter_mut().find(|(p, a, _)| *p == prec && *a == assoc) {
+        if let Some(group) = precedence_groups
+            .iter_mut()
+            .find(|(p, a, _)| *p == prec && *a == assoc)
+        {
             group.2.push(rule);
         } else {
             precedence_groups.push((prec, assoc, vec![rule]));
@@ -109,20 +112,16 @@ pub fn build_pratt_parser() -> PrattParser<Rule> {
     }
 
     // Prefix operators
-    parser = parser.op(
-        Op::prefix(Rule::negation)
-            | Op::prefix(Rule::spread_operator)
-            | Op::prefix(Rule::invert)
-            | Op::prefix(Rule::natural_not),
-    );
+    parser = parser.op(Op::prefix(Rule::negation)
+        | Op::prefix(Rule::spread_operator)
+        | Op::prefix(Rule::invert)
+        | Op::prefix(Rule::natural_not));
 
     // Postfix operators
     parser = parser.op(Op::postfix(Rule::factorial));
-    parser = parser.op(
-        Op::postfix(Rule::access)
-            | Op::postfix(Rule::dot_access)
-            | Op::postfix(Rule::call_list),
-    );
+    parser = parser.op(Op::postfix(Rule::access)
+        | Op::postfix(Rule::dot_access)
+        | Op::postfix(Rule::call_list));
 
     parser
 }
