@@ -144,11 +144,16 @@ pub fn evaluate_ast(
             "inf" => Ok(Number(f64::INFINITY)),
             "constants" => Ok(Value::Record(RecordPointer::new(0))),
             _ => bindings.get(ident).ok_or_else(|| {
-                RuntimeError::with_span(
-                    format!("unknown identifier: {}", ident),
-                    expr.span,
-                    source.clone(),
-                )
+                use crate::heap::CONSTANTS;
+                let message = if CONSTANTS.contains_key(ident) {
+                    format!(
+                        "unknown identifier: {}. Did you mean constants.{}?",
+                        ident, ident
+                    )
+                } else {
+                    format!("unknown identifier: {}", ident)
+                };
+                RuntimeError::with_span(message, expr.span, source.clone())
             }),
         },
         Expr::InputReference(field) => {

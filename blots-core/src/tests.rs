@@ -1547,3 +1547,104 @@ mod via_into_error_message_tests {
         );
     }
 }
+
+// Tests for unknown identifier error messages suggesting constants
+#[cfg(test)]
+mod unknown_identifier_suggestion_tests {
+    use crate::environment::Environment;
+    use crate::expressions::evaluate_pairs;
+    use crate::heap::Heap;
+    use crate::parser::{Rule, get_pairs};
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    fn parse_and_evaluate(code: &str) -> Result<Value, crate::error::RuntimeError> {
+        let pairs = get_pairs(code).map_err(|e| crate::error::RuntimeError::new(e.to_string()))?;
+
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        let mut result = Value::Null;
+        for pair in pairs {
+            match pair.as_rule() {
+                Rule::statement => {
+                    if let Some(inner_pair) = pair.into_inner().next() {
+                        match inner_pair.as_rule() {
+                            Rule::expression | Rule::assignment => {
+                                result = evaluate_pairs(
+                                    inner_pair.into_inner(),
+                                    Rc::clone(&heap),
+                                    Rc::clone(&bindings),
+                                    0,
+                                    code,
+                                )?;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Rule::EOI => {}
+                _ => {}
+            }
+        }
+        Ok(result)
+    }
+
+    #[test]
+    fn test_unknown_identifier_pi_suggests_constants() {
+        let result = parse_and_evaluate("pi * 2");
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("Did you mean constants.pi?"),
+            "Error should suggest constants.pi, got: {}",
+            error_msg
+        );
+    }
+
+    #[test]
+    fn test_unknown_identifier_e_suggests_constants() {
+        let result = parse_and_evaluate("e ^ 2");
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("Did you mean constants.e?"),
+            "Error should suggest constants.e, got: {}",
+            error_msg
+        );
+    }
+
+    #[test]
+    fn test_unknown_identifier_no_suggestion_for_non_constant() {
+        let result = parse_and_evaluate("foo + 1");
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("unknown identifier: foo"),
+            "Error should mention unknown identifier, got: {}",
+            error_msg
+        );
+        assert!(
+            !error_msg.contains("Did you mean"),
+            "Error should not suggest anything for non-constant, got: {}",
+            error_msg
+        );
+    }
+
+    #[test]
+    fn test_constants_pi_works() {
+        let result = parse_and_evaluate("constants.pi");
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value, Value::Number(std::f64::consts::PI));
+    }
+
+    #[test]
+    fn test_constants_e_works() {
+        let result = parse_and_evaluate("constants.e");
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value, Value::Number(std::f64::consts::E));
+    }
+}
