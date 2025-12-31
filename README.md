@@ -303,6 +303,31 @@ output result = {
 }
 ```
 
+**Function output:**
+
+Functions are serialized as JSON objects with a special `__blots_function` key containing the function source code. Simple functions are output as-is:
+
+```blots
+output double = x => x * 2
+```
+
+```json
+{ "double": { "__blots_function": "(x) => x * 2" } }
+```
+
+Closure values are inlined into the function body, making functions self-contained and losslessly serializable:
+
+```blots
+multiplier = 10
+output scale = x => x * multiplier
+```
+
+```json
+{ "scale": { "__blots_function": "(x) => x * 10" } }
+```
+
+Functions can be passed as inputs to other Blots programs, enabling function composition across programs.
+
 **Using outputs with other tools:**
 ```bash
 # Format output with jq
@@ -340,19 +365,19 @@ x = 42 // This is also a comment
 - `log10(x)` - returns the base-10 logarithm of x
 - `exp(x)` - returns _e_ raised to the power of x
 - `abs(x)` - returns the absolute value of x
-- `floor(x)` - returns the largest integer less than or equal to x (e.g. `2.7` becomes `2` and `-2.7` becomes `3`)
-- `ceil(x)` - returns the smallest integer greater than or equal to x (e.g. `2.1` becomes `3`)
+- `floor(x)` - returns the largest integer less than or equal to x (e.g. `2.7` becomes `2` and `-2.7` becomes `-3`)
+- `ceil(x)` - returns the smallest integer greater than or equal to x (e.g. `2.1` becomes `3` and `-4.5` becomes `-4`)
 - `round(x)` - returns x rounded to the nearest integer (e.g. `2.7` becomes `3`)
-- `trunc(x)` - returns the integer part of x (removes fractional part) (e.g. `2.7` becomes `2` and `-2.7` becomes `-2`)
+- `trunc(x)` - returns the integer part of x (removes fractional part) (e.g. both `2.7` and `2.1` become `2`, and both `-2.7` and `-2.1` become `-2`)
 - `random(seed)` - returns a pseudo-random number in the range [0, 1) based on the given seed. The same seed always produces the same result, making it deterministic and reproducible. Use different seeds to generate different random numbers (e.g., `random(42)` always returns the same value, while `[1, 2, 3, 4, 5] via random` generates five different random numbers)
 
 #### Aggregate Functions
-- `min(list)` - returns the minimum given value from a list
-- `max(list)` - returns the maximum value from a list
-- `avg(list)` - returns the average (mean) of values in a list
-- `sum(list)` - returns the sum of all values in a list
-- `prod(list)` - returns the product of all values in a list
-- `median(list)` - returns the median value from a list
+- `min(list)` or `min(...args)` - returns the minimum given value from a list
+- `max(list)` or `max(...args)` - returns the maximum value from a list
+- `avg(list)` or `avg(...args)` - returns the average (mean) of values in a list
+- `sum(list)` or `sum(...args)` - returns the sum of all values in a list
+- `prod(list)` or `prod(...args)` - returns the product of all values in a list
+- `median(list)` or `median(...args)` - returns the median value from a list
 - `percentile(list, p)` - returns the percentile value at position p (0-100) from a list
 
 #### List Functions
