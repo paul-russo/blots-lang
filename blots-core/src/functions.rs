@@ -7,6 +7,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use dyn_fmt::AsStrFormatExt;
+use indexmap::IndexMap;
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::LazyLock};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -105,6 +106,13 @@ pub enum BuiltInFunction {
     Values,
     Entries,
 
+    // List utility functions
+    GroupBy,
+    CountBy,
+    Flatten,
+    Zip,
+    Chunk,
+
     // Conversion functions
     ToString,
     ToNumber,
@@ -185,6 +193,11 @@ impl BuiltInFunction {
             "keys" => Some(Self::Keys),
             "values" => Some(Self::Values),
             "entries" => Some(Self::Entries),
+            "group_by" => Some(Self::GroupBy),
+            "count_by" => Some(Self::CountBy),
+            "flatten" => Some(Self::Flatten),
+            "zip" => Some(Self::Zip),
+            "chunk" => Some(Self::Chunk),
             #[cfg(not(target_arch = "wasm32"))]
             "print" => Some(Self::Print),
             #[cfg(not(target_arch = "wasm32"))]
@@ -249,6 +262,11 @@ impl BuiltInFunction {
             Self::Keys => "keys",
             Self::Values => "values",
             Self::Entries => "entries",
+            Self::GroupBy => "group_by",
+            Self::CountBy => "count_by",
+            Self::Flatten => "flatten",
+            Self::Zip => "zip",
+            Self::Chunk => "chunk",
             Self::ToString => "to_string",
             Self::ToNumber => "to_number",
             Self::ToBool => "to_bool",
@@ -326,6 +344,12 @@ impl BuiltInFunction {
 
             // Record functions
             Self::Keys | Self::Values | Self::Entries => FunctionArity::Exact(1),
+
+            // List utility functions
+            Self::GroupBy | Self::CountBy => FunctionArity::Exact(2),
+            Self::Flatten => FunctionArity::Exact(1),
+            Self::Zip => FunctionArity::AtLeast(2),
+            Self::Chunk => FunctionArity::Exact(2),
 
             // Platform-specific functions
             #[cfg(not(target_arch = "wasm32"))]
@@ -965,6 +989,153 @@ impl BuiltInFunction {
                 Ok(heap.borrow_mut().insert_list(entries))
             }
 
+            // List utility functions
+            Self::GroupBy => {
+                let func = &args[1];
+                let (list, func_def) = {
+                    let borrowed_heap = &heap.borrow();
+                    let list = args[0].as_list(borrowed_heap)?.clone();
+                    let func_def = get_function_def(func, borrowed_heap)
+                        .ok_or_else(|| anyhow!("second argument must be a function"))?;
+                    (list, func_def)
+                };
+
+                let mut groups: IndexMap<String, Vec<Value>> = IndexMap::new();
+                for item in list.iter() {
+                    let key_result = func_def.call(
+                        Value::Null,
+                        vec![*item],
+                        Rc::clone(&heap),
+                        Rc::clone(&bindings),
+                        call_depth + 1,
+                        source,
+                    )?;
+
+                    let key = match key_result {
+                        Value::String(_) => key_result.as_string(&heap.borrow())?.to_string(),
+                        _ => {
+                            return Err(anyhow!(
+                                "group_by key function must return a string, but got a {}",
+                                key_result.get_type()
+                            ));
+                        }
+                    };
+
+                    groups.entry(key).or_default().push(*item);
+                }
+
+                // Convert groups to record of lists
+                let record: IndexMap<String, Value> = groups
+                    .into_iter()
+                    .map(|(k, v)| (k, heap.borrow_mut().insert_list(v)))
+                    .collect();
+
+                Ok(heap.borrow_mut().insert_record(record))
+            }
+
+            Self::CountBy => {
+                let func = &args[1];
+                let (list, func_def) = {
+                    let borrowed_heap = &heap.borrow();
+                    let list = args[0].as_list(borrowed_heap)?.clone();
+                    let func_def = get_function_def(func, borrowed_heap)
+                        .ok_or_else(|| anyhow!("second argument must be a function"))?;
+                    (list, func_def)
+                };
+
+                let mut counts: IndexMap<String, f64> = IndexMap::new();
+                for item in list.iter() {
+                    let key_result = func_def.call(
+                        Value::Null,
+                        vec![*item],
+                        Rc::clone(&heap),
+                        Rc::clone(&bindings),
+                        call_depth + 1,
+                        source,
+                    )?;
+
+                    let key = match key_result {
+                        Value::String(_) => key_result.as_string(&heap.borrow())?.to_string(),
+                        _ => {
+                            return Err(anyhow!(
+                                "count_by key function must return a string, but got a {}",
+                                key_result.get_type()
+                            ));
+                        }
+                    };
+
+                    *counts.entry(key).or_insert(0.0) += 1.0;
+                }
+
+                // Convert counts to record of numbers
+                let record: IndexMap<String, Value> = counts
+                    .into_iter()
+                    .map(|(k, v)| (k, Value::Number(v)))
+                    .collect();
+
+                Ok(heap.borrow_mut().insert_record(record))
+            }
+
+            Self::Flatten => {
+                let list = args[0].as_list(&heap.borrow())?.clone();
+                let mut result = vec![];
+
+                for item in list.iter() {
+                    match item {
+                        Value::List(_) => {
+                            let inner = item.as_list(&heap.borrow())?.clone();
+                            result.extend(inner);
+                        }
+                        _ => result.push(*item),
+                    }
+                }
+
+                Ok(heap.borrow_mut().insert_list(result))
+            }
+
+            Self::Zip => {
+                // Extract all lists from args
+                let lists: Vec<Vec<Value>> = args
+                    .iter()
+                    .map(|arg| {
+                        arg.as_list(&heap.borrow())
+                            .cloned()
+                            .map_err(|_| anyhow!("all arguments to zip must be lists"))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+
+                // Find max length
+                let max_len = lists.iter().map(|l| l.len()).max().unwrap_or(0);
+
+                // Build tuples
+                let mut result = vec![];
+                for i in 0..max_len {
+                    let tuple: Vec<Value> = lists
+                        .iter()
+                        .map(|list| list.get(i).copied().unwrap_or(Value::Null))
+                        .collect();
+                    result.push(heap.borrow_mut().insert_list(tuple));
+                }
+
+                Ok(heap.borrow_mut().insert_list(result))
+            }
+
+            Self::Chunk => {
+                let list = args[0].as_list(&heap.borrow())?.clone();
+                let n = args[1].as_number()? as usize;
+
+                if n == 0 {
+                    return Err(anyhow!("chunk size must be greater than 0"));
+                }
+
+                let chunks: Vec<Value> = list
+                    .chunks(n)
+                    .map(|chunk| heap.borrow_mut().insert_list(chunk.to_vec()))
+                    .collect();
+
+                Ok(heap.borrow_mut().insert_list(chunks))
+            }
+
             // Conversion functions
             Self::ToString => match args[0] {
                 Value::String(_) => Ok(args[0]), // If it's already a string, just return it
@@ -1328,6 +1499,11 @@ impl BuiltInFunction {
             Self::Keys,
             Self::Values,
             Self::Entries,
+            Self::GroupBy,
+            Self::CountBy,
+            Self::Flatten,
+            Self::Zip,
+            Self::Chunk,
             #[cfg(not(target_arch = "wasm32"))]
             Self::Print,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1868,7 +2044,7 @@ mod tests {
 
             if let Value::Number(num) = result {
                 assert!(
-                    num >= 0.0 && num < 1.0,
+                    (0.0..1.0).contains(&num),
                     "Random value {} should be in range [0, 1)",
                     num
                 );
@@ -1892,7 +2068,7 @@ mod tests {
 
         if let Value::Number(num) = result {
             assert!(
-                num >= 0.0 && num < 1.0,
+                (0.0..1.0).contains(&num),
                 "Random value {} should be in range [0, 1)",
                 num
             );
@@ -2268,5 +2444,436 @@ mod tests {
             .call(args, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
         assert_eq!(result, Value::Number(1000.0));
+    }
+
+    #[test]
+    fn test_flatten() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        // Create [[1, 2], [3, 4]]
+        let inner1 = heap
+            .borrow_mut()
+            .insert_list(vec![Value::Number(1.0), Value::Number(2.0)]);
+        let inner2 = heap
+            .borrow_mut()
+            .insert_list(vec![Value::Number(3.0), Value::Number(4.0)]);
+        let list = heap.borrow_mut().insert_list(vec![inner1, inner2]);
+
+        let result = BuiltInFunction::Flatten
+            .call(vec![list], heap.clone(), bindings.clone(), 0, "")
+            .unwrap();
+
+        let heap_borrow = heap.borrow();
+        let result_list = result.as_list(&heap_borrow).unwrap();
+        assert_eq!(result_list.len(), 4);
+        assert_eq!(result_list[0], Value::Number(1.0));
+        assert_eq!(result_list[1], Value::Number(2.0));
+        assert_eq!(result_list[2], Value::Number(3.0));
+        assert_eq!(result_list[3], Value::Number(4.0));
+    }
+
+    #[test]
+    fn test_flatten_with_non_list_elements() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        // Create [[1, 2], 3, [4, 5]]
+        let inner1 = heap
+            .borrow_mut()
+            .insert_list(vec![Value::Number(1.0), Value::Number(2.0)]);
+        let inner2 = heap
+            .borrow_mut()
+            .insert_list(vec![Value::Number(4.0), Value::Number(5.0)]);
+        let list = heap
+            .borrow_mut()
+            .insert_list(vec![inner1, Value::Number(3.0), inner2]);
+
+        let result = BuiltInFunction::Flatten
+            .call(vec![list], heap.clone(), bindings.clone(), 0, "")
+            .unwrap();
+
+        let heap_borrow = heap.borrow();
+        let result_list = result.as_list(&heap_borrow).unwrap();
+        assert_eq!(result_list.len(), 5);
+        assert_eq!(result_list[0], Value::Number(1.0));
+        assert_eq!(result_list[1], Value::Number(2.0));
+        assert_eq!(result_list[2], Value::Number(3.0));
+        assert_eq!(result_list[3], Value::Number(4.0));
+        assert_eq!(result_list[4], Value::Number(5.0));
+    }
+
+    #[test]
+    fn test_flatten_one_level_only() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        // Create [[1, [2, 3]], [4]]
+        let deep_inner = heap
+            .borrow_mut()
+            .insert_list(vec![Value::Number(2.0), Value::Number(3.0)]);
+        let inner1 = heap
+            .borrow_mut()
+            .insert_list(vec![Value::Number(1.0), deep_inner]);
+        let inner2 = heap.borrow_mut().insert_list(vec![Value::Number(4.0)]);
+        let list = heap.borrow_mut().insert_list(vec![inner1, inner2]);
+
+        let result = BuiltInFunction::Flatten
+            .call(vec![list], heap.clone(), bindings.clone(), 0, "")
+            .unwrap();
+
+        let heap_borrow = heap.borrow();
+        let result_list = result.as_list(&heap_borrow).unwrap();
+        // Should be [1, [2, 3], 4] - the nested list stays nested
+        assert_eq!(result_list.len(), 3);
+        assert_eq!(result_list[0], Value::Number(1.0));
+        // result_list[1] should still be a list
+        assert!(matches!(result_list[1], Value::List(_)));
+        assert_eq!(result_list[2], Value::Number(4.0));
+    }
+
+    #[test]
+    fn test_zip_equal_lengths() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        let list1 = heap
+            .borrow_mut()
+            .insert_list(vec![Value::Number(1.0), Value::Number(2.0)]);
+        let str_a = heap.borrow_mut().insert_string("a".to_string());
+        let str_b = heap.borrow_mut().insert_string("b".to_string());
+        let list2 = heap.borrow_mut().insert_list(vec![str_a, str_b]);
+
+        let result = BuiltInFunction::Zip
+            .call(vec![list1, list2], heap.clone(), bindings.clone(), 0, "")
+            .unwrap();
+
+        let heap_borrow = heap.borrow();
+        let result_list = result.as_list(&heap_borrow).unwrap();
+        assert_eq!(result_list.len(), 2);
+
+        let pair1 = result_list[0].as_list(&heap_borrow).unwrap();
+        assert_eq!(pair1.len(), 2);
+        assert_eq!(pair1[0], Value::Number(1.0));
+
+        let pair2 = result_list[1].as_list(&heap_borrow).unwrap();
+        assert_eq!(pair2.len(), 2);
+        assert_eq!(pair2[0], Value::Number(2.0));
+    }
+
+    #[test]
+    fn test_zip_unequal_lengths_pads_with_null() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        let list1 = heap.borrow_mut().insert_list(vec![Value::Number(1.0)]);
+        let str_a = heap.borrow_mut().insert_string("a".to_string());
+        let str_b = heap.borrow_mut().insert_string("b".to_string());
+        let str_c = heap.borrow_mut().insert_string("c".to_string());
+        let list2 = heap.borrow_mut().insert_list(vec![str_a, str_b, str_c]);
+
+        let result = BuiltInFunction::Zip
+            .call(vec![list1, list2], heap.clone(), bindings.clone(), 0, "")
+            .unwrap();
+
+        let heap_borrow = heap.borrow();
+        let result_list = result.as_list(&heap_borrow).unwrap();
+        assert_eq!(result_list.len(), 3); // Pads to longest
+
+        let pair1 = result_list[0].as_list(&heap_borrow).unwrap();
+        assert_eq!(pair1[0], Value::Number(1.0));
+
+        let pair2 = result_list[1].as_list(&heap_borrow).unwrap();
+        assert_eq!(pair2[0], Value::Null); // Padded with null
+
+        let pair3 = result_list[2].as_list(&heap_borrow).unwrap();
+        assert_eq!(pair3[0], Value::Null); // Padded with null
+    }
+
+    #[test]
+    fn test_zip_three_lists() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        let list1 = heap
+            .borrow_mut()
+            .insert_list(vec![Value::Number(1.0), Value::Number(2.0)]);
+        let str_a = heap.borrow_mut().insert_string("a".to_string());
+        let str_b = heap.borrow_mut().insert_string("b".to_string());
+        let list2 = heap.borrow_mut().insert_list(vec![str_a, str_b]);
+        let list3 = heap
+            .borrow_mut()
+            .insert_list(vec![Value::Bool(true), Value::Bool(false)]);
+
+        let result = BuiltInFunction::Zip
+            .call(
+                vec![list1, list2, list3],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap();
+
+        let heap_borrow = heap.borrow();
+        let result_list = result.as_list(&heap_borrow).unwrap();
+        assert_eq!(result_list.len(), 2);
+
+        let tuple1 = result_list[0].as_list(&heap_borrow).unwrap();
+        assert_eq!(tuple1.len(), 3);
+        assert_eq!(tuple1[0], Value::Number(1.0));
+        assert_eq!(tuple1[2], Value::Bool(true));
+    }
+
+    #[test]
+    fn test_chunk() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        let list = heap.borrow_mut().insert_list(vec![
+            Value::Number(1.0),
+            Value::Number(2.0),
+            Value::Number(3.0),
+            Value::Number(4.0),
+            Value::Number(5.0),
+        ]);
+
+        let result = BuiltInFunction::Chunk
+            .call(
+                vec![list, Value::Number(2.0)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap();
+
+        let heap_borrow = heap.borrow();
+        let result_list = result.as_list(&heap_borrow).unwrap();
+        assert_eq!(result_list.len(), 3);
+
+        let chunk1 = result_list[0].as_list(&heap_borrow).unwrap();
+        assert_eq!(chunk1.len(), 2);
+        assert_eq!(chunk1[0], Value::Number(1.0));
+        assert_eq!(chunk1[1], Value::Number(2.0));
+
+        let chunk2 = result_list[1].as_list(&heap_borrow).unwrap();
+        assert_eq!(chunk2.len(), 2);
+        assert_eq!(chunk2[0], Value::Number(3.0));
+        assert_eq!(chunk2[1], Value::Number(4.0));
+
+        let chunk3 = result_list[2].as_list(&heap_borrow).unwrap();
+        assert_eq!(chunk3.len(), 1); // Last chunk smaller
+        assert_eq!(chunk3[0], Value::Number(5.0));
+    }
+
+    #[test]
+    fn test_chunk_zero_size_error() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        let list = heap
+            .borrow_mut()
+            .insert_list(vec![Value::Number(1.0), Value::Number(2.0)]);
+
+        let result = BuiltInFunction::Chunk.call(
+            vec![list, Value::Number(0.0)],
+            heap.clone(),
+            bindings.clone(),
+            0,
+            "",
+        );
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("chunk size must be greater than 0")
+        );
+    }
+
+    #[test]
+    fn test_chunk_empty_list() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        let list = heap.borrow_mut().insert_list(vec![]);
+
+        let result = BuiltInFunction::Chunk
+            .call(
+                vec![list, Value::Number(2.0)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap();
+
+        let heap_borrow = heap.borrow();
+        let result_list = result.as_list(&heap_borrow).unwrap();
+        assert_eq!(result_list.len(), 0);
+    }
+
+    #[test]
+    fn test_group_by() {
+        use crate::values::LambdaDef;
+
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        // Use strings like "a", "b", "a" as input with identity lambda
+        let str_a1 = heap.borrow_mut().insert_string("a".to_string());
+        let str_b = heap.borrow_mut().insert_string("b".to_string());
+        let str_a2 = heap.borrow_mut().insert_string("a".to_string());
+        let simple_list = heap.borrow_mut().insert_list(vec![str_a1, str_b, str_a2]);
+
+        // Identity lambda: x => x
+        let lambda = LambdaDef {
+            name: None,
+            args: vec![crate::values::LambdaArg::Required("x".to_string())],
+            body: crate::ast::Spanned::dummy(crate::ast::Expr::Identifier("x".to_string())),
+            scope: HashMap::new(),
+            source: Rc::from(""),
+        };
+        let lambda_value = heap.borrow_mut().insert_lambda(lambda);
+
+        let result = BuiltInFunction::GroupBy
+            .call(
+                vec![simple_list, lambda_value],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap();
+
+        let heap_borrow = heap.borrow();
+        let record = result.as_record(&heap_borrow).unwrap();
+        assert_eq!(record.len(), 2); // "a" and "b"
+        assert!(record.contains_key("a"));
+        assert!(record.contains_key("b"));
+
+        let group_a = record.get("a").unwrap().as_list(&heap_borrow).unwrap();
+        assert_eq!(group_a.len(), 2); // "a" appears twice
+
+        let group_b = record.get("b").unwrap().as_list(&heap_borrow).unwrap();
+        assert_eq!(group_b.len(), 1); // "b" appears once
+    }
+
+    #[test]
+    fn test_group_by_non_string_key_error() {
+        use crate::values::LambdaDef;
+
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        let list = heap
+            .borrow_mut()
+            .insert_list(vec![Value::Number(1.0), Value::Number(2.0)]);
+
+        // Lambda that returns a number: x => x
+        let lambda = LambdaDef {
+            name: None,
+            args: vec![crate::values::LambdaArg::Required("x".to_string())],
+            body: crate::ast::Spanned::dummy(crate::ast::Expr::Identifier("x".to_string())),
+            scope: HashMap::new(),
+            source: Rc::from(""),
+        };
+        let lambda_value = heap.borrow_mut().insert_lambda(lambda);
+
+        let result = BuiltInFunction::GroupBy.call(
+            vec![list, lambda_value],
+            heap.clone(),
+            bindings.clone(),
+            0,
+            "",
+        );
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must return a string")
+        );
+    }
+
+    #[test]
+    fn test_count_by() {
+        use crate::values::LambdaDef;
+
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        // Use strings as input with identity lambda
+        let str_a1 = heap.borrow_mut().insert_string("a".to_string());
+        let str_b = heap.borrow_mut().insert_string("b".to_string());
+        let str_a2 = heap.borrow_mut().insert_string("a".to_string());
+        let str_a3 = heap.borrow_mut().insert_string("a".to_string());
+        let list = heap
+            .borrow_mut()
+            .insert_list(vec![str_a1, str_b, str_a2, str_a3]);
+
+        // Identity lambda: x => x
+        let lambda = LambdaDef {
+            name: None,
+            args: vec![crate::values::LambdaArg::Required("x".to_string())],
+            body: crate::ast::Spanned::dummy(crate::ast::Expr::Identifier("x".to_string())),
+            scope: HashMap::new(),
+            source: Rc::from(""),
+        };
+        let lambda_value = heap.borrow_mut().insert_lambda(lambda);
+
+        let result = BuiltInFunction::CountBy
+            .call(
+                vec![list, lambda_value],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap();
+
+        let heap_borrow = heap.borrow();
+        let record = result.as_record(&heap_borrow).unwrap();
+        assert_eq!(record.len(), 2); // "a" and "b"
+
+        assert_eq!(*record.get("a").unwrap(), Value::Number(3.0)); // "a" appears 3 times
+        assert_eq!(*record.get("b").unwrap(), Value::Number(1.0)); // "b" appears 1 time
+    }
+
+    #[test]
+    fn test_count_by_empty_list() {
+        use crate::values::LambdaDef;
+
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        let list = heap.borrow_mut().insert_list(vec![]);
+
+        // Identity lambda: x => x
+        let lambda = LambdaDef {
+            name: None,
+            args: vec![crate::values::LambdaArg::Required("x".to_string())],
+            body: crate::ast::Spanned::dummy(crate::ast::Expr::Identifier("x".to_string())),
+            scope: HashMap::new(),
+            source: Rc::from(""),
+        };
+        let lambda_value = heap.borrow_mut().insert_lambda(lambda);
+
+        let result = BuiltInFunction::CountBy
+            .call(
+                vec![list, lambda_value],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap();
+
+        let heap_borrow = heap.borrow();
+        let record = result.as_record(&heap_borrow).unwrap();
+        assert_eq!(record.len(), 0); // Empty record
     }
 }

@@ -395,6 +395,11 @@ x = 42 // This is also a comment
 - `reverse(list)` - returns a reversed copy of the list
 - `any(list)` - returns true if *any* element in the list is `true`
 - `all(list)` - returns true if *all* elements in the list are `true`
+- `flatten(list)` - flattens nested lists by one level (e.g., `[[1, 2], [3, 4]]` becomes `[1, 2, 3, 4]`)
+- `zip(list1, list2, ...)` - combines multiple lists into a list of tuples; pads shorter lists with `null` (e.g., `zip([1, 2], ["a", "b"])` returns `[[1, "a"], [2, "b"]]`)
+- `chunk(list, n)` - splits a list into sublists of size n; the last chunk may be smaller (e.g., `chunk([1, 2, 3, 4, 5], 2)` returns `[[1, 2], [3, 4], [5]]`)
+- `group_by(list, fn)` - groups elements by the result of fn (must return a string); returns a record of lists (e.g., `group_by(["apple", "banana"], x => slice(x, 0, 1))` returns `{"a": ["apple"], "b": ["banana"]}`)
+- `count_by(list, fn)` - counts elements by the result of fn (must return a string); returns a record of counts (e.g., `count_by(["a", "b", "a"], x => x)` returns `{"a": 2, "b": 1}`)
 
 #### Higher-Order Functions
 - `map(list, fn)` - applies a function to each element of a list
