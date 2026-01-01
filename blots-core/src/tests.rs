@@ -1648,3 +1648,125 @@ mod unknown_identifier_suggestion_tests {
         assert_eq!(value, Value::Number(std::f64::consts::E));
     }
 }
+
+// Tests for negative (end-relative) indexing
+#[cfg(test)]
+mod negative_indexing_tests {
+    use crate::environment::Environment;
+    use crate::expressions::evaluate_pairs;
+    use crate::heap::Heap;
+    use crate::parser::{Rule, get_pairs};
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    fn parse_and_evaluate(code: &str) -> Result<Value, crate::error::RuntimeError> {
+        let pairs = get_pairs(code).map_err(|e| crate::error::RuntimeError::new(e.to_string()))?;
+
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        let mut result = Value::Null;
+        for pair in pairs {
+            match pair.as_rule() {
+                Rule::statement => {
+                    if let Some(inner_pair) = pair.into_inner().next() {
+                        match inner_pair.as_rule() {
+                            Rule::expression | Rule::assignment => {
+                                result = evaluate_pairs(
+                                    inner_pair.into_inner(),
+                                    Rc::clone(&heap),
+                                    Rc::clone(&bindings),
+                                    0,
+                                    code,
+                                )?;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Rule::EOI => {}
+                _ => {}
+            }
+        }
+        Ok(result)
+    }
+
+    #[test]
+    fn test_list_negative_index_last() {
+        let result = parse_and_evaluate("[1, 2, 3][-1]").unwrap();
+        assert_eq!(result, Value::Number(3.0));
+    }
+
+    #[test]
+    fn test_list_negative_index_second_to_last() {
+        let result = parse_and_evaluate("[1, 2, 3][-2]").unwrap();
+        assert_eq!(result, Value::Number(2.0));
+    }
+
+    #[test]
+    fn test_list_negative_index_first() {
+        let result = parse_and_evaluate("[1, 2, 3][-3]").unwrap();
+        assert_eq!(result, Value::Number(1.0));
+    }
+
+    #[test]
+    fn test_list_negative_index_out_of_bounds() {
+        let result = parse_and_evaluate("[1, 2, 3][-4]").unwrap();
+        assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn test_list_positive_index_still_works() {
+        let result = parse_and_evaluate("[1, 2, 3][0]").unwrap();
+        assert_eq!(result, Value::Number(1.0));
+    }
+
+    #[test]
+    fn test_list_negative_zero_index() {
+        // -0 should be treated as 0 (first element)
+        let result = parse_and_evaluate("[1, 2, 3][-0]").unwrap();
+        assert_eq!(result, Value::Number(1.0));
+    }
+
+    #[test]
+    fn test_string_negative_index_last() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+        let pairs =
+            get_pairs("\"abc\"[-1]").map_err(|e| crate::error::RuntimeError::new(e.to_string()));
+        let pairs = pairs.unwrap();
+        let mut result = Value::Null;
+        for pair in pairs {
+            match pair.as_rule() {
+                Rule::statement => {
+                    if let Some(inner_pair) = pair.into_inner().next() {
+                        match inner_pair.as_rule() {
+                            Rule::expression | Rule::assignment => {
+                                result = evaluate_pairs(
+                                    inner_pair.into_inner(),
+                                    Rc::clone(&heap),
+                                    Rc::clone(&bindings),
+                                    0,
+                                    "\"abc\"[-1]",
+                                )
+                                .unwrap();
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Rule::EOI => {}
+                _ => {}
+            }
+        }
+        let borrowed_heap = heap.borrow();
+        assert_eq!(result.as_string(&borrowed_heap).unwrap(), "c");
+    }
+
+    #[test]
+    fn test_string_negative_index_out_of_bounds() {
+        let result = parse_and_evaluate("\"abc\"[-4]").unwrap();
+        assert_eq!(result, Value::Null);
+    }
+}

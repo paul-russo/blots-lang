@@ -25,7 +25,7 @@ cargo install blots
 - **Number**: 64-bit float with decimal/sci-notation support and `_` separators (e.g., `1_000_000`, `3.14e-2`)
 - **String**: Single or double quotes (`'hello'`, `"world"`); concatenate with `+`
 - **Boolean**: `true`, `false`; operators: `and`/`&&`, `or`/`||`, `not`/`!`
-- **List**: Ordered collection `[1, 2, 3]`; access with `list[index]` (0-based); spread with `[...list1, ...list2]`
+- **List**: Ordered collection `[1, 2, 3]`; access with `list[index]` (0-based, or negative to count from end: `list[-1]` is the last element); spread with `[...list1, ...list2]`
 - **Record**: JSON compatible. Key-value pairs `{a: 1, "hello there": "hi"}`; key shorthand `{foo}`; access with `record.a` or `record["key"]`
 - **Function**: `x => x+1`, `(x,y?) => x + (y ?? 0)`, `(f, ...rest) => map(rest,f)`
 - **Null**: `null`

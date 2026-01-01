@@ -531,14 +531,31 @@ pub fn evaluate_ast(
                 Value::List(list) => {
                     let borrowed_heap = &heap.borrow();
                     let list = list.reify(borrowed_heap).as_list()?;
-                    let index = usize::try_from(idx_val.as_number()? as u64)
-                        .map_err(|e| RuntimeError::from(anyhow::Error::from(e)))?;
+                    let raw_index = idx_val.as_number()? as i64;
+                    let index = if raw_index < 0 {
+                        let adjusted = list.len() as i64 + raw_index;
+                        if adjusted < 0 {
+                            return Ok(Value::Null);
+                        }
+                        adjusted as usize
+                    } else {
+                        raw_index as usize
+                    };
                     Ok(list.get(index).copied().unwrap_or(Value::Null))
                 }
                 Value::String(string) => {
                     let string = string.reify(&heap.borrow()).as_string()?.to_string();
-                    let index = usize::try_from(idx_val.as_number()? as u64)
-                        .map_err(|e| RuntimeError::from(anyhow::Error::from(e)))?;
+                    let char_count = string.chars().count();
+                    let raw_index = idx_val.as_number()? as i64;
+                    let index = if raw_index < 0 {
+                        let adjusted = char_count as i64 + raw_index;
+                        if adjusted < 0 {
+                            return Ok(Value::Null);
+                        }
+                        adjusted as usize
+                    } else {
+                        raw_index as usize
+                    };
 
                     Ok(string
                         .chars()
