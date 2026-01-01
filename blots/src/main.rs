@@ -559,33 +559,36 @@ fn main() -> ! {
         accumulated_input.push_str(&line);
 
         // Try to parse the accumulated input
-        let pairs = match get_pairs(&accumulated_input) {
-            Ok(pairs) => pairs,
-            Err(error) => {
-                // Check for unmatched brackets
-                if accumulated_input.matches('(').count() > accumulated_input.matches(')').count()
-                    || accumulated_input.matches('[').count()
-                        > accumulated_input.matches(']').count()
-                    || accumulated_input.matches('{').count()
-                        > accumulated_input.matches('}').count()
-                {
-                    continuation = true;
-                    continue;
-                } else {
-                    println!("[parse error] {}", error);
-                    accumulated_input.clear();
-                    continuation = false;
-                    continue;
-                }
-            }
-        };
+        let parse_result = get_pairs(&accumulated_input);
 
-        // Add to history if using rustyline
+        // Check for continuation (unmatched brackets)
+        if parse_result.is_err()
+            && (accumulated_input.matches('(').count() > accumulated_input.matches(')').count()
+                || accumulated_input.matches('[').count()
+                    > accumulated_input.matches(']').count()
+                || accumulated_input.matches('{').count()
+                    > accumulated_input.matches('}').count())
+        {
+            continuation = true;
+            continue;
+        }
+
+        // Add to history (for both successful and failed commands)
         if let Some(ref mut editor) = rl
             && !accumulated_input.trim().is_empty()
         {
             let _ = editor.add_history_entry(accumulated_input.trim());
         }
+
+        let pairs = match parse_result {
+            Ok(pairs) => pairs,
+            Err(error) => {
+                println!("[parse error] {}", error);
+                accumulated_input.clear();
+                continuation = false;
+                continue;
+            }
+        };
 
         pairs.for_each(|pair| match pair.as_rule() {
             Rule::statement => {
