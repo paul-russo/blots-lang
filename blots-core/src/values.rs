@@ -498,10 +498,11 @@ pub enum SerializableIterableValue {
     Record(IndexMap<String, SerializableValue>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum SerializableValue {
     Number(f64),
     Bool(bool),
+    #[default]
     Null,
     List(Vec<SerializableValue>),
     String(String),
@@ -747,6 +748,104 @@ impl SerializableValue {
         }
     }
 }
+
+// From implementations required for jsonpath_rust::query::queryable::Queryable trait
+impl From<&str> for SerializableValue {
+    fn from(s: &str) -> Self {
+        SerializableValue::String(s.to_string())
+    }
+}
+
+impl From<String> for SerializableValue {
+    fn from(s: String) -> Self {
+        SerializableValue::String(s)
+    }
+}
+
+impl From<bool> for SerializableValue {
+    fn from(b: bool) -> Self {
+        SerializableValue::Bool(b)
+    }
+}
+
+impl From<i64> for SerializableValue {
+    fn from(n: i64) -> Self {
+        SerializableValue::Number(n as f64)
+    }
+}
+
+impl From<f64> for SerializableValue {
+    fn from(n: f64) -> Self {
+        SerializableValue::Number(n)
+    }
+}
+
+impl From<Vec<SerializableValue>> for SerializableValue {
+    fn from(v: Vec<SerializableValue>) -> Self {
+        SerializableValue::List(v)
+    }
+}
+
+// Implement Queryable trait for JSONPath support
+impl jsonpath_rust::query::queryable::Queryable for SerializableValue {
+    fn get(&self, key: &str) -> Option<&Self> {
+        match self {
+            SerializableValue::Record(map) => map.get(key),
+            _ => None,
+        }
+    }
+
+    fn as_array(&self) -> Option<&Vec<Self>> {
+        match self {
+            SerializableValue::List(arr) => Some(arr),
+            _ => None,
+        }
+    }
+
+    fn as_object(&self) -> Option<Vec<(&str, &Self)>> {
+        match self {
+            SerializableValue::Record(map) => {
+                Some(map.iter().map(|(k, v)| (k.as_str(), v)).collect())
+            }
+            _ => None,
+        }
+    }
+
+    fn as_str(&self) -> Option<&str> {
+        match self {
+            SerializableValue::String(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    fn as_i64(&self) -> Option<i64> {
+        match self {
+            SerializableValue::Number(n) => Some(*n as i64),
+            _ => None,
+        }
+    }
+
+    fn as_f64(&self) -> Option<f64> {
+        match self {
+            SerializableValue::Number(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    fn as_bool(&self) -> Option<bool> {
+        match self {
+            SerializableValue::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    fn null() -> Self {
+        SerializableValue::Null
+    }
+}
+
+// JsonPath trait provides the query methods (all have default implementations)
+impl jsonpath_rust::JsonPath for SerializableValue {}
 
 #[derive(Debug, Copy, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub enum PrimitiveValue {

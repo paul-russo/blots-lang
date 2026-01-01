@@ -3,7 +3,7 @@ use crate::{
     expressions::evaluate_ast,
     heap::{Heap, HeapPointer, IterablePointer},
     units,
-    values::{FunctionArity, LambdaArg, LambdaDef, ReifiedValue, Value},
+    values::{FunctionArity, LambdaArg, LambdaDef, ReifiedValue, SerializableValue, Value},
 };
 use anyhow::{Result, anyhow};
 use dyn_fmt::AsStrFormatExt;
@@ -104,6 +104,7 @@ pub enum BuiltInFunction {
     Keys,
     Values,
     Entries,
+    Query,
 
     // Conversion functions
     ToString,
@@ -185,6 +186,7 @@ impl BuiltInFunction {
             "keys" => Some(Self::Keys),
             "values" => Some(Self::Values),
             "entries" => Some(Self::Entries),
+            "query" => Some(Self::Query),
             #[cfg(not(target_arch = "wasm32"))]
             "print" => Some(Self::Print),
             #[cfg(not(target_arch = "wasm32"))]
@@ -249,6 +251,7 @@ impl BuiltInFunction {
             Self::Keys => "keys",
             Self::Values => "values",
             Self::Entries => "entries",
+            Self::Query => "query",
             Self::ToString => "to_string",
             Self::ToNumber => "to_number",
             Self::ToBool => "to_bool",
@@ -326,6 +329,7 @@ impl BuiltInFunction {
 
             // Record functions
             Self::Keys | Self::Values | Self::Entries => FunctionArity::Exact(1),
+            Self::Query => FunctionArity::Exact(2),
 
             // Platform-specific functions
             #[cfg(not(target_arch = "wasm32"))]
@@ -965,6 +969,40 @@ impl BuiltInFunction {
                 Ok(heap.borrow_mut().insert_list(entries))
             }
 
+            Self::Query => {
+                use jsonpath_rust::JsonPath;
+
+                // Get the JSONPath string
+                let path_string = {
+                    let borrowed_heap = &heap.borrow();
+                    args[1]
+                        .as_string(borrowed_heap)
+                        .map_err(|_| anyhow!("second argument to query must be a JSONPath string"))?
+                        .to_string()
+                };
+
+                // Convert Blots value to SerializableValue (no serde_json intermediate)
+                let serializable = {
+                    let borrowed_heap = &heap.borrow();
+                    SerializableValue::from_value(&args[0], borrowed_heap)?
+                };
+
+                // Execute the JSONPath query directly on SerializableValue
+                let query_results: Vec<&SerializableValue> = serializable
+                    .query(&path_string)
+                    .map_err(|e| anyhow!("invalid JSONPath expression: {}", e))?;
+
+                // Convert results back to Blots values
+                let mut result_values = Vec::new();
+                for sv_ref in query_results {
+                    let blots_value = sv_ref.clone().to_value(&mut heap.borrow_mut())?;
+                    result_values.push(blots_value);
+                }
+
+                // Always return a list
+                Ok(heap.borrow_mut().insert_list(result_values))
+            }
+
             // Conversion functions
             Self::ToString => match args[0] {
                 Value::String(_) => Ok(args[0]), // If it's already a string, just return it
@@ -1328,6 +1366,7 @@ impl BuiltInFunction {
             Self::Keys,
             Self::Values,
             Self::Entries,
+            Self::Query,
             #[cfg(not(target_arch = "wasm32"))]
             Self::Print,
             #[cfg(not(target_arch = "wasm32"))]

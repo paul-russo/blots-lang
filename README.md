@@ -424,6 +424,7 @@ x = 42 // This is also a comment
 - `keys(record)` - returns a list of all keys in a record
 - `values(record)` - returns a list of all values in a record
 - `entries(record)` - returns a list of [key, value] pairs from a record
+- `query(data, path)` - queries data using a JSONPath expression (see [JSONPath Query](#jsonpath-query) below)
 
 #### Unit Conversion
 - `convert(value, from_unit, to_unit)` - converts a numeric value from one unit to another
@@ -460,6 +461,69 @@ convert(1024, "bytes", "kibibytes")    // 1
 convert(180, "degrees", "radians")     // 3.141592653589793 (π)
 convert(1, "kilowatt", "watts")        // 1000
 ```
+
+#### JSONPath Query
+- `query(data, path)` - queries records and lists using JSONPath expressions
+
+The `query` function lets you extract data from nested records and lists using [JSONPath](https://www.rfc-editor.org/rfc/rfc9535.html) expressions. JSONPath is a query language for JSON (and JSON-compatible data like Blots records), similar to how XPath works for XML.
+
+The function always returns a list of matching values. If nothing matches, it returns an empty list `[]`. If the JSONPath expression is invalid, the function returns an error.
+
+**Basic field access:**
+```blots
+data = {name: "Alice", age: 30}
+query(data, "$.name")        // ["Alice"]
+query(data, "$.age")         // [30]
+query(data, "$.missing")     // [] (no match)
+```
+
+**Nested access:**
+```blots
+data = {user: {profile: {email: "alice@example.com"}}}
+query(data, "$.user.profile.email")  // ["alice@example.com"]
+```
+
+**Array operations:**
+```blots
+data = {items: ["a", "b", "c", "d"]}
+query(data, "$.items[0]")      // ["a"] (first element)
+query(data, "$.items[-1]")     // ["d"] (last element)
+query(data, "$.items[1:3]")    // ["b", "c"] (slice)
+query(data, "$.items[*]")      // ["a", "b", "c", "d"] (all elements)
+```
+
+**Wildcard and recursive descent:**
+```blots
+data = {users: [{name: "Alice"}, {name: "Bob"}]}
+query(data, "$.users[*].name")  // ["Alice", "Bob"]
+
+data = {a: {b: {c: 1}}, d: {c: 2}}
+query(data, "$..c")             // [1, 2] (find all "c" keys recursively)
+```
+
+**Filter expressions:**
+```blots
+data = {users: [{name: "Alice", age: 30}, {name: "Bob", age: 25}, {name: "Carol", age: 35}]}
+
+// Filter by condition
+query(data, "$.users[?@.age > 28]")         // [{name: "Alice", age: 30}, {name: "Carol", age: 35}]
+query(data, "$.users[?@.age > 28].name")    // ["Alice", "Carol"]
+query(data, "$.users[?@.name == 'Bob']")    // [{name: "Bob", age: 25}]
+```
+
+**Common JSONPath operators:**
+| Operator | Description |
+|----------|-------------|
+| `$` | Root element |
+| `.key` or `['key']` | Child field access |
+| `[n]` | Array index (0-based, negative from end) |
+| `[start:end]` | Array slice |
+| `[*]` | All elements (wildcard) |
+| `..` | Recursive descent (search all descendants) |
+| `[?expr]` | Filter expression |
+| `@` | Current element (in filter expressions) |
+
+For the complete JSONPath specification, see [RFC 9535](https://www.rfc-editor.org/rfc/rfc9535.html).
 
 ### Constants
 
