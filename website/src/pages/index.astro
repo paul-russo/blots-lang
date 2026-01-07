@@ -148,15 +148,23 @@ const releaseDateFormatted = format(parseISO(releaseDate), "MMMM d, yyyy");
 
     <section>
       <SectionHeading>Tools</SectionHeading>
-      <p>
-        There's a language support extension for Blots, available on both the <Link
-          href="https://marketplace.visualstudio.com/items?itemName=Blots.blots-syntax"
-          external>VSCode Marketplace</Link
-        > (for VSCode) and the <Link
-          href="https://open-vsx.org/extension/blots/blots-syntax"
-          external>Open VSX Registry</Link
-        > (for other VSCode-based editors, like Cursor).
-      </p>
+      <div class="space-y-4">
+        <p>
+          There's a language support extension for Blots, available on both the <Link
+            href="https://marketplace.visualstudio.com/items?itemName=Blots.blots-syntax"
+            external>VSCode Marketplace</Link
+          > (for VSCode) and the <Link
+            href="https://open-vsx.org/extension/blots/blots-syntax"
+            external>Open VSX Registry</Link
+          > (for other VSCode-based editors, like Cursor).
+        </p>
+        <p>
+          For Vim users, there's also a <Link
+            href="https://github.com/paul-russo/blots-vim"
+            external>Vim plugin</Link
+          > providing syntax highlighting.
+        </p>
+      </div>
     </section>
   </div>
 </Layout>

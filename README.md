@@ -477,3 +477,5 @@ Access mathematical constants via `constants.*`:
 ## Tools
 
 There's a language support [extension](https://github.com/paul-russo/blots-syntax) for Blots, available on both the [VSCode Marketplace](https://marketplace.visualstudio.com/items?itemName=Blots.blots-syntax) and the [Open VSX Registry](https://open-vsx.org/extension/blots/blots-syntax). You should be able to install it from within your editor like other extensions, but you can also download the VSIX file directly from either directory.
+
+For Vim users, there's also a [Vim plugin](https://github.com/paul-russo/blots-vim) providing syntax highlighting for `.blots` files.
