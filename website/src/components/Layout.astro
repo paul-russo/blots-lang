@@ -8,14 +8,14 @@ const { title } = Astro.props;
 
 <html lang="en">
   <Head title={title} />
-  <body class="flex min-h-dvh flex-col bg-amber-50 p-4">
+  <body class="flex min-h-dvh flex-col bg-amber-50 p-4 dark:bg-zinc-900 dark:text-zinc-100">
     <main class="mx-auto w-full max-w-3xl">
       <header class="pb-4">
         <h1
-          class="flex items-center justify-between border-y-3 border-double px-2 pt-2 pb-4 font-serif text-2xl italic sm:text-3xl md:border-y-5 md:text-5xl"
+          class="flex items-center justify-between border-y-3 border-double border-current px-2 pt-2 pb-4 font-serif text-2xl italic sm:text-3xl md:border-y-5 md:text-5xl"
         >
           <div>
-            The <span class="font-bold text-purple-700">Blots</span> Programming
+            The <span class="font-bold text-purple-700 dark:text-purple-400">Blots</span> Programming
             Language
           </div>
           <Logo class="relative top-1 size-8 md:size-12" />

@@ -3,3 +3,14 @@
 @theme inline {
   --font-serif: var(--font-neuton);
 }
+
+:root {
+  color-scheme: light dark;
+  --logo-bg: white;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --logo-bg: #18181b; /* zinc-900 */
+  }
+}

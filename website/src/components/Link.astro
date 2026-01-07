@@ -11,6 +11,6 @@ const { href, external } = Astro.props;
   href={href}
   target={external ? "_blank" : undefined}
   rel={external ? "noopener noreferrer" : undefined}
-  class="underline transition-colors hover:text-purple-700 focus:text-purple-700"
+  class="underline transition-colors hover:text-purple-700 focus:text-purple-700 dark:hover:text-purple-400 dark:focus:text-purple-400"
   ><slot /></a
 >
