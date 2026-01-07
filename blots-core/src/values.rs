@@ -295,12 +295,45 @@ impl Display for LambdaArg {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CapturedScope(Rc<HashMap<String, Value>>);
+
+impl CapturedScope {
+    pub fn new(map: HashMap<String, Value>) -> Self {
+        Self(Rc::new(map))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.0.contains_key(key)
+    }
+
+    pub fn get(&self, key: &str) -> Option<Value> {
+        self.0.get(key).copied()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Value)> {
+        self.0.iter()
+    }
+
+    pub fn as_rc(&self) -> Rc<HashMap<String, Value>> {
+        Rc::clone(&self.0)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LambdaDef {
     pub name: Option<String>,
     pub args: Vec<LambdaArg>,
     pub body: SpannedExpr,
-    pub scope: HashMap<String, Value>,
+    pub scope: CapturedScope,
     /// The source code string that the body's spans refer to (shared via Rc for efficiency)
     pub source: Rc<str>,
 }
@@ -668,9 +701,8 @@ impl SerializableValue {
                 // Convert the scope to SerializableValues
                 let serializable_scope: IndexMap<String, SerializableValue> = lambda
                     .scope
-                    .clone()
-                    .into_iter()
-                    .map(|(k, v)| SerializableValue::from_value(&v, heap).map(|sv| (k, sv)))
+                    .iter()
+                    .map(|(k, v)| SerializableValue::from_value(v, heap).map(|sv| (k.clone(), sv)))
                     .collect::<Result<IndexMap<String, SerializableValue>>>()?;
 
                 // Generate the body with inlined scope values
@@ -713,7 +745,7 @@ impl SerializableValue {
                 Ok(heap.insert_record(deserialized_record))
             }
             SerializableValue::Lambda(s_lambda) => {
-                let scope = if let Some(scope) = s_lambda.scope.clone() {
+                let scope = if let Some(scope) = s_lambda.scope.as_ref() {
                     scope
                         .iter()
                         .map(|(k, v)| Ok((k.to_string(), SerializableValue::to_value(v, heap)?)))
@@ -735,7 +767,7 @@ impl SerializableValue {
                     name: s_lambda.name.clone(),
                     args: s_lambda.args.clone(),
                     body: body_ast,
-                    scope,
+                    scope: CapturedScope::new(scope),
                     source: Rc::from(""), // Deserialized lambdas don't have original source
                 };
 

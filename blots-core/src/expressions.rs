@@ -10,7 +10,7 @@ use crate::{
     parser::Rule,
     precedence::PRATT,
     values::{
-        LambdaArg, LambdaDef,
+        CapturedScope, LambdaArg, LambdaDef,
         Value::{self, Bool, List, Number, Spread},
     },
 };
@@ -320,7 +320,7 @@ pub fn evaluate_ast(
                 name: None,
                 args: args.clone(),
                 body: (**body).clone(),
-                scope: captured_scope,
+                scope: CapturedScope::new(captured_scope),
                 source: source.clone(),
             });
 
@@ -754,7 +754,7 @@ pub fn validate_portable_value(
                 }
 
                 // Also add variables from the captured scope as bound
-                for key in lambda_def.scope.keys() {
+                for (key, _) in lambda_def.scope.iter() {
                     bound_vars.insert(key.clone());
                 }
 
@@ -2467,7 +2467,7 @@ mod tests {
             let lambda_def = result.as_lambda(&heap_borrow).unwrap();
             assert_eq!(lambda_def.name, Some("f".to_string()));
             assert_eq!(lambda_def.args, vec![LambdaArg::Required("x".to_string())]);
-            assert_eq!(lambda_def.scope, HashMap::new());
+            assert!(lambda_def.scope.is_empty());
             // The body should be a BinaryOp(Add) with Identifier("x") and Number(1)
             match &lambda_def.body.node {
                 Expr::BinaryOp {

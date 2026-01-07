@@ -3,6 +3,12 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+#[derive(Debug)]
+enum LocalBindings {
+    Owned(RefCell<HashMap<String, Value>>),
+    Shared(Rc<HashMap<String, Value>>),
+}
+
 /// A scope chain environment for variable bindings.
 ///
 /// Instead of cloning the entire HashMap on each function call,
@@ -11,7 +17,7 @@ use std::rc::Rc;
 #[derive(Debug)]
 pub struct Environment {
     /// Local bindings in this scope
-    local: RefCell<HashMap<String, Value>>,
+    local: LocalBindings,
     /// Parent scope (if any)
     parent: Option<Rc<Environment>>,
 }
@@ -20,7 +26,7 @@ impl Environment {
     /// Create a new root environment with no parent
     pub fn new() -> Self {
         Environment {
-            local: RefCell::new(HashMap::new()),
+            local: LocalBindings::Owned(RefCell::new(HashMap::new())),
             parent: None,
         }
     }
@@ -28,7 +34,7 @@ impl Environment {
     /// Create a new root environment with initial bindings
     pub fn with_bindings(bindings: HashMap<String, Value>) -> Self {
         Environment {
-            local: RefCell::new(bindings),
+            local: LocalBindings::Owned(RefCell::new(bindings)),
             parent: None,
         }
     }
@@ -36,7 +42,7 @@ impl Environment {
     /// Create a child environment that inherits from this one
     pub fn extend(parent: Rc<Environment>) -> Self {
         Environment {
-            local: RefCell::new(HashMap::new()),
+            local: LocalBindings::Owned(RefCell::new(HashMap::new())),
             parent: Some(parent),
         }
     }
@@ -44,7 +50,15 @@ impl Environment {
     /// Create a child environment with initial local bindings
     pub fn extend_with(parent: Rc<Environment>, local: HashMap<String, Value>) -> Self {
         Environment {
-            local: RefCell::new(local),
+            local: LocalBindings::Owned(RefCell::new(local)),
+            parent: Some(parent),
+        }
+    }
+
+    /// Create a child environment with shared local bindings
+    pub fn extend_shared(parent: Rc<Environment>, local: Rc<HashMap<String, Value>>) -> Self {
+        Environment {
+            local: LocalBindings::Shared(local),
             parent: Some(parent),
         }
     }
@@ -52,8 +66,12 @@ impl Environment {
     /// Look up a variable, walking the scope chain
     pub fn get(&self, key: &str) -> Option<Value> {
         // Check local scope first
-        if let Some(value) = self.local.borrow().get(key) {
-            return Some(*value);
+        let local_value = match &self.local {
+            LocalBindings::Owned(map) => map.borrow().get(key).copied(),
+            LocalBindings::Shared(map) => map.get(key).copied(),
+        };
+        if let Some(value) = local_value {
+            return Some(value);
         }
         // Then check parent scope
         if let Some(parent) = &self.parent {
@@ -64,12 +82,23 @@ impl Environment {
 
     /// Insert or update a binding in the local scope
     pub fn insert(&self, key: String, value: Value) {
-        self.local.borrow_mut().insert(key, value);
+        match &self.local {
+            LocalBindings::Owned(map) => {
+                map.borrow_mut().insert(key, value);
+            }
+            LocalBindings::Shared(_) => {
+                panic!("cannot insert into shared environment");
+            }
+        }
     }
 
     /// Check if a key exists in any scope
     pub fn contains_key(&self, key: &str) -> bool {
-        if self.local.borrow().contains_key(key) {
+        let contains_local = match &self.local {
+            LocalBindings::Owned(map) => map.borrow().contains_key(key),
+            LocalBindings::Shared(map) => map.contains_key(key),
+        };
+        if contains_local {
             return true;
         }
         if let Some(parent) = &self.parent {
@@ -80,7 +109,10 @@ impl Environment {
 
     /// Check if a key exists in the local scope only
     pub fn contains_key_local(&self, key: &str) -> bool {
-        self.local.borrow().contains_key(key)
+        match &self.local {
+            LocalBindings::Owned(map) => map.borrow().contains_key(key),
+            LocalBindings::Shared(map) => map.contains_key(key),
+        }
     }
 }
 
@@ -95,7 +127,7 @@ impl Clone for Environment {
         // For closures that capture scope, we need to clone
         // This flattens the scope chain into a single HashMap
         Environment {
-            local: RefCell::new(self.flatten()),
+            local: LocalBindings::Owned(RefCell::new(self.flatten())),
             parent: None,
         }
     }
@@ -116,8 +148,17 @@ impl Environment {
             parent.flatten_into(result);
         }
         // Then add local bindings
-        for (key, value) in self.local.borrow().iter() {
-            result.insert(key.clone(), *value);
+        match &self.local {
+            LocalBindings::Owned(map) => {
+                for (key, value) in map.borrow().iter() {
+                    result.insert(key.clone(), *value);
+                }
+            }
+            LocalBindings::Shared(map) => {
+                for (key, value) in map.iter() {
+                    result.insert(key.clone(), *value);
+                }
+            }
         }
     }
 

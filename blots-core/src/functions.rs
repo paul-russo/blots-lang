@@ -1659,11 +1659,6 @@ impl FunctionDef {
                 // Build local bindings for this call (O(1) - no clone of parent environment!)
                 let mut local_bindings = HashMap::new();
 
-                // Add captured scope (captured variables take precedence over parent env)
-                for (key, value) in scope {
-                    local_bindings.insert(key.clone(), *value);
-                }
-
                 // Add self-reference if named
                 if let Some(fn_name) = name {
                     local_bindings.insert(fn_name.clone(), this_value);
@@ -1699,11 +1694,13 @@ impl FunctionDef {
                 #[cfg(not(target_arch = "wasm32"))]
                 let end_var_env = std::time::Instant::now();
 
-                // Create new environment that extends parent (O(1) instead of O(n) clone!)
-                let new_env = Rc::new(Environment::extend_with(
-                    Rc::clone(&bindings),
-                    local_bindings,
-                ));
+                let parent_env = if scope.is_empty() {
+                    Rc::clone(&bindings)
+                } else {
+                    Rc::new(Environment::extend_shared(Rc::clone(&bindings), scope.as_rc()))
+                };
+                // Create new environment that extends captured scope (O(1) instead of O(n) clone!)
+                let new_env = Rc::new(Environment::extend_with(parent_env, local_bindings));
 
                 let return_value = evaluate_ast(
                     body,
@@ -2079,7 +2076,7 @@ mod tests {
 
     #[test]
     fn test_map_with_index() {
-        use crate::values::LambdaDef;
+        use crate::values::{CapturedScope, LambdaDef};
 
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(Environment::new());
@@ -2107,7 +2104,7 @@ mod tests {
                     "i".to_string(),
                 ))),
             }),
-            scope: HashMap::new(),
+            scope: CapturedScope::default(),
             source: Rc::from(""),
         };
         let lambda_value = heap.borrow_mut().insert_lambda(lambda);
@@ -2134,7 +2131,7 @@ mod tests {
 
     #[test]
     fn test_filter_with_index() {
-        use crate::values::LambdaDef;
+        use crate::values::{CapturedScope, LambdaDef};
 
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(Environment::new());
@@ -2161,7 +2158,7 @@ mod tests {
                 ))),
                 right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Number(1.0))),
             }),
-            scope: HashMap::new(),
+            scope: CapturedScope::default(),
             source: Rc::from(""),
         };
         let lambda_value = heap.borrow_mut().insert_lambda(lambda);
@@ -2187,7 +2184,7 @@ mod tests {
 
     #[test]
     fn test_reduce_with_index() {
-        use crate::values::LambdaDef;
+        use crate::values::{CapturedScope, LambdaDef};
 
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(Environment::new());
@@ -2222,7 +2219,7 @@ mod tests {
                     "i".to_string(),
                 ))),
             }),
-            scope: HashMap::new(),
+            scope: CapturedScope::default(),
             source: Rc::from(""),
         };
         let lambda_value = heap.borrow_mut().insert_lambda(lambda);
@@ -2244,7 +2241,7 @@ mod tests {
 
     #[test]
     fn test_map_backward_compatible() {
-        use crate::values::LambdaDef;
+        use crate::values::{CapturedScope, LambdaDef};
 
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(Environment::new());
@@ -2267,7 +2264,7 @@ mod tests {
                 ))),
                 right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Number(2.0))),
             }),
-            scope: HashMap::new(),
+            scope: CapturedScope::default(),
             source: Rc::from(""),
         };
         let lambda_value = heap.borrow_mut().insert_lambda(lambda);
@@ -2717,7 +2714,7 @@ mod tests {
 
     #[test]
     fn test_group_by() {
-        use crate::values::LambdaDef;
+        use crate::values::{CapturedScope, LambdaDef};
 
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(Environment::new());
@@ -2733,7 +2730,7 @@ mod tests {
             name: None,
             args: vec![crate::values::LambdaArg::Required("x".to_string())],
             body: crate::ast::Spanned::dummy(crate::ast::Expr::Identifier("x".to_string())),
-            scope: HashMap::new(),
+            scope: CapturedScope::default(),
             source: Rc::from(""),
         };
         let lambda_value = heap.borrow_mut().insert_lambda(lambda);
@@ -2763,7 +2760,7 @@ mod tests {
 
     #[test]
     fn test_group_by_non_string_key_error() {
-        use crate::values::LambdaDef;
+        use crate::values::{CapturedScope, LambdaDef};
 
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(Environment::new());
@@ -2777,7 +2774,7 @@ mod tests {
             name: None,
             args: vec![crate::values::LambdaArg::Required("x".to_string())],
             body: crate::ast::Spanned::dummy(crate::ast::Expr::Identifier("x".to_string())),
-            scope: HashMap::new(),
+            scope: CapturedScope::default(),
             source: Rc::from(""),
         };
         let lambda_value = heap.borrow_mut().insert_lambda(lambda);
@@ -2801,7 +2798,7 @@ mod tests {
 
     #[test]
     fn test_count_by() {
-        use crate::values::LambdaDef;
+        use crate::values::{CapturedScope, LambdaDef};
 
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(Environment::new());
@@ -2820,7 +2817,7 @@ mod tests {
             name: None,
             args: vec![crate::values::LambdaArg::Required("x".to_string())],
             body: crate::ast::Spanned::dummy(crate::ast::Expr::Identifier("x".to_string())),
-            scope: HashMap::new(),
+            scope: CapturedScope::default(),
             source: Rc::from(""),
         };
         let lambda_value = heap.borrow_mut().insert_lambda(lambda);
@@ -2845,7 +2842,7 @@ mod tests {
 
     #[test]
     fn test_count_by_empty_list() {
-        use crate::values::LambdaDef;
+        use crate::values::{CapturedScope, LambdaDef};
 
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(Environment::new());
@@ -2857,7 +2854,7 @@ mod tests {
             name: None,
             args: vec![crate::values::LambdaArg::Required("x".to_string())],
             body: crate::ast::Spanned::dummy(crate::ast::Expr::Identifier("x".to_string())),
-            scope: HashMap::new(),
+            scope: CapturedScope::default(),
             source: Rc::from(""),
         };
         let lambda_value = heap.borrow_mut().insert_lambda(lambda);
