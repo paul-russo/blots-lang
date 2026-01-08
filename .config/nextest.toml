@@ -1,0 +1,12 @@
+[profile.default]
+# Retry failed tests once to handle flaky tests
+retries = 0
+# Use all available CPUs
+test-threads = "num-cpus"
+# Fail fast on first failure in CI
+fail-fast = false
+
+[profile.ci]
+# CI-specific settings
+retries = 2
+fail-fast = true

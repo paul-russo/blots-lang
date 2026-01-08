@@ -22,7 +22,12 @@ release version:
 
 # Run tests
 test:
-    cargo test
+    cargo nextest run
+    UV_CACHE_DIR=.uv-cache uv run --python 3.11 --with pint python scripts/check_unit_conversions.py
+
+# Run tests with CI profile (retries, fail-fast)
+test-ci:
+    cargo nextest run --profile ci
     UV_CACHE_DIR=.uv-cache uv run --python 3.11 --with pint python scripts/check_unit_conversions.py
 
 # Clean build artifacts
