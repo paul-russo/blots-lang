@@ -50,7 +50,7 @@ fn flatten_spread_value(
     match spread_ptr {
         IterablePointer::List(list_ptr) => {
             let borrowed_heap = heap.borrow();
-            Ok(list_ptr.reify(&borrowed_heap).as_list()?.clone())
+            Ok(list_ptr.reify(&borrowed_heap).as_list()?.to_vec())
         }
         IterablePointer::String(string_ptr) => {
             let string = {
@@ -66,7 +66,12 @@ fn flatten_spread_value(
         IterablePointer::Record(record_ptr) => {
             let entries = {
                 let borrowed_heap = heap.borrow();
-                record_ptr.reify(&borrowed_heap).as_record()?.clone()
+                record_ptr
+                    .reify(&borrowed_heap)
+                    .as_record()?
+                    .iter()
+                    .map(|(k, v)| (k.clone(), *v))
+                    .collect::<Vec<(String, Value)>>()
             };
             // Convert record to list of [key, value] pairs
             Ok(entries
@@ -876,210 +881,293 @@ fn evaluate_binary_op_ast(
             source.clone(),
         )),
         (Value::List(list_l), Value::List(list_r)) => {
-            let (l_vec, r_vec) = {
-                let borrowed_heap = &heap.borrow();
-                (
-                    list_l.reify(borrowed_heap).as_list()?.clone(),
-                    list_r.reify(borrowed_heap).as_list()?.clone(),
-                )
+            let list_len = {
+                let borrowed_heap = heap.borrow();
+                let l_list = list_l.reify(&borrowed_heap).as_list()?;
+                let r_list = list_r.reify(&borrowed_heap).as_list()?;
+                if l_list.len() != r_list.len() {
+                    return Err(RuntimeError::with_span(
+                        "left- and right-hand-side lists must be the same length".to_string(),
+                        op_span,
+                        source.clone(),
+                    ));
+                }
+                l_list.len()
             };
-
-            if l_vec.len() != r_vec.len() {
-                return Err(RuntimeError::with_span(
-                    "left- and right-hand-side lists must be the same length".to_string(),
-                    op_span,
-                    source.clone(),
-                ));
-            }
 
             match op {
                 BinaryOp::Equal => {
-                    let mapped_list = l_vec
-                        .iter()
-                        .zip(&r_vec)
-                        .map(|(l, r)| Ok(Bool(l.equals(r, &heap.borrow())?)))
-                        .collect::<AnyhowResult<Vec<Value>>>()?;
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let l_list = list_l.reify(&borrowed_heap).as_list()?;
+                        let r_list = list_r.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_len);
+                        for (l, r) in l_list.iter().zip(r_list.iter()) {
+                            mapped_list.push(Bool(l.equals(r, &borrowed_heap)?));
+                        }
+                        mapped_list
+                    };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::NotEqual => {
-                    let mapped_list = l_vec
-                        .iter()
-                        .zip(&r_vec)
-                        .map(|(l, r)| Ok(Bool(!l.equals(r, &heap.borrow())?)))
-                        .collect::<AnyhowResult<Vec<Value>>>()?;
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let l_list = list_l.reify(&borrowed_heap).as_list()?;
+                        let r_list = list_r.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_len);
+                        for (l, r) in l_list.iter().zip(r_list.iter()) {
+                            mapped_list.push(Bool(!l.equals(r, &borrowed_heap)?));
+                        }
+                        mapped_list
+                    };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Less => {
-                    let mapped_list = l_vec
-                        .iter()
-                        .zip(&r_vec)
-                        .map(|(l, r)| match l.compare(r, &heap.borrow())? {
-                            Some(std::cmp::Ordering::Less) => Ok(Bool(true)),
-                            _ => Ok(Bool(false)),
-                        })
-                        .collect::<AnyhowResult<Vec<Value>>>()?;
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let l_list = list_l.reify(&borrowed_heap).as_list()?;
+                        let r_list = list_r.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_len);
+                        for (l, r) in l_list.iter().zip(r_list.iter()) {
+                            let is_less = matches!(
+                                l.compare(r, &borrowed_heap)?,
+                                Some(std::cmp::Ordering::Less)
+                            );
+                            mapped_list.push(Bool(is_less));
+                        }
+                        mapped_list
+                    };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::LessEq => {
-                    let mapped_list = l_vec
-                        .iter()
-                        .zip(&r_vec)
-                        .map(|(l, r)| match l.compare(r, &heap.borrow())? {
-                            Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal) => {
-                                Ok(Bool(true))
-                            }
-                            _ => Ok(Bool(false)),
-                        })
-                        .collect::<AnyhowResult<Vec<Value>>>()?;
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let l_list = list_l.reify(&borrowed_heap).as_list()?;
+                        let r_list = list_r.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_len);
+                        for (l, r) in l_list.iter().zip(r_list.iter()) {
+                            let ordering = l.compare(r, &borrowed_heap)?;
+                            let is_match = matches!(
+                                ordering,
+                                Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal)
+                            );
+                            mapped_list.push(Bool(is_match));
+                        }
+                        mapped_list
+                    };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Greater => {
-                    let mapped_list = l_vec
-                        .iter()
-                        .zip(&r_vec)
-                        .map(|(l, r)| match l.compare(r, &heap.borrow())? {
-                            Some(std::cmp::Ordering::Greater) => Ok(Bool(true)),
-                            _ => Ok(Bool(false)),
-                        })
-                        .collect::<AnyhowResult<Vec<Value>>>()?;
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let l_list = list_l.reify(&borrowed_heap).as_list()?;
+                        let r_list = list_r.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_len);
+                        for (l, r) in l_list.iter().zip(r_list.iter()) {
+                            let is_greater = matches!(
+                                l.compare(r, &borrowed_heap)?,
+                                Some(std::cmp::Ordering::Greater)
+                            );
+                            mapped_list.push(Bool(is_greater));
+                        }
+                        mapped_list
+                    };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::GreaterEq => {
-                    let mapped_list = l_vec
-                        .iter()
-                        .zip(&r_vec)
-                        .map(|(l, r)| match l.compare(r, &heap.borrow())? {
-                            Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal) => {
-                                Ok(Bool(true))
-                            }
-                            _ => Ok(Bool(false)),
-                        })
-                        .collect::<AnyhowResult<Vec<Value>>>()?;
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let l_list = list_l.reify(&borrowed_heap).as_list()?;
+                        let r_list = list_r.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_len);
+                        for (l, r) in l_list.iter().zip(r_list.iter()) {
+                            let ordering = l.compare(r, &borrowed_heap)?;
+                            let is_match = matches!(
+                                ordering,
+                                Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal)
+                            );
+                            mapped_list.push(Bool(is_match));
+                        }
+                        mapped_list
+                    };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::And | BinaryOp::NaturalAnd => {
-                    let mapped_list = l_vec
-                        .iter()
-                        .zip(&r_vec)
-                        .map(|(l, r)| Ok(Bool(l.as_bool()? && r.as_bool()?)))
-                        .collect::<AnyhowResult<Vec<Value>>>()?;
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let l_list = list_l.reify(&borrowed_heap).as_list()?;
+                        let r_list = list_r.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_len);
+                        for (l, r) in l_list.iter().zip(r_list.iter()) {
+                            mapped_list.push(Bool(l.as_bool()? && r.as_bool()?));
+                        }
+                        mapped_list
+                    };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Or | BinaryOp::NaturalOr => {
-                    let mapped_list = l_vec
-                        .iter()
-                        .zip(&r_vec)
-                        .map(|(l, r)| Ok(Bool(l.as_bool()? || r.as_bool()?)))
-                        .collect::<AnyhowResult<Vec<Value>>>()?;
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let l_list = list_l.reify(&borrowed_heap).as_list()?;
+                        let r_list = list_r.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_len);
+                        for (l, r) in l_list.iter().zip(r_list.iter()) {
+                            mapped_list.push(Bool(l.as_bool()? || r.as_bool()?));
+                        }
+                        mapped_list
+                    };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Add => {
                     let source_owned = source.clone();
-                    let mapped_list = l_vec
-                        .iter()
-                        .zip(&r_vec)
-                        .map(|(l, r)| match (l, r) {
+                    let mut mapped_list = Vec::with_capacity(list_len);
+                    for idx in 0..list_len {
+                        let (l, r) = {
+                            let borrowed_heap = heap.borrow();
+                            let l_list = list_l.reify(&borrowed_heap).as_list()?;
+                            let r_list = list_r.reify(&borrowed_heap).as_list()?;
+                            (l_list[idx], r_list[idx])
+                        };
+                        let value = match (l, r) {
                             (Value::String(_), Value::String(_)) => {
                                 let (l_str, r_str) = {
+                                    let borrowed_heap = heap.borrow();
                                     (
-                                        l.as_string(&heap.borrow())?.to_string(),
-                                        r.as_string(&heap.borrow())?.to_string(),
+                                        l.as_string(&borrowed_heap)?.to_string(),
+                                        r.as_string(&borrowed_heap)?.to_string(),
                                     )
                                 };
-                                Ok(heap
-                                    .borrow_mut()
-                                    .insert_string(format!("{}{}", l_str, r_str)))
+                                heap.borrow_mut()
+                                    .insert_string(format!("{}{}", l_str, r_str))
                             }
                             (Value::Number(_), Value::Number(_)) => {
-                                Ok(Number(l.as_number()? + r.as_number()?))
+                                Number(l.as_number()? + r.as_number()?)
                             }
-                            _ => Err(RuntimeError::with_span(
-                                format!("can't add {} and {}", l.get_type(), r.get_type()),
-                                op_span,
-                                source_owned.clone(),
-                            )),
-                        })
-                        .collect::<Result<Vec<Value>, RuntimeError>>()?;
-                    Ok(heap.borrow_mut().insert_list(mapped_list))
-                }
-                BinaryOp::Subtract => {
-                    let mapped_list = l_vec
-                        .iter()
-                        .zip(&r_vec)
-                        .map(|(l, r)| Ok(Number(l.as_number()? - r.as_number()?)))
-                        .collect::<AnyhowResult<Vec<Value>>>()?;
-                    Ok(heap.borrow_mut().insert_list(mapped_list))
-                }
-                BinaryOp::Multiply => {
-                    let mapped_list = l_vec
-                        .iter()
-                        .zip(&r_vec)
-                        .map(|(l, r)| Ok(Number(l.as_number()? * r.as_number()?)))
-                        .collect::<AnyhowResult<Vec<Value>>>()?;
-                    Ok(heap.borrow_mut().insert_list(mapped_list))
-                }
-                BinaryOp::Divide => {
-                    let mapped_list = l_vec
-                        .iter()
-                        .zip(&r_vec)
-                        .map(|(l, r)| Ok(Number(l.as_number()? / r.as_number()?)))
-                        .collect::<AnyhowResult<Vec<Value>>>()?;
-                    Ok(heap.borrow_mut().insert_list(mapped_list))
-                }
-                BinaryOp::Modulo => {
-                    let mapped_list = l_vec
-                        .iter()
-                        .zip(&r_vec)
-                        .map(|(l, r)| Ok(Number(l.as_number()? % r.as_number()?)))
-                        .collect::<AnyhowResult<Vec<Value>>>()?;
-                    Ok(heap.borrow_mut().insert_list(mapped_list))
-                }
-                BinaryOp::Power => {
-                    let mapped_list = l_vec
-                        .iter()
-                        .zip(&r_vec)
-                        .map(|(l, r)| Ok(Number(l.as_number()?.powf(r.as_number()?))))
-                        .collect::<AnyhowResult<Vec<Value>>>()?;
-                    Ok(heap.borrow_mut().insert_list(mapped_list))
-                }
-                BinaryOp::Coalesce => {
-                    let mapped_list = l_vec
-                        .iter()
-                        .zip(&r_vec)
-                        .map(|(l, r)| if *l == Value::Null { Ok(*r) } else { Ok(*l) })
-                        .collect::<AnyhowResult<Vec<Value>>>()?;
-                    Ok(heap.borrow_mut().insert_list(mapped_list))
-                }
-                BinaryOp::Via => {
-                    let source_owned = source.clone();
-                    let mapped_list = l_vec
-                        .iter()
-                        .zip(&r_vec)
-                        .map(|(l, r)| {
-                            if !r.is_lambda() && !r.is_built_in() {
+                            _ => {
                                 return Err(RuntimeError::with_span(
-                                    format!(
-                                        "right-hand iterable contains non-function {}",
-                                        r.stringify_internal(&heap.borrow())
-                                    ),
+                                    format!("can't add {} and {}", l.get_type(), r.get_type()),
                                     op_span,
                                     source_owned.clone(),
                                 ));
                             }
+                        };
+                        mapped_list.push(value);
+                    }
+                    Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+                BinaryOp::Subtract => {
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let l_list = list_l.reify(&borrowed_heap).as_list()?;
+                        let r_list = list_r.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_len);
+                        for (l, r) in l_list.iter().zip(r_list.iter()) {
+                            mapped_list.push(Number(l.as_number()? - r.as_number()?));
+                        }
+                        mapped_list
+                    };
+                    Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+                BinaryOp::Multiply => {
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let l_list = list_l.reify(&borrowed_heap).as_list()?;
+                        let r_list = list_r.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_len);
+                        for (l, r) in l_list.iter().zip(r_list.iter()) {
+                            mapped_list.push(Number(l.as_number()? * r.as_number()?));
+                        }
+                        mapped_list
+                    };
+                    Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+                BinaryOp::Divide => {
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let l_list = list_l.reify(&borrowed_heap).as_list()?;
+                        let r_list = list_r.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_len);
+                        for (l, r) in l_list.iter().zip(r_list.iter()) {
+                            mapped_list.push(Number(l.as_number()? / r.as_number()?));
+                        }
+                        mapped_list
+                    };
+                    Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+                BinaryOp::Modulo => {
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let l_list = list_l.reify(&borrowed_heap).as_list()?;
+                        let r_list = list_r.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_len);
+                        for (l, r) in l_list.iter().zip(r_list.iter()) {
+                            mapped_list.push(Number(l.as_number()? % r.as_number()?));
+                        }
+                        mapped_list
+                    };
+                    Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+                BinaryOp::Power => {
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let l_list = list_l.reify(&borrowed_heap).as_list()?;
+                        let r_list = list_r.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_len);
+                        for (l, r) in l_list.iter().zip(r_list.iter()) {
+                            mapped_list.push(Number(l.as_number()?.powf(r.as_number()?)));
+                        }
+                        mapped_list
+                    };
+                    Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+                BinaryOp::Coalesce => {
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let l_list = list_l.reify(&borrowed_heap).as_list()?;
+                        let r_list = list_r.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_len);
+                        for (l, r) in l_list.iter().zip(r_list.iter()) {
+                            mapped_list.push(if *l == Value::Null { *r } else { *l });
+                        }
+                        mapped_list
+                    };
+                    Ok(heap.borrow_mut().insert_list(mapped_list))
+                }
+                BinaryOp::Via => {
+                    let source_owned = source.clone();
+                    let mut mapped_list = Vec::with_capacity(list_len);
+                    for idx in 0..list_len {
+                        let (l, r) = {
+                            let borrowed_heap = heap.borrow();
+                            let l_list = list_l.reify(&borrowed_heap).as_list()?;
+                            let r_list = list_r.reify(&borrowed_heap).as_list()?;
+                            (l_list[idx], r_list[idx])
+                        };
+                        if !r.is_lambda() && !r.is_built_in() {
+                            return Err(RuntimeError::with_span(
+                                format!(
+                                    "right-hand iterable contains non-function {}",
+                                    r.stringify_internal(&heap.borrow())
+                                ),
+                                op_span,
+                                source_owned.clone(),
+                            ));
+                        }
 
-                            let def = {
-                                let borrowed_heap = &heap.borrow();
-                                get_function_def(r, borrowed_heap).ok_or_else(|| {
-                                    anyhow!(
-                                        "unknown function: {}",
-                                        r.stringify_internal(borrowed_heap)
-                                    )
-                                })?
-                            };
+                        let def = {
+                            let borrowed_heap = heap.borrow();
+                            get_function_def(&r, &borrowed_heap).ok_or_else(|| {
+                                anyhow!(
+                                    "unknown function: {}",
+                                    r.stringify_internal(&borrowed_heap)
+                                )
+                            })?
+                        };
 
-                            def.call(
-                                *r,
-                                vec![*l],
+                        let value = def
+                            .call(
+                                r,
+                                vec![l],
                                 Rc::clone(&heap),
                                 Rc::clone(&bindings),
                                 call_depth,
@@ -1088,9 +1176,9 @@ fn evaluate_binary_op_ast(
                             .map_err(|e| {
                                 RuntimeError::from(anyhow!("in \"via\" callback: {}", e))
                                     .with_call_site(op_span, source_owned.clone())
-                            })
-                        })
-                        .collect::<Result<Vec<Value>, RuntimeError>>()?;
+                            })?;
+                        mapped_list.push(value);
+                    }
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Into => {
@@ -1114,269 +1202,317 @@ fn evaluate_binary_op_ast(
             }
         }
         (Value::List(list), scalar) | (scalar, Value::List(list)) => {
-            let (l_vec, is_list_first) = {
-                let borrowed_heap = &heap.borrow();
-                if matches!(lhs, Value::List(_)) {
-                    (list.reify(borrowed_heap).as_list()?.clone(), true)
-                } else {
-                    (list.reify(borrowed_heap).as_list()?.clone(), false)
-                }
+            let is_list_first = matches!(lhs, Value::List(_));
+            let list_len = {
+                let borrowed_heap = heap.borrow();
+                list.reify(&borrowed_heap).as_list()?.len()
             };
 
             match op {
                 BinaryOp::Equal => {
-                    let mapped_list = l_vec
-                        .iter()
-                        .map(|v| Ok(Bool(v.equals(&scalar, &heap.borrow())?)))
-                        .collect::<AnyhowResult<Vec<Value>>>()?;
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let list_ref = list.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_ref.len());
+                        for v in list_ref.iter() {
+                            mapped_list.push(Bool(v.equals(&scalar, &borrowed_heap)?));
+                        }
+                        mapped_list
+                    };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::NotEqual => {
-                    let mapped_list = l_vec
-                        .iter()
-                        .map(|v| Ok(Bool(!v.equals(&scalar, &heap.borrow())?)))
-                        .collect::<AnyhowResult<Vec<Value>>>()?;
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let list_ref = list.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_ref.len());
+                        for v in list_ref.iter() {
+                            mapped_list.push(Bool(!v.equals(&scalar, &borrowed_heap)?));
+                        }
+                        mapped_list
+                    };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Less => {
-                    let mapped_list = l_vec
-                        .iter()
-                        .map(|v| {
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let list_ref = list.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_ref.len());
+                        for v in list_ref.iter() {
                             let ordering = if is_list_first {
-                                v.compare(&scalar, &heap.borrow())?
+                                v.compare(&scalar, &borrowed_heap)?
                             } else {
-                                scalar.compare(v, &heap.borrow())?
+                                scalar.compare(v, &borrowed_heap)?
                             };
-                            match ordering {
-                                Some(std::cmp::Ordering::Less) => Ok(Bool(true)),
-                                _ => Ok(Bool(false)),
-                            }
-                        })
-                        .collect::<AnyhowResult<Vec<Value>>>()?;
+                            mapped_list
+                                .push(Bool(matches!(ordering, Some(std::cmp::Ordering::Less))));
+                        }
+                        mapped_list
+                    };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::LessEq => {
-                    let mapped_list = l_vec
-                        .iter()
-                        .map(|v| {
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let list_ref = list.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_ref.len());
+                        for v in list_ref.iter() {
                             let ordering = if is_list_first {
-                                v.compare(&scalar, &heap.borrow())?
+                                v.compare(&scalar, &borrowed_heap)?
                             } else {
-                                scalar.compare(v, &heap.borrow())?
+                                scalar.compare(v, &borrowed_heap)?
                             };
-                            match ordering {
-                                Some(std::cmp::Ordering::Less)
-                                | Some(std::cmp::Ordering::Equal) => Ok(Bool(true)),
-                                _ => Ok(Bool(false)),
-                            }
-                        })
-                        .collect::<AnyhowResult<Vec<Value>>>()?;
+                            let is_match = matches!(
+                                ordering,
+                                Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal)
+                            );
+                            mapped_list.push(Bool(is_match));
+                        }
+                        mapped_list
+                    };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Greater => {
-                    let mapped_list = l_vec
-                        .iter()
-                        .map(|v| {
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let list_ref = list.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_ref.len());
+                        for v in list_ref.iter() {
                             let ordering = if is_list_first {
-                                v.compare(&scalar, &heap.borrow())?
+                                v.compare(&scalar, &borrowed_heap)?
                             } else {
-                                scalar.compare(v, &heap.borrow())?
+                                scalar.compare(v, &borrowed_heap)?
                             };
-                            match ordering {
-                                Some(std::cmp::Ordering::Greater) => Ok(Bool(true)),
-                                _ => Ok(Bool(false)),
-                            }
-                        })
-                        .collect::<AnyhowResult<Vec<Value>>>()?;
+                            mapped_list
+                                .push(Bool(matches!(ordering, Some(std::cmp::Ordering::Greater))));
+                        }
+                        mapped_list
+                    };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::GreaterEq => {
-                    let mapped_list = l_vec
-                        .iter()
-                        .map(|v| {
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let list_ref = list.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_ref.len());
+                        for v in list_ref.iter() {
                             let ordering = if is_list_first {
-                                v.compare(&scalar, &heap.borrow())?
+                                v.compare(&scalar, &borrowed_heap)?
                             } else {
-                                scalar.compare(v, &heap.borrow())?
+                                scalar.compare(v, &borrowed_heap)?
                             };
-                            match ordering {
-                                Some(std::cmp::Ordering::Greater)
-                                | Some(std::cmp::Ordering::Equal) => Ok(Bool(true)),
-                                _ => Ok(Bool(false)),
-                            }
-                        })
-                        .collect::<AnyhowResult<Vec<Value>>>()?;
+                            let is_match = matches!(
+                                ordering,
+                                Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal)
+                            );
+                            mapped_list.push(Bool(is_match));
+                        }
+                        mapped_list
+                    };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::And | BinaryOp::NaturalAnd => {
-                    let mapped_list = if is_list_first {
-                        l_vec
-                            .iter()
-                            .map(|v| Ok(Bool(v.as_bool()? && scalar.as_bool()?)))
-                            .collect::<Result<Vec<Value>, RuntimeError>>()?
-                    } else {
-                        l_vec
-                            .iter()
-                            .map(|v| Ok(Bool(scalar.as_bool()? && v.as_bool()?)))
-                            .collect::<Result<Vec<Value>, RuntimeError>>()?
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let list_ref = list.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_ref.len());
+                        if is_list_first {
+                            for v in list_ref.iter() {
+                                mapped_list.push(Bool(v.as_bool()? && scalar.as_bool()?));
+                            }
+                        } else {
+                            for v in list_ref.iter() {
+                                mapped_list.push(Bool(scalar.as_bool()? && v.as_bool()?));
+                            }
+                        }
+                        mapped_list
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Or | BinaryOp::NaturalOr => {
-                    let mapped_list = if is_list_first {
-                        l_vec
-                            .iter()
-                            .map(|v| Ok(Bool(v.as_bool()? || scalar.as_bool()?)))
-                            .collect::<Result<Vec<Value>, RuntimeError>>()?
-                    } else {
-                        l_vec
-                            .iter()
-                            .map(|v| Ok(Bool(scalar.as_bool()? || v.as_bool()?)))
-                            .collect::<Result<Vec<Value>, RuntimeError>>()?
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let list_ref = list.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_ref.len());
+                        if is_list_first {
+                            for v in list_ref.iter() {
+                                mapped_list.push(Bool(v.as_bool()? || scalar.as_bool()?));
+                            }
+                        } else {
+                            for v in list_ref.iter() {
+                                mapped_list.push(Bool(scalar.as_bool()? || v.as_bool()?));
+                            }
+                        }
+                        mapped_list
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Add => {
                     let source_owned = source.clone();
-                    let mapped_list = if is_list_first {
-                        l_vec
-                            .iter()
-                            .map(|v| match (v, &scalar) {
+                    let mut mapped_list = Vec::with_capacity(list_len);
+                    for idx in 0..list_len {
+                        let item = {
+                            let borrowed_heap = heap.borrow();
+                            let list_ref = list.reify(&borrowed_heap).as_list()?;
+                            list_ref[idx]
+                        };
+                        let value = if is_list_first {
+                            match (item, scalar) {
                                 (Value::String(_), Value::String(_)) => {
                                     let (v_str, s_str) = {
+                                        let borrowed_heap = heap.borrow();
                                         (
-                                            v.as_string(&heap.borrow())?.to_string(),
-                                            scalar.as_string(&heap.borrow())?.to_string(),
+                                            item.as_string(&borrowed_heap)?.to_string(),
+                                            scalar.as_string(&borrowed_heap)?.to_string(),
                                         )
                                     };
-                                    Ok(heap
-                                        .borrow_mut()
-                                        .insert_string(format!("{}{}", v_str, s_str)))
+                                    heap.borrow_mut()
+                                        .insert_string(format!("{}{}", v_str, s_str))
                                 }
                                 (Value::Number(_), Value::Number(_)) => {
-                                    Ok(Number(v.as_number()? + scalar.as_number()?))
+                                    Number(item.as_number()? + scalar.as_number()?)
                                 }
-                                _ => Err(RuntimeError::with_span(
-                                    format!("can't add {} and {}", v.get_type(), scalar.get_type()),
-                                    op_span,
-                                    source_owned.clone(),
-                                )),
-                            })
-                            .collect::<Result<Vec<Value>, RuntimeError>>()?
-                    } else {
-                        l_vec
-                            .iter()
-                            .map(|v| match (&scalar, v) {
+                                _ => {
+                                    return Err(RuntimeError::with_span(
+                                        format!(
+                                            "can't add {} and {}",
+                                            item.get_type(),
+                                            scalar.get_type()
+                                        ),
+                                        op_span,
+                                        source_owned.clone(),
+                                    ));
+                                }
+                            }
+                        } else {
+                            match (scalar, item) {
                                 (Value::String(_), Value::String(_)) => {
                                     let (s_str, v_str) = {
+                                        let borrowed_heap = heap.borrow();
                                         (
-                                            scalar.as_string(&heap.borrow())?.to_string(),
-                                            v.as_string(&heap.borrow())?.to_string(),
+                                            scalar.as_string(&borrowed_heap)?.to_string(),
+                                            item.as_string(&borrowed_heap)?.to_string(),
                                         )
                                     };
-                                    Ok(heap
-                                        .borrow_mut()
-                                        .insert_string(format!("{}{}", s_str, v_str)))
+                                    heap.borrow_mut()
+                                        .insert_string(format!("{}{}", s_str, v_str))
                                 }
                                 (Value::Number(_), Value::Number(_)) => {
-                                    Ok(Number(scalar.as_number()? + v.as_number()?))
+                                    Number(scalar.as_number()? + item.as_number()?)
                                 }
-                                _ => Err(RuntimeError::with_span(
-                                    format!("can't add {} and {}", scalar.get_type(), v.get_type()),
-                                    op_span,
-                                    source_owned.clone(),
-                                )),
-                            })
-                            .collect::<Result<Vec<Value>, RuntimeError>>()?
-                    };
+                                _ => {
+                                    return Err(RuntimeError::with_span(
+                                        format!(
+                                            "can't add {} and {}",
+                                            scalar.get_type(),
+                                            item.get_type()
+                                        ),
+                                        op_span,
+                                        source_owned.clone(),
+                                    ));
+                                }
+                            }
+                        };
+                        mapped_list.push(value);
+                    }
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Subtract => {
-                    let mapped_list = if is_list_first {
-                        l_vec
-                            .iter()
-                            .map(|v| Ok(Number(v.as_number()? - scalar.as_number()?)))
-                            .collect::<Result<Vec<Value>, RuntimeError>>()?
-                    } else {
-                        l_vec
-                            .iter()
-                            .map(|v| Ok(Number(scalar.as_number()? - v.as_number()?)))
-                            .collect::<Result<Vec<Value>, RuntimeError>>()?
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let list_ref = list.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_ref.len());
+                        for v in list_ref.iter() {
+                            let value = if is_list_first {
+                                Number(v.as_number()? - scalar.as_number()?)
+                            } else {
+                                Number(scalar.as_number()? - v.as_number()?)
+                            };
+                            mapped_list.push(value);
+                        }
+                        mapped_list
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Multiply => {
-                    let mapped_list = l_vec
-                        .iter()
-                        .map(|v| Ok(Number(v.as_number()? * scalar.as_number()?)))
-                        .collect::<AnyhowResult<Vec<Value>>>()?;
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let list_ref = list.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_ref.len());
+                        for v in list_ref.iter() {
+                            mapped_list.push(Number(v.as_number()? * scalar.as_number()?));
+                        }
+                        mapped_list
+                    };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Divide => {
-                    let mapped_list = if is_list_first {
-                        l_vec
-                            .iter()
-                            .map(|v| Ok(Number(v.as_number()? / scalar.as_number()?)))
-                            .collect::<Result<Vec<Value>, RuntimeError>>()?
-                    } else {
-                        l_vec
-                            .iter()
-                            .map(|v| Ok(Number(scalar.as_number()? / v.as_number()?)))
-                            .collect::<Result<Vec<Value>, RuntimeError>>()?
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let list_ref = list.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_ref.len());
+                        for v in list_ref.iter() {
+                            let value = if is_list_first {
+                                Number(v.as_number()? / scalar.as_number()?)
+                            } else {
+                                Number(scalar.as_number()? / v.as_number()?)
+                            };
+                            mapped_list.push(value);
+                        }
+                        mapped_list
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Modulo => {
-                    let mapped_list = if is_list_first {
-                        l_vec
-                            .iter()
-                            .map(|v| Ok(Number(v.as_number()? % scalar.as_number()?)))
-                            .collect::<Result<Vec<Value>, RuntimeError>>()?
-                    } else {
-                        l_vec
-                            .iter()
-                            .map(|v| Ok(Number(scalar.as_number()? % v.as_number()?)))
-                            .collect::<Result<Vec<Value>, RuntimeError>>()?
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let list_ref = list.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_ref.len());
+                        for v in list_ref.iter() {
+                            let value = if is_list_first {
+                                Number(v.as_number()? % scalar.as_number()?)
+                            } else {
+                                Number(scalar.as_number()? % v.as_number()?)
+                            };
+                            mapped_list.push(value);
+                        }
+                        mapped_list
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Power => {
-                    let mapped_list = if is_list_first {
-                        l_vec
-                            .iter()
-                            .map(|v| Ok(Number(v.as_number()?.powf(scalar.as_number()?))))
-                            .collect::<Result<Vec<Value>, RuntimeError>>()?
-                    } else {
-                        l_vec
-                            .iter()
-                            .map(|v| Ok(Number(scalar.as_number()?.powf(v.as_number()?))))
-                            .collect::<Result<Vec<Value>, RuntimeError>>()?
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let list_ref = list.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_ref.len());
+                        for v in list_ref.iter() {
+                            let value = if is_list_first {
+                                Number(v.as_number()?.powf(scalar.as_number()?))
+                            } else {
+                                Number(scalar.as_number()?.powf(v.as_number()?))
+                            };
+                            mapped_list.push(value);
+                        }
+                        mapped_list
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::Coalesce => {
-                    let mapped_list = if is_list_first {
-                        l_vec
-                            .iter()
-                            .map(|v| {
-                                if *v == Value::Null {
-                                    Ok(scalar)
-                                } else {
-                                    Ok(*v)
-                                }
-                            })
-                            .collect::<Result<Vec<Value>, RuntimeError>>()?
-                    } else {
-                        l_vec
-                            .iter()
-                            .map(|v| {
-                                if scalar == Value::Null {
-                                    Ok(*v)
-                                } else {
-                                    Ok(scalar)
-                                }
-                            })
-                            .collect::<Result<Vec<Value>, RuntimeError>>()?
+                    let mapped_list = {
+                        let borrowed_heap = heap.borrow();
+                        let list_ref = list.reify(&borrowed_heap).as_list()?;
+                        let mut mapped_list = Vec::with_capacity(list_ref.len());
+                        for v in list_ref.iter() {
+                            let value = if is_list_first {
+                                if *v == Value::Null { scalar } else { *v }
+                            } else if scalar == Value::Null {
+                                *v
+                            } else {
+                                scalar
+                            };
+                            mapped_list.push(value);
+                        }
+                        mapped_list
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
@@ -1407,16 +1543,20 @@ fn evaluate_binary_op_ast(
                             (def, accepts_two)
                         };
 
-                        let mapped_list = l_vec
-                            .iter()
-                            .enumerate()
-                            .map(|(idx, item)| {
-                                let args = if func_accepts_two_args {
-                                    vec![*item, Value::Number(idx as f64)]
-                                } else {
-                                    vec![*item]
-                                };
-                                def.call(
+                        let mut mapped_list = Vec::with_capacity(list_len);
+                        for idx in 0..list_len {
+                            let item = {
+                                let borrowed_heap = heap.borrow();
+                                let list_ref = list.reify(&borrowed_heap).as_list()?;
+                                list_ref[idx]
+                            };
+                            let args = if func_accepts_two_args {
+                                vec![item, Value::Number(idx as f64)]
+                            } else {
+                                vec![item]
+                            };
+                            let value = def
+                                .call(
                                     scalar,
                                     args,
                                     Rc::clone(&heap),
@@ -1427,9 +1567,9 @@ fn evaluate_binary_op_ast(
                                 .map_err(|e| {
                                     RuntimeError::from(anyhow!("in \"via\" callback: {}", e))
                                         .with_call_site(op_span, source_owned.clone())
-                                })
-                            })
-                            .collect::<Result<Vec<Value>, RuntimeError>>()?;
+                                })?;
+                            mapped_list.push(value);
+                        }
 
                         Ok(heap.borrow_mut().insert_list(mapped_list))
                     } else {
@@ -1453,7 +1593,7 @@ fn evaluate_binary_op_ast(
                             ));
                         }
 
-                        let list = heap.borrow_mut().insert_list(l_vec.clone());
+                        let list = Value::List(list);
 
                         let def = {
                             let borrowed_heap = &heap.borrow();
@@ -1513,11 +1653,16 @@ fn evaluate_binary_op_ast(
                         };
 
                         let mut filtered_list = vec![];
-                        for (idx, item) in l_vec.iter().enumerate() {
+                        for idx in 0..list_len {
+                            let item = {
+                                let borrowed_heap = heap.borrow();
+                                let list_ref = list.reify(&borrowed_heap).as_list()?;
+                                list_ref[idx]
+                            };
                             let args = if func_accepts_two_args {
-                                vec![*item, Value::Number(idx as f64)]
+                                vec![item, Value::Number(idx as f64)]
                             } else {
-                                vec![*item]
+                                vec![item]
                             };
 
                             let result = def
@@ -1538,7 +1683,7 @@ fn evaluate_binary_op_ast(
                                 RuntimeError::from(anyhow!("in \"where\" callback: {}", e))
                                     .with_call_site(op_span, source_owned.clone())
                             })? {
-                                filtered_list.push(*item);
+                                filtered_list.push(item);
                             }
                         }
 

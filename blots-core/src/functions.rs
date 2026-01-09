@@ -679,15 +679,15 @@ impl BuiltInFunction {
 
                 match args[0] {
                     Value::List(_) => {
-                        let l = {
-                            let borrowed_heap = &heap.borrow();
-                            args[0].as_list(borrowed_heap)?.clone()
+                        let slice = {
+                            let borrowed_heap = heap.borrow();
+                            let list = args[0].as_list(&borrowed_heap)?;
+                            list.get(start..end)
+                                .ok_or_else(|| anyhow!("index out of bounds"))?
+                                .to_vec()
                         };
 
-                        l.get(start..end)
-                            .map_or(Err(anyhow!("index out of bounds")), |l| {
-                                Ok(heap.borrow_mut().insert_list(l.to_vec()))
-                            })
+                        Ok(heap.borrow_mut().insert_list(slice))
                     }
                     Value::String(_) => {
                         let s = {
@@ -709,9 +709,15 @@ impl BuiltInFunction {
 
                 for arg in args {
                     match arg {
-                        Value::List(p) => list.extend(p.reify(&heap.borrow()).as_list()?.clone()),
+                        Value::List(p) => {
+                            let borrowed_heap = heap.borrow();
+                            let values = p.reify(&borrowed_heap).as_list()?;
+                            list.extend(values.iter().copied());
+                        }
                         Value::Spread(IterablePointer::List(p)) => {
-                            list.extend(p.reify(&heap.borrow()).as_list()?.clone())
+                            let borrowed_heap = heap.borrow();
+                            let values = p.reify(&borrowed_heap).as_list()?;
+                            list.extend(values.iter().copied());
                         }
                         Value::Spread(IterablePointer::String(p)) => {
                             let string = {
@@ -733,13 +739,9 @@ impl BuiltInFunction {
             }
 
             Self::Dot => {
-                let (a, b) = {
-                    let borrowed_heap = &heap.borrow();
-                    (
-                        args[0].as_list(borrowed_heap)?.clone(),
-                        args[1].as_list(borrowed_heap)?.clone(),
-                    )
-                };
+                let borrowed_heap = heap.borrow();
+                let a = args[0].as_list(&borrowed_heap)?;
+                let b = args[1].as_list(&borrowed_heap)?;
 
                 if a.len() != b.len() {
                     return Err(anyhow!(
@@ -747,29 +749,19 @@ impl BuiltInFunction {
                     ));
                 }
 
-                Ok(Value::Number(
-                    a.iter()
-                        .zip(b.iter())
-                        .map(|(a, b)| {
-                            let a_num = a.as_number()?;
-                            let b_num = b.as_number()?;
-                            Ok(a_num * b_num)
-                        })
-                        .collect::<Result<Vec<f64>>>()?
-                        .iter()
-                        .sum(),
-                ))
+                let mut sum = 0.0;
+                for (a, b) in a.iter().zip(b.iter()) {
+                    sum += a.as_number()? * b.as_number()?;
+                }
+                Ok(Value::Number(sum))
             }
 
             Self::Unique => {
-                let list = {
-                    let borrowed_heap = &heap.borrow();
-                    args[0].as_list(borrowed_heap)?.clone()
-                };
                 let mut unique_list = vec![];
                 let borrowed_heap = heap.borrow();
+                let list = args[0].as_list(&borrowed_heap)?;
 
-                for item in list {
+                for item in list.iter() {
                     let mut is_duplicate = false;
                     for existing in &unique_list {
                         if item.equals(existing, &borrowed_heap)? {
@@ -778,7 +770,7 @@ impl BuiltInFunction {
                         }
                     }
                     if !is_duplicate {
-                        unique_list.push(item);
+                        unique_list.push(*item);
                     }
                 }
 
@@ -808,14 +800,16 @@ impl BuiltInFunction {
             }
 
             Self::Any => {
-                let list = args[0].as_list(&heap.borrow())?.clone();
+                let borrowed_heap = heap.borrow();
+                let list = args[0].as_list(&borrowed_heap)?;
                 Ok(Value::Bool(
                     list.iter().any(|v| v.as_bool().unwrap_or(false)),
                 ))
             }
 
             Self::All => {
-                let list = args[0].as_list(&heap.borrow())?.clone();
+                let borrowed_heap = heap.borrow();
+                let list = args[0].as_list(&borrowed_heap)?;
                 Ok(Value::Bool(
                     list.iter().all(|v| v.as_bool().unwrap_or(false)),
                 ))
@@ -954,57 +948,81 @@ impl BuiltInFunction {
 
             // Record functions
             Self::Keys => {
-                let record = args[0].as_record(&heap.borrow())?.clone();
-                let keys = {
-                    let key_strings = record.keys().cloned().collect::<Vec<String>>();
-                    key_strings
-                        .iter()
-                        .map(|k| heap.borrow_mut().insert_string(k.to_string()))
-                        .collect()
+                let key_strings = {
+                    let borrowed_heap = heap.borrow();
+                    args[0]
+                        .as_record(&borrowed_heap)?
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<String>>()
                 };
+                let mut borrowed_heap = heap.borrow_mut();
+                let keys = key_strings
+                    .into_iter()
+                    .map(|k| borrowed_heap.insert_string(k))
+                    .collect();
 
-                Ok(heap.borrow_mut().insert_list(keys))
+                Ok(borrowed_heap.insert_list(keys))
             }
 
             Self::Values => {
-                let record = args[0].as_record(&heap.borrow())?.clone();
-                let values = record.values().cloned().collect();
+                let values = {
+                    let borrowed_heap = heap.borrow();
+                    args[0]
+                        .as_record(&borrowed_heap)?
+                        .values()
+                        .copied()
+                        .collect::<Vec<Value>>()
+                };
 
                 Ok(heap.borrow_mut().insert_list(values))
             }
 
             Self::Entries => {
-                let record = args[0].as_record(&heap.borrow())?.clone();
-                let entries = record
-                    .iter()
+                let entries = {
+                    let borrowed_heap = heap.borrow();
+                    args[0]
+                        .as_record(&borrowed_heap)?
+                        .iter()
+                        .map(|(k, v)| (k.clone(), *v))
+                        .collect::<Vec<(String, Value)>>()
+                };
+                let mut borrowed_heap = heap.borrow_mut();
+                let entry_values = entries
+                    .into_iter()
                     .map(|(k, v)| {
-                        let entry = {
-                            let mut borrowed_heap = heap.borrow_mut();
-                            vec![borrowed_heap.insert_string(k.to_string()), *v]
-                        };
-                        heap.borrow_mut().insert_list(entry)
+                        let key = borrowed_heap.insert_string(k);
+                        borrowed_heap.insert_list(vec![key, v])
                     })
                     .collect();
 
-                Ok(heap.borrow_mut().insert_list(entries))
+                Ok(borrowed_heap.insert_list(entry_values))
             }
 
             // List utility functions
             Self::GroupBy => {
                 let func = &args[1];
-                let (list, func_def) = {
-                    let borrowed_heap = &heap.borrow();
-                    let list = args[0].as_list(borrowed_heap)?.clone();
-                    let func_def = get_function_def(func, borrowed_heap)
-                        .ok_or_else(|| anyhow!("second argument must be a function"))?;
-                    (list, func_def)
+                let list_ptr = args[0].as_list_pointer()?;
+                let func_def = {
+                    let borrowed_heap = heap.borrow();
+                    get_function_def(func, &borrowed_heap)
+                        .ok_or_else(|| anyhow!("second argument must be a function"))?
+                };
+                let list_len = {
+                    let borrowed_heap = heap.borrow();
+                    list_ptr.reify(&borrowed_heap).as_list()?.len()
                 };
 
                 let mut groups: IndexMap<String, Vec<Value>> = IndexMap::new();
-                for item in list.iter() {
+                for idx in 0..list_len {
+                    let item = {
+                        let borrowed_heap = heap.borrow();
+                        let list = list_ptr.reify(&borrowed_heap).as_list()?;
+                        list[idx]
+                    };
                     let key_result = func_def.call(
                         Value::Null,
-                        vec![*item],
+                        vec![item],
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
@@ -1021,7 +1039,7 @@ impl BuiltInFunction {
                         }
                     };
 
-                    groups.entry(key).or_default().push(*item);
+                    groups.entry(key).or_default().push(item);
                 }
 
                 // Convert groups to record of lists
@@ -1035,19 +1053,27 @@ impl BuiltInFunction {
 
             Self::CountBy => {
                 let func = &args[1];
-                let (list, func_def) = {
-                    let borrowed_heap = &heap.borrow();
-                    let list = args[0].as_list(borrowed_heap)?.clone();
-                    let func_def = get_function_def(func, borrowed_heap)
-                        .ok_or_else(|| anyhow!("second argument must be a function"))?;
-                    (list, func_def)
+                let list_ptr = args[0].as_list_pointer()?;
+                let func_def = {
+                    let borrowed_heap = heap.borrow();
+                    get_function_def(func, &borrowed_heap)
+                        .ok_or_else(|| anyhow!("second argument must be a function"))?
+                };
+                let list_len = {
+                    let borrowed_heap = heap.borrow();
+                    list_ptr.reify(&borrowed_heap).as_list()?.len()
                 };
 
                 let mut counts: IndexMap<String, f64> = IndexMap::new();
-                for item in list.iter() {
+                for idx in 0..list_len {
+                    let item = {
+                        let borrowed_heap = heap.borrow();
+                        let list = list_ptr.reify(&borrowed_heap).as_list()?;
+                        list[idx]
+                    };
                     let key_result = func_def.call(
                         Value::Null,
-                        vec![*item],
+                        vec![item],
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
@@ -1077,43 +1103,57 @@ impl BuiltInFunction {
             }
 
             Self::Flatten => {
-                let list = args[0].as_list(&heap.borrow())?.clone();
                 let mut result = vec![];
+                let borrowed_heap = heap.borrow();
+                let list = args[0].as_list(&borrowed_heap)?;
 
-                for item in list.iter() {
+                for item in list.iter().copied() {
                     match item {
-                        Value::List(_) => {
-                            let inner = item.as_list(&heap.borrow())?.clone();
-                            result.extend(inner);
+                        Value::List(pointer) => {
+                            let inner = pointer.reify(&borrowed_heap).as_list()?;
+                            result.extend(inner.iter().copied());
                         }
-                        _ => result.push(*item),
+                        _ => result.push(item),
                     }
                 }
 
+                drop(borrowed_heap);
                 Ok(heap.borrow_mut().insert_list(result))
             }
 
             Self::Zip => {
                 // Extract all lists from args
-                let lists: Vec<Vec<Value>> = args
+                let list_ptrs = args
                     .iter()
                     .map(|arg| {
-                        arg.as_list(&heap.borrow())
-                            .cloned()
+                        arg.as_list_pointer()
                             .map_err(|_| anyhow!("all arguments to zip must be lists"))
                     })
                     .collect::<Result<Vec<_>>>()?;
 
                 // Find max length
-                let max_len = lists.iter().map(|l| l.len()).max().unwrap_or(0);
+                let max_len = {
+                    let borrowed_heap = heap.borrow();
+                    let mut max_len = 0;
+                    for ptr in &list_ptrs {
+                        let len = ptr.reify(&borrowed_heap).as_list()?.len();
+                        max_len = max_len.max(len);
+                    }
+                    max_len
+                };
 
                 // Build tuples
-                let mut result = vec![];
+                let mut result = Vec::with_capacity(max_len);
                 for i in 0..max_len {
-                    let tuple: Vec<Value> = lists
-                        .iter()
-                        .map(|list| list.get(i).copied().unwrap_or(Value::Null))
-                        .collect();
+                    let tuple = {
+                        let borrowed_heap = heap.borrow();
+                        let mut tuple = Vec::with_capacity(list_ptrs.len());
+                        for ptr in &list_ptrs {
+                            let list = ptr.reify(&borrowed_heap).as_list()?;
+                            tuple.push(list.get(i).copied().unwrap_or(Value::Null));
+                        }
+                        tuple
+                    };
                     result.push(heap.borrow_mut().insert_list(tuple));
                 }
 
@@ -1121,19 +1161,24 @@ impl BuiltInFunction {
             }
 
             Self::Chunk => {
-                let list = args[0].as_list(&heap.borrow())?.clone();
                 let n = args[1].as_number()? as usize;
 
                 if n == 0 {
                     return Err(anyhow!("chunk size must be greater than 0"));
                 }
 
-                let chunks: Vec<Value> = list
-                    .chunks(n)
-                    .map(|chunk| heap.borrow_mut().insert_list(chunk.to_vec()))
+                let chunk_values = {
+                    let borrowed_heap = heap.borrow();
+                    let list = args[0].as_list(&borrowed_heap)?;
+                    list.chunks(n).map(|chunk| chunk.to_vec()).collect::<Vec<_>>()
+                };
+                let mut borrowed_heap = heap.borrow_mut();
+                let chunks = chunk_values
+                    .into_iter()
+                    .map(|chunk| borrowed_heap.insert_list(chunk))
                     .collect();
 
-                Ok(heap.borrow_mut().insert_list(chunks))
+                Ok(borrowed_heap.insert_list(chunks))
             }
 
             // Conversion functions
@@ -1210,24 +1255,29 @@ impl BuiltInFunction {
             // Higher-order functions
             Self::Map => {
                 let func = &args[1];
-                let (list, func_def, func_accepts_two_args) = {
-                    let borrowed_heap = &heap.borrow();
-                    let list = args[0].as_list(borrowed_heap)?.clone();
-                    let func_def = get_function_def(func, borrowed_heap)
-                        .ok_or_else(|| anyhow!("second argument must be a function"))?;
-
-                    // Check if the function can accept 2 arguments (element, index)
-                    let accepts_two = func_def.arity().can_accept(2);
-
-                    (list, func_def, accepts_two)
+                let list_ptr = args[0].as_list_pointer()?;
+                let func_def = {
+                    let borrowed_heap = heap.borrow();
+                    get_function_def(func, &borrowed_heap)
+                        .ok_or_else(|| anyhow!("second argument must be a function"))?
                 };
+                let list_len = {
+                    let borrowed_heap = heap.borrow();
+                    list_ptr.reify(&borrowed_heap).as_list()?.len()
+                };
+                let func_accepts_two_args = func_def.arity().can_accept(2);
 
-                let mut mapped_list = vec![];
-                for (idx, item) in list.iter().enumerate() {
+                let mut mapped_list = Vec::with_capacity(list_len);
+                for idx in 0..list_len {
+                    let item = {
+                        let borrowed_heap = heap.borrow();
+                        let list = list_ptr.reify(&borrowed_heap).as_list()?;
+                        list[idx]
+                    };
                     let args = if func_accepts_two_args {
-                        vec![*item, Value::Number(idx as f64)]
+                        vec![item, Value::Number(idx as f64)]
                     } else {
-                        vec![*item]
+                        vec![item]
                     };
 
                     let result = func_def.call(
@@ -1246,24 +1296,29 @@ impl BuiltInFunction {
 
             Self::Filter => {
                 let func = &args[1];
-                let (list, func_def, func_accepts_two_args) = {
-                    let borrowed_heap = &heap.borrow();
-                    let list = args[0].as_list(borrowed_heap)?.clone();
-                    let func_def = get_function_def(func, borrowed_heap)
-                        .ok_or_else(|| anyhow!("second argument must be a function"))?;
-
-                    // Check if the function can accept 2 arguments (element, index)
-                    let accepts_two = func_def.arity().can_accept(2);
-
-                    (list, func_def, accepts_two)
+                let list_ptr = args[0].as_list_pointer()?;
+                let func_def = {
+                    let borrowed_heap = heap.borrow();
+                    get_function_def(func, &borrowed_heap)
+                        .ok_or_else(|| anyhow!("second argument must be a function"))?
                 };
+                let list_len = {
+                    let borrowed_heap = heap.borrow();
+                    list_ptr.reify(&borrowed_heap).as_list()?.len()
+                };
+                let func_accepts_two_args = func_def.arity().can_accept(2);
 
                 let mut filtered_list = vec![];
-                for (idx, item) in list.iter().enumerate() {
+                for idx in 0..list_len {
+                    let item = {
+                        let borrowed_heap = heap.borrow();
+                        let list = list_ptr.reify(&borrowed_heap).as_list()?;
+                        list[idx]
+                    };
                     let args = if func_accepts_two_args {
-                        vec![*item, Value::Number(idx as f64)]
+                        vec![item, Value::Number(idx as f64)]
                     } else {
-                        vec![*item]
+                        vec![item]
                     };
 
                     let result = func_def.call(
@@ -1275,7 +1330,7 @@ impl BuiltInFunction {
                         source,
                     )?;
                     if result.as_bool()? {
-                        filtered_list.push(*item);
+                        filtered_list.push(item);
                     }
                 }
 
@@ -1285,24 +1340,29 @@ impl BuiltInFunction {
             Self::Reduce => {
                 let func = &args[1];
                 let initial = args[2];
-                let (list, func_def, func_accepts_three_args) = {
-                    let borrowed_heap = &heap.borrow();
-                    let list = args[0].as_list(borrowed_heap)?.clone();
-                    let func_def = get_function_def(func, borrowed_heap)
-                        .ok_or_else(|| anyhow!("second argument must be a function"))?;
-
-                    // Check if the function can accept 3 arguments (accumulator, element, index)
-                    let accepts_three = func_def.arity().can_accept(3);
-
-                    (list, func_def, accepts_three)
+                let list_ptr = args[0].as_list_pointer()?;
+                let func_def = {
+                    let borrowed_heap = heap.borrow();
+                    get_function_def(func, &borrowed_heap)
+                        .ok_or_else(|| anyhow!("second argument must be a function"))?
                 };
+                let list_len = {
+                    let borrowed_heap = heap.borrow();
+                    list_ptr.reify(&borrowed_heap).as_list()?.len()
+                };
+                let func_accepts_three_args = func_def.arity().can_accept(3);
 
                 let mut accumulator = initial;
-                for (idx, item) in list.iter().enumerate() {
+                for idx in 0..list_len {
+                    let item = {
+                        let borrowed_heap = heap.borrow();
+                        let list = list_ptr.reify(&borrowed_heap).as_list()?;
+                        list[idx]
+                    };
                     let args = if func_accepts_three_args {
-                        vec![accumulator, *item, Value::Number(idx as f64)]
+                        vec![accumulator, item, Value::Number(idx as f64)]
                     } else {
-                        vec![accumulator, *item]
+                        vec![accumulator, item]
                     };
 
                     accumulator = func_def.call(
@@ -1320,23 +1380,28 @@ impl BuiltInFunction {
 
             Self::Every => {
                 let func = &args[1];
-                let (list, func_def, func_accepts_two_args) = {
-                    let borrowed_heap = &heap.borrow();
-                    let list = args[0].as_list(borrowed_heap)?.clone();
-                    let func_def = get_function_def(func, borrowed_heap)
-                        .ok_or_else(|| anyhow!("second argument must be a function"))?;
-
-                    // Check if the function can accept 2 arguments (element, index)
-                    let accepts_two = func_def.arity().can_accept(2);
-
-                    (list, func_def, accepts_two)
+                let list_ptr = args[0].as_list_pointer()?;
+                let func_def = {
+                    let borrowed_heap = heap.borrow();
+                    get_function_def(func, &borrowed_heap)
+                        .ok_or_else(|| anyhow!("second argument must be a function"))?
                 };
+                let list_len = {
+                    let borrowed_heap = heap.borrow();
+                    list_ptr.reify(&borrowed_heap).as_list()?.len()
+                };
+                let func_accepts_two_args = func_def.arity().can_accept(2);
 
-                for (idx, item) in list.iter().enumerate() {
+                for idx in 0..list_len {
+                    let item = {
+                        let borrowed_heap = heap.borrow();
+                        let list = list_ptr.reify(&borrowed_heap).as_list()?;
+                        list[idx]
+                    };
                     let args = if func_accepts_two_args {
-                        vec![*item, Value::Number(idx as f64)]
+                        vec![item, Value::Number(idx as f64)]
                     } else {
-                        vec![*item]
+                        vec![item]
                     };
 
                     let result = func_def.call(
@@ -1357,23 +1422,28 @@ impl BuiltInFunction {
 
             Self::Some => {
                 let func = &args[1];
-                let (list, func_def, func_accepts_two_args) = {
-                    let borrowed_heap = &heap.borrow();
-                    let list = args[0].as_list(borrowed_heap)?.clone();
-                    let func_def = get_function_def(func, borrowed_heap)
-                        .ok_or_else(|| anyhow!("second argument must be a function"))?;
-
-                    // Check if the function can accept 2 arguments (element, index)
-                    let accepts_two = func_def.arity().can_accept(2);
-
-                    (list, func_def, accepts_two)
+                let list_ptr = args[0].as_list_pointer()?;
+                let func_def = {
+                    let borrowed_heap = heap.borrow();
+                    get_function_def(func, &borrowed_heap)
+                        .ok_or_else(|| anyhow!("second argument must be a function"))?
                 };
+                let list_len = {
+                    let borrowed_heap = heap.borrow();
+                    list_ptr.reify(&borrowed_heap).as_list()?.len()
+                };
+                let func_accepts_two_args = func_def.arity().can_accept(2);
 
-                for (idx, item) in list.iter().enumerate() {
+                for idx in 0..list_len {
+                    let item = {
+                        let borrowed_heap = heap.borrow();
+                        let list = list_ptr.reify(&borrowed_heap).as_list()?;
+                        list[idx]
+                    };
                     let args = if func_accepts_two_args {
-                        vec![*item, Value::Number(idx as f64)]
+                        vec![item, Value::Number(idx as f64)]
                     } else {
-                        vec![*item]
+                        vec![item]
                     };
 
                     let result = func_def.call(

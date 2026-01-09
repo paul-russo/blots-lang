@@ -1,0 +1,54 @@
+start = time_now()
+
+// Deeply nested record allocations + via transform
+n = 20000
+depth = 8
+
+make_node = (i, d) =>
+  if d <= 0 then
+    {
+      value: i,
+      payload: { a: i + 1, b: i + 2, c: i + 3 },
+      meta: { tag: "leaf", idx: i, hash: i % 97 }
+    }
+  else
+    {
+      level: d,
+      child: make_node(i, d - 1),
+      payload: { a: i + d, b: i + d + 1, c: i + d + 2 },
+      meta: { tag: "node", idx: i, hash: i % 97 }
+    }
+
+bump = node =>
+  if node.child == null then
+    {
+      value: node.value + 1,
+      payload: {
+        a: node.payload.a + 1,
+        b: node.payload.b + 1,
+        c: node.payload.c + 1
+      },
+      meta: { tag: node.meta.tag, idx: node.meta.idx, hash: node.meta.hash }
+    }
+  else
+    {
+      level: node.level,
+      child: bump(node.child),
+      payload: {
+        a: node.payload.a,
+        b: node.payload.b,
+        c: node.payload.c
+      },
+      meta: { tag: node.meta.tag, idx: node.meta.idx, hash: node.meta.hash }
+    }
+
+t1 = time_now()
+records = range(n) via i => make_node(i, depth)
+print("build: {}s", time_now() - t1)
+
+t2 = time_now()
+transformed = records via bump
+print("transform: {}s", time_now() - t2)
+
+print("sanity: {}", len(transformed))
+print("total: {}s", time_now() - start)

@@ -1,0 +1,67 @@
+start = time_now()
+
+// Worst-case patterns for clone-heavy paths (tweak n/k/m for more stress)
+n = 500000
+xs = range(n)
+ys = range(n)
+zs = range(n)
+
+// Issue 1: list binary ops broadcasting over two large lists
+t1 = time_now()
+sum_list = xs + ys
+prod_list = xs * ys
+eq_list = sum_list == prod_list
+print("broadcast binary ops: {}s", time_now() - t1)
+
+// Issue 2: list built-ins that used to clone full inputs
+t2 = time_now()
+dot_val = dot(xs, ys)
+any_false = any(xs < 0)
+all_true = all(xs >= 0)
+mapped = map(xs, x => x + 1)
+filtered = filter(xs, x => x >= 0)
+reduced = reduce(xs, (acc, x) => acc + x, 0)
+every_true = every(xs, x => x >= 0)
+some_last = some(xs, x => x == n - 1)
+print("list builtins: {}s", time_now() - t2)
+
+// Zip/Chunk are especially heavy because they allocate many nested lists
+k = 200000
+t3 = time_now()
+xs_small = range(k)
+ys_small = range(k)
+zs_small = range(k)
+zipped = zip(xs_small, ys_small, zs_small)
+chunked = chunk(xs_small, 1)
+print("zip/chunk builtins: {}s", time_now() - t3)
+
+// Record built-ins: group_by/count_by + keys/values/entries
+m = 200000
+t4 = time_now()
+record1 = group_by(range(m), x => to_string(x))
+record2 = count_by(range(m), x => to_string(x))
+keys_list = keys(record1)
+values_list = values(record1)
+entries_list = entries(record1)
+print("record builtins: {}s", time_now() - t4)
+
+// Issue 3: spread expansion for lists, records, and call args
+t5 = time_now()
+spread_list = [...xs, ...ys, ...sum_list]
+spread_call = sum(...xs)
+spread_pairs = [...record1]
+print("spread expansion: {}s", time_now() - t5)
+
+print(
+  "sanity: {}",
+  dot_val
+    + reduced
+    + spread_call
+    + len(spread_list)
+    + len(zipped)
+    + len(chunked)
+    + len(keys_list)
+    + len(entries_list)
+    + len(spread_pairs)
+)
+print("total: {}s", time_now() - start)

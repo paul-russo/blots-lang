@@ -1,0 +1,26 @@
+start = time_now()
+
+n = 200000
+xs = range(n)
+ys = range(n)
+
+// Broadcast-heavy operations
+the_sum = xs + ys
+add1 = xs + 1
+the_prod = the_sum * 2
+cmp = the_prod > 1000
+
+// Concat and flatten to stress list aggregation
+alls = concat(xs, ys, the_sum, add1, the_prod)
+nested = map(range(50000), i => [i, i + 1, i + 2, i + 3])
+flat = flatten(nested)
+
+// List + function operators
+evens = xs where x => x % 2 == 0
+scaled = xs via x => x * 2
+
+print(
+  "lens: {}",
+  len(alls) + len(flat) + len(evens) + len(scaled) + len(cmp)
+)
+print("that took {} seconds", time_now() - start)
