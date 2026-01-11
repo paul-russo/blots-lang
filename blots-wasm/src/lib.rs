@@ -2,7 +2,7 @@ use anyhow::Result;
 use blots_core::{
     ast::{Expr, Spanned},
     environment::Environment,
-    expressions::{evaluate_pairs, pairs_to_expr},
+    expressions::{evaluate_pairs, pairs_to_expr_with_comments},
     formatter::{format_expr, join_statements_with_spacing},
     functions::get_built_in_function_idents,
     heap::{CONSTANTS, Heap},
@@ -317,7 +317,7 @@ pub fn format_blots(source: &str, max_columns: Option<usize>) -> Result<JsValue,
                     }
                     Rule::output_declaration => {
                         // Output declaration - wrap in Output expression
-                        let inner_expr = pairs_to_expr(first_pair.into_inner())
+                        let inner_expr = pairs_to_expr_with_comments(first_pair.into_inner())
                             .map_err(|e| JsError::new(&format!("AST conversion error: {}", e)))?;
                         let output_expr = Spanned::dummy(Expr::Output {
                             expr: Box::new(inner_expr),
@@ -326,7 +326,7 @@ pub fn format_blots(source: &str, max_columns: Option<usize>) -> Result<JsValue,
                     }
                     _ => {
                         // Format as expression
-                        let expr = pairs_to_expr(first_pair.into_inner())
+                        let expr = pairs_to_expr_with_comments(first_pair.into_inner())
                             .map_err(|e| JsError::new(&format!("AST conversion error: {}", e)))?;
                         format_expr(&expr, max_columns)
                     }
@@ -505,6 +505,63 @@ mod tests {
         // Output keyword should be preserved with via expression
         assert!(formatted.contains("output result = items via"));
         assert!(formatted.starts_with("output result"));
+    }
+
+    #[wasm_bindgen_test]
+    fn test_format_blots_comments_inside_list() {
+        // Test that comments inside lists are preserved
+        let source = "[\n// leading comment\n1,\n2, // trailing comment\n]";
+        let result = format_blots(source, Some(80)).unwrap();
+        let formatted: String = serde_wasm_bindgen::from_value(result).unwrap();
+
+        assert!(
+            formatted.contains("// leading comment"),
+            "Leading comment inside list should be preserved. Got: {}",
+            formatted
+        );
+        assert!(
+            formatted.contains("// trailing comment"),
+            "Trailing comment inside list should be preserved. Got: {}",
+            formatted
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn test_format_blots_comments_inside_record() {
+        // Test that comments inside records are preserved
+        let source = "{\n// leading comment\na: 1,\nb: 2, // trailing comment\n}";
+        let result = format_blots(source, Some(80)).unwrap();
+        let formatted: String = serde_wasm_bindgen::from_value(result).unwrap();
+
+        assert!(
+            formatted.contains("// leading comment"),
+            "Leading comment inside record should be preserved. Got: {}",
+            formatted
+        );
+        assert!(
+            formatted.contains("// trailing comment"),
+            "Trailing comment inside record should be preserved. Got: {}",
+            formatted
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn test_format_blots_comments_inside_nested_structures() {
+        // Test that comments are preserved in nested lists/records
+        let source = "{\n  items: [\n    // first item\n    1,\n    2, // second\n  ],\n}";
+        let result = format_blots(source, Some(80)).unwrap();
+        let formatted: String = serde_wasm_bindgen::from_value(result).unwrap();
+
+        assert!(
+            formatted.contains("// first item"),
+            "Comment in nested list should be preserved. Got: {}",
+            formatted
+        );
+        assert!(
+            formatted.contains("// second"),
+            "Trailing comment in nested list should be preserved. Got: {}",
+            formatted
+        );
     }
 
     // ============================================================================
