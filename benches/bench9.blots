@@ -1,0 +1,146 @@
+// Top-level comment at start of file
+// Another top-level comment
+
+// Simple assignment with trailing comment
+x = 42  // the answer
+
+// List with various comment styles
+numbers = [
+  // First section - small numbers
+  1,
+  2,  // inline after 2
+  3,
+  // Second section - medium numbers
+  10,
+  20,  // twenty
+  30,
+  // Third section - large numbers
+  100,
+  200,
+  300,  // three hundred
+]
+
+// Record with comments
+config = {
+  // Server settings
+  host: "localhost",
+  port: 8080,  // default port
+  // Database settings
+  db_name: "test",
+  db_port: 5432,  // postgres default
+  // Feature flags
+  debug: true,
+  verbose: false,  // keep quiet
+}
+
+// Nested structures with comments
+nested = {
+  // Outer level
+  items: [
+    // First item
+    {
+      // Item details
+      name: "alpha",
+      value: 1,  // low priority
+    },
+    // Second item
+    {
+      name: "beta",
+      value: 2,
+    },
+    // Third item with more comments
+    {
+      // High priority item
+      name: "gamma",  // greek letter
+      value: 3,
+    },
+  ],
+  // Metadata
+  count: 3,
+}
+
+// Function with do block and comments
+process = items => do {
+  // Initialize accumulator
+  total = 0
+  // Process each item
+  result = items via i => i * 2
+  // Calculate sum
+  sum_val = result into sum
+  // Return the final result
+  return sum_val
+}
+
+// Another function with nested comments
+analyze = data => do {
+  // Step 1: Filter
+  filtered = data where x => x > 0
+  // Step 2: Transform
+  transformed = filtered via x => x ^ 2
+  // Step 3: Aggregate
+  total = transformed into sum
+  avg = total / (filtered into len)
+  // Step 4: Build result
+  return {
+    // Summary stats
+    total,
+    avg,  // average value
+    // Raw data
+    filtered,
+    transformed,
+  }
+}
+
+// Complex expression with comments throughout
+matrix = [
+  // Row 1
+  [1, 2, 3],  // first row
+  // Row 2
+  [4, 5, 6],
+  // Row 3
+  [7, 8, 9],  // last row
+]
+
+// Computation section
+// Calculate various statistics
+stats = {
+  // Basic stats
+  sum_numbers: numbers into sum,
+  avg_numbers: (numbers into sum) / (numbers into len),
+  // Count
+  total_items: numbers into len,
+  // Matrix operations
+  flat_matrix: matrix into flatten,
+}
+
+// Conditional with surrounding comments
+// Check if we have enough data
+check_result = if (numbers into len) > 5 then
+  // We have enough
+  "sufficient"
+else
+  // Need more data
+  "insufficient"
+
+// Final computation
+// Using all the above
+final_result = do {
+  // Get processed numbers
+  processed = process(numbers)
+  // Analyze the data
+  analysis = analyze(numbers)
+  // Combine results
+  return {
+    // Processing result
+    processed,
+    // Analysis result
+    analysis,
+    // Additional info
+    check: check_result,
+    // Configuration used
+    config,
+  }
+}
+
+// Output the result
+output result = final_result

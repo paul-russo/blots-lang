@@ -4,7 +4,7 @@ mod highlighter;
 
 use blots_core::ast::{Expr, Spanned};
 use blots_core::environment::Environment;
-use blots_core::expressions::{evaluate_pairs, pairs_to_expr, validate_portable_value};
+use blots_core::expressions::{evaluate_pairs, pairs_to_expr_with_comments, validate_portable_value};
 use blots_core::formatter::format_expr;
 use blots_core::functions::{clear_function_call_stats, get_function_call_stats};
 use blots_core::heap::Heap;
@@ -248,7 +248,7 @@ fn main() -> ! {
                 Rule::statement => {
                     if let Some(inner_pair) = pair.into_inner().next() {
                         match inner_pair.as_rule() {
-                            Rule::expression => match pairs_to_expr(inner_pair.into_inner()) {
+                            Rule::expression => match pairs_to_expr_with_comments(inner_pair.into_inner()) {
                                 Ok(expr) => {
                                     let formatted = format_expr(&expr, None);
                                     formatted_output.push_str(&formatted);
@@ -260,7 +260,7 @@ fn main() -> ! {
                                 }
                             },
                             Rule::output_declaration => {
-                                match pairs_to_expr(inner_pair.into_inner()) {
+                                match pairs_to_expr_with_comments(inner_pair.into_inner()) {
                                     Ok(inner_expr) => {
                                         // Wrap in Output expression
                                         let output_expr = Spanned::dummy(Expr::Output {

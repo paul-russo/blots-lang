@@ -1,6 +1,6 @@
 use crate::{
     ast::{
-        BinaryOp, DoStatement, Expr, PostfixOp, RecordEntry, RecordKey, Span, Spanned, SpannedExpr,
+        BinaryOp, Commented, Expr, PostfixOp, RecordEntry, RecordKey, Span, Spanned, SpannedExpr,
         UnaryOp,
     },
     environment::Environment,
@@ -187,7 +187,7 @@ pub fn evaluate_ast(
                 .iter()
                 .map(|e| {
                     evaluate_ast(
-                        e,
+                        &e.node,
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth,
@@ -214,7 +214,8 @@ pub fn evaluate_ast(
         Expr::Record(entries) => {
             let mut record = IndexMap::new();
 
-            for entry in entries {
+            for commented_entry in entries {
+                let entry = &commented_entry.node;
                 match &entry.key {
                     RecordKey::Static(key) => {
                         let value = evaluate_ast(
@@ -427,25 +428,20 @@ pub fn evaluate_ast(
             // Create new scope that extends current bindings (O(1) instead of clone)
             let block_bindings = Rc::new(Environment::extend(Rc::clone(&bindings)));
 
-            // Execute statements with shadowing allowed
+            // Execute statements with shadowing allowed (comments are ignored)
             for stmt in statements {
-                match stmt {
-                    DoStatement::Expression(expr) => {
-                        evaluate_do_block_expr(
-                            expr,
-                            Rc::clone(&heap),
-                            Rc::clone(&block_bindings),
-                            call_depth,
-                            source.clone(),
-                        )?;
-                    }
-                    DoStatement::Comment(_) => {} // Skip comments
-                }
+                evaluate_do_block_expr(
+                    &stmt.node,
+                    Rc::clone(&heap),
+                    Rc::clone(&block_bindings),
+                    call_depth,
+                    source.clone(),
+                )?;
             }
 
             // Return the final expression
             evaluate_do_block_expr(
-                return_expr,
+                &return_expr.node,
                 heap,
                 block_bindings,
                 call_depth,
@@ -696,12 +692,13 @@ fn collect_free_variables(expr: &SpannedExpr, vars: &mut Vec<String>, bound: &mu
             collect_free_variables(value, vars, bound);
         }
         Expr::List(exprs) => {
-            for expr in exprs {
-                collect_free_variables(expr, vars, bound);
+            for commented_expr in exprs {
+                collect_free_variables(&commented_expr.node, vars, bound);
             }
         }
         Expr::Record(entries) => {
-            for entry in entries {
+            for commented_entry in entries {
+                let entry = &commented_entry.node;
                 match &entry.key {
                     RecordKey::Dynamic(expr) | RecordKey::Spread(expr) => {
                         collect_free_variables(expr, vars, bound);
@@ -721,19 +718,18 @@ fn collect_free_variables(expr: &SpannedExpr, vars: &mut Vec<String>, bound: &mu
             let mut block_bound = bound.clone();
 
             for stmt in statements {
-                if let DoStatement::Expression(expr) = stmt {
-                    // Check if this is an assignment and add the variable to block scope
-                    if let Expr::Assignment { ident, value } = &expr.node {
-                        // First collect free variables from the value
-                        collect_free_variables(value, vars, &mut block_bound);
-                        // Then add the assigned variable to the block's bound set
-                        block_bound.insert(ident.clone());
-                    } else {
-                        collect_free_variables(expr, vars, &mut block_bound);
-                    }
+                let expr = &stmt.node;
+                // Check if this is an assignment and add the variable to block scope
+                if let Expr::Assignment { ident, value } = &expr.node {
+                    // First collect free variables from the value
+                    collect_free_variables(value, vars, &mut block_bound);
+                    // Then add the assigned variable to the block's bound set
+                    block_bound.insert(ident.clone());
+                } else {
+                    collect_free_variables(expr, vars, &mut block_bound);
                 }
             }
-            collect_free_variables(return_expr, vars, &mut block_bound);
+            collect_free_variables(&return_expr.node, vars, &mut block_bound);
         }
         _ => {}
     }
@@ -1863,8 +1859,61 @@ fn span_from_pair(pair: &Pair<Rule>) -> Span {
     Span::new(span.start(), span.end(), line, col)
 }
 
-// Convert Pest pairs to our AST
+// Helper function to parse a record entry (pair, shorthand, or spread)
+fn parse_record_entry(pair: Pair<Rule>, preserve_comments: bool) -> AnyhowResult<RecordEntry> {
+    match pair.as_rule() {
+        Rule::record_pair => {
+            let mut inner_pairs = pair.into_inner();
+            let key_pair = inner_pairs.next().unwrap();
+            let key = match key_pair.as_rule() {
+                Rule::record_key_static => {
+                    let inner_key_pair = key_pair.into_inner().next().unwrap();
+                    match inner_key_pair.as_rule() {
+                        Rule::identifier => RecordKey::Static(inner_key_pair.as_str().to_string()),
+                        Rule::string => {
+                            RecordKey::Static(inner_key_pair.into_inner().as_str().to_string())
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                Rule::record_key_dynamic => {
+                    RecordKey::Dynamic(Box::new(pairs_to_expr_inner(key_pair.into_inner(), preserve_comments)?))
+                }
+                _ => unreachable!(),
+            };
+            let value = pairs_to_expr_inner(inner_pairs.next().unwrap().into_inner(), preserve_comments)?;
+            Ok(RecordEntry { key, value })
+        }
+        Rule::record_shorthand => {
+            let ident = pair.into_inner().next().unwrap().as_str().to_string();
+            Ok(RecordEntry {
+                key: RecordKey::Shorthand(ident),
+                value: Spanned::dummy(Expr::Null),
+            })
+        }
+        Rule::spread_expression => {
+            let spread_expr = pairs_to_expr_inner(pair.into_inner(), preserve_comments)?;
+            Ok(RecordEntry {
+                key: RecordKey::Spread(Box::new(spread_expr)),
+                value: Spanned::dummy(Expr::Null),
+            })
+        }
+        _ => unreachable!("Unexpected record entry rule: {:?}", pair.as_rule()),
+    }
+}
+
+// Convert Pest pairs to our AST (without comment preservation)
 pub fn pairs_to_expr(pairs: Pairs<Rule>) -> AnyhowResult<SpannedExpr> {
+    pairs_to_expr_inner(pairs, false)
+}
+
+// Convert Pest pairs to our AST (with comment preservation for formatting)
+pub fn pairs_to_expr_with_comments(pairs: Pairs<Rule>) -> AnyhowResult<SpannedExpr> {
+    pairs_to_expr_inner(pairs, true)
+}
+
+// Internal function that handles comment preservation
+fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowResult<SpannedExpr> {
     PRATT
         .map_primary(|primary| {
             let span = span_from_pair(&primary);
@@ -1879,61 +1928,126 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> AnyhowResult<SpannedExpr> {
                 }
                 Rule::list => {
                     let list_pairs = primary.into_inner();
-                    let elements = list_pairs
-                        .into_iter()
-                        .map(|pair| pairs_to_expr(pair.into_inner()))
-                        .collect::<AnyhowResult<Vec<SpannedExpr>>>()?;
+                    let mut elements: Vec<Commented<SpannedExpr>> = Vec::new();
+                    let mut pending_comments: Vec<String> = Vec::new();
+
+                    for pair in list_pairs {
+                        match pair.as_rule() {
+                            Rule::comment => {
+                                if preserve_comments {
+                                    pending_comments.push(pair.as_str().to_string());
+                                }
+                            }
+                            Rule::list_item => {
+                                let mut inner = pair.into_inner();
+                                // First is the spreadable_expression
+                                let expr_pair = inner.next().unwrap();
+                                let expr = pairs_to_expr_inner(expr_pair.into_inner(), preserve_comments)?;
+                                // Optional eol_comment
+                                let trailing = if preserve_comments {
+                                    inner.next().map(|p| p.as_str().to_string())
+                                } else {
+                                    None
+                                };
+                                elements.push(Commented::with_comments(
+                                    std::mem::take(&mut pending_comments),
+                                    expr,
+                                    trailing,
+                                ));
+                            }
+                            _ => {
+                                // Fallback for other rules (shouldn't happen with updated grammar)
+                                let expr = pairs_to_expr_inner(pair.into_inner(), preserve_comments)?;
+                                elements.push(Commented::new(expr));
+                            }
+                        }
+                    }
+                    // Attach any remaining comments (after the last item) as trailing comments to the last item
+                    if !pending_comments.is_empty() && !elements.is_empty()
+                        && let Some(last) = elements.last_mut() {
+                            // Combine remaining comments as trailing (separated by newline if multiple)
+                            let trailing = pending_comments.join("\n");
+                            if last.trailing.is_some() {
+                                // Already has a trailing comment, append
+                                last.trailing = Some(format!("{}\n{}", last.trailing.as_ref().unwrap(), trailing));
+                            } else {
+                                last.trailing = Some(trailing);
+                            }
+                        }
                     Ok(Spanned::new(Expr::List(elements), span))
                 }
                 Rule::record => {
                     let record_pairs = primary.into_inner();
-                    let mut entries = Vec::new();
+                    let mut entries: Vec<Commented<RecordEntry>> = Vec::new();
+                    let mut pending_comments: Vec<String> = Vec::new();
 
                     for pair in record_pairs {
                         match pair.as_rule() {
-                            Rule::record_pair => {
-                                let mut inner_pairs = pair.into_inner();
-                                let key_pair = inner_pairs.next().unwrap();
-                                let key = match key_pair.as_rule() {
-                                    Rule::record_key_static => {
-                                        let inner_key_pair = key_pair.into_inner().next().unwrap();
-                                        match inner_key_pair.as_rule() {
-                                            Rule::identifier => RecordKey::Static(
-                                                inner_key_pair.as_str().to_string(),
-                                            ),
-                                            Rule::string => RecordKey::Static(
-                                                inner_key_pair.into_inner().as_str().to_string(),
-                                            ),
-                                            _ => unreachable!(),
-                                        }
-                                    }
-                                    Rule::record_key_dynamic => RecordKey::Dynamic(Box::new(
-                                        pairs_to_expr(key_pair.into_inner())?,
-                                    )),
-                                    _ => unreachable!(),
+                            Rule::comment => {
+                                if preserve_comments {
+                                    pending_comments.push(pair.as_str().to_string());
+                                }
+                            }
+                            Rule::record_item => {
+                                let mut inner = pair.into_inner();
+                                let entry_pair = inner.next().unwrap();
+                                let entry = parse_record_entry(entry_pair, preserve_comments)?;
+                                // Optional eol_comment
+                                let trailing = if preserve_comments {
+                                    inner.next().map(|p| p.as_str().to_string())
+                                } else {
+                                    None
                                 };
-
-                                let value =
-                                    pairs_to_expr(inner_pairs.next().unwrap().into_inner())?;
-                                entries.push(RecordEntry { key, value });
+                                entries.push(Commented::with_comments(
+                                    std::mem::take(&mut pending_comments),
+                                    entry,
+                                    trailing,
+                                ));
+                            }
+                            Rule::record_pair => {
+                                // Fallback for direct record_pair (old grammar or edge case)
+                                let entry = parse_record_entry(pair, preserve_comments)?;
+                                entries.push(Commented::with_comments(
+                                    std::mem::take(&mut pending_comments),
+                                    entry,
+                                    None,
+                                ));
                             }
                             Rule::record_shorthand => {
                                 let ident = pair.into_inner().next().unwrap().as_str().to_string();
-                                entries.push(RecordEntry {
-                                    key: RecordKey::Shorthand(ident),
-                                    value: Spanned::dummy(Expr::Null), // Will be resolved during evaluation
-                                });
+                                entries.push(Commented::with_comments(
+                                    std::mem::take(&mut pending_comments),
+                                    RecordEntry {
+                                        key: RecordKey::Shorthand(ident),
+                                        value: Spanned::dummy(Expr::Null),
+                                    },
+                                    None,
+                                ));
                             }
                             Rule::spread_expression => {
-                                let spread_expr = pairs_to_expr(pair.into_inner())?;
-                                entries.push(RecordEntry {
-                                    key: RecordKey::Spread(Box::new(spread_expr)),
-                                    value: Spanned::dummy(Expr::Null), // Will be resolved during evaluation
-                                });
+                                let spread_expr = pairs_to_expr_inner(pair.into_inner(), preserve_comments)?;
+                                entries.push(Commented::with_comments(
+                                    std::mem::take(&mut pending_comments),
+                                    RecordEntry {
+                                        key: RecordKey::Spread(Box::new(spread_expr)),
+                                        value: Spanned::dummy(Expr::Null),
+                                    },
+                                    None,
+                                ));
                             }
                             _ => {}
                         }
                     }
+                    // Attach any remaining comments (after the last entry) as trailing comments to the last entry
+                    if !pending_comments.is_empty() && !entries.is_empty()
+                        && let Some(last) = entries.last_mut() {
+                            let trailing = pending_comments.join("\n");
+                            if last.trailing.is_some() {
+                                last.trailing = Some(format!("{}\n{}", last.trailing.as_ref().unwrap(), trailing));
+                            } else {
+                                last.trailing = Some(trailing);
+                            }
+                        }
 
                     Ok(Spanned::new(Expr::Record(entries), span))
                 }
@@ -1954,7 +2068,7 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> AnyhowResult<SpannedExpr> {
                 Rule::assignment => {
                     let mut inner_pairs = primary.into_inner();
                     let ident = inner_pairs.next().unwrap().as_str().to_string();
-                    let value = Box::new(pairs_to_expr(inner_pairs.next().unwrap().into_inner())?);
+                    let value = Box::new(pairs_to_expr_inner(inner_pairs.next().unwrap().into_inner(), preserve_comments)?);
                     Ok(Spanned::new(Expr::Assignment { ident, value }, span))
                 }
                 Rule::lambda => {
@@ -1984,17 +2098,17 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> AnyhowResult<SpannedExpr> {
                         }
                     }
 
-                    let body = Box::new(pairs_to_expr(body_pairs.into_inner())?);
+                    let body = Box::new(pairs_to_expr_inner(body_pairs.into_inner(), preserve_comments)?);
                     Ok(Spanned::new(Expr::Lambda { args, body }, span))
                 }
                 Rule::conditional => {
                     let mut inner_pairs = primary.into_inner();
                     let condition =
-                        Box::new(pairs_to_expr(inner_pairs.next().unwrap().into_inner())?);
+                        Box::new(pairs_to_expr_inner(inner_pairs.next().unwrap().into_inner(), preserve_comments)?);
                     let then_expr =
-                        Box::new(pairs_to_expr(inner_pairs.next().unwrap().into_inner())?);
+                        Box::new(pairs_to_expr_inner(inner_pairs.next().unwrap().into_inner(), preserve_comments)?);
                     let else_expr =
-                        Box::new(pairs_to_expr(inner_pairs.next().unwrap().into_inner())?);
+                        Box::new(pairs_to_expr_inner(inner_pairs.next().unwrap().into_inner(), preserve_comments)?);
                     Ok(Spanned::new(
                         Expr::Conditional {
                             condition,
@@ -2006,27 +2120,49 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> AnyhowResult<SpannedExpr> {
                 }
                 Rule::do_block => {
                     let inner_pairs = primary.into_inner();
-                    let mut statements = Vec::new();
-                    let mut return_expr = Box::new(Spanned::dummy(Expr::Null));
+                    let mut statements: Vec<Commented<SpannedExpr>> = Vec::new();
+                    let mut pending_comments: Vec<String> = Vec::new();
+                    let mut return_expr = Box::new(Commented::new(Spanned::dummy(Expr::Null)));
 
                     for pair in inner_pairs {
                         match pair.as_rule() {
                             Rule::do_statement => {
-                                if let Some(inner) = pair.into_inner().next() {
-                                    if inner.as_rule() == Rule::expression {
-                                        statements.push(DoStatement::Expression(pairs_to_expr(
-                                            inner.into_inner(),
-                                        )?));
-                                    } else if inner.as_rule() == Rule::comment {
-                                        statements
-                                            .push(DoStatement::Comment(inner.as_str().to_string()));
-                                    }
+                                let mut inner = pair.into_inner();
+                                if let Some(first) = inner.next() {
+                                    if first.as_rule() == Rule::expression {
+                                        let expr = pairs_to_expr_inner(first.into_inner(), preserve_comments)?;
+                                        // Check for optional trailing comment
+                                        let trailing = if preserve_comments {
+                                            inner.next()
+                                                .filter(|p| p.as_rule() == Rule::comment)
+                                                .map(|p| p.as_str().to_string())
+                                        } else {
+                                            None
+                                        };
+                                        statements.push(Commented::with_comments(
+                                            std::mem::take(&mut pending_comments),
+                                            expr,
+                                            trailing,
+                                        ));
+                                    } else if first.as_rule() == Rule::comment
+                                        && preserve_comments {
+                                            pending_comments.push(first.as_str().to_string());
+                                        }
                                 }
                             }
                             Rule::return_statement => {
                                 let return_expr_pair = pair.into_inner().next().unwrap();
-                                return_expr =
-                                    Box::new(pairs_to_expr(return_expr_pair.into_inner())?);
+                                let expr = pairs_to_expr_inner(return_expr_pair.into_inner(), preserve_comments)?;
+                                return_expr = Box::new(Commented::with_comments(
+                                    std::mem::take(&mut pending_comments),
+                                    expr,
+                                    None,
+                                ));
+                            }
+                            Rule::comment => {
+                                if preserve_comments {
+                                    pending_comments.push(pair.as_str().to_string());
+                                }
                             }
                             _ => {}
                         }
@@ -2055,7 +2191,7 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> AnyhowResult<SpannedExpr> {
                     let field = primary.as_str()[1..].to_string();
                     Ok(Spanned::new(Expr::InputReference(field), span))
                 }
-                Rule::expression => pairs_to_expr(primary.into_inner()),
+                Rule::expression => pairs_to_expr_inner(primary.into_inner(), preserve_comments),
                 _ => unreachable!("{}", primary.as_str()),
             }
         })
@@ -2091,7 +2227,7 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> AnyhowResult<SpannedExpr> {
                     span,
                 )),
                 Rule::access => {
-                    let index_expr = pairs_to_expr(op.into_inner())?;
+                    let index_expr = pairs_to_expr_inner(op.into_inner(), preserve_comments)?;
                     Ok(Spanned::new(
                         Expr::Access {
                             expr: Box::new(lhs?),
@@ -2114,7 +2250,7 @@ pub fn pairs_to_expr(pairs: Pairs<Rule>) -> AnyhowResult<SpannedExpr> {
                     let call_list = op.into_inner();
                     let args = call_list
                         .into_iter()
-                        .map(|arg| pairs_to_expr(arg.into_inner()))
+                        .map(|arg| pairs_to_expr_inner(arg.into_inner(), preserve_comments))
                         .collect::<AnyhowResult<Vec<SpannedExpr>>>()?;
                     Ok(Spanned::new(
                         Expr::Call {

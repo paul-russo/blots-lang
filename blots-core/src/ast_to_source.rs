@@ -1,6 +1,4 @@
-use crate::ast::{
-    BinaryOp, DoStatement, Expr, PostfixOp, RecordEntry, RecordKey, SpannedExpr, UnaryOp,
-};
+use crate::ast::{BinaryOp, Expr, PostfixOp, RecordEntry, RecordKey, SpannedExpr, UnaryOp};
 use crate::precedence::{Assoc, operator_info};
 use crate::values::{LambdaArg, SerializableValue};
 use indexmap::IndexMap;
@@ -62,11 +60,11 @@ pub fn expr_to_source(spanned_expr: &SpannedExpr) -> String {
         Expr::InputReference(field) => format!("#{}", field),
         Expr::BuiltIn(built_in) => built_in.name().to_string(),
         Expr::List(items) => {
-            let items_str: Vec<String> = items.iter().map(expr_to_source).collect();
+            let items_str: Vec<String> = items.iter().map(|c| expr_to_source(&c.node)).collect();
             format!("[{}]", items_str.join(", "))
         }
         Expr::Record(entries) => {
-            let entries_str: Vec<String> = entries.iter().map(record_entry_to_source).collect();
+            let entries_str: Vec<String> = entries.iter().map(|c| record_entry_to_source(&c.node)).collect();
             format!("{{{}}}", entries_str.join(", "))
         }
         Expr::Lambda { args, body } => {
@@ -89,16 +87,22 @@ pub fn expr_to_source(spanned_expr: &SpannedExpr) -> String {
         } => {
             let mut result = "do {".to_string();
             for stmt in statements {
-                match stmt {
-                    DoStatement::Expression(e) => {
-                        result.push_str(&format!("\n  {}", expr_to_source(e)));
-                    }
-                    DoStatement::Comment(c) => {
-                        result.push_str(&format!("\n  {}", c));
-                    }
+                // Leading comments
+                for comment in &stmt.leading {
+                    result.push_str(&format!("\n  {}", comment));
+                }
+                // Expression
+                result.push_str(&format!("\n  {}", expr_to_source(&stmt.node)));
+                // Trailing comment
+                if let Some(trailing) = &stmt.trailing {
+                    result.push_str(&format!("  {}", trailing));
                 }
             }
-            result.push_str(&format!("\n  return {}\n}}", expr_to_source(return_expr)));
+            // Return expression with leading comments
+            for comment in &return_expr.leading {
+                result.push_str(&format!("\n  {}", comment));
+            }
+            result.push_str(&format!("\n  return {}\n}}", expr_to_source(&return_expr.node)));
             result
         }
         Expr::Assignment { ident, value } => format!("{} = {}", ident, expr_to_source(value)),
@@ -284,14 +288,14 @@ pub fn expr_to_source_with_scope(
         Expr::List(items) => {
             let items_str: Vec<String> = items
                 .iter()
-                .map(|e| expr_to_source_with_scope(e, scope))
+                .map(|c| expr_to_source_with_scope(&c.node, scope))
                 .collect();
             format!("[{}]", items_str.join(", "))
         }
         Expr::Record(entries) => {
             let entries_str: Vec<String> = entries
                 .iter()
-                .map(|e| record_entry_to_source_with_scope(e, scope))
+                .map(|c| record_entry_to_source_with_scope(&c.node, scope))
                 .collect();
             format!("{{{}}}", entries_str.join(", "))
         }
@@ -325,18 +329,24 @@ pub fn expr_to_source_with_scope(
         } => {
             let mut result = "do {".to_string();
             for stmt in statements {
-                match stmt {
-                    DoStatement::Expression(e) => {
-                        result.push_str(&format!("\n  {}", expr_to_source_with_scope(e, scope)));
-                    }
-                    DoStatement::Comment(c) => {
-                        result.push_str(&format!("\n  // {}", c));
-                    }
+                // Leading comments
+                for comment in &stmt.leading {
+                    result.push_str(&format!("\n  {}", comment));
                 }
+                // Expression
+                result.push_str(&format!("\n  {}", expr_to_source_with_scope(&stmt.node, scope)));
+                // Trailing comment
+                if let Some(trailing) = &stmt.trailing {
+                    result.push_str(&format!("  {}", trailing));
+                }
+            }
+            // Return expression with leading comments
+            for comment in &return_expr.leading {
+                result.push_str(&format!("\n  {}", comment));
             }
             result.push_str(&format!(
                 "\n  return {}",
-                expr_to_source_with_scope(return_expr, scope)
+                expr_to_source_with_scope(&return_expr.node, scope)
             ));
             result.push_str("\n}");
             result

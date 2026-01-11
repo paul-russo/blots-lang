@@ -1,4 +1,4 @@
-use crate::ast::{BinaryOp, DoStatement, Expr, RecordEntry, RecordKey, SpannedExpr};
+use crate::ast::{BinaryOp, Commented, Expr, RecordEntry, RecordKey, SpannedExpr};
 use crate::ast_to_source::{expr_to_source, format_record_key, needs_parens_in_binop};
 use crate::values::LambdaArg;
 
@@ -44,6 +44,9 @@ fn format_expr_impl(expr: &SpannedExpr, max_cols: usize, indent: usize) -> Strin
 /// Format an expression on a single line (respecting our formatting rules)
 fn format_single_line(expr: &SpannedExpr) -> String {
     match &expr.node {
+        Expr::Assignment { ident, value } => {
+            format!("{} = {}", ident, format_single_line(value))
+        }
         Expr::Output { expr: inner_expr } => {
             format!("output {}", format_single_line(inner_expr))
         }
@@ -65,13 +68,21 @@ fn format_single_line(expr: &SpannedExpr) -> String {
             format!("{}({})", func_str, args_str.join(", "))
         }
         Expr::List(items) => {
-            let items_str: Vec<String> = items.iter().map(format_single_line).collect();
+            // If any items have comments, force multiline by returning string with newline
+            if items.iter().any(|c| c.has_comments()) {
+                return "[\n]".to_string(); // Placeholder that forces multiline
+            }
+            let items_str: Vec<String> = items.iter().map(|c| format_single_line(&c.node)).collect();
             format!("[{}]", items_str.join(", "))
         }
         Expr::Record(entries) => {
+            // If any entries have comments, force multiline by returning string with newline
+            if entries.iter().any(|c| c.has_comments()) {
+                return "{\n}".to_string(); // Placeholder that forces multiline
+            }
             let entries_str: Vec<String> = entries
                 .iter()
-                .map(format_record_entry_single_line)
+                .map(|c| format_record_entry_single_line(&c.node))
                 .collect();
             format!("{{{}}}", entries_str.join(", "))
         }
@@ -152,7 +163,7 @@ fn format_assignment_multiline(
 }
 
 /// Format a list with line breaks
-fn format_list_multiline(items: &[SpannedExpr], max_cols: usize, indent: usize) -> String {
+fn format_list_multiline(items: &[Commented<SpannedExpr>], max_cols: usize, indent: usize) -> String {
     if items.is_empty() {
         return "[]".to_string();
     }
@@ -163,12 +174,22 @@ fn format_list_multiline(items: &[SpannedExpr], max_cols: usize, indent: usize) 
     let mut result = "[".to_string();
 
     for item in items.iter() {
+        // Leading comments
+        for comment in &item.leading {
+            result.push('\n');
+            result.push_str(&indent_str);
+            result.push_str(comment);
+        }
+        // Expression
         result.push('\n');
         result.push_str(&indent_str);
-        result.push_str(&format_expr_impl(item, max_cols, inner_indent));
-
-        // Add comma after each item (including last for multi-line)
+        result.push_str(&format_expr_impl(&item.node, max_cols, inner_indent));
         result.push(',');
+        // Trailing comment
+        if let Some(trailing) = &item.trailing {
+            result.push_str("  ");
+            result.push_str(trailing);
+        }
     }
 
     result.push('\n');
@@ -179,7 +200,7 @@ fn format_list_multiline(items: &[SpannedExpr], max_cols: usize, indent: usize) 
 }
 
 /// Format a record with line breaks
-fn format_record_multiline(entries: &[RecordEntry], max_cols: usize, indent: usize) -> String {
+fn format_record_multiline(entries: &[Commented<RecordEntry>], max_cols: usize, indent: usize) -> String {
     if entries.is_empty() {
         return "{}".to_string();
     }
@@ -190,12 +211,22 @@ fn format_record_multiline(entries: &[RecordEntry], max_cols: usize, indent: usi
     let mut result = "{".to_string();
 
     for entry in entries {
+        // Leading comments
+        for comment in &entry.leading {
+            result.push('\n');
+            result.push_str(&indent_str);
+            result.push_str(comment);
+        }
+        // Entry
         result.push('\n');
         result.push_str(&indent_str);
-        result.push_str(&format_record_entry(entry, max_cols, inner_indent));
-
-        // Add comma after each entry (including last for multi-line)
+        result.push_str(&format_record_entry(&entry.node, max_cols, inner_indent));
         result.push(',');
+        // Trailing comment
+        if let Some(trailing) = &entry.trailing {
+            result.push_str("  ");
+            result.push_str(trailing);
+        }
     }
 
     result.push('\n');
@@ -479,8 +510,8 @@ fn format_binary_op_multiline(
 
 /// Format a do block (always multi-line)
 fn format_do_block_multiline(
-    statements: &[DoStatement],
-    return_expr: &SpannedExpr,
+    statements: &[Commented<SpannedExpr>],
+    return_expr: &Commented<SpannedExpr>,
     max_cols: usize,
     indent: usize,
 ) -> String {
@@ -490,24 +521,33 @@ fn format_do_block_multiline(
     let mut result = "do {".to_string();
 
     for stmt in statements {
-        match stmt {
-            DoStatement::Expression(e) => {
-                result.push('\n');
-                result.push_str(&indent_str);
-                result.push_str(&format_expr_impl(e, max_cols, inner_indent));
-            }
-            DoStatement::Comment(c) => {
-                result.push('\n');
-                result.push_str(&indent_str);
-                result.push_str(c);
-            }
+        // Leading comments
+        for comment in &stmt.leading {
+            result.push('\n');
+            result.push_str(&indent_str);
+            result.push_str(comment);
+        }
+        // Expression
+        result.push('\n');
+        result.push_str(&indent_str);
+        result.push_str(&format_expr_impl(&stmt.node, max_cols, inner_indent));
+        // Trailing comment
+        if let Some(trailing) = &stmt.trailing {
+            result.push_str("  ");
+            result.push_str(trailing);
         }
     }
 
+    // Return expression with leading comments
+    for comment in &return_expr.leading {
+        result.push('\n');
+        result.push_str(&indent_str);
+        result.push_str(comment);
+    }
     result.push('\n');
     result.push_str(&indent_str);
     result.push_str("return ");
-    result.push_str(&format_expr_impl(return_expr, max_cols, inner_indent));
+    result.push_str(&format_expr_impl(&return_expr.node, max_cols, inner_indent));
     result.push('\n');
     result.push_str(&make_indent(indent));
     result.push('}');
@@ -1484,5 +1524,132 @@ mod tests {
         // Verify the formatted output is still valid syntax by re-parsing
         let reparsed = parse_test_expr(&formatted);
         assert!(matches!(reparsed.node, Expr::Assignment { .. }));
+    }
+
+    #[test]
+    fn test_list_comments_preserved() {
+        use crate::expressions::pairs_to_expr_with_comments;
+        use crate::parser::Rule;
+
+        let source = "x = [\n  // first item\n  1,\n  2,  // inline\n  // third\n  3,\n]";
+        let pairs = get_pairs(source).unwrap();
+
+        for pair in pairs {
+            if pair.as_rule() == Rule::statement {
+                if let Some(inner_pair) = pair.into_inner().next() {
+                    if let Ok(expr) = pairs_to_expr_with_comments(inner_pair.into_inner()) {
+                        let formatted = format_expr(&expr, Some(80));
+
+                        assert!(
+                            formatted.contains("// first item"),
+                            "Leading comment should be preserved, got:\n{}",
+                            formatted
+                        );
+                        assert!(
+                            formatted.contains("// inline"),
+                            "Inline comment should be preserved, got:\n{}",
+                            formatted
+                        );
+                        assert!(
+                            formatted.contains("// third"),
+                            "Leading comment on third item should be preserved, got:\n{}",
+                            formatted
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_record_comments_preserved() {
+        use crate::expressions::pairs_to_expr_with_comments;
+        use crate::parser::Rule;
+
+        let source = "x = {\n  // name field\n  name: \"Alice\",\n  age: 30,  // years old\n}";
+        let pairs = get_pairs(source).unwrap();
+
+        for pair in pairs {
+            if pair.as_rule() == Rule::statement {
+                if let Some(inner_pair) = pair.into_inner().next() {
+                    if let Ok(expr) = pairs_to_expr_with_comments(inner_pair.into_inner()) {
+                        let formatted = format_expr(&expr, Some(80));
+
+                        assert!(
+                            formatted.contains("// name field"),
+                            "Leading comment should be preserved, got:\n{}",
+                            formatted
+                        );
+                        assert!(
+                            formatted.contains("// years old"),
+                            "Inline comment should be preserved, got:\n{}",
+                            formatted
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_do_block_comments_preserved() {
+        use crate::expressions::pairs_to_expr_with_comments;
+        use crate::parser::Rule;
+
+        let source = "f = n => do {\n  // compute\n  doubled = n * 2\n  // result\n  return doubled\n}";
+        let pairs = get_pairs(source).unwrap();
+
+        for pair in pairs {
+            if pair.as_rule() == Rule::statement {
+                if let Some(inner_pair) = pair.into_inner().next() {
+                    if let Ok(expr) = pairs_to_expr_with_comments(inner_pair.into_inner()) {
+                        let formatted = format_expr(&expr, Some(80));
+
+                        assert!(
+                            formatted.contains("// compute"),
+                            "Statement leading comment should be preserved, got:\n{}",
+                            formatted
+                        );
+                        assert!(
+                            formatted.contains("// result"),
+                            "Return leading comment should be preserved, got:\n{}",
+                            formatted
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_comments_force_multiline() {
+        use crate::expressions::pairs_to_expr_with_comments;
+        use crate::parser::Rule;
+
+        // Even a short list with comments should be multiline
+        let source = "x = [1,  // one\n2]";
+        let pairs = get_pairs(source).unwrap();
+
+        for pair in pairs {
+            if pair.as_rule() == Rule::statement {
+                if let Some(inner_pair) = pair.into_inner().next() {
+                    if let Ok(expr) = pairs_to_expr_with_comments(inner_pair.into_inner()) {
+                        let formatted = format_expr(&expr, Some(80));
+
+                        // Should contain newlines because of the comment
+                        assert!(
+                            formatted.contains('\n'),
+                            "List with comments should be multiline, got:\n{}",
+                            formatted
+                        );
+                        assert!(
+                            formatted.contains("// one"),
+                            "Comment should be preserved, got:\n{}",
+                            formatted
+                        );
+                    }
+                }
+            }
+        }
     }
 }

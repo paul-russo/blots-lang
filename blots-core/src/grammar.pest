@@ -1,7 +1,9 @@
 WHITESPACE = _{ " " | "\t" }
-NEWLINE    = _{ inline_comment? ~ ("\r\n" | "\n") }
-inline_comment = _{ "//" ~ (!NEWLINE ~ ANY)* }
-comment    = @{ "//" ~ (!NEWLINE ~ ANY)* }
+plain_newline = _{ "\r\n" | "\n" }
+NEWLINE    = _{ inline_comment? ~ plain_newline }
+inline_comment = _{ "//" ~ (!plain_newline ~ ANY)* }
+comment    = @{ "//" ~ (!plain_newline ~ ANY)* }
+eol_comment = @{ "//" ~ (!plain_newline ~ ANY)* }
 
 number  = @{ (integer ~ ("_"+ ~ integer)* ~ ("." ~ ASCII_DIGIT+)? | !integer ~ "." ~ ASCII_DIGIT+) ~ (^"e" ~ integer)? }
 integer = _{ ("+" | "-")? ~ ASCII_DIGIT+ }
@@ -81,14 +83,16 @@ spread_operator       =  { "..." }
 spread_expression     = ${ spread_operator ~ expression }
 spreadable_expression = _{ spread_expression | expression }
 
-list = !{ "[]" | "[" ~ NEWLINE* ~ spreadable_expression ~ ("," ~ NEWLINE* ~ spreadable_expression)* ~ ("," ~ NEWLINE)? ~ NEWLINE* ~ "]" }
+list_item = { spreadable_expression ~ (WHITESPACE* ~ eol_comment)? }
+list = !{ "[]" | "[" ~ (comment ~ (WHITESPACE | plain_newline)+ | WHITESPACE | plain_newline)* ~ (list_item ~ ("," ~ (comment ~ (WHITESPACE | plain_newline)+ | WHITESPACE | plain_newline)* ~ list_item)*)? ~ ("," ~ (WHITESPACE | plain_newline)*)? ~ (comment ~ (WHITESPACE | plain_newline)* | WHITESPACE | plain_newline)* ~ "]" }
 
 record_key_static  =  { identifier | string }
 record_key_dynamic =  { "[" ~ expression ~ "]" }
 record_key         = _{ record_key_static | record_key_dynamic }
 record_pair        = !{ record_key ~ ":" ~ NEWLINE* ~ expression }
 record_shorthand   =  { identifier }
-record             = !{ "{}" | "{" ~ NEWLINE* ~ ((record_pair | record_shorthand | spread_expression) ~ ("," ~ NEWLINE* ~ (record_pair | record_shorthand | spread_expression))*)? ~ ("," ~ NEWLINE)? ~ NEWLINE* ~ "}" }
+record_item        =  { (record_pair | record_shorthand | spread_expression) ~ (WHITESPACE* ~ eol_comment)? }
+record             = !{ "{}" | "{" ~ (comment ~ (WHITESPACE | plain_newline)+ | WHITESPACE | plain_newline)* ~ (record_item ~ ("," ~ (comment ~ (WHITESPACE | plain_newline)+ | WHITESPACE | plain_newline)* ~ record_item)*)? ~ ("," ~ (WHITESPACE | plain_newline)*)? ~ (comment ~ (WHITESPACE | plain_newline)* | WHITESPACE | plain_newline)* ~ "}" }
 
 conditional = ${ "if" ~ WHITESPACE+ ~ expression ~ (WHITESPACE | NEWLINE)+ ~ "then" ~ (WHITESPACE | NEWLINE)+ ~ expression ~ (WHITESPACE | NEWLINE)+ ~ "else" ~ (WHITESPACE | NEWLINE)+ ~ expression }
 
@@ -102,7 +106,7 @@ output_declaration = ${ "output" ~ WHITESPACE+ ~ (assignment | identifier) }
 
 do_statement     =  { (expression | comment) ~ comment? }
 return_statement = ${ WHITESPACE* ~ "return" ~ WHITESPACE+ ~ expression }
-do_block         = ${ "do" ~ (WHITESPACE | NEWLINE)+ ~ "{" ~ (WHITESPACE | NEWLINE)* ~ (WHITESPACE* ~ do_statement ~ WHITESPACE* ~ (NEWLINE+ | ";") ~ (WHITESPACE | NEWLINE)*)* ~ (WHITESPACE | NEWLINE)* ~ return_statement ~ (WHITESPACE | NEWLINE)* ~ "}" }
+do_block         = ${ "do" ~ (WHITESPACE | plain_newline)+ ~ "{" ~ (comment ~ (WHITESPACE | plain_newline)+ | WHITESPACE | plain_newline)* ~ (WHITESPACE* ~ do_statement ~ WHITESPACE* ~ (plain_newline+ | ";") ~ (comment ~ (WHITESPACE | plain_newline)+ | WHITESPACE | plain_newline)*)* ~ (comment ~ (WHITESPACE | plain_newline)* | WHITESPACE | plain_newline)* ~ return_statement ~ (WHITESPACE | plain_newline)* ~ "}" }
 
 statement =  { (output_declaration | expression | comment) ~ comment? }
 input     = _{ SOI ~ statement? ~ (NEWLINE ~ statement?)* ~ EOI }

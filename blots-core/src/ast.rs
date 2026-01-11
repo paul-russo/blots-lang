@@ -66,6 +66,49 @@ impl<T> Spanned<T> {
 /// Expression with source location information
 pub type SpannedExpr = Spanned<Expr>;
 
+/// Wrapper that attaches leading/trailing comments to any AST node.
+/// Used for preserving comments during formatting while keeping evaluation clean.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Commented<T> {
+    /// Comments appearing on lines before this node
+    pub leading: Vec<String>,
+    /// The wrapped node
+    pub node: T,
+    /// Optional inline comment at end of line
+    pub trailing: Option<String>,
+}
+
+impl<T> Commented<T> {
+    /// Create a new Commented wrapper with no comments
+    pub fn new(node: T) -> Self {
+        Self {
+            leading: vec![],
+            node,
+            trailing: None,
+        }
+    }
+
+    /// Create a Commented wrapper with comments
+    pub fn with_comments(leading: Vec<String>, node: T, trailing: Option<String>) -> Self {
+        Self {
+            leading,
+            node,
+            trailing,
+        }
+    }
+
+    /// Check if this node has any comments attached
+    pub fn has_comments(&self) -> bool {
+        !self.leading.is_empty() || self.trailing.is_some()
+    }
+}
+
+impl<T> From<T> for Commented<T> {
+    fn from(node: T) -> Self {
+        Self::new(node)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Expr {
     // Literals
@@ -79,9 +122,9 @@ pub enum Expr {
     InputReference(String),   // Shorthand for inputs.field (e.g., #field)
     BuiltIn(BuiltInFunction), // Built-in function
 
-    // Collections
-    List(Vec<SpannedExpr>),
-    Record(Vec<RecordEntry>),
+    // Collections (elements wrapped in Commented for formatting)
+    List(Vec<Commented<SpannedExpr>>),
+    Record(Vec<Commented<RecordEntry>>),
 
     // Lambda
     Lambda {
@@ -97,8 +140,8 @@ pub enum Expr {
     },
 
     DoBlock {
-        statements: Vec<DoStatement>,
-        return_expr: Box<SpannedExpr>,
+        statements: Vec<Commented<SpannedExpr>>,
+        return_expr: Box<Commented<SpannedExpr>>,
     },
 
     // Operations
@@ -158,12 +201,6 @@ pub enum RecordKey {
     Dynamic(Box<SpannedExpr>),
     Shorthand(String),
     Spread(Box<SpannedExpr>),
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum DoStatement {
-    Expression(SpannedExpr),
-    Comment(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
