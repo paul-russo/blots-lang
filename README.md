@@ -22,7 +22,7 @@ cargo install blots
 
 ### Core Types
 
-- **Number**: 64-bit float with decimal/sci-notation support and `_` separators (e.g., `1_000_000`, `3.14e-2`)
+- **Number**: 64-bit float with decimal/sci-notation support, `_` separators, and `0b`/`0x` prefixes for binary/hex literals (e.g., `1_000_000`, `3.14e-2`, `0b1010`, `0xFF`)
 - **String**: Single or double quotes (`'hello'`, `"world"`); concatenate with `+`
 - **Boolean**: `true`, `false`; operators: `and`/`&&`, `or`/`||`, `not`/`!`
 - **List**: Ordered collection `[1, 2, 3]`; access with `list[index]` (0-based, or negative to count from end: `list[-1]` is the last element); spread with `[...list1, ...list2]`
