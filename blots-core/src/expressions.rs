@@ -1919,11 +1919,38 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
             let span = span_from_pair(&primary);
             match primary.as_rule() {
                 Rule::number => {
-                    let value = primary
-                        .as_str()
-                        .replace("_", "")
-                        .parse::<f64>()
-                        .map_err(anyhow::Error::from)?;
+                    let num_str = primary.as_str();
+                    let value = if num_str.starts_with("0b") || num_str.starts_with("-0b") || num_str.starts_with("+0b") {
+                        // Binary number
+                        let (sign, digits) = if num_str.starts_with("-0b") {
+                            (-1.0, &num_str[3..])
+                        } else if num_str.starts_with("+0b") {
+                            (1.0, &num_str[3..])
+                        } else {
+                            (1.0, &num_str[2..])
+                        };
+                        let cleaned = digits.replace("_", "");
+                        let parsed = i64::from_str_radix(&cleaned, 2)
+                            .map_err(|e| anyhow!("Invalid binary number: {}", e))?;
+                        sign * parsed as f64
+                    } else if num_str.starts_with("0x") || num_str.starts_with("-0x") || num_str.starts_with("+0x") {
+                        // Hexadecimal number
+                        let (sign, digits) = if num_str.starts_with("-0x") {
+                            (-1.0, &num_str[3..])
+                        } else if num_str.starts_with("+0x") {
+                            (1.0, &num_str[3..])
+                        } else {
+                            (1.0, &num_str[2..])
+                        };
+                        let cleaned = digits.replace("_", "");
+                        let parsed = i64::from_str_radix(&cleaned, 16)
+                            .map_err(|e| anyhow!("Invalid hexadecimal number: {}", e))?;
+                        sign * parsed as f64
+                    } else {
+                        // Decimal number (existing logic)
+                        num_str.replace("_", "").parse::<f64>()
+                            .map_err(anyhow::Error::from)?
+                    };
                     Ok(Spanned::new(Expr::Number(value), span))
                 }
                 Rule::list => {

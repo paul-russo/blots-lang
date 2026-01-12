@@ -1770,3 +1770,201 @@ mod negative_indexing_tests {
         assert_eq!(result, Value::Null);
     }
 }
+
+// Tests for binary and hexadecimal number notation
+#[cfg(test)]
+mod binary_hex_number_tests {
+    use crate::environment::Environment;
+    use crate::expressions::evaluate_pairs;
+    use crate::heap::Heap;
+    use crate::parser::{Rule, get_pairs};
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    fn parse_and_evaluate(
+        code: &str,
+        heap: Option<Rc<RefCell<Heap>>>,
+        bindings: Option<Rc<Environment>>,
+    ) -> Result<Value, crate::error::RuntimeError> {
+        let pairs = get_pairs(code).map_err(|e| crate::error::RuntimeError::new(e.to_string()))?;
+
+        let heap = heap.unwrap_or_else(|| Rc::new(RefCell::new(Heap::new())));
+        let bindings = bindings.unwrap_or_else(|| Rc::new(Environment::new()));
+
+        let mut result = Value::Null;
+        for pair in pairs {
+            match pair.as_rule() {
+                Rule::statement => {
+                    if let Some(inner_pair) = pair.into_inner().next() {
+                        match inner_pair.as_rule() {
+                            Rule::expression | Rule::assignment => {
+                                result = evaluate_pairs(
+                                    inner_pair.into_inner(),
+                                    Rc::clone(&heap),
+                                    Rc::clone(&bindings),
+                                    0,
+                                    code,
+                                )?;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Rule::EOI => {}
+                _ => {}
+            }
+        }
+        Ok(result)
+    }
+
+    #[test]
+    fn test_binary_basic() {
+        let result = parse_and_evaluate("0b1010", None, None).unwrap();
+        assert_eq!(result, Value::Number(10.0));
+    }
+
+    #[test]
+    fn test_binary_zero() {
+        let result = parse_and_evaluate("0b0", None, None).unwrap();
+        assert_eq!(result, Value::Number(0.0));
+    }
+
+    #[test]
+    fn test_binary_one() {
+        let result = parse_and_evaluate("0b1", None, None).unwrap();
+        assert_eq!(result, Value::Number(1.0));
+    }
+
+    #[test]
+    fn test_binary_negative() {
+        let result = parse_and_evaluate("-0b1010", None, None).unwrap();
+        assert_eq!(result, Value::Number(-10.0));
+    }
+
+    #[test]
+    fn test_binary_explicit_positive() {
+        let result = parse_and_evaluate("+0b1010", None, None).unwrap();
+        assert_eq!(result, Value::Number(10.0));
+    }
+
+    #[test]
+    fn test_binary_with_underscores() {
+        let result = parse_and_evaluate("0b1010_1010", None, None).unwrap();
+        assert_eq!(result, Value::Number(170.0));
+    }
+
+    #[test]
+    fn test_binary_negative_zero() {
+        let result = parse_and_evaluate("-0b0", None, None).unwrap();
+        assert_eq!(result, Value::Number(0.0));
+    }
+
+    #[test]
+    fn test_hex_basic() {
+        let result = parse_and_evaluate("0xFF", None, None).unwrap();
+        assert_eq!(result, Value::Number(255.0));
+    }
+
+    #[test]
+    fn test_hex_lowercase() {
+        let result = parse_and_evaluate("0xff", None, None).unwrap();
+        assert_eq!(result, Value::Number(255.0));
+    }
+
+    #[test]
+    fn test_hex_mixed_case() {
+        let result = parse_and_evaluate("0xFf", None, None).unwrap();
+        assert_eq!(result, Value::Number(255.0));
+    }
+
+    #[test]
+    fn test_hex_zero() {
+        let result = parse_and_evaluate("0x0", None, None).unwrap();
+        assert_eq!(result, Value::Number(0.0));
+    }
+
+    #[test]
+    fn test_hex_negative() {
+        let result = parse_and_evaluate("-0xFF", None, None).unwrap();
+        assert_eq!(result, Value::Number(-255.0));
+    }
+
+    #[test]
+    fn test_hex_explicit_positive() {
+        let result = parse_and_evaluate("+0xFF", None, None).unwrap();
+        assert_eq!(result, Value::Number(255.0));
+    }
+
+    #[test]
+    fn test_hex_with_underscores() {
+        let result = parse_and_evaluate("0xFF_FF", None, None).unwrap();
+        assert_eq!(result, Value::Number(65535.0));
+    }
+
+    #[test]
+    fn test_hex_large_value() {
+        let result = parse_and_evaluate("0xFFFFFFFF", None, None).unwrap();
+        assert_eq!(result, Value::Number(4294967295.0));
+    }
+
+    #[test]
+    fn test_hex_negative_zero() {
+        let result = parse_and_evaluate("-0x0", None, None).unwrap();
+        assert_eq!(result, Value::Number(0.0));
+    }
+
+    #[test]
+    fn test_binary_in_arithmetic() {
+        let result = parse_and_evaluate("0b1010 + 5", None, None).unwrap();
+        assert_eq!(result, Value::Number(15.0));
+    }
+
+    #[test]
+    fn test_hex_in_arithmetic() {
+        let result = parse_and_evaluate("0xFF * 2", None, None).unwrap();
+        assert_eq!(result, Value::Number(510.0));
+    }
+
+    #[test]
+    fn test_binary_and_hex_together() {
+        let result = parse_and_evaluate("0b1010 + 0xFF", None, None).unwrap();
+        assert_eq!(result, Value::Number(265.0));
+    }
+
+    #[test]
+    fn test_binary_in_comparison() {
+        let result = parse_and_evaluate("0b1010 == 10", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn test_hex_in_comparison() {
+        let result = parse_and_evaluate("0xFF == 255", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn test_binary_in_list() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+        let result = parse_and_evaluate("[0b1, 0b10, 0b11]", Some(Rc::clone(&heap)), Some(bindings)).unwrap();
+        let borrowed_heap = heap.borrow();
+        let list = result.as_list(&borrowed_heap).unwrap();
+        assert_eq!(list[0], Value::Number(1.0));
+        assert_eq!(list[1], Value::Number(2.0));
+        assert_eq!(list[2], Value::Number(3.0));
+    }
+
+    #[test]
+    fn test_hex_in_list() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+        let result = parse_and_evaluate("[0x1, 0xA, 0xFF]", Some(Rc::clone(&heap)), Some(bindings)).unwrap();
+        let borrowed_heap = heap.borrow();
+        let list = result.as_list(&borrowed_heap).unwrap();
+        assert_eq!(list[0], Value::Number(1.0));
+        assert_eq!(list[1], Value::Number(10.0));
+        assert_eq!(list[2], Value::Number(255.0));
+    }
+}
