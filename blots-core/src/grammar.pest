@@ -5,7 +5,12 @@ inline_comment = _{ "//" ~ (!plain_newline ~ ANY)* }
 comment    = @{ "//" ~ (!plain_newline ~ ANY)* }
 eol_comment = @{ "//" ~ (!plain_newline ~ ANY)* }
 
-number  = @{ (integer ~ ("_"+ ~ integer)* ~ ("." ~ ASCII_DIGIT+)? | !integer ~ "." ~ ASCII_DIGIT+) ~ (^"e" ~ integer)? }
+number  = @{ binary_number | hex_number | decimal_number }
+binary_number = _{ ("+" | "-")? ~ "0b" ~ binary_digits }
+hex_number = _{ ("+" | "-")? ~ "0x" ~ hex_digits }
+decimal_number = _{ (integer ~ ("_"+ ~ integer)* ~ ("." ~ ASCII_DIGIT+)? | !integer ~ "." ~ ASCII_DIGIT+) ~ (^"e" ~ integer)? }
+binary_digits = _{ ("0" | "1")+ ~ ("_"+ ~ ("0" | "1")+)* }
+hex_digits = _{ (ASCII_DIGIT | 'a'..'f' | 'A'..'F')+ ~ ("_"+ ~ (ASCII_DIGIT | 'a'..'f' | 'A'..'F')+)* }
 integer = _{ ("+" | "-")? ~ ASCII_DIGIT+ }
 
 bool = { "true" | "false" }
