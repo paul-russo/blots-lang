@@ -119,6 +119,12 @@ pub enum BuiltInFunction {
     ToBool,
     Convert,
 
+    // Unchecked comparison functions
+    Ugt,
+    Ult,
+    Ugte,
+    Ulte,
+
     // Platform-specific functions
     #[cfg(not(target_arch = "wasm32"))]
     Print,
@@ -198,6 +204,10 @@ impl BuiltInFunction {
             "flatten" => Some(Self::Flatten),
             "zip" => Some(Self::Zip),
             "chunk" => Some(Self::Chunk),
+            "ugt" => Some(Self::Ugt),
+            "ult" => Some(Self::Ult),
+            "ugte" => Some(Self::Ugte),
+            "ulte" => Some(Self::Ulte),
             #[cfg(not(target_arch = "wasm32"))]
             "print" => Some(Self::Print),
             #[cfg(not(target_arch = "wasm32"))]
@@ -271,6 +281,10 @@ impl BuiltInFunction {
             Self::ToNumber => "to_number",
             Self::ToBool => "to_bool",
             Self::Convert => "convert",
+            Self::Ugt => "ugt",
+            Self::Ult => "ult",
+            Self::Ugte => "ugte",
+            Self::Ulte => "ulte",
             #[cfg(not(target_arch = "wasm32"))]
             Self::Print => "print",
             #[cfg(not(target_arch = "wasm32"))]
@@ -350,6 +364,9 @@ impl BuiltInFunction {
             Self::Flatten => FunctionArity::Exact(1),
             Self::Zip => FunctionArity::AtLeast(2),
             Self::Chunk => FunctionArity::Exact(2),
+
+            // Unchecked comparison functions
+            Self::Ugt | Self::Ult | Self::Ugte | Self::Ulte => FunctionArity::Exact(2),
 
             // Platform-specific functions
             #[cfg(not(target_arch = "wasm32"))]
@@ -1170,7 +1187,9 @@ impl BuiltInFunction {
                 let chunk_values = {
                     let borrowed_heap = heap.borrow();
                     let list = args[0].as_list(&borrowed_heap)?;
-                    list.chunks(n).map(|chunk| chunk.to_vec()).collect::<Vec<_>>()
+                    list.chunks(n)
+                        .map(|chunk| chunk.to_vec())
+                        .collect::<Vec<_>>()
                 };
                 let mut borrowed_heap = heap.borrow_mut();
                 let chunks = chunk_values
@@ -1506,6 +1525,36 @@ impl BuiltInFunction {
 
                 Ok(heap.borrow_mut().insert_list(list))
             }
+
+            // Unchecked comparison functions - return false instead of error for type mismatches
+            Self::Ugt => {
+                match args[0].compare(&args[1], &heap.borrow())? {
+                    Some(std::cmp::Ordering::Greater) => Ok(Value::Bool(true)),
+                    _ => Ok(Value::Bool(false)),
+                }
+            }
+            Self::Ult => {
+                match args[0].compare(&args[1], &heap.borrow())? {
+                    Some(std::cmp::Ordering::Less) => Ok(Value::Bool(true)),
+                    _ => Ok(Value::Bool(false)),
+                }
+            }
+            Self::Ugte => {
+                match args[0].compare(&args[1], &heap.borrow())? {
+                    Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal) => {
+                        Ok(Value::Bool(true))
+                    }
+                    _ => Ok(Value::Bool(false)),
+                }
+            }
+            Self::Ulte => {
+                match args[0].compare(&args[1], &heap.borrow())? {
+                    Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal) => {
+                        Ok(Value::Bool(true))
+                    }
+                    _ => Ok(Value::Bool(false)),
+                }
+            }
         }
     }
 
@@ -1574,6 +1623,10 @@ impl BuiltInFunction {
             Self::Flatten,
             Self::Zip,
             Self::Chunk,
+            Self::Ugt,
+            Self::Ult,
+            Self::Ugte,
+            Self::Ulte,
             #[cfg(not(target_arch = "wasm32"))]
             Self::Print,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1767,7 +1820,10 @@ impl FunctionDef {
                 let parent_env = if scope.is_empty() {
                     Rc::clone(&bindings)
                 } else {
-                    Rc::new(Environment::extend_shared(Rc::clone(&bindings), scope.as_rc()))
+                    Rc::new(Environment::extend_shared(
+                        Rc::clone(&bindings),
+                        scope.as_rc(),
+                    ))
                 };
                 // Create new environment that extends captured scope (O(1) instead of O(n) clone!)
                 let new_env = Rc::new(Environment::extend_with(parent_env, local_bindings));
@@ -2942,5 +2998,257 @@ mod tests {
         let heap_borrow = heap.borrow();
         let record = result.as_record(&heap_borrow).unwrap();
         assert_eq!(record.len(), 0); // Empty record
+    }
+
+    #[test]
+    fn test_ugt_same_types() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        // 5 > 3 = true
+        let result = BuiltInFunction::Ugt
+            .call(
+                vec![Value::Number(5.0), Value::Number(3.0)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        // 3 > 5 = false
+        let result = BuiltInFunction::Ugt
+            .call(
+                vec![Value::Number(3.0), Value::Number(5.0)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        // 5 > 5 = false
+        let result = BuiltInFunction::Ugt
+            .call(
+                vec![Value::Number(5.0), Value::Number(5.0)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    #[test]
+    fn test_ult_same_types() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        // 3 < 5 = true
+        let result = BuiltInFunction::Ult
+            .call(
+                vec![Value::Number(3.0), Value::Number(5.0)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        // 5 < 3 = false
+        let result = BuiltInFunction::Ult
+            .call(
+                vec![Value::Number(5.0), Value::Number(3.0)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    #[test]
+    fn test_ugte_same_types() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        // 5 >= 3 = true
+        let result = BuiltInFunction::Ugte
+            .call(
+                vec![Value::Number(5.0), Value::Number(3.0)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        // 5 >= 5 = true
+        let result = BuiltInFunction::Ugte
+            .call(
+                vec![Value::Number(5.0), Value::Number(5.0)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        // 3 >= 5 = false
+        let result = BuiltInFunction::Ugte
+            .call(
+                vec![Value::Number(3.0), Value::Number(5.0)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    #[test]
+    fn test_ulte_same_types() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        // 3 <= 5 = true
+        let result = BuiltInFunction::Ulte
+            .call(
+                vec![Value::Number(3.0), Value::Number(5.0)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        // 5 <= 5 = true
+        let result = BuiltInFunction::Ulte
+            .call(
+                vec![Value::Number(5.0), Value::Number(5.0)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        // 5 <= 3 = false
+        let result = BuiltInFunction::Ulte
+            .call(
+                vec![Value::Number(5.0), Value::Number(3.0)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    #[test]
+    fn test_unchecked_comparisons_mixed_types_return_false() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        // null > 0 = false (not an error)
+        let result = BuiltInFunction::Ugt
+            .call(
+                vec![Value::Null, Value::Number(0.0)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        // null < 5 = false (not an error)
+        let result = BuiltInFunction::Ult
+            .call(
+                vec![Value::Null, Value::Number(5.0)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        // null >= 0 = false (not an error)
+        let result = BuiltInFunction::Ugte
+            .call(
+                vec![Value::Null, Value::Number(0.0)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        // null <= 0 = false (not an error)
+        let result = BuiltInFunction::Ulte
+            .call(
+                vec![Value::Null, Value::Number(0.0)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        // string vs number: "hello" > 5 = false (not an error)
+        let str_val = heap.borrow_mut().insert_string("hello".to_string());
+        let result = BuiltInFunction::Ugt
+            .call(
+                vec![str_val, Value::Number(5.0)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        // bool vs number: true > 5 = false (not an error)
+        let result = BuiltInFunction::Ugt
+            .call(
+                vec![Value::Bool(true), Value::Number(5.0)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        // list vs number: [1,2,3] > 5 = false (not an error)
+        let list = heap.borrow_mut().insert_list(vec![
+            Value::Number(1.0),
+            Value::Number(2.0),
+            Value::Number(3.0),
+        ]);
+        let result = BuiltInFunction::Ugt
+            .call(
+                vec![list, Value::Number(5.0)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap();
+        assert_eq!(result, Value::Bool(false));
     }
 }

@@ -12,6 +12,7 @@ use crate::{
     values::{
         CapturedScope, LambdaArg, LambdaDef,
         Value::{self, Bool, List, Number, Spread},
+        ValueType,
     },
 };
 use anyhow::{Result as AnyhowResult, anyhow};
@@ -19,9 +20,31 @@ use indexmap::IndexMap;
 use pest::iterators::{Pair, Pairs};
 use std::{
     cell::RefCell,
+    cmp::Ordering,
     collections::{HashMap, HashSet},
     rc::Rc,
 };
+
+/// Helper to evaluate ordering comparisons with proper type error handling.
+/// Returns true if the ordering matches any of the expected orderings, false otherwise.
+/// Returns an error if the types cannot be compared (compare() returns None).
+fn check_ordering(
+    ordering: Option<Ordering>,
+    expected: &[Ordering],
+    lhs_type: ValueType,
+    rhs_type: ValueType,
+    op_span: Span,
+    source: Rc<str>,
+) -> Result<bool, RuntimeError> {
+    match ordering {
+        Some(ord) => Ok(expected.contains(&ord)),
+        None => Err(RuntimeError::with_span(
+            format!("cannot compare {} with {}", lhs_type, rhs_type),
+            op_span,
+            source,
+        )),
+    }
+}
 
 /// Parse pairs into AST and evaluate
 pub fn evaluate_pairs(
@@ -829,39 +852,6 @@ fn evaluate_binary_op_ast(
         source.clone(),
     )?;
 
-    // Handle dot operators first - they never broadcast
-    match op {
-        BinaryOp::DotEqual => return Ok(Bool(lhs.equals(&rhs, &heap.borrow())?)),
-        BinaryOp::DotNotEqual => return Ok(Bool(!lhs.equals(&rhs, &heap.borrow())?)),
-        BinaryOp::DotLess => {
-            return match lhs.compare(&rhs, &heap.borrow())? {
-                Some(std::cmp::Ordering::Less) => Ok(Bool(true)),
-                _ => Ok(Bool(false)),
-            };
-        }
-        BinaryOp::DotLessEq => {
-            return match lhs.compare(&rhs, &heap.borrow())? {
-                Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal) => Ok(Bool(true)),
-                _ => Ok(Bool(false)),
-            };
-        }
-        BinaryOp::DotGreater => {
-            return match lhs.compare(&rhs, &heap.borrow())? {
-                Some(std::cmp::Ordering::Greater) => Ok(Bool(true)),
-                _ => Ok(Bool(false)),
-            };
-        }
-        BinaryOp::DotGreaterEq => {
-            return match lhs.compare(&rhs, &heap.borrow())? {
-                Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal) => {
-                    Ok(Bool(true))
-                }
-                _ => Ok(Bool(false)),
-            };
-        }
-        _ => {} // Continue to regular operator handling
-    }
-
     // Create a combined span for the entire binary operation
     let op_span = Span::new(
         left.span.start_byte,
@@ -869,6 +859,53 @@ fn evaluate_binary_op_ast(
         left.span.start_line,
         left.span.start_col,
     );
+
+    // Handle dot operators first - they never broadcast
+    match op {
+        BinaryOp::DotEqual => return Ok(Bool(lhs.equals(&rhs, &heap.borrow())?)),
+        BinaryOp::DotNotEqual => return Ok(Bool(!lhs.equals(&rhs, &heap.borrow())?)),
+        BinaryOp::DotLess => {
+            return Ok(Bool(check_ordering(
+                lhs.compare(&rhs, &heap.borrow())?,
+                &[Ordering::Less],
+                lhs.get_type(),
+                rhs.get_type(),
+                op_span,
+                source.clone(),
+            )?));
+        }
+        BinaryOp::DotLessEq => {
+            return Ok(Bool(check_ordering(
+                lhs.compare(&rhs, &heap.borrow())?,
+                &[Ordering::Less, Ordering::Equal],
+                lhs.get_type(),
+                rhs.get_type(),
+                op_span,
+                source.clone(),
+            )?));
+        }
+        BinaryOp::DotGreater => {
+            return Ok(Bool(check_ordering(
+                lhs.compare(&rhs, &heap.borrow())?,
+                &[Ordering::Greater],
+                lhs.get_type(),
+                rhs.get_type(),
+                op_span,
+                source.clone(),
+            )?));
+        }
+        BinaryOp::DotGreaterEq => {
+            return Ok(Bool(check_ordering(
+                lhs.compare(&rhs, &heap.borrow())?,
+                &[Ordering::Greater, Ordering::Equal],
+                lhs.get_type(),
+                rhs.get_type(),
+                op_span,
+                source.clone(),
+            )?));
+        }
+        _ => {} // Continue to regular operator handling
+    }
 
     match (lhs, rhs) {
         (_, Value::List(_)) if op == BinaryOp::Into => Err(RuntimeError::with_span(
@@ -918,74 +955,30 @@ fn evaluate_binary_op_ast(
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
-                BinaryOp::Less => {
-                    let mapped_list = {
-                        let borrowed_heap = heap.borrow();
-                        let l_list = list_l.reify(&borrowed_heap).as_list()?;
-                        let r_list = list_r.reify(&borrowed_heap).as_list()?;
-                        let mut mapped_list = Vec::with_capacity(list_len);
-                        for (l, r) in l_list.iter().zip(r_list.iter()) {
-                            let is_less = matches!(
-                                l.compare(r, &borrowed_heap)?,
-                                Some(std::cmp::Ordering::Less)
-                            );
-                            mapped_list.push(Bool(is_less));
-                        }
-                        mapped_list
+                BinaryOp::Less | BinaryOp::LessEq | BinaryOp::Greater | BinaryOp::GreaterEq => {
+                    let expected = match op {
+                        BinaryOp::Less => &[Ordering::Less][..],
+                        BinaryOp::LessEq => &[Ordering::Less, Ordering::Equal][..],
+                        BinaryOp::Greater => &[Ordering::Greater][..],
+                        BinaryOp::GreaterEq => &[Ordering::Greater, Ordering::Equal][..],
+                        _ => unreachable!(),
                     };
-                    Ok(heap.borrow_mut().insert_list(mapped_list))
-                }
-                BinaryOp::LessEq => {
-                    let mapped_list = {
-                        let borrowed_heap = heap.borrow();
-                        let l_list = list_l.reify(&borrowed_heap).as_list()?;
-                        let r_list = list_r.reify(&borrowed_heap).as_list()?;
-                        let mut mapped_list = Vec::with_capacity(list_len);
-                        for (l, r) in l_list.iter().zip(r_list.iter()) {
-                            let ordering = l.compare(r, &borrowed_heap)?;
-                            let is_match = matches!(
-                                ordering,
-                                Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal)
-                            );
-                            mapped_list.push(Bool(is_match));
-                        }
-                        mapped_list
-                    };
-                    Ok(heap.borrow_mut().insert_list(mapped_list))
-                }
-                BinaryOp::Greater => {
-                    let mapped_list = {
-                        let borrowed_heap = heap.borrow();
-                        let l_list = list_l.reify(&borrowed_heap).as_list()?;
-                        let r_list = list_r.reify(&borrowed_heap).as_list()?;
-                        let mut mapped_list = Vec::with_capacity(list_len);
-                        for (l, r) in l_list.iter().zip(r_list.iter()) {
-                            let is_greater = matches!(
-                                l.compare(r, &borrowed_heap)?,
-                                Some(std::cmp::Ordering::Greater)
-                            );
-                            mapped_list.push(Bool(is_greater));
-                        }
-                        mapped_list
-                    };
-                    Ok(heap.borrow_mut().insert_list(mapped_list))
-                }
-                BinaryOp::GreaterEq => {
-                    let mapped_list = {
-                        let borrowed_heap = heap.borrow();
-                        let l_list = list_l.reify(&borrowed_heap).as_list()?;
-                        let r_list = list_r.reify(&borrowed_heap).as_list()?;
-                        let mut mapped_list = Vec::with_capacity(list_len);
-                        for (l, r) in l_list.iter().zip(r_list.iter()) {
-                            let ordering = l.compare(r, &borrowed_heap)?;
-                            let is_match = matches!(
-                                ordering,
-                                Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal)
-                            );
-                            mapped_list.push(Bool(is_match));
-                        }
-                        mapped_list
-                    };
+                    let borrowed_heap = heap.borrow();
+                    let l_list = list_l.reify(&borrowed_heap).as_list()?;
+                    let r_list = list_r.reify(&borrowed_heap).as_list()?;
+                    let mut mapped_list = Vec::with_capacity(list_len);
+                    for (l, r) in l_list.iter().zip(r_list.iter()) {
+                        let result = check_ordering(
+                            l.compare(r, &borrowed_heap)?,
+                            expected,
+                            l.get_type(),
+                            r.get_type(),
+                            op_span,
+                            source.clone(),
+                        )?;
+                        mapped_list.push(Bool(result));
+                    }
+                    drop(borrowed_heap);
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::And | BinaryOp::NaturalAnd => {
@@ -1229,82 +1222,42 @@ fn evaluate_binary_op_ast(
                     };
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
-                BinaryOp::Less => {
-                    let mapped_list = {
-                        let borrowed_heap = heap.borrow();
-                        let list_ref = list.reify(&borrowed_heap).as_list()?;
-                        let mut mapped_list = Vec::with_capacity(list_ref.len());
-                        for v in list_ref.iter() {
-                            let ordering = if is_list_first {
-                                v.compare(&scalar, &borrowed_heap)?
-                            } else {
-                                scalar.compare(v, &borrowed_heap)?
-                            };
-                            mapped_list
-                                .push(Bool(matches!(ordering, Some(std::cmp::Ordering::Less))));
-                        }
-                        mapped_list
+                BinaryOp::Less | BinaryOp::LessEq | BinaryOp::Greater | BinaryOp::GreaterEq => {
+                    let expected = match op {
+                        BinaryOp::Less => &[Ordering::Less][..],
+                        BinaryOp::LessEq => &[Ordering::Less, Ordering::Equal][..],
+                        BinaryOp::Greater => &[Ordering::Greater][..],
+                        BinaryOp::GreaterEq => &[Ordering::Greater, Ordering::Equal][..],
+                        _ => unreachable!(),
                     };
-                    Ok(heap.borrow_mut().insert_list(mapped_list))
-                }
-                BinaryOp::LessEq => {
-                    let mapped_list = {
-                        let borrowed_heap = heap.borrow();
-                        let list_ref = list.reify(&borrowed_heap).as_list()?;
-                        let mut mapped_list = Vec::with_capacity(list_ref.len());
-                        for v in list_ref.iter() {
-                            let ordering = if is_list_first {
-                                v.compare(&scalar, &borrowed_heap)?
-                            } else {
-                                scalar.compare(v, &borrowed_heap)?
-                            };
-                            let is_match = matches!(
-                                ordering,
-                                Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal)
-                            );
-                            mapped_list.push(Bool(is_match));
-                        }
-                        mapped_list
-                    };
-                    Ok(heap.borrow_mut().insert_list(mapped_list))
-                }
-                BinaryOp::Greater => {
-                    let mapped_list = {
-                        let borrowed_heap = heap.borrow();
-                        let list_ref = list.reify(&borrowed_heap).as_list()?;
-                        let mut mapped_list = Vec::with_capacity(list_ref.len());
-                        for v in list_ref.iter() {
-                            let ordering = if is_list_first {
-                                v.compare(&scalar, &borrowed_heap)?
-                            } else {
-                                scalar.compare(v, &borrowed_heap)?
-                            };
-                            mapped_list
-                                .push(Bool(matches!(ordering, Some(std::cmp::Ordering::Greater))));
-                        }
-                        mapped_list
-                    };
-                    Ok(heap.borrow_mut().insert_list(mapped_list))
-                }
-                BinaryOp::GreaterEq => {
-                    let mapped_list = {
-                        let borrowed_heap = heap.borrow();
-                        let list_ref = list.reify(&borrowed_heap).as_list()?;
-                        let mut mapped_list = Vec::with_capacity(list_ref.len());
-                        for v in list_ref.iter() {
-                            let ordering = if is_list_first {
-                                v.compare(&scalar, &borrowed_heap)?
-                            } else {
-                                scalar.compare(v, &borrowed_heap)?
-                            };
-                            let is_match = matches!(
-                                ordering,
-                                Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal)
-                            );
-                            mapped_list.push(Bool(is_match));
-                        }
-                        mapped_list
-                    };
+                    let borrowed_heap = heap.borrow();
+                    let list_ref = list.reify(&borrowed_heap).as_list()?;
+                    let mut mapped_list = Vec::with_capacity(list_ref.len());
+                    for v in list_ref.iter() {
+                        let (ordering, l_type, r_type) = if is_list_first {
+                            (
+                                v.compare(&scalar, &borrowed_heap)?,
+                                v.get_type(),
+                                scalar.get_type(),
+                            )
+                        } else {
+                            (
+                                scalar.compare(v, &borrowed_heap)?,
+                                scalar.get_type(),
+                                v.get_type(),
+                            )
+                        };
+                        let result = check_ordering(
+                            ordering,
+                            expected,
+                            l_type,
+                            r_type,
+                            op_span,
+                            source.clone(),
+                        )?;
+                        mapped_list.push(Bool(result));
+                    }
+                    drop(borrowed_heap);
                     Ok(heap.borrow_mut().insert_list(mapped_list))
                 }
                 BinaryOp::And | BinaryOp::NaturalAnd => {
@@ -1706,24 +1659,38 @@ fn evaluate_binary_op_ast(
         (lhs, rhs) => match op {
             BinaryOp::Equal => Ok(Bool(lhs.equals(&rhs, &heap.borrow())?)),
             BinaryOp::NotEqual => Ok(Bool(!lhs.equals(&rhs, &heap.borrow())?)),
-            BinaryOp::Less => match lhs.compare(&rhs, &heap.borrow())? {
-                Some(std::cmp::Ordering::Less) => Ok(Bool(true)),
-                _ => Ok(Bool(false)),
-            },
-            BinaryOp::LessEq => match lhs.compare(&rhs, &heap.borrow())? {
-                Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal) => Ok(Bool(true)),
-                _ => Ok(Bool(false)),
-            },
-            BinaryOp::Greater => match lhs.compare(&rhs, &heap.borrow())? {
-                Some(std::cmp::Ordering::Greater) => Ok(Bool(true)),
-                _ => Ok(Bool(false)),
-            },
-            BinaryOp::GreaterEq => match lhs.compare(&rhs, &heap.borrow())? {
-                Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal) => {
-                    Ok(Bool(true))
-                }
-                _ => Ok(Bool(false)),
-            },
+            BinaryOp::Less => Ok(Bool(check_ordering(
+                lhs.compare(&rhs, &heap.borrow())?,
+                &[Ordering::Less],
+                lhs.get_type(),
+                rhs.get_type(),
+                op_span,
+                source.clone(),
+            )?)),
+            BinaryOp::LessEq => Ok(Bool(check_ordering(
+                lhs.compare(&rhs, &heap.borrow())?,
+                &[Ordering::Less, Ordering::Equal],
+                lhs.get_type(),
+                rhs.get_type(),
+                op_span,
+                source.clone(),
+            )?)),
+            BinaryOp::Greater => Ok(Bool(check_ordering(
+                lhs.compare(&rhs, &heap.borrow())?,
+                &[Ordering::Greater],
+                lhs.get_type(),
+                rhs.get_type(),
+                op_span,
+                source.clone(),
+            )?)),
+            BinaryOp::GreaterEq => Ok(Bool(check_ordering(
+                lhs.compare(&rhs, &heap.borrow())?,
+                &[Ordering::Greater, Ordering::Equal],
+                lhs.get_type(),
+                rhs.get_type(),
+                op_span,
+                source.clone(),
+            )?)),
             BinaryOp::And | BinaryOp::NaturalAnd => Ok(Bool(lhs.as_bool()? && rhs.as_bool()?)),
             BinaryOp::Or | BinaryOp::NaturalOr => Ok(Bool(lhs.as_bool()? || rhs.as_bool()?)),
             BinaryOp::Add => {
@@ -1876,12 +1843,14 @@ fn parse_record_entry(pair: Pair<Rule>, preserve_comments: bool) -> AnyhowResult
                         _ => unreachable!(),
                     }
                 }
-                Rule::record_key_dynamic => {
-                    RecordKey::Dynamic(Box::new(pairs_to_expr_inner(key_pair.into_inner(), preserve_comments)?))
-                }
+                Rule::record_key_dynamic => RecordKey::Dynamic(Box::new(pairs_to_expr_inner(
+                    key_pair.into_inner(),
+                    preserve_comments,
+                )?)),
                 _ => unreachable!(),
             };
-            let value = pairs_to_expr_inner(inner_pairs.next().unwrap().into_inner(), preserve_comments)?;
+            let value =
+                pairs_to_expr_inner(inner_pairs.next().unwrap().into_inner(), preserve_comments)?;
             Ok(RecordEntry { key, value })
         }
         Rule::record_shorthand => {
@@ -1969,7 +1938,8 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                                 let mut inner = pair.into_inner();
                                 // First is the spreadable_expression
                                 let expr_pair = inner.next().unwrap();
-                                let expr = pairs_to_expr_inner(expr_pair.into_inner(), preserve_comments)?;
+                                let expr =
+                                    pairs_to_expr_inner(expr_pair.into_inner(), preserve_comments)?;
                                 // Optional eol_comment
                                 let trailing = if preserve_comments {
                                     inner.next().map(|p| p.as_str().to_string())
@@ -1984,23 +1954,27 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                             }
                             _ => {
                                 // Fallback for other rules (shouldn't happen with updated grammar)
-                                let expr = pairs_to_expr_inner(pair.into_inner(), preserve_comments)?;
+                                let expr =
+                                    pairs_to_expr_inner(pair.into_inner(), preserve_comments)?;
                                 elements.push(Commented::new(expr));
                             }
                         }
                     }
                     // Attach any remaining comments (after the last item) as trailing comments to the last item
-                    if !pending_comments.is_empty() && !elements.is_empty()
-                        && let Some(last) = elements.last_mut() {
-                            // Combine remaining comments as trailing (separated by newline if multiple)
-                            let trailing = pending_comments.join("\n");
-                            if last.trailing.is_some() {
-                                // Already has a trailing comment, append
-                                last.trailing = Some(format!("{}\n{}", last.trailing.as_ref().unwrap(), trailing));
-                            } else {
-                                last.trailing = Some(trailing);
-                            }
+                    if !pending_comments.is_empty()
+                        && !elements.is_empty()
+                        && let Some(last) = elements.last_mut()
+                    {
+                        // Combine remaining comments as trailing (separated by newline if multiple)
+                        let trailing = pending_comments.join("\n");
+                        if last.trailing.is_some() {
+                            // Already has a trailing comment, append
+                            last.trailing =
+                                Some(format!("{}\n{}", last.trailing.as_ref().unwrap(), trailing));
+                        } else {
+                            last.trailing = Some(trailing);
                         }
+                    }
                     Ok(Spanned::new(Expr::List(elements), span))
                 }
                 Rule::record => {
@@ -2052,7 +2026,8 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                                 ));
                             }
                             Rule::spread_expression => {
-                                let spread_expr = pairs_to_expr_inner(pair.into_inner(), preserve_comments)?;
+                                let spread_expr =
+                                    pairs_to_expr_inner(pair.into_inner(), preserve_comments)?;
                                 entries.push(Commented::with_comments(
                                     std::mem::take(&mut pending_comments),
                                     RecordEntry {
@@ -2066,15 +2041,18 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                         }
                     }
                     // Attach any remaining comments (after the last entry) as trailing comments to the last entry
-                    if !pending_comments.is_empty() && !entries.is_empty()
-                        && let Some(last) = entries.last_mut() {
-                            let trailing = pending_comments.join("\n");
-                            if last.trailing.is_some() {
-                                last.trailing = Some(format!("{}\n{}", last.trailing.as_ref().unwrap(), trailing));
-                            } else {
-                                last.trailing = Some(trailing);
-                            }
+                    if !pending_comments.is_empty()
+                        && !entries.is_empty()
+                        && let Some(last) = entries.last_mut()
+                    {
+                        let trailing = pending_comments.join("\n");
+                        if last.trailing.is_some() {
+                            last.trailing =
+                                Some(format!("{}\n{}", last.trailing.as_ref().unwrap(), trailing));
+                        } else {
+                            last.trailing = Some(trailing);
                         }
+                    }
 
                     Ok(Spanned::new(Expr::Record(entries), span))
                 }
@@ -2095,7 +2073,10 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                 Rule::assignment => {
                     let mut inner_pairs = primary.into_inner();
                     let ident = inner_pairs.next().unwrap().as_str().to_string();
-                    let value = Box::new(pairs_to_expr_inner(inner_pairs.next().unwrap().into_inner(), preserve_comments)?);
+                    let value = Box::new(pairs_to_expr_inner(
+                        inner_pairs.next().unwrap().into_inner(),
+                        preserve_comments,
+                    )?);
                     Ok(Spanned::new(Expr::Assignment { ident, value }, span))
                 }
                 Rule::lambda => {
@@ -2125,17 +2106,26 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                         }
                     }
 
-                    let body = Box::new(pairs_to_expr_inner(body_pairs.into_inner(), preserve_comments)?);
+                    let body = Box::new(pairs_to_expr_inner(
+                        body_pairs.into_inner(),
+                        preserve_comments,
+                    )?);
                     Ok(Spanned::new(Expr::Lambda { args, body }, span))
                 }
                 Rule::conditional => {
                     let mut inner_pairs = primary.into_inner();
-                    let condition =
-                        Box::new(pairs_to_expr_inner(inner_pairs.next().unwrap().into_inner(), preserve_comments)?);
-                    let then_expr =
-                        Box::new(pairs_to_expr_inner(inner_pairs.next().unwrap().into_inner(), preserve_comments)?);
-                    let else_expr =
-                        Box::new(pairs_to_expr_inner(inner_pairs.next().unwrap().into_inner(), preserve_comments)?);
+                    let condition = Box::new(pairs_to_expr_inner(
+                        inner_pairs.next().unwrap().into_inner(),
+                        preserve_comments,
+                    )?);
+                    let then_expr = Box::new(pairs_to_expr_inner(
+                        inner_pairs.next().unwrap().into_inner(),
+                        preserve_comments,
+                    )?);
+                    let else_expr = Box::new(pairs_to_expr_inner(
+                        inner_pairs.next().unwrap().into_inner(),
+                        preserve_comments,
+                    )?);
                     Ok(Spanned::new(
                         Expr::Conditional {
                             condition,
@@ -2157,10 +2147,14 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                                 let mut inner = pair.into_inner();
                                 if let Some(first) = inner.next() {
                                     if first.as_rule() == Rule::expression {
-                                        let expr = pairs_to_expr_inner(first.into_inner(), preserve_comments)?;
+                                        let expr = pairs_to_expr_inner(
+                                            first.into_inner(),
+                                            preserve_comments,
+                                        )?;
                                         // Check for optional trailing comment
                                         let trailing = if preserve_comments {
-                                            inner.next()
+                                            inner
+                                                .next()
                                                 .filter(|p| p.as_rule() == Rule::comment)
                                                 .map(|p| p.as_str().to_string())
                                         } else {
@@ -2171,15 +2165,18 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                                             expr,
                                             trailing,
                                         ));
-                                    } else if first.as_rule() == Rule::comment
-                                        && preserve_comments {
-                                            pending_comments.push(first.as_str().to_string());
-                                        }
+                                    } else if first.as_rule() == Rule::comment && preserve_comments
+                                    {
+                                        pending_comments.push(first.as_str().to_string());
+                                    }
                                 }
                             }
                             Rule::return_statement => {
                                 let return_expr_pair = pair.into_inner().next().unwrap();
-                                let expr = pairs_to_expr_inner(return_expr_pair.into_inner(), preserve_comments)?;
+                                let expr = pairs_to_expr_inner(
+                                    return_expr_pair.into_inner(),
+                                    preserve_comments,
+                                )?;
                                 return_expr = Box::new(Commented::with_comments(
                                     std::mem::take(&mut pending_comments),
                                     expr,
@@ -4271,17 +4268,116 @@ mod tests {
     fn dot_operators_mixed_types() {
         let heap = Rc::new(RefCell::new(Heap::new()));
 
-        // String vs list should not be equal
+        // String vs list should not be equal (equality across types is allowed)
         let result =
             parse_and_evaluate("\"hello\" .== [1, 2, 3]", Some(Rc::clone(&heap)), None).unwrap();
-        assert_eq!(result, Value::Bool(false));
-
-        // Number vs list comparison returns false (no natural ordering)
-        let result = parse_and_evaluate("5 .< [1, 2, 3]", Some(Rc::clone(&heap)), None).unwrap();
         assert_eq!(result, Value::Bool(false));
 
         // String comparison works
         let result = parse_and_evaluate("\"abc\" .< \"def\"", Some(heap), None).unwrap();
         assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn mixed_type_comparison_errors() {
+        // null > number should error
+        let result = parse_and_evaluate("null > 0", None, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cannot compare"));
+
+        // null < number should error
+        let result = parse_and_evaluate("null < 5", None, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cannot compare"));
+
+        // null >= number should error
+        let result = parse_and_evaluate("null >= 0", None, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cannot compare"));
+
+        // null <= number should error
+        let result = parse_and_evaluate("null <= 0", None, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cannot compare"));
+
+        // string > number should error
+        let result = parse_and_evaluate("\"hello\" > 5", None, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cannot compare"));
+
+        // boolean > number should error
+        let result = parse_and_evaluate("true > 5", None, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cannot compare"));
+    }
+
+    #[test]
+    fn mixed_type_equality_does_not_error() {
+        // Equality operators should still work across types (returning false)
+        let result = parse_and_evaluate("null == 0", None, None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        let result = parse_and_evaluate("null != 0", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result = parse_and_evaluate("\"hello\" == 5", None, None).unwrap();
+        assert_eq!(result, Value::Bool(false));
+
+        // Same type equality still works
+        let result = parse_and_evaluate("null == null", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn same_type_comparison_still_works() {
+        // Number comparisons
+        let result = parse_and_evaluate("5 > 3", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result = parse_and_evaluate("3 < 5", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result = parse_and_evaluate("5 >= 5", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let result = parse_and_evaluate("5 <= 5", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        // String comparisons
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let result = parse_and_evaluate("\"b\" > \"a\"", Some(Rc::clone(&heap)), None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        // Boolean comparisons (false < true)
+        let result = parse_and_evaluate("false < true", None, None).unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn list_with_mixed_types_comparison_errors() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        // List containing null compared to number should error
+        let result = parse_and_evaluate("[1, 2, null] > 0", Some(Rc::clone(&heap)), None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cannot compare"));
+
+        // List-to-list comparison with incompatible types should error
+        let result = parse_and_evaluate("[1, 2, 3] > [1, 2, null]", Some(heap), None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cannot compare"));
+    }
+
+    #[test]
+    fn dot_operators_mixed_type_comparison_errors() {
+        // Number vs list ordering comparison should error
+        let result = parse_and_evaluate("5 .< [1, 2, 3]", None, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cannot compare"));
+
+        // null vs number ordering comparison should error
+        let result = parse_and_evaluate("null .> 0", None, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cannot compare"));
     }
 }

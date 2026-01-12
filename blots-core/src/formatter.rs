@@ -72,7 +72,8 @@ fn format_single_line(expr: &SpannedExpr) -> String {
             if items.iter().any(|c| c.has_comments()) {
                 return "[\n]".to_string(); // Placeholder that forces multiline
             }
-            let items_str: Vec<String> = items.iter().map(|c| format_single_line(&c.node)).collect();
+            let items_str: Vec<String> =
+                items.iter().map(|c| format_single_line(&c.node)).collect();
             format!("[{}]", items_str.join(", "))
         }
         Expr::Record(entries) => {
@@ -163,7 +164,11 @@ fn format_assignment_multiline(
 }
 
 /// Format a list with line breaks
-fn format_list_multiline(items: &[Commented<SpannedExpr>], max_cols: usize, indent: usize) -> String {
+fn format_list_multiline(
+    items: &[Commented<SpannedExpr>],
+    max_cols: usize,
+    indent: usize,
+) -> String {
     if items.is_empty() {
         return "[]".to_string();
     }
@@ -200,7 +205,11 @@ fn format_list_multiline(items: &[Commented<SpannedExpr>], max_cols: usize, inde
 }
 
 /// Format a record with line breaks
-fn format_record_multiline(entries: &[Commented<RecordEntry>], max_cols: usize, indent: usize) -> String {
+fn format_record_multiline(
+    entries: &[Commented<RecordEntry>],
+    max_cols: usize,
+    indent: usize,
+) -> String {
     if entries.is_empty() {
         return "{}".to_string();
     }
@@ -1596,7 +1605,8 @@ mod tests {
         use crate::expressions::pairs_to_expr_with_comments;
         use crate::parser::Rule;
 
-        let source = "f = n => do {\n  // compute\n  doubled = n * 2\n  // result\n  return doubled\n}";
+        let source =
+            "f = n => do {\n  // compute\n  doubled = n * 2\n  // result\n  return doubled\n}";
         let pairs = get_pairs(source).unwrap();
 
         for pair in pairs {

@@ -64,7 +64,10 @@ pub fn expr_to_source(spanned_expr: &SpannedExpr) -> String {
             format!("[{}]", items_str.join(", "))
         }
         Expr::Record(entries) => {
-            let entries_str: Vec<String> = entries.iter().map(|c| record_entry_to_source(&c.node)).collect();
+            let entries_str: Vec<String> = entries
+                .iter()
+                .map(|c| record_entry_to_source(&c.node))
+                .collect();
             format!("{{{}}}", entries_str.join(", "))
         }
         Expr::Lambda { args, body } => {
@@ -102,7 +105,10 @@ pub fn expr_to_source(spanned_expr: &SpannedExpr) -> String {
             for comment in &return_expr.leading {
                 result.push_str(&format!("\n  {}", comment));
             }
-            result.push_str(&format!("\n  return {}\n}}", expr_to_source(&return_expr.node)));
+            result.push_str(&format!(
+                "\n  return {}\n}}",
+                expr_to_source(&return_expr.node)
+            ));
             result
         }
         Expr::Assignment { ident, value } => format!("{} = {}", ident, expr_to_source(value)),
@@ -334,7 +340,10 @@ pub fn expr_to_source_with_scope(
                     result.push_str(&format!("\n  {}", comment));
                 }
                 // Expression
-                result.push_str(&format!("\n  {}", expr_to_source_with_scope(&stmt.node, scope)));
+                result.push_str(&format!(
+                    "\n  {}",
+                    expr_to_source_with_scope(&stmt.node, scope)
+                ));
                 // Trailing comment
                 if let Some(trailing) = &stmt.trailing {
                     result.push_str(&format!("  {}", trailing));

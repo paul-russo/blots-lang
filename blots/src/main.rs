@@ -4,7 +4,9 @@ mod highlighter;
 
 use blots_core::ast::{Expr, Spanned};
 use blots_core::environment::Environment;
-use blots_core::expressions::{evaluate_pairs, pairs_to_expr_with_comments, validate_portable_value};
+use blots_core::expressions::{
+    evaluate_pairs, pairs_to_expr_with_comments, validate_portable_value,
+};
 use blots_core::formatter::format_expr;
 use blots_core::functions::{clear_function_call_stats, get_function_call_stats};
 use blots_core::heap::Heap;
@@ -248,17 +250,19 @@ fn main() -> ! {
                 Rule::statement => {
                     if let Some(inner_pair) = pair.into_inner().next() {
                         match inner_pair.as_rule() {
-                            Rule::expression => match pairs_to_expr_with_comments(inner_pair.into_inner()) {
-                                Ok(expr) => {
-                                    let formatted = format_expr(&expr, None);
-                                    formatted_output.push_str(&formatted);
-                                    formatted_output.push('\n');
+                            Rule::expression => {
+                                match pairs_to_expr_with_comments(inner_pair.into_inner()) {
+                                    Ok(expr) => {
+                                        let formatted = format_expr(&expr, None);
+                                        formatted_output.push_str(&formatted);
+                                        formatted_output.push('\n');
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Error converting to AST: {}", e);
+                                        std::process::exit(1);
+                                    }
                                 }
-                                Err(e) => {
-                                    eprintln!("Error converting to AST: {}", e);
-                                    std::process::exit(1);
-                                }
-                            },
+                            }
                             Rule::output_declaration => {
                                 match pairs_to_expr_with_comments(inner_pair.into_inner()) {
                                     Ok(inner_expr) => {
@@ -564,10 +568,8 @@ fn main() -> ! {
         // Check for continuation (unmatched brackets)
         if parse_result.is_err()
             && (accumulated_input.matches('(').count() > accumulated_input.matches(')').count()
-                || accumulated_input.matches('[').count()
-                    > accumulated_input.matches(']').count()
-                || accumulated_input.matches('{').count()
-                    > accumulated_input.matches('}').count())
+                || accumulated_input.matches('[').count() > accumulated_input.matches(']').count()
+                || accumulated_input.matches('{').count() > accumulated_input.matches('}').count())
         {
             continuation = true;
             continue;

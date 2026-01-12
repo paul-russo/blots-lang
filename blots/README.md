@@ -108,14 +108,15 @@ For `.==` and `.!=`, lists must be exactly equal in both structure and values:
 
 ##### Mixed Type Comparisons
 
-When comparing different types with dot operators:
-- `.==` and `.!=` always return `false` and `true` respectively for different types
-- Ordering operators (`.<`, etc.) return `false` when types can't be ordered
+When comparing different types:
+- Equality operators (`==`, `!=`, `.==`, `.!=`) work across all types, returning `false` or `true` respectively when types differ
+- Ordering operators (`<`, `<=`, `>`, `>=` and their dot variants) **error** when types cannot be compared
 
 ```blots
 "hello" .== [1, 2, 3]    // false (string != list)
-5 .< [1, 2, 3]           // false (number and list have no natural ordering)
 "abc" .< "def"           // true  (strings compare lexicographically)
+5 .< [1, 2, 3]           // ERROR: cannot compare number with list
+null > 0                 // ERROR: cannot compare null with number
 ```
 
 ### `via` and `into`
@@ -429,6 +430,12 @@ x = 42 // This is also a comment
 - `keys(record)` - returns a list of all keys in a record
 - `values(record)` - returns a list of all values in a record
 - `entries(record)` - returns a list of [key, value] pairs from a record
+
+#### Unchecked Comparison Functions
+- `ugt(a, b)` - unchecked greater than: returns `true` if `a > b`, `false` otherwise (including when types cannot be compared)
+- `ult(a, b)` - unchecked less than: returns `true` if `a < b`, `false` otherwise
+- `ugte(a, b)` - unchecked greater than or equal: returns `true` if `a >= b`, `false` otherwise
+- `ulte(a, b)` - unchecked less than or equal: returns `true` if `a <= b`, `false` otherwise
 
 #### Unit Conversion
 - `convert(value, from_unit, to_unit)` - converts a numeric value from one unit to another
