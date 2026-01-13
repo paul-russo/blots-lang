@@ -20,6 +20,8 @@ fn run_blots_with_input(code: &str, input_json: serde_json::Value) -> String {
         stdin
             .write_all(code.as_bytes())
             .expect("Failed to write to stdin");
+        stdin.flush().expect("Failed to flush stdin");
+        drop(stdin); // Explicitly drop to close stdin before waiting
     }
 
     let output = child.wait_with_output().expect("Failed to wait for blots");
@@ -205,6 +207,8 @@ fn test_round_trip_function() {
         stdin
             .write_all(b"x = 5\noutput f = y => x + y")
             .expect("Failed to write to stdin");
+        stdin.flush().expect("Failed to flush stdin");
+        drop(stdin); // Explicitly drop to close stdin before waiting
     }
 
     let output = child.wait_with_output().expect("Failed to wait for blots");
@@ -247,6 +251,8 @@ fn test_round_trip_higher_order_compose() {
                   output composed = compose(add_one, double)",
             )
             .expect("Failed to write to stdin");
+        stdin.flush().expect("Failed to flush stdin");
+        drop(stdin); // Explicitly drop to close stdin before waiting
     }
 
     let output = child.wait_with_output().expect("Failed to wait for blots");
@@ -301,6 +307,8 @@ fn test_round_trip_curried_function() {
                   output curried_mult = curry(multiply)",
             )
             .expect("Failed to write to stdin");
+        stdin.flush().expect("Failed to flush stdin");
+        drop(stdin); // Explicitly drop to close stdin before waiting
     }
 
     let output = child.wait_with_output().expect("Failed to wait for blots");
@@ -345,6 +353,8 @@ fn test_round_trip_combiner_function() {
                   output combined = combiner(add_five, add_ten)",
             )
             .expect("Failed to write to stdin");
+        stdin.flush().expect("Failed to flush stdin");
+        drop(stdin); // Explicitly drop to close stdin before waiting
     }
 
     let output = child.wait_with_output().expect("Failed to wait for blots");
