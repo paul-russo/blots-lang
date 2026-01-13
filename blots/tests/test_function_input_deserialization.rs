@@ -7,7 +7,7 @@ fn run_blots_with_input(code: &str, input_json: serde_json::Value) -> String {
     let input_str = input_json.to_string();
 
     let mut child = Command::new("cargo")
-        .args(&["run", "-p", "blots", "--", "-e", "-i", &input_str])
+        .args(["run", "-p", "blots", "--", "-e", "-i", &input_str])
         .env("CARGO_TERM_COLOR", "never")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -195,7 +195,7 @@ fn test_round_trip_function() {
     use std::process::{Command, Stdio};
 
     let mut child = Command::new("cargo")
-        .args(&["run", "-p", "blots", "--", "-e"])
+        .args(["run", "-p", "blots", "--", "-e"])
         .env("CARGO_TERM_COLOR", "never")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -234,7 +234,7 @@ fn test_round_trip_higher_order_compose() {
     use std::process::{Command, Stdio};
 
     let mut child = Command::new("cargo")
-        .args(&["run", "-p", "blots", "--", "-e"])
+        .args(["run", "-p", "blots", "--", "-e"])
         .env("CARGO_TERM_COLOR", "never")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -291,7 +291,7 @@ fn test_round_trip_curried_function() {
     use std::process::{Command, Stdio};
 
     let mut child = Command::new("cargo")
-        .args(&["run", "-p", "blots", "--", "-e"])
+        .args(["run", "-p", "blots", "--", "-e"])
         .env("CARGO_TERM_COLOR", "never")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -335,7 +335,7 @@ fn test_round_trip_combiner_function() {
     use std::process::{Command, Stdio};
 
     let mut child = Command::new("cargo")
-        .args(&["run", "-p", "blots", "--", "-e"])
+        .args(["run", "-p", "blots", "--", "-e"])
         .env("CARGO_TERM_COLOR", "never")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

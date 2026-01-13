@@ -1345,7 +1345,7 @@ mod tests {
     #[test]
     fn test_fuel_efficiency_conversion() {
         let result = convert(10.0, "liters per 100 kilometers", "miles per gallon").unwrap();
-        assert!((result - 23.521_458_333_333_332).abs() < 1e-9);
+        assert!((result - 23.521_458_333_333_33).abs() < 1e-9);
 
         let result = convert(7.5, "miles per gallon", "liters per 100 kilometers").unwrap();
         assert!((result - (235.214_583_333_333_34 / 7.5)).abs() < 1e-9);

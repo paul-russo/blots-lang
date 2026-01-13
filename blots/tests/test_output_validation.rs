@@ -11,7 +11,7 @@ fn test_output_unbound_variable_file_mode() {
 
     // Run blots on the file
     let output = Command::new("cargo")
-        .args(&["run", "-p", "blots", "--", file.path().to_str().unwrap()])
+        .args(["run", "-p", "blots", "--", file.path().to_str().unwrap()])
         .output()
         .expect("Failed to execute command");
 
@@ -39,7 +39,7 @@ fn test_output_self_contained_function_succeeds() {
 
     // Run blots on the file
     let output = Command::new("cargo")
-        .args(&["run", "-p", "blots", "--", file.path().to_str().unwrap()])
+        .args(["run", "-p", "blots", "--", file.path().to_str().unwrap()])
         .output()
         .expect("Failed to execute command");
 
@@ -72,7 +72,7 @@ fn test_output_recursive_function_succeeds() {
 
     // Run blots on the file
     let output = Command::new("cargo")
-        .args(&["run", "-p", "blots", "--", file.path().to_str().unwrap()])
+        .args(["run", "-p", "blots", "--", file.path().to_str().unwrap()])
         .output()
         .expect("Failed to execute command");
 
@@ -102,7 +102,7 @@ fn test_output_function_with_closure_succeeds() {
 
     // Run blots on the file
     let output = Command::new("cargo")
-        .args(&["run", "-p", "blots", "--", file.path().to_str().unwrap()])
+        .args(["run", "-p", "blots", "--", file.path().to_str().unwrap()])
         .output()
         .expect("Failed to execute command");
 
@@ -135,7 +135,7 @@ fn test_output_reassigned_recursive_function_succeeds() {
 
     // Run blots on the file
     let output = Command::new("cargo")
-        .args(&["run", "-p", "blots", "--", file.path().to_str().unwrap()])
+        .args(["run", "-p", "blots", "--", file.path().to_str().unwrap()])
         .output()
         .expect("Failed to execute command");
 
@@ -166,7 +166,7 @@ fn test_output_late_bound_function_succeeds() {
 
     // Run blots on the file
     let output = Command::new("cargo")
-        .args(&["run", "-p", "blots", "--", file.path().to_str().unwrap()])
+        .args(["run", "-p", "blots", "--", file.path().to_str().unwrap()])
         .output()
         .expect("Failed to execute command");
 
@@ -200,7 +200,7 @@ fn test_output_truly_unbound_variable_fails() {
 
     // Run blots on the file
     let output = Command::new("cargo")
-        .args(&["run", "-p", "blots", "--", file.path().to_str().unwrap()])
+        .args(["run", "-p", "blots", "--", file.path().to_str().unwrap()])
         .output()
         .expect("Failed to execute command");
 

@@ -1320,7 +1320,7 @@ mod tests {
 
     #[test]
     fn test_format_display_number_decimals() {
-        assert_eq!(format_display_number(3.14159), "3.14159");
+        assert_eq!(format_display_number(3.7432), "3.7432");
         assert_eq!(format_display_number(1234.56), "1,234.56");
         assert_eq!(format_display_number(0.5), "0.5");
         assert_eq!(format_display_number(0.0001), "0.0001");
@@ -1351,7 +1351,7 @@ mod tests {
 
     #[test]
     fn test_format_display_number_negative() {
-        assert_eq!(format_display_number(-3.14), "-3.14");
+        assert_eq!(format_display_number(-3.7432), "-3.7432");
         assert_eq!(format_display_number(-1234.56), "-1,234.56");
         assert_eq!(format_display_number(-0.00001), "-1e-5");
         assert_eq!(format_display_number(-1e15), "-1e15");

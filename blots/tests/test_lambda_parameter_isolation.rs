@@ -5,7 +5,7 @@ fn run_blots_eval(code: &str) -> String {
     use std::process::{Command, Stdio};
 
     let mut child = Command::new("cargo")
-        .args(&["run", "-p", "blots", "--", "-e"])
+        .args(["run", "-p", "blots", "--", "-e"])
         .env("CARGO_TERM_COLOR", "never")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -33,20 +33,16 @@ fn run_blots_eval(code: &str) -> String {
 
 fn parse_function_output(json_str: &str) -> String {
     let json: Value =
-        serde_json::from_str(json_str).expect(&format!("Failed to parse JSON: {}", json_str));
+        serde_json::from_str(json_str).unwrap_or_else(|_| panic!("Failed to parse JSON: {}", json_str));
 
     // Extract the function source from the first output
-    if let Some(obj) = json.as_object() {
-        if let Some((_, value)) = obj.iter().next() {
-            if let Some(func_obj) = value.as_object() {
-                if let Some(func_src) = func_obj.get("__blots_function") {
-                    if let Some(src) = func_src.as_str() {
+    if let Some(obj) = json.as_object()
+        && let Some((_, value)) = obj.iter().next()
+            && let Some(func_obj) = value.as_object()
+                && let Some(func_src) = func_obj.get("__blots_function")
+                    && let Some(src) = func_src.as_str() {
                         return src.to_string();
                     }
-                }
-            }
-        }
-    }
     panic!("Could not extract function source from: {}", json_str);
 }
 

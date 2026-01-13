@@ -1063,9 +1063,9 @@ mod where_operator_tests {
 
         let mut result = Value::Null;
         for pair in pairs {
-            if let crate::parser::Rule::statement = pair.as_rule() {
-                if let Some(inner_pair) = pair.into_inner().next() {
-                    if let crate::parser::Rule::expression = inner_pair.as_rule() {
+            if let crate::parser::Rule::statement = pair.as_rule()
+                && let Some(inner_pair) = pair.into_inner().next()
+                    && let crate::parser::Rule::expression = inner_pair.as_rule() {
                         result = crate::expressions::evaluate_pairs(
                             inner_pair.into_inner(),
                             Rc::clone(&heap),
@@ -1075,8 +1075,6 @@ mod where_operator_tests {
                         )
                         .unwrap();
                     }
-                }
-            }
         }
 
         let borrowed_heap = heap.borrow();
@@ -1390,8 +1388,8 @@ mod via_into_error_message_tests {
             let bindings = Rc::new(Environment::new());
             let mut result = Value::Null;
             for pair in pairs {
-                if let crate::parser::Rule::statement = pair.as_rule() {
-                    if let Some(inner_pair) = pair.into_inner().next() {
+                if let crate::parser::Rule::statement = pair.as_rule()
+                    && let Some(inner_pair) = pair.into_inner().next() {
                         result = crate::expressions::evaluate_pairs(
                             inner_pair.into_inner(),
                             Rc::clone(&heap),
@@ -1401,7 +1399,6 @@ mod via_into_error_message_tests {
                         )
                         .unwrap();
                     }
-                }
             }
             (result, heap)
         };

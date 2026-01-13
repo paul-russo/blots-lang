@@ -663,11 +663,10 @@ mod tests {
 
         // Extract the actual expression from the statement wrapper
         for pair in pairs {
-            if pair.as_rule() == Rule::statement {
-                if let Some(inner_pair) = pair.into_inner().next() {
+            if pair.as_rule() == Rule::statement
+                && let Some(inner_pair) = pair.into_inner().next() {
                     return pairs_to_expr(inner_pair.into_inner()).unwrap();
                 }
-            }
         }
 
         panic!("No statement found in parsed input");
@@ -759,14 +758,12 @@ mod tests {
         let mut formatted_statements = Vec::new();
 
         for pair in pairs {
-            if pair.as_rule() == Rule::statement {
-                if let Some(inner_pair) = pair.into_inner().next() {
-                    if let Ok(expr) = pairs_to_expr(inner_pair.into_inner()) {
+            if pair.as_rule() == Rule::statement
+                && let Some(inner_pair) = pair.into_inner().next()
+                    && let Ok(expr) = pairs_to_expr(inner_pair.into_inner()) {
                         let formatted = format_expr(&expr, Some(80));
                         formatted_statements.push(formatted);
                     }
-                }
-            }
         }
 
         // Should have formatted all 3 statements
@@ -786,8 +783,8 @@ mod tests {
         let mut formatted_statements = Vec::new();
 
         for pair in pairs {
-            if pair.as_rule() == Rule::statement {
-                if let Some(inner_pair) = pair.into_inner().next() {
+            if pair.as_rule() == Rule::statement
+                && let Some(inner_pair) = pair.into_inner().next() {
                     match inner_pair.as_rule() {
                         Rule::comment => {
                             // Preserve comment as-is
@@ -802,7 +799,6 @@ mod tests {
                         }
                     }
                 }
-            }
         }
 
         // All 4 items should be preserved
@@ -823,8 +819,8 @@ mod tests {
         let mut formatted_statements = Vec::new();
 
         for pair in pairs {
-            if pair.as_rule() == Rule::statement {
-                if let Some(inner_pair) = pair.into_inner().next() {
+            if pair.as_rule() == Rule::statement
+                && let Some(inner_pair) = pair.into_inner().next() {
                     match inner_pair.as_rule() {
                         Rule::comment => {
                             formatted_statements.push(inner_pair.as_str().to_string());
@@ -837,7 +833,6 @@ mod tests {
                         }
                     }
                 }
-            }
         }
 
         let result = formatted_statements.join("\n");
@@ -864,8 +859,8 @@ mod tests {
         let mut formatted_statements = Vec::new();
 
         for pair in pairs {
-            if pair.as_rule() == Rule::statement {
-                if let Some(inner_pair) = pair.into_inner().next() {
+            if pair.as_rule() == Rule::statement
+                && let Some(inner_pair) = pair.into_inner().next() {
                     match inner_pair.as_rule() {
                         Rule::output_declaration => {
                             // Should preserve the output keyword
@@ -895,7 +890,6 @@ mod tests {
                         }
                     }
                 }
-            }
         }
 
         assert_eq!(formatted_statements.len(), 1);
@@ -912,8 +906,8 @@ mod tests {
         let mut formatted_statements = Vec::new();
 
         for pair in pairs {
-            if pair.as_rule() == Rule::statement {
-                if let Some(inner_pair) = pair.into_inner().next() {
+            if pair.as_rule() == Rule::statement
+                && let Some(inner_pair) = pair.into_inner().next() {
                     match inner_pair.as_rule() {
                         Rule::output_declaration => {
                             // Should preserve the output keyword
@@ -943,7 +937,6 @@ mod tests {
                         }
                     }
                 }
-            }
         }
 
         assert_eq!(formatted_statements.len(), 2);
@@ -961,8 +954,8 @@ mod tests {
         let mut formatted_statements = Vec::new();
 
         for pair in pairs {
-            if pair.as_rule() == Rule::statement {
-                if let Some(inner_pair) = pair.into_inner().next() {
+            if pair.as_rule() == Rule::statement
+                && let Some(inner_pair) = pair.into_inner().next() {
                     match inner_pair.as_rule() {
                         Rule::output_declaration => {
                             // Should preserve the output keyword
@@ -992,7 +985,6 @@ mod tests {
                         }
                     }
                 }
-            }
         }
 
         assert_eq!(formatted_statements.len(), 1);
@@ -1228,9 +1220,9 @@ mod tests {
         let pairs = get_pairs(source).unwrap();
 
         for pair in pairs {
-            if pair.as_rule() == Rule::statement {
-                if let Some(inner_pair) = pair.into_inner().next() {
-                    if let Ok(expr) = pairs_to_expr(inner_pair.into_inner()) {
+            if pair.as_rule() == Rule::statement
+                && let Some(inner_pair) = pair.into_inner().next()
+                    && let Ok(expr) = pairs_to_expr(inner_pair.into_inner()) {
                         let formatted = format_expr(&expr, Some(40));
                         println!("Formatted output:\n{}", formatted);
                         println!("Line count: {}", formatted.lines().count());
@@ -1245,8 +1237,6 @@ mod tests {
                             );
                         }
                     }
-                }
-            }
         }
     }
 
@@ -1259,9 +1249,9 @@ mod tests {
         let pairs = get_pairs(source).unwrap();
 
         for pair in pairs {
-            if pair.as_rule() == Rule::statement {
-                if let Some(inner_pair) = pair.into_inner().next() {
-                    if let Ok(expr) = pairs_to_expr(inner_pair.into_inner()) {
+            if pair.as_rule() == Rule::statement
+                && let Some(inner_pair) = pair.into_inner().next()
+                    && let Ok(expr) = pairs_to_expr(inner_pair.into_inner()) {
                         let formatted = format_expr(&expr, Some(80));
                         println!("Input:\n{}", source);
                         println!("Output:\n{}", formatted);
@@ -1269,8 +1259,6 @@ mod tests {
                         // Currently it collapses to single line
                         assert_eq!(formatted, "x = [1, 2, 3]");
                     }
-                }
-            }
         }
     }
 
@@ -1289,12 +1277,11 @@ mod tests {
                 let start_line = pair.as_span().start_pos().line_col().0;
                 let end_line = pair.as_span().end_pos().line_col().0;
 
-                if let Some(inner_pair) = pair.into_inner().next() {
-                    if let Ok(expr) = pairs_to_expr(inner_pair.into_inner()) {
+                if let Some(inner_pair) = pair.into_inner().next()
+                    && let Ok(expr) = pairs_to_expr(inner_pair.into_inner()) {
                         let formatted = format_expr(&expr, Some(80));
                         statements_with_positions.push((formatted, start_line, end_line));
                     }
-                }
             }
         }
 
@@ -1326,9 +1313,9 @@ mod tests {
         let pairs = get_pairs(source).unwrap();
 
         for pair in pairs {
-            if pair.as_rule() == Rule::statement {
-                if let Some(inner_pair) = pair.into_inner().next() {
-                    if let Ok(expr) = pairs_to_expr(inner_pair.into_inner()) {
+            if pair.as_rule() == Rule::statement
+                && let Some(inner_pair) = pair.into_inner().next()
+                    && let Ok(expr) = pairs_to_expr(inner_pair.into_inner()) {
                         let formatted = format_expr(&expr, Some(40));
                         println!("Formatted:\n{}", formatted);
 
@@ -1336,8 +1323,6 @@ mod tests {
                         assert!(formatted.contains("[\n  {"));
                         assert!(!formatted.contains("            ")); // Should not have excessive indentation
                     }
-                }
-            }
         }
     }
 
@@ -1544,9 +1529,9 @@ mod tests {
         let pairs = get_pairs(source).unwrap();
 
         for pair in pairs {
-            if pair.as_rule() == Rule::statement {
-                if let Some(inner_pair) = pair.into_inner().next() {
-                    if let Ok(expr) = pairs_to_expr_with_comments(inner_pair.into_inner()) {
+            if pair.as_rule() == Rule::statement
+                && let Some(inner_pair) = pair.into_inner().next()
+                    && let Ok(expr) = pairs_to_expr_with_comments(inner_pair.into_inner()) {
                         let formatted = format_expr(&expr, Some(80));
 
                         assert!(
@@ -1565,8 +1550,6 @@ mod tests {
                             formatted
                         );
                     }
-                }
-            }
         }
     }
 
@@ -1579,9 +1562,9 @@ mod tests {
         let pairs = get_pairs(source).unwrap();
 
         for pair in pairs {
-            if pair.as_rule() == Rule::statement {
-                if let Some(inner_pair) = pair.into_inner().next() {
-                    if let Ok(expr) = pairs_to_expr_with_comments(inner_pair.into_inner()) {
+            if pair.as_rule() == Rule::statement
+                && let Some(inner_pair) = pair.into_inner().next()
+                    && let Ok(expr) = pairs_to_expr_with_comments(inner_pair.into_inner()) {
                         let formatted = format_expr(&expr, Some(80));
 
                         assert!(
@@ -1595,8 +1578,6 @@ mod tests {
                             formatted
                         );
                     }
-                }
-            }
         }
     }
 
@@ -1610,9 +1591,9 @@ mod tests {
         let pairs = get_pairs(source).unwrap();
 
         for pair in pairs {
-            if pair.as_rule() == Rule::statement {
-                if let Some(inner_pair) = pair.into_inner().next() {
-                    if let Ok(expr) = pairs_to_expr_with_comments(inner_pair.into_inner()) {
+            if pair.as_rule() == Rule::statement
+                && let Some(inner_pair) = pair.into_inner().next()
+                    && let Ok(expr) = pairs_to_expr_with_comments(inner_pair.into_inner()) {
                         let formatted = format_expr(&expr, Some(80));
 
                         assert!(
@@ -1626,8 +1607,6 @@ mod tests {
                             formatted
                         );
                     }
-                }
-            }
         }
     }
 
@@ -1641,9 +1620,9 @@ mod tests {
         let pairs = get_pairs(source).unwrap();
 
         for pair in pairs {
-            if pair.as_rule() == Rule::statement {
-                if let Some(inner_pair) = pair.into_inner().next() {
-                    if let Ok(expr) = pairs_to_expr_with_comments(inner_pair.into_inner()) {
+            if pair.as_rule() == Rule::statement
+                && let Some(inner_pair) = pair.into_inner().next()
+                    && let Ok(expr) = pairs_to_expr_with_comments(inner_pair.into_inner()) {
                         let formatted = format_expr(&expr, Some(80));
 
                         // Should contain newlines because of the comment
@@ -1658,8 +1637,6 @@ mod tests {
                             formatted
                         );
                     }
-                }
-            }
         }
     }
 }
