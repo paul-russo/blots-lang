@@ -23,12 +23,18 @@ release version:
 # Run tests
 test:
     cargo nextest run
+    cd blots-wasm && wasm-pack test --node
     UV_CACHE_DIR=.uv-cache uv run --python 3.11 --with pint python scripts/check_unit_conversions.py
 
 # Run tests with CI profile (retries, fail-fast)
 test-ci:
     cargo nextest run --profile ci
+    cd blots-wasm && wasm-pack test --node
     UV_CACHE_DIR=.uv-cache uv run --python 3.11 --with pint python scripts/check_unit_conversions.py
+
+# Run WASM tests only
+test-wasm:
+    cd blots-wasm && wasm-pack test --node
 
 # Clean build artifacts
 clean:
