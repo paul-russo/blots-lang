@@ -1527,34 +1527,24 @@ impl BuiltInFunction {
             }
 
             // Unchecked comparison functions - return false instead of error for type mismatches
-            Self::Ugt => {
-                match args[0].compare(&args[1], &heap.borrow())? {
-                    Some(std::cmp::Ordering::Greater) => Ok(Value::Bool(true)),
-                    _ => Ok(Value::Bool(false)),
+            Self::Ugt => match args[0].compare(&args[1], &heap.borrow())? {
+                Some(std::cmp::Ordering::Greater) => Ok(Value::Bool(true)),
+                _ => Ok(Value::Bool(false)),
+            },
+            Self::Ult => match args[0].compare(&args[1], &heap.borrow())? {
+                Some(std::cmp::Ordering::Less) => Ok(Value::Bool(true)),
+                _ => Ok(Value::Bool(false)),
+            },
+            Self::Ugte => match args[0].compare(&args[1], &heap.borrow())? {
+                Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal) => {
+                    Ok(Value::Bool(true))
                 }
-            }
-            Self::Ult => {
-                match args[0].compare(&args[1], &heap.borrow())? {
-                    Some(std::cmp::Ordering::Less) => Ok(Value::Bool(true)),
-                    _ => Ok(Value::Bool(false)),
-                }
-            }
-            Self::Ugte => {
-                match args[0].compare(&args[1], &heap.borrow())? {
-                    Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal) => {
-                        Ok(Value::Bool(true))
-                    }
-                    _ => Ok(Value::Bool(false)),
-                }
-            }
-            Self::Ulte => {
-                match args[0].compare(&args[1], &heap.borrow())? {
-                    Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal) => {
-                        Ok(Value::Bool(true))
-                    }
-                    _ => Ok(Value::Bool(false)),
-                }
-            }
+                _ => Ok(Value::Bool(false)),
+            },
+            Self::Ulte => match args[0].compare(&args[1], &heap.borrow())? {
+                Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal) => Ok(Value::Bool(true)),
+                _ => Ok(Value::Bool(false)),
+            },
         }
     }
 

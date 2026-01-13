@@ -32,17 +32,18 @@ fn run_blots_eval(code: &str) -> String {
 }
 
 fn parse_function_output(json_str: &str) -> String {
-    let json: Value =
-        serde_json::from_str(json_str).unwrap_or_else(|_| panic!("Failed to parse JSON: {}", json_str));
+    let json: Value = serde_json::from_str(json_str)
+        .unwrap_or_else(|_| panic!("Failed to parse JSON: {}", json_str));
 
     // Extract the function source from the first output
     if let Some(obj) = json.as_object()
         && let Some((_, value)) = obj.iter().next()
-            && let Some(func_obj) = value.as_object()
-                && let Some(func_src) = func_obj.get("__blots_function")
-                    && let Some(src) = func_src.as_str() {
-                        return src.to_string();
-                    }
+        && let Some(func_obj) = value.as_object()
+        && let Some(func_src) = func_obj.get("__blots_function")
+        && let Some(src) = func_src.as_str()
+    {
+        return src.to_string();
+    }
     panic!("Could not extract function source from: {}", json_str);
 }
 

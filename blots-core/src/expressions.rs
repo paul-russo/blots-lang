@@ -1889,7 +1889,10 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
             match primary.as_rule() {
                 Rule::number => {
                     let num_str = primary.as_str();
-                    let value = if num_str.starts_with("0b") || num_str.starts_with("-0b") || num_str.starts_with("+0b") {
+                    let value = if num_str.starts_with("0b")
+                        || num_str.starts_with("-0b")
+                        || num_str.starts_with("+0b")
+                    {
                         // Binary number
                         let (sign, digits) = if let Some(stripped) = num_str.strip_prefix("-0b") {
                             (-1.0, stripped)
@@ -1902,7 +1905,10 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                         let parsed = i64::from_str_radix(&cleaned, 2)
                             .map_err(|e| anyhow!("Invalid binary number: {}", e))?;
                         sign * parsed as f64
-                    } else if num_str.starts_with("0x") || num_str.starts_with("-0x") || num_str.starts_with("+0x") {
+                    } else if num_str.starts_with("0x")
+                        || num_str.starts_with("-0x")
+                        || num_str.starts_with("+0x")
+                    {
                         // Hexadecimal number
                         let (sign, digits) = if let Some(stripped) = num_str.strip_prefix("-0x") {
                             (-1.0, stripped)
@@ -1917,7 +1923,9 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                         sign * parsed as f64
                     } else {
                         // Decimal number (existing logic)
-                        num_str.replace("_", "").parse::<f64>()
+                        num_str
+                            .replace("_", "")
+                            .parse::<f64>()
                             .map_err(anyhow::Error::from)?
                     };
                     Ok(Spanned::new(Expr::Number(value), span))

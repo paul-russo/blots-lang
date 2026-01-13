@@ -1065,16 +1065,17 @@ mod where_operator_tests {
         for pair in pairs {
             if let crate::parser::Rule::statement = pair.as_rule()
                 && let Some(inner_pair) = pair.into_inner().next()
-                    && let crate::parser::Rule::expression = inner_pair.as_rule() {
-                        result = crate::expressions::evaluate_pairs(
-                            inner_pair.into_inner(),
-                            Rc::clone(&heap),
-                            Rc::clone(&bindings),
-                            0,
-                            "[\"apple\", \"banana\", \"cherry\"] where s => s == \"banana\"",
-                        )
-                        .unwrap();
-                    }
+                && let crate::parser::Rule::expression = inner_pair.as_rule()
+            {
+                result = crate::expressions::evaluate_pairs(
+                    inner_pair.into_inner(),
+                    Rc::clone(&heap),
+                    Rc::clone(&bindings),
+                    0,
+                    "[\"apple\", \"banana\", \"cherry\"] where s => s == \"banana\"",
+                )
+                .unwrap();
+            }
         }
 
         let borrowed_heap = heap.borrow();
@@ -1389,16 +1390,17 @@ mod via_into_error_message_tests {
             let mut result = Value::Null;
             for pair in pairs {
                 if let crate::parser::Rule::statement = pair.as_rule()
-                    && let Some(inner_pair) = pair.into_inner().next() {
-                        result = crate::expressions::evaluate_pairs(
-                            inner_pair.into_inner(),
-                            Rc::clone(&heap),
-                            Rc::clone(&bindings),
-                            0,
-                            "[10, 20, 30] via (x, idx) => x + idx",
-                        )
-                        .unwrap();
-                    }
+                    && let Some(inner_pair) = pair.into_inner().next()
+                {
+                    result = crate::expressions::evaluate_pairs(
+                        inner_pair.into_inner(),
+                        Rc::clone(&heap),
+                        Rc::clone(&bindings),
+                        0,
+                        "[10, 20, 30] via (x, idx) => x + idx",
+                    )
+                    .unwrap();
+                }
             }
             (result, heap)
         };
@@ -1945,7 +1947,9 @@ mod binary_hex_number_tests {
     fn test_binary_in_list() {
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(Environment::new());
-        let result = parse_and_evaluate("[0b1, 0b10, 0b11]", Some(Rc::clone(&heap)), Some(bindings)).unwrap();
+        let result =
+            parse_and_evaluate("[0b1, 0b10, 0b11]", Some(Rc::clone(&heap)), Some(bindings))
+                .unwrap();
         let borrowed_heap = heap.borrow();
         let list = result.as_list(&borrowed_heap).unwrap();
         assert_eq!(list[0], Value::Number(1.0));
@@ -1957,7 +1961,8 @@ mod binary_hex_number_tests {
     fn test_hex_in_list() {
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(Environment::new());
-        let result = parse_and_evaluate("[0x1, 0xA, 0xFF]", Some(Rc::clone(&heap)), Some(bindings)).unwrap();
+        let result =
+            parse_and_evaluate("[0x1, 0xA, 0xFF]", Some(Rc::clone(&heap)), Some(bindings)).unwrap();
         let borrowed_heap = heap.borrow();
         let list = result.as_list(&borrowed_heap).unwrap();
         assert_eq!(list[0], Value::Number(1.0));
