@@ -1822,7 +1822,8 @@ fn evaluate_binary_op_ast(
 // Helper function to extract Span from a Pest Pair
 fn span_from_pair(pair: &Pair<Rule>) -> Span {
     let span = pair.as_span();
-    let (line, col) = span.start_pos().line_col();
+    let (line, col) = pair.line_col();
+
     Span::new(span.start(), span.end(), line, col)
 }
 

@@ -138,10 +138,12 @@ dependencies = [
  "anyhow",
  "blots-core",
  "indexmap",
+ "pest",
  "regex",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
+ "string-offsets",
  "wasm-bindgen",
  "wasm-bindgen-test",
 ]
@@ -724,6 +726,12 @@ name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
+
+[[package]]
+name = "string-offsets"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a651d1095b5b70f1a88e10dbcf58625e30140112b0f9f55f334e0f84ec2e3176"
 
 [[package]]
 name = "strsim"

@@ -2,6 +2,7 @@ use anyhow::Result;
 use blots_core::{
     ast::{Expr, Spanned},
     environment::Environment,
+    error::RuntimeError,
     expressions::{evaluate_pairs, pairs_to_expr_with_comments},
     formatter::{format_expr, join_statements_with_spacing},
     functions::get_built_in_function_idents,
@@ -10,8 +11,10 @@ use blots_core::{
     values::SerializableValue,
 };
 use indexmap::{IndexMap, IndexSet};
+use pest::error::InputLocation;
 use serde::{Deserialize, Serialize};
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use string_offsets::StringOffsets;
 use wasm_bindgen::prelude::*;
 
 #[cfg(test)]
@@ -24,16 +27,108 @@ struct EvaluationResult {
     outputs: IndexSet<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum EvaluateResponse {
+    Success { result: EvaluationResult },
+    Error { error: ErrorInfo },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ErrorInfo {
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    range: Option<ErrorRange>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum ErrorRange {
+    Span { start: usize, end: usize },
+    Pos { pos: usize },
+}
+
+/// Extract error range from pest parsing error, converting UTF-8 byte positions to UTF-16 offsets
+fn extract_pest_error_range(
+    error: &pest::error::Error<Rule>,
+    offsets: &StringOffsets,
+) -> Option<ErrorRange> {
+    match &error.location {
+        InputLocation::Pos(pos) => Some(ErrorRange::Pos {
+            pos: offsets.utf8_to_utf16(*pos),
+        }),
+        InputLocation::Span((start, end)) => Some(ErrorRange::Span {
+            start: offsets.utf8_to_utf16(*start),
+            end: offsets.utf8_to_utf16(*end),
+        }),
+    }
+}
+
+/// Extract error range from RuntimeError, converting UTF-8 byte positions to UTF-16 offsets
+fn extract_runtime_error_range(
+    error: &RuntimeError,
+    offsets: &StringOffsets,
+) -> Option<ErrorRange> {
+    error.span.as_ref().map(|span| {
+        // Convert UTF-8 byte positions to UTF-16 offsets
+        if span.end_byte != span.start_byte {
+            ErrorRange::Span {
+                start: offsets.utf8_to_utf16(span.start_byte),
+                end: offsets.utf8_to_utf16(span.end_byte),
+            }
+        } else {
+            // Single position
+            ErrorRange::Pos {
+                pos: offsets.utf8_to_utf16(span.start_byte),
+            }
+        }
+    })
+}
+
 #[wasm_bindgen]
 pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
-    let heap = Rc::new(RefCell::new(Heap::new()));
-    let inputs_given: IndexMap<String, SerializableValue> =
-        serde_wasm_bindgen::from_value(inputs_js)?;
+    let expr_owned = String::from(expr);
 
-    let inputs = inputs_given
+    // Parse inputs
+    let inputs_given: IndexMap<String, SerializableValue> =
+        match serde_wasm_bindgen::from_value(inputs_js) {
+            Ok(v) => v,
+            Err(e) => {
+                let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+                return Ok(EvaluateResponse::Error {
+                    error: ErrorInfo {
+                        message: format!("Invalid inputs: {}", e),
+                        range: None,
+                    },
+                }
+                .serialize(&serializer)?);
+            }
+        };
+
+    let heap = Rc::new(RefCell::new(Heap::new()));
+    let inputs = match inputs_given
         .into_iter()
-        .map(|(key, value)| (key, value.to_value(&mut heap.borrow_mut()).unwrap()))
-        .collect();
+        .map(|(key, value)| {
+            value
+                .to_value(&mut heap.borrow_mut())
+                .map(|v| (key.clone(), v))
+                .map_err(|e| RuntimeError::new(format!("Failed to convert input '{}': {}", key, e)))
+        })
+        .collect::<Result<IndexMap<String, _>, RuntimeError>>()
+    {
+        Ok(inputs) => inputs,
+        Err(e) => {
+            let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+            let offsets = StringOffsets::new(&expr_owned);
+            return Ok(EvaluateResponse::Error {
+                error: ErrorInfo {
+                    message: e.message.clone(),
+                    range: extract_runtime_error_range(&e, &offsets),
+                },
+            }
+            .serialize(&serializer)?);
+        }
+    };
 
     let bindings = Rc::new(Environment::new());
     bindings.insert(
@@ -41,9 +136,21 @@ pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
         heap.borrow_mut().insert_record(inputs),
     );
 
-    let expr_owned = String::from(expr);
-    let pairs =
-        get_pairs(&expr_owned).map_err(|e| JsError::new(&format!("Parsing error: {}", e)))?;
+    // Parse the expression
+    let pairs = match get_pairs(&expr_owned) {
+        Ok(pairs) => pairs,
+        Err(e) => {
+            let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+            let offsets = StringOffsets::new(&expr_owned);
+            return Ok(EvaluateResponse::Error {
+                error: ErrorInfo {
+                    message: format!("Parsing error: {}", e),
+                    range: extract_pest_error_range(&e, &offsets),
+                },
+            }
+            .serialize(&serializer)?);
+        }
+    };
 
     let mut outputs = IndexSet::new();
     let mut values = HashMap::new();
@@ -93,14 +200,26 @@ pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
                         start_line_col.0, start_line_col.1, end_line_col.0, end_line_col.1
                     );
 
-                    let value = evaluate_pairs(
+                    let value = match evaluate_pairs(
                         inner_pairs,
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         0,
-                        expr,
-                    )
-                    .map_err(|error| JsError::new(&format!("Evaluation error: {}", error)))?;
+                        &expr_owned,
+                    ) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+                            let offsets = StringOffsets::new(&expr_owned);
+                            return Ok(EvaluateResponse::Error {
+                                error: ErrorInfo {
+                                    message: e.message.clone(),
+                                    range: extract_runtime_error_range(&e, &offsets),
+                                },
+                            }
+                            .serialize(&serializer)?);
+                        }
+                    };
 
                     values.insert(col_id, value);
                 }
@@ -112,21 +231,63 @@ pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
 
     let values_serializable = values
         .iter()
-        .map(|(k, v)| (k.clone(), v.to_serializable_value(&heap.borrow()).unwrap()))
-        .collect();
+        .map(|(k, v)| {
+            v.to_serializable_value(&heap.borrow())
+                .map(|sv| (k.clone(), sv))
+                .map_err(|e| RuntimeError::new(format!("Serialization error for '{}': {}", k, e)))
+        })
+        .collect::<Result<HashMap<String, _>, RuntimeError>>();
+
+    let values_serializable = match values_serializable {
+        Ok(v) => v,
+        Err(e) => {
+            let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+            let offsets = StringOffsets::new(&expr_owned);
+            return Ok(EvaluateResponse::Error {
+                error: ErrorInfo {
+                    message: e.message.clone(),
+                    range: extract_runtime_error_range(&e, &offsets),
+                },
+            }
+            .serialize(&serializer)?);
+        }
+    };
 
     let bindings_serializable = bindings
         .iter()
-        .map(|(k, v)| (k, v.to_serializable_value(&heap.borrow()).unwrap()))
-        .collect();
+        .map(|(k, v)| {
+            v.to_serializable_value(&heap.borrow())
+                .map(|sv| (k.clone(), sv))
+                .map_err(|e| {
+                    RuntimeError::new(format!("Serialization error for binding '{}': {}", k, e))
+                })
+        })
+        .collect::<Result<HashMap<String, _>, RuntimeError>>();
+
+    let bindings_serializable = match bindings_serializable {
+        Ok(v) => v,
+        Err(e) => {
+            let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+            let offsets = StringOffsets::new(&expr_owned);
+            return Ok(EvaluateResponse::Error {
+                error: ErrorInfo {
+                    message: e.message.clone(),
+                    range: extract_runtime_error_range(&e, &offsets),
+                },
+            }
+            .serialize(&serializer)?);
+        }
+    };
 
     // Use json_compatible serializer to ensure Records are serialized as JSON objects
     // instead of JavaScript Maps
     let serializer = serde_wasm_bindgen::Serializer::json_compatible();
-    Ok(EvaluationResult {
-        values: values_serializable,
-        bindings: bindings_serializable,
-        outputs,
+    Ok(EvaluateResponse::Success {
+        result: EvaluationResult {
+            values: values_serializable,
+            bindings: bindings_serializable,
+            outputs,
+        },
     }
     .serialize(&serializer)?)
 }
