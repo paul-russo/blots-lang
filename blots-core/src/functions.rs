@@ -1,11 +1,12 @@
 use crate::{
     environment::Environment,
+    error::RuntimeError,
     expressions::evaluate_ast,
     heap::{Heap, HeapPointer, IterablePointer},
     units,
     values::{FunctionArity, LambdaArg, LambdaDef, ReifiedValue, Value},
 };
-use anyhow::{Result, anyhow};
+use anyhow::Result as AnyhowResult;
 use dyn_fmt::AsStrFormatExt;
 use indexmap::IndexMap;
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::LazyLock};
@@ -383,7 +384,7 @@ impl BuiltInFunction {
         bindings: Rc<Environment>,
         call_depth: usize,
         source: &str,
-    ) -> Result<Value> {
+    ) -> Result<Value, RuntimeError> {
         match self {
             // Math functions
             Self::Sqrt => Ok(Value::Number(args[0].as_number()?.sqrt())),
@@ -428,18 +429,18 @@ impl BuiltInFunction {
                             let list = args[0].as_list(&borrowed_heap)?;
                             list.iter()
                                 .map(|a| a.as_number())
-                                .collect::<Result<Vec<f64>>>()?
+                                .collect::<AnyhowResult<Vec<f64>>>()?
                         }
                         _ => vec![args[0].as_number()?],
                     }
                 } else {
                     args.iter()
                         .map(|a| a.as_number())
-                        .collect::<Result<Vec<f64>>>()?
+                        .collect::<AnyhowResult<Vec<f64>>>()?
                 };
 
                 if nums.is_empty() {
-                    return Err(anyhow!("min requires at least one number"));
+                    return Err(RuntimeError::from("min requires at least one number"));
                 }
 
                 Ok(Value::Number(
@@ -456,18 +457,18 @@ impl BuiltInFunction {
                             let list = args[0].as_list(&borrowed_heap)?;
                             list.iter()
                                 .map(|a| a.as_number())
-                                .collect::<Result<Vec<f64>>>()?
+                                .collect::<AnyhowResult<Vec<f64>>>()?
                         }
                         _ => vec![args[0].as_number()?],
                     }
                 } else {
                     args.iter()
                         .map(|a| a.as_number())
-                        .collect::<Result<Vec<f64>>>()?
+                        .collect::<AnyhowResult<Vec<f64>>>()?
                 };
 
                 if nums.is_empty() {
-                    return Err(anyhow!("max requires at least one number"));
+                    return Err(RuntimeError::from("max requires at least one number"));
                 }
 
                 Ok(Value::Number(
@@ -483,17 +484,17 @@ impl BuiltInFunction {
                             let list = args[0].as_list(&borrowed_heap)?;
                             list.iter()
                                 .map(|a| a.as_number())
-                                .collect::<Result<Vec<f64>>>()?
+                                .collect::<AnyhowResult<Vec<f64>>>()?
                         }
                         _ => vec![args[0].as_number()?],
                     }
                 } else {
                     args.iter()
                         .map(|a| a.as_number())
-                        .collect::<Result<Vec<f64>>>()?
+                        .collect::<AnyhowResult<Vec<f64>>>()?
                 };
                 if nums.is_empty() {
-                    return Err(anyhow!("avg requires at least one number"));
+                    return Err(RuntimeError::from("avg requires at least one number"));
                 }
                 Ok(Value::Number(nums.iter().sum::<f64>() / nums.len() as f64))
             }
@@ -506,17 +507,17 @@ impl BuiltInFunction {
                             let list = args[0].as_list(&borrowed_heap)?;
                             list.iter()
                                 .map(|a| a.as_number())
-                                .collect::<Result<Vec<f64>>>()?
+                                .collect::<AnyhowResult<Vec<f64>>>()?
                         }
                         _ => vec![args[0].as_number()?],
                     }
                 } else {
                     args.iter()
                         .map(|a| a.as_number())
-                        .collect::<Result<Vec<f64>>>()?
+                        .collect::<AnyhowResult<Vec<f64>>>()?
                 };
                 if nums.is_empty() {
-                    return Err(anyhow!("prod requires at least one number"));
+                    return Err(RuntimeError::from("prod requires at least one number"));
                 }
                 Ok(Value::Number(nums.iter().product()))
             }
@@ -525,17 +526,17 @@ impl BuiltInFunction {
                 let (start, end) = match args[..] {
                     [Value::Number(start)] => (0.0, start),
                     [Value::Number(start), Value::Number(end)] => (start, end),
-                    _ => return Err(anyhow!("range requires 1 or 2 numbers")),
+                    _ => return Err(RuntimeError::from("range requires 1 or 2 numbers")),
                 };
 
                 if start > end {
-                    return Err(anyhow!(
+                    return Err(RuntimeError::from(
                         "range requires start to be less than or equal to end"
                     ));
                 }
 
                 if !f64::is_finite(start) || !f64::is_finite(end) {
-                    return Err(anyhow!("range requires finite numbers"));
+                    return Err(RuntimeError::from("range requires finite numbers"));
                 }
 
                 let start_i64 = start as i64;
@@ -543,10 +544,10 @@ impl BuiltInFunction {
                 let length = end_i64 - start_i64;
 
                 if length > u32::MAX as i64 {
-                    return Err(anyhow!(
+                    return Err(RuntimeError::new(format!(
                         "list would be longer than the maximum length of {}",
                         u32::MAX
-                    ));
+                    )));
                 }
 
                 let values = (start_i64..end_i64)
@@ -565,17 +566,17 @@ impl BuiltInFunction {
                             let list = args[0].as_list(&borrowed_heap)?;
                             list.iter()
                                 .map(|a| a.as_number())
-                                .collect::<Result<Vec<f64>>>()?
+                                .collect::<AnyhowResult<Vec<f64>>>()?
                         }
                         _ => vec![args[0].as_number()?],
                     }
                 } else {
                     args.iter()
                         .map(|a| a.as_number())
-                        .collect::<Result<Vec<f64>>>()?
+                        .collect::<AnyhowResult<Vec<f64>>>()?
                 };
                 if nums.is_empty() {
-                    return Err(anyhow!("sum requires at least one number"));
+                    return Err(RuntimeError::from("sum requires at least one number"));
                 }
                 Ok(Value::Number(nums.iter().sum()))
             }
@@ -589,18 +590,18 @@ impl BuiltInFunction {
                             let list = args[0].as_list(&borrowed_heap)?;
                             list.iter()
                                 .map(|a| a.as_number())
-                                .collect::<Result<Vec<f64>>>()?
+                                .collect::<AnyhowResult<Vec<f64>>>()?
                         }
                         _ => vec![args[0].as_number()?],
                     }
                 } else {
                     args.into_iter()
                         .map(|a| a.as_number())
-                        .collect::<Result<Vec<f64>>>()?
+                        .collect::<AnyhowResult<Vec<f64>>>()?
                 };
 
                 if nums.is_empty() {
-                    return Err(anyhow!("median requires at least one number"));
+                    return Err(RuntimeError::from("median requires at least one number"));
                 }
 
                 nums.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -618,13 +619,13 @@ impl BuiltInFunction {
                 let list = args[0].as_list(heap)?;
 
                 if !(0.0..=100.0).contains(&p) {
-                    return Err(anyhow!("percentile must be between 0 and 100"));
+                    return Err(RuntimeError::from("percentile must be between 0 and 100"));
                 }
 
                 let mut nums = list
                     .iter()
                     .map(|a| a.as_number())
-                    .collect::<Result<Vec<f64>>>()?;
+                    .collect::<AnyhowResult<Vec<f64>>>()?;
 
                 nums.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 let index = (p / 100.0 * (nums.len() - 1) as f64).round() as usize;
@@ -640,7 +641,7 @@ impl BuiltInFunction {
                 Value::String(s) => Ok(Value::Number(
                     s.reify(&heap.borrow()).as_string()?.len() as f64
                 )),
-                _ => Err(anyhow!("argument must be a list or string")),
+                _ => Err(RuntimeError::from("argument must be a list or string")),
             },
 
             Self::Head => match &args[0] {
@@ -661,7 +662,7 @@ impl BuiltInFunction {
 
                     Ok(heap.borrow_mut().insert_string(val))
                 }
-                _ => Err(anyhow!("argument must be a list or string")),
+                _ => Err(RuntimeError::from("argument must be a list or string")),
             },
 
             Self::Tail => match &args[0] {
@@ -687,7 +688,7 @@ impl BuiltInFunction {
 
                     Ok(heap.borrow_mut().insert_string(val))
                 }
-                _ => Err(anyhow!("argument must be a list or string")),
+                _ => Err(RuntimeError::from("argument must be a list or string")),
             },
 
             Self::Slice => {
@@ -700,7 +701,7 @@ impl BuiltInFunction {
                             let borrowed_heap = heap.borrow();
                             let list = args[0].as_list(&borrowed_heap)?;
                             list.get(start..end)
-                                .ok_or_else(|| anyhow!("index out of bounds"))?
+                                .ok_or_else(|| RuntimeError::from("index out of bounds"))?
                                 .to_vec()
                         };
 
@@ -713,11 +714,11 @@ impl BuiltInFunction {
                         };
 
                         s.get(start..end)
-                            .map_or(Err(anyhow!("index out of bounds")), |s| {
+                            .map_or(Err(RuntimeError::from("index out of bounds")), |s| {
                                 Ok(heap.borrow_mut().insert_string(s.to_string()))
                             })
                     }
-                    _ => Err(anyhow!("argument must be a list or string")),
+                    _ => Err(RuntimeError::from("argument must be a list or string")),
                 }
             }
 
@@ -761,7 +762,7 @@ impl BuiltInFunction {
                 let b = args[1].as_list(&borrowed_heap)?;
 
                 if a.len() != b.len() {
-                    return Err(anyhow!(
+                    return Err(RuntimeError::from(
                         "cannot calculate dot product of lists with different lengths"
                     ));
                 }
@@ -913,12 +914,12 @@ impl BuiltInFunction {
                             let borrowed_heap = &heap.borrow();
                             args[1]
                                 .as_string(borrowed_heap)
-                                .map_err(|_| anyhow!("second argument must be a string"))?
+                                .map_err(|_| RuntimeError::from("second argument must be a string"))?
                                 .to_string()
                         };
                         Ok(Value::Bool(s.contains(&needle)))
                     }
-                    _ => Err(anyhow!("first argument must be a list or string")),
+                    _ => Err(RuntimeError::from("first argument must be a list or string")),
                 }
             }
 
@@ -927,7 +928,7 @@ impl BuiltInFunction {
                     let borrowed_heap = &heap.borrow();
                     args[0]
                         .as_string(borrowed_heap)
-                        .map_err(|_| anyhow!("first argument must be a string"))?
+                        .map_err(|_| RuntimeError::from("first argument must be a string"))?
                         .to_string()
                 };
 
@@ -953,7 +954,7 @@ impl BuiltInFunction {
                 let arity = match args[0] {
                     Value::Lambda(p) => p.reify(&heap.borrow()).as_lambda()?.get_arity(),
                     Value::BuiltIn(built_in) => built_in.arity(),
-                    _ => return Err(anyhow!("argument must be a function or built-in function")),
+                    _ => return Err(RuntimeError::from("argument must be a function or built-in function")),
                 };
 
                 Ok(Value::Number(match arity {
@@ -1023,7 +1024,7 @@ impl BuiltInFunction {
                 let func_def = {
                     let borrowed_heap = heap.borrow();
                     get_function_def(func, &borrowed_heap)
-                        .ok_or_else(|| anyhow!("second argument must be a function"))?
+                        .ok_or_else(|| RuntimeError::from("second argument must be a function"))?
                 };
                 let list_len = {
                     let borrowed_heap = heap.borrow();
@@ -1049,10 +1050,10 @@ impl BuiltInFunction {
                     let key = match key_result {
                         Value::String(_) => key_result.as_string(&heap.borrow())?.to_string(),
                         _ => {
-                            return Err(anyhow!(
+                            return Err(RuntimeError::new(format!(
                                 "group_by key function must return a string, but got a {}",
                                 key_result.get_type()
-                            ));
+                            )));
                         }
                     };
 
@@ -1074,7 +1075,7 @@ impl BuiltInFunction {
                 let func_def = {
                     let borrowed_heap = heap.borrow();
                     get_function_def(func, &borrowed_heap)
-                        .ok_or_else(|| anyhow!("second argument must be a function"))?
+                        .ok_or_else(|| RuntimeError::from("second argument must be a function"))?
                 };
                 let list_len = {
                     let borrowed_heap = heap.borrow();
@@ -1100,10 +1101,10 @@ impl BuiltInFunction {
                     let key = match key_result {
                         Value::String(_) => key_result.as_string(&heap.borrow())?.to_string(),
                         _ => {
-                            return Err(anyhow!(
+                            return Err(RuntimeError::new(format!(
                                 "count_by key function must return a string, but got a {}",
                                 key_result.get_type()
-                            ));
+                            )));
                         }
                     };
 
@@ -1144,9 +1145,9 @@ impl BuiltInFunction {
                     .iter()
                     .map(|arg| {
                         arg.as_list_pointer()
-                            .map_err(|_| anyhow!("all arguments to zip must be lists"))
+                            .map_err(|_| RuntimeError::from("all arguments to zip must be lists"))
                     })
-                    .collect::<Result<Vec<_>>>()?;
+                    .collect::<Result<Vec<_>, RuntimeError>>()?;
 
                 // Find max length
                 let max_len = {
@@ -1181,7 +1182,7 @@ impl BuiltInFunction {
                 let n = args[1].as_number()? as usize;
 
                 if n == 0 {
-                    return Err(anyhow!("chunk size must be greater than 0"));
+                    return Err(RuntimeError::from("chunk size must be greater than 0"));
                 }
 
                 let chunk_values = {
@@ -1212,16 +1213,22 @@ impl BuiltInFunction {
             Self::ToNumber => match args[0] {
                 Value::Number(_) => Ok(args[0]), // If it's already a number, just return it
                 Value::Bool(b) => Ok(Value::Number(if b { 1.0 } else { 0.0 })),
-                _ => Ok(Value::Number(args[0].as_string(&heap.borrow())?.parse()?)),
+                _ => {
+                    let s = args[0].as_string(&heap.borrow())?.to_string();
+                    let n: f64 = s.parse().map_err(|_| {
+                        RuntimeError::new(format!("cannot convert '{}' to a number", s))
+                    })?;
+                    Ok(Value::Number(n))
+                }
             },
 
             Self::ToBool => match args[0] {
                 Value::Bool(_) => Ok(args[0]), // If it's already a boolean, just return it
                 Value::Number(_) => Ok(Value::Bool(args[0].as_number()? != 0.0)),
-                _ => Err(anyhow!(
+                _ => Err(RuntimeError::new(format!(
                     "expected a boolean or number, but got a {}",
                     args[0].get_type()
-                )),
+                ))),
             },
 
             Self::Convert => {
@@ -1248,7 +1255,7 @@ impl BuiltInFunction {
                     args[0].stringify_internal(borrowed_heap)
                 } else {
                     let format_str = args[0].as_string(borrowed_heap).map_err(|_| {
-                        anyhow!("first argument must be a formatting string if multiple arguments are given")
+                        RuntimeError::from("first argument must be a formatting string if multiple arguments are given")
                     })?;
                     let format_args = &args[1..]
                         .iter()
@@ -1278,7 +1285,7 @@ impl BuiltInFunction {
                 let func_def = {
                     let borrowed_heap = heap.borrow();
                     get_function_def(func, &borrowed_heap)
-                        .ok_or_else(|| anyhow!("second argument must be a function"))?
+                        .ok_or_else(|| RuntimeError::from("second argument must be a function"))?
                 };
                 let list_len = {
                     let borrowed_heap = heap.borrow();
@@ -1319,7 +1326,7 @@ impl BuiltInFunction {
                 let func_def = {
                     let borrowed_heap = heap.borrow();
                     get_function_def(func, &borrowed_heap)
-                        .ok_or_else(|| anyhow!("second argument must be a function"))?
+                        .ok_or_else(|| RuntimeError::from("second argument must be a function"))?
                 };
                 let list_len = {
                     let borrowed_heap = heap.borrow();
@@ -1363,7 +1370,7 @@ impl BuiltInFunction {
                 let func_def = {
                     let borrowed_heap = heap.borrow();
                     get_function_def(func, &borrowed_heap)
-                        .ok_or_else(|| anyhow!("second argument must be a function"))?
+                        .ok_or_else(|| RuntimeError::from("second argument must be a function"))?
                 };
                 let list_len = {
                     let borrowed_heap = heap.borrow();
@@ -1403,7 +1410,7 @@ impl BuiltInFunction {
                 let func_def = {
                     let borrowed_heap = heap.borrow();
                     get_function_def(func, &borrowed_heap)
-                        .ok_or_else(|| anyhow!("second argument must be a function"))?
+                        .ok_or_else(|| RuntimeError::from("second argument must be a function"))?
                 };
                 let list_len = {
                     let borrowed_heap = heap.borrow();
@@ -1445,7 +1452,7 @@ impl BuiltInFunction {
                 let func_def = {
                     let borrowed_heap = heap.borrow();
                     get_function_def(func, &borrowed_heap)
-                        .ok_or_else(|| anyhow!("second argument must be a function"))?
+                        .ok_or_else(|| RuntimeError::from("second argument must be a function"))?
                 };
                 let list_len = {
                     let borrowed_heap = heap.borrow();
@@ -1650,44 +1657,44 @@ impl FunctionDef {
         }
     }
 
-    pub fn check_arity(&self, arg_count: usize) -> Result<()> {
+    pub fn check_arity(&self, arg_count: usize) -> Result<(), RuntimeError> {
         match self {
             FunctionDef::BuiltIn(built_in) => match built_in.arity() {
                 FunctionArity::Exact(expected) => {
                     if arg_count == expected {
                         Ok(())
                     } else {
-                        Err(anyhow!(
+                        Err(RuntimeError::new(format!(
                             "{} takes exactly {} arguments, but {} were given",
                             self.get_name(),
                             expected,
                             arg_count
-                        ))
+                        )))
                     }
                 }
                 FunctionArity::AtLeast(expected) => {
                     if arg_count >= expected {
                         Ok(())
                     } else {
-                        Err(anyhow!(
+                        Err(RuntimeError::new(format!(
                             "{} takes at least {} arguments, but {} were given",
                             self.get_name(),
                             expected,
                             arg_count
-                        ))
+                        )))
                     }
                 }
                 FunctionArity::Between(min, max) => {
                     if arg_count >= min && arg_count <= max {
                         Ok(())
                     } else {
-                        Err(anyhow!(
+                        Err(RuntimeError::new(format!(
                             "{} takes between {} and {} arguments, but {} were given",
                             self.get_name(),
                             min,
                             max,
                             arg_count
-                        ))
+                        )))
                     }
                 }
             },
@@ -1699,37 +1706,37 @@ impl FunctionDef {
                         if arg_count == expected {
                             Ok(())
                         } else {
-                            Err(anyhow!(
+                            Err(RuntimeError::new(format!(
                                 "{} takes exactly {} arguments, but {} were given",
                                 self.get_name(),
                                 expected,
                                 arg_count
-                            ))
+                            )))
                         }
                     }
                     FunctionArity::AtLeast(expected) => {
                         if arg_count >= expected {
                             Ok(())
                         } else {
-                            Err(anyhow!(
+                            Err(RuntimeError::new(format!(
                                 "{} takes at least {} arguments, but {} were given",
                                 self.get_name(),
                                 expected,
                                 arg_count
-                            ))
+                            )))
                         }
                     }
                     FunctionArity::Between(min, max) => {
                         if arg_count >= min && arg_count <= max {
                             Ok(())
                         } else {
-                            Err(anyhow!(
+                            Err(RuntimeError::new(format!(
                                 "{} takes between {} and {} arguments, but {} were given",
                                 self.get_name(),
                                 min,
                                 max,
                                 arg_count
-                            ))
+                            )))
                         }
                     }
                 }
@@ -1745,17 +1752,17 @@ impl FunctionDef {
         bindings: Rc<Environment>,
         call_depth: usize,
         source: &str,
-    ) -> Result<Value> {
+    ) -> Result<Value, RuntimeError> {
         #[cfg(not(target_arch = "wasm32"))]
         let start = std::time::Instant::now();
 
         self.check_arity(args.len())?;
 
         if call_depth > 1000 {
-            return Err(anyhow!(
+            return Err(RuntimeError::new(format!(
                 "in {}: maximum call depth of 1000 exceeded",
                 self.get_name()
-            ));
+            )));
         }
 
         match self {
@@ -1825,7 +1832,7 @@ impl FunctionDef {
                     call_depth + 1,
                     lambda_source.clone(),
                 )
-                .map_err(|error| anyhow!("in {}: {}", self.get_name(), error));
+                .map_err(|error| error.with_function_context(&self.get_name()));
 
                 #[cfg(not(target_arch = "wasm32"))]
                 FUNCTION_CALLS.lock().unwrap().push(FunctionCallStats {
@@ -1841,7 +1848,7 @@ impl FunctionDef {
             FunctionDef::BuiltIn(built_in) => {
                 let return_value = built_in
                     .call(args, heap, bindings, call_depth + 1, source)
-                    .map_err(|error| anyhow!("in {}: {}", self.get_name(), error));
+                    .map_err(|error| error.with_function_context(&self.get_name()));
 
                 #[cfg(not(target_arch = "wasm32"))]
                 FUNCTION_CALLS.lock().unwrap().push(FunctionCallStats {

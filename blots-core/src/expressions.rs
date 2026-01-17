@@ -527,7 +527,7 @@ pub fn evaluate_ast(
             };
 
             def.call(func_val, arg_vals, heap, bindings, call_depth, &source)
-                .map_err(|e| RuntimeError::from(e).with_call_site(expr.span, source.clone()))
+                .map_err(|e| e.with_call_site(expr.span, source.clone()))
         }
         Expr::Access { expr, index } => {
             let val = evaluate_ast(
@@ -1163,7 +1163,7 @@ fn evaluate_binary_op_ast(
                                 &source,
                             )
                             .map_err(|e| {
-                                RuntimeError::from(anyhow!("in \"via\" callback: {}", e))
+                                e.with_function_context("\"via\" callback")
                                     .with_call_site(op_span, source_owned.clone())
                             })?;
                         mapped_list.push(value);
@@ -1514,7 +1514,7 @@ fn evaluate_binary_op_ast(
                                     &source,
                                 )
                                 .map_err(|e| {
-                                    RuntimeError::from(anyhow!("in \"via\" callback: {}", e))
+                                    e.with_function_context("\"via\" callback")
                                         .with_call_site(op_span, source_owned.clone())
                                 })?;
                             mapped_list.push(value);
@@ -1563,7 +1563,7 @@ fn evaluate_binary_op_ast(
                             &source,
                         )
                         .map_err(|e| {
-                            RuntimeError::from(anyhow!("in \"into\" callback: {}", e))
+                            e.with_function_context("\"into\" callback")
                                 .with_call_site(op_span, source.clone())
                         })
                     } else {
@@ -1624,12 +1624,13 @@ fn evaluate_binary_op_ast(
                                     &source,
                                 )
                                 .map_err(|e| {
-                                    RuntimeError::from(anyhow!("in \"where\" callback: {}", e))
+                                    e.with_function_context("\"where\" callback")
                                         .with_call_site(op_span, source_owned.clone())
                                 })?;
 
                             if result.as_bool().map_err(|e| {
-                                RuntimeError::from(anyhow!("in \"where\" callback: {}", e))
+                                RuntimeError::from(e)
+                                    .with_function_context("\"where\" callback")
                                     .with_call_site(op_span, source_owned.clone())
                             })? {
                                 filtered_list.push(item);
@@ -1757,7 +1758,7 @@ fn evaluate_binary_op_ast(
                         &source,
                     )
                     .map_err(|e| {
-                        RuntimeError::from(anyhow!("in \"via\" callback: {}", e))
+                        e.with_function_context("\"via\" callback")
                             .with_call_site(op_span, source.clone())
                     })
             }
@@ -1797,7 +1798,7 @@ fn evaluate_binary_op_ast(
                         &source,
                     )
                     .map_err(|e| {
-                        RuntimeError::from(anyhow!("in \"into\" callback: {}", e))
+                        e.with_function_context("\"into\" callback")
                             .with_call_site(op_span, source.clone())
                     })
             }

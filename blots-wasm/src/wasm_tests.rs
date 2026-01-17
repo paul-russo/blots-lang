@@ -671,6 +671,110 @@ y = undefined_variable"#;
         }
     }
 
+    // ==================== Function Call Error Position Tests ====================
+
+    #[wasm_bindgen_test]
+    fn test_error_position_inside_function_body_not_call_site() {
+        // When an error occurs inside a function body, the error span should point to
+        // the actual error location (inside the function), not the call site.
+        //
+        // Source: "f = x => asdf + x\nf(5)"
+        // The error is "unknown identifier: asdf" at position 9-13 (0-indexed)
+        // NOT at the call site "f(5)" on line 2
+
+        let source = "f = x => asdf + x\nf(5)";
+        //            0123456789...
+        //                     ^--- "asdf" starts at position 9
+
+        let inputs = serde_wasm_bindgen::to_value(&serde_json::json!({})).unwrap();
+        let result = evaluate(source, inputs).unwrap();
+        let result_obj: serde_json::Value = serde_wasm_bindgen::from_value(result).unwrap();
+
+        // Should get an error
+        assert!(
+            result_obj["error"].is_object(),
+            "Expected error for undefined identifier 'asdf'"
+        );
+
+        let error = &result_obj["error"];
+        let message = error["message"].as_str().unwrap_or("");
+
+        // Error message should mention the undefined identifier
+        assert!(
+            message.contains("asdf"),
+            "Error message should mention 'asdf', got: {}",
+            message
+        );
+
+        // Check the error range
+        let range = &error["range"];
+        assert!(
+            range.is_object(),
+            "Expected error range object, got: {:?}",
+            range
+        );
+
+        // The error should point to "asdf" which starts at byte position 9
+        // (f = x => asdf)
+        //  0123456789
+        if let (Some(start), Some(end)) = (range.get("start"), range.get("end")) {
+            let start_pos = start.as_u64().unwrap() as usize;
+            let end_pos = end.as_u64().unwrap() as usize;
+
+            // "asdf" is at positions 9-13 in the source
+            // The span should be within line 1, not pointing to line 2 where f(5) is
+            assert!(
+                start_pos < 18, // Line 1 ends at position 17 (including newline)
+                "Error span start {} should be on line 1 (inside function body), not at call site on line 2",
+                start_pos
+            );
+
+            // Verify it's pointing to "asdf" specifically (positions 9-13)
+            assert_eq!(
+                start_pos, 9,
+                "Error span should start at position 9 (start of 'asdf'), got {}",
+                start_pos
+            );
+            assert_eq!(
+                end_pos, 13,
+                "Error span should end at position 13 (end of 'asdf'), got {}",
+                end_pos
+            );
+        } else {
+            panic!(
+                "Expected error range with start/end, got: {:?}",
+                range
+            );
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn test_error_position_nested_function_call() {
+        // Test that errors in nested function calls also point to the actual error location
+        let source = "f = x => x + undefined_var\ng = y => f(y)\ng(5)";
+
+        let inputs = serde_wasm_bindgen::to_value(&serde_json::json!({})).unwrap();
+        let result = evaluate(source, inputs).unwrap();
+        let result_obj: serde_json::Value = serde_wasm_bindgen::from_value(result).unwrap();
+
+        assert!(
+            result_obj["error"].is_object(),
+            "Expected error for undefined identifier"
+        );
+
+        let range = &result_obj["error"]["range"];
+        if let Some(start) = range.get("start") {
+            let start_pos = start.as_u64().unwrap() as usize;
+            // "undefined_var" starts at position 13 in line 1
+            // The error should NOT point to g(5) on line 3
+            assert!(
+                start_pos < 27, // Line 1 ends before this
+                "Error should point to 'undefined_var' in function f, not to call site. Got position {}",
+                start_pos
+            );
+        }
+    }
+
     // ==================== Edge Cases ====================
 
     #[wasm_bindgen_test]

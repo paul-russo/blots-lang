@@ -47,6 +47,15 @@ impl RuntimeError {
             }
         }
     }
+
+    /// Prepend function name context to the error message while preserving span information
+    pub fn with_function_context(self, function_name: &str) -> Self {
+        Self {
+            message: format!("in {}: {}", function_name, self.message),
+            span: self.span,
+            source: self.source,
+        }
+    }
 }
 
 impl fmt::Display for RuntimeError {

@@ -1547,6 +1547,152 @@ mod via_into_error_message_tests {
     }
 }
 
+// Tests for error span positions in function calls
+#[cfg(test)]
+mod function_error_span_tests {
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_pairs;
+    use crate::heap::Heap;
+    use crate::parser::{Rule, get_pairs};
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    fn parse_and_evaluate(code: &str) -> Result<Value, RuntimeError> {
+        let pairs = get_pairs(code).map_err(|e| RuntimeError::new(e.to_string()))?;
+
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        let mut result = Value::Null;
+        for pair in pairs {
+            match pair.as_rule() {
+                Rule::statement => {
+                    if let Some(inner_pair) = pair.into_inner().next() {
+                        match inner_pair.as_rule() {
+                            Rule::expression | Rule::assignment => {
+                                result = evaluate_pairs(
+                                    inner_pair.into_inner(),
+                                    Rc::clone(&heap),
+                                    Rc::clone(&bindings),
+                                    0,
+                                    code,
+                                )?;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Rule::EOI => {}
+                _ => {}
+            }
+        }
+
+        Ok(result)
+    }
+
+    #[test]
+    fn test_error_span_points_to_function_body_not_call_site() {
+        // When an error occurs inside a function body, the error span should point to
+        // the actual error location (inside the function), not the call site.
+        //
+        // Source: "f = x => asdf + x\nf(5)"
+        // The error is "unknown identifier: asdf" at position 9-13 (0-indexed)
+        // NOT at the call site "f(5)" on line 2
+
+        let source = "f = x => asdf + x\nf(5)";
+        //            0123456789...
+        //                     ^--- "asdf" starts at position 9
+
+        let result = parse_and_evaluate(source);
+        assert!(result.is_err(), "Should have error for undefined identifier 'asdf'");
+
+        let error = result.unwrap_err();
+
+        // Error message should mention the undefined identifier
+        assert!(
+            error.message.contains("asdf"),
+            "Error message should mention 'asdf', got: {}",
+            error.message
+        );
+
+        // Check the error span
+        let span = error.span.expect("Error should have a span");
+
+        // "asdf" is at positions 9-13 in the source
+        // The span should point to "asdf", not to "f(5)" which starts at position 18
+        assert_eq!(
+            span.start_byte, 9,
+            "Error span should start at position 9 (start of 'asdf'), got {}",
+            span.start_byte
+        );
+        assert_eq!(
+            span.end_byte, 13,
+            "Error span should end at position 13 (end of 'asdf'), got {}",
+            span.end_byte
+        );
+    }
+
+    #[test]
+    fn test_error_span_in_nested_function_call() {
+        // Test that errors in nested function calls also point to the actual error location
+        let source = "f = x => x + undefined_var\ng = y => f(y)\ng(5)";
+        //            0         1         2
+        //            0123456789012345678901234567
+        //                         ^--- "undefined_var" starts at position 13
+
+        let result = parse_and_evaluate(source);
+        assert!(result.is_err(), "Should have error for undefined identifier");
+
+        let error = result.unwrap_err();
+        let span = error.span.expect("Error should have a span");
+
+        // "undefined_var" starts at position 13 in line 1
+        // The error should NOT point to g(5) on line 3
+        assert!(
+            span.start_byte < 27, // Line 1 ends at position 26
+            "Error should point to 'undefined_var' in function f (position {}), not to call site",
+            span.start_byte
+        );
+
+        // Verify it's pointing to "undefined_var" specifically
+        assert_eq!(
+            span.start_byte, 13,
+            "Error span should start at position 13 (start of 'undefined_var'), got {}",
+            span.start_byte
+        );
+    }
+
+    #[test]
+    fn test_error_span_with_named_function() {
+        // Test that named functions also preserve error spans correctly
+        let source = "my_func = x => unknown_thing + x\nmy_func(10)";
+        //            0         1         2         3
+        //            0123456789012345678901234567890123
+
+        let result = parse_and_evaluate(source);
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        let span = error.span.expect("Error should have a span");
+
+        // "unknown_thing" starts at position 15
+        assert_eq!(
+            span.start_byte, 15,
+            "Error span should start at position 15 (start of 'unknown_thing'), got {}",
+            span.start_byte
+        );
+
+        // Verify the message mentions the function name
+        assert!(
+            error.message.contains("my_func"),
+            "Error message should mention function name 'my_func', got: {}",
+            error.message
+        );
+    }
+}
+
 // Tests for unknown identifier error messages suggesting constants
 #[cfg(test)]
 mod unknown_identifier_suggestion_tests {
