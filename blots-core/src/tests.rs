@@ -275,6 +275,7 @@ mod input_reference_tests {
     use crate::environment::Environment;
     use crate::expressions::evaluate_pairs;
     use crate::heap::{Heap, HeapPointer};
+    use crate::intern::Symbol;
     use crate::parser::{Rule, get_pairs};
     use crate::values::Value;
     use indexmap::IndexMap;
@@ -328,7 +329,7 @@ mod input_reference_tests {
         );
 
         let inputs_value = heap.borrow_mut().insert_record(inputs_map);
-        bindings.insert("inputs".to_string(), inputs_value);
+        bindings.insert(Symbol::intern("inputs"), inputs_value);
     }
 
     #[test]
@@ -459,7 +460,7 @@ mod input_reference_tests {
         let mut inputs_map = IndexMap::new();
         inputs_map.insert("my_value".to_string(), Value::Number(123.0));
         let inputs_value = heap.borrow_mut().insert_record(inputs_map);
-        bindings.insert("inputs".to_string(), inputs_value);
+        bindings.insert(Symbol::intern("inputs"), inputs_value);
 
         let result = parse_and_evaluate("#my_value", Some(heap), Some(bindings)).unwrap();
         assert_eq!(result, Value::Number(123.0));
@@ -661,6 +662,7 @@ mod lambda_parameter_isolation_tests {
     use crate::environment::Environment;
     use crate::expressions::evaluate_pairs;
     use crate::heap::Heap;
+    use crate::intern::Symbol;
     use crate::parser::{Rule, get_pairs};
     use crate::values::{SerializableValue, Value};
     use std::cell::RefCell;
@@ -721,14 +723,14 @@ mod lambda_parameter_isolation_tests {
         .unwrap();
 
         // Get the lambda value and check its scope
-        let f_value = bindings.get("f").unwrap();
+        let f_value = bindings.get(Symbol::intern("f")).unwrap();
         {
             let heap_ref = heap.borrow();
             let lambda_def = f_value.as_lambda(&heap_ref).unwrap();
 
             // The lambda's scope should NOT contain x
             assert!(
-                !lambda_def.scope.contains_key("x"),
+                !lambda_def.scope.contains_key(Symbol::intern("x")),
                 "Lambda should not capture its own parameter 'x' from outer scope"
             );
         }
@@ -757,18 +759,18 @@ mod lambda_parameter_isolation_tests {
         .unwrap();
 
         // Get the lambda value and check its scope
-        let add_value = bindings.get("add").unwrap();
+        let add_value = bindings.get(Symbol::intern("add")).unwrap();
         {
             let heap_ref = heap.borrow();
             let lambda_def = add_value.as_lambda(&heap_ref).unwrap();
 
             // The lambda's scope should NOT contain a or b
             assert!(
-                !lambda_def.scope.contains_key("a"),
+                !lambda_def.scope.contains_key(Symbol::intern("a")),
                 "Lambda should not capture its parameter 'a'"
             );
             assert!(
-                !lambda_def.scope.contains_key("b"),
+                !lambda_def.scope.contains_key(Symbol::intern("b")),
                 "Lambda should not capture its parameter 'b'"
             );
         }
@@ -801,14 +803,14 @@ mod lambda_parameter_isolation_tests {
         .unwrap();
 
         // Get outer lambda and check its scope
-        let outer_value = bindings.get("outer").unwrap();
+        let outer_value = bindings.get(Symbol::intern("outer")).unwrap();
         {
             let heap_ref = heap.borrow();
             let outer_lambda = outer_value.as_lambda(&heap_ref).unwrap();
 
             // Outer lambda should NOT capture x from global scope
             assert!(
-                !outer_lambda.scope.contains_key("x"),
+                !outer_lambda.scope.contains_key(Symbol::intern("x")),
                 "Outer lambda should not capture its own parameter 'x'"
             );
         }
@@ -844,7 +846,7 @@ mod lambda_parameter_isolation_tests {
         .unwrap();
 
         // Get the lambda and serialize it
-        let increment_value = bindings.get("increment").unwrap();
+        let increment_value = bindings.get(Symbol::intern("increment")).unwrap();
         let serialized = increment_value
             .to_serializable_value(&heap.borrow())
             .unwrap();
@@ -894,24 +896,29 @@ mod lambda_parameter_isolation_tests {
         .unwrap();
 
         // Get add_five and check its scope
-        let add_five_value = bindings.get("add_five").unwrap();
+        let add_five_value = bindings.get(Symbol::intern("add_five")).unwrap();
         {
             let heap_ref = heap.borrow();
             let add_five_lambda = add_five_value.as_lambda(&heap_ref).unwrap();
 
             // add_five should capture x=5 from outer scope
             assert!(
-                add_five_lambda.scope.contains_key("x"),
+                add_five_lambda.scope.contains_key(Symbol::intern("x")),
                 "add_five should capture 'x' from outer scope"
             );
             assert_eq!(
-                add_five_lambda.scope.get("x").unwrap().as_number().unwrap(),
+                add_five_lambda
+                    .scope
+                    .get(Symbol::intern("x"))
+                    .unwrap()
+                    .as_number()
+                    .unwrap(),
                 5.0
             );
 
             // but should NOT capture its own parameter y
             assert!(
-                !add_five_lambda.scope.contains_key("y"),
+                !add_five_lambda.scope.contains_key(Symbol::intern("y")),
                 "add_five should not capture its own parameter 'y'"
             );
         }

@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::{cell::RefCell, collections::HashMap, fmt::Display, rc::Rc};
+use std::{cell::RefCell, fmt::Display, rc::Rc};
 
 use crate::{
     ast::SpannedExpr,
@@ -10,6 +10,7 @@ use crate::{
         Heap, HeapPointer, HeapValue, IterablePointer, LambdaPointer, ListPointer, RecordPointer,
         StringPointer,
     },
+    intern::{Symbol, SymbolMap},
 };
 
 /// Format a number for display output, matching the JS displayNumber function:
@@ -226,19 +227,21 @@ impl FunctionArity {
     }
 }
 
+/// A lambda parameter. The name is an interned [`Symbol`] so that binding arguments at call
+/// time copies a pointer instead of cloning a `String`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
 pub enum LambdaArg {
-    Required(String),
-    Optional(String),
-    Rest(String),
+    Required(Symbol),
+    Optional(Symbol),
+    Rest(Symbol),
 }
 
 impl LambdaArg {
-    pub fn get_name(&self) -> &str {
+    pub fn get_name(&self) -> Symbol {
         match self {
-            LambdaArg::Required(name) => name,
-            LambdaArg::Optional(name) => name,
-            LambdaArg::Rest(name) => name,
+            LambdaArg::Required(name) => *name,
+            LambdaArg::Optional(name) => *name,
+            LambdaArg::Rest(name) => *name,
         }
     }
 
@@ -254,9 +257,9 @@ impl LambdaArg {
         matches!(self, LambdaArg::Rest(_))
     }
 
-    pub fn as_required(&self) -> Result<&str> {
+    pub fn as_required(&self) -> Result<Symbol> {
         match self {
-            LambdaArg::Required(name) => Ok(name),
+            LambdaArg::Required(name) => Ok(*name),
             _ => Err(anyhow!(
                 "expected a required argument, but got a {} one",
                 self.get_name()
@@ -264,9 +267,9 @@ impl LambdaArg {
         }
     }
 
-    pub fn as_optional(&self) -> Result<&str> {
+    pub fn as_optional(&self) -> Result<Symbol> {
         match self {
-            LambdaArg::Optional(name) => Ok(name),
+            LambdaArg::Optional(name) => Ok(*name),
             _ => Err(anyhow!(
                 "expected an optional argument, but got a {} one",
                 self.get_name()
@@ -274,9 +277,9 @@ impl LambdaArg {
         }
     }
 
-    pub fn as_rest(&self) -> Result<&str> {
+    pub fn as_rest(&self) -> Result<Symbol> {
         match self {
-            LambdaArg::Rest(name) => Ok(name),
+            LambdaArg::Rest(name) => Ok(*name),
             _ => Err(anyhow!(
                 "expected a rest argument, but got a {} one",
                 self.get_name()
@@ -295,11 +298,13 @@ impl Display for LambdaArg {
     }
 }
 
+/// The variables captured by a closure, keyed by interned name and shared via `Rc` so that
+/// calling the closure never copies the captured bindings.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct CapturedScope(Rc<HashMap<String, Value>>);
+pub struct CapturedScope(Rc<SymbolMap<Value>>);
 
 impl CapturedScope {
-    pub fn new(map: HashMap<String, Value>) -> Self {
+    pub fn new(map: SymbolMap<Value>) -> Self {
         Self(Rc::new(map))
     }
 
@@ -311,19 +316,19 @@ impl CapturedScope {
         self.0.len()
     }
 
-    pub fn contains_key(&self, key: &str) -> bool {
-        self.0.contains_key(key)
+    pub fn contains_key(&self, key: Symbol) -> bool {
+        self.0.contains_key(&key)
     }
 
-    pub fn get(&self, key: &str) -> Option<Value> {
-        self.0.get(key).copied()
+    pub fn get(&self, key: Symbol) -> Option<Value> {
+        self.0.get(&key).copied()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &Value)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&Symbol, &Value)> {
         self.0.iter()
     }
 
-    pub fn as_rc(&self) -> Rc<HashMap<String, Value>> {
+    pub fn as_rc(&self) -> Rc<SymbolMap<Value>> {
         Rc::clone(&self.0)
     }
 }
@@ -332,7 +337,7 @@ impl CapturedScope {
 /// because every call expression clones the definition out of the heap before invoking it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LambdaDef {
-    pub name: Option<Rc<str>>,
+    pub name: Option<Symbol>,
     pub args: Rc<Vec<LambdaArg>>,
     pub body: Rc<SpannedExpr>,
     pub scope: CapturedScope,
@@ -342,8 +347,8 @@ pub struct LambdaDef {
 }
 
 impl LambdaDef {
-    pub fn set_name(&mut self, name: String, _value: Value) {
-        self.name = Some(Rc::from(name));
+    pub fn set_name(&mut self, name: Symbol, _value: Value) {
+        self.name = Some(name);
     }
 
     pub fn get_arity(&self) -> FunctionArity {
@@ -647,7 +652,7 @@ impl SerializableValue {
                     .args
                     .iter()
                     .map(|arg| match arg {
-                        LambdaArg::Required(name) => name.clone(),
+                        LambdaArg::Required(name) => name.to_string(),
                         LambdaArg::Optional(name) => format!("{}?", name),
                         LambdaArg::Rest(name) => format!("...{}", name),
                     })
@@ -705,7 +710,9 @@ impl SerializableValue {
                 let serializable_scope: IndexMap<String, SerializableValue> = lambda
                     .scope
                     .iter()
-                    .map(|(k, v)| SerializableValue::from_value(v, heap).map(|sv| (k.clone(), sv)))
+                    .map(|(k, v)| {
+                        SerializableValue::from_value(v, heap).map(|sv| (k.to_string(), sv))
+                    })
                     .collect::<Result<IndexMap<String, SerializableValue>>>()?;
 
                 // Generate the body with inlined scope values
@@ -751,10 +758,12 @@ impl SerializableValue {
                 let scope = if let Some(scope) = s_lambda.scope.as_ref() {
                     scope
                         .iter()
-                        .map(|(k, v)| Ok((k.to_string(), SerializableValue::to_value(v, heap)?)))
-                        .collect::<Result<HashMap<String, Value>>>()?
+                        .map(|(k, v)| {
+                            Ok((Symbol::intern(k), SerializableValue::to_value(v, heap)?))
+                        })
+                        .collect::<Result<SymbolMap<Value>>>()?
                 } else {
-                    HashMap::new()
+                    SymbolMap::default()
                 };
 
                 // For now, parse the body string back to AST
@@ -767,7 +776,7 @@ impl SerializableValue {
                 )?;
 
                 let lambda = LambdaDef {
-                    name: s_lambda.name.as_deref().map(Rc::from),
+                    name: s_lambda.name.as_deref().map(Symbol::intern),
                     args: Rc::new(s_lambda.args.clone()),
                     body: Rc::new(body_ast),
                     scope: CapturedScope::new(scope),
@@ -1214,7 +1223,7 @@ impl Value {
                     .filter_map(|(k, v)| {
                         SerializableValue::from_value(v, heap)
                             .ok()
-                            .map(|sv| (k.clone(), sv))
+                            .map(|sv| (k.to_string(), sv))
                     })
                     .collect();
 

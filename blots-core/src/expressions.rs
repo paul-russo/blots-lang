@@ -7,6 +7,7 @@ use crate::{
     error::RuntimeError,
     functions::{BuiltInFunction, get_function_def, is_built_in_function},
     heap::{Heap, HeapPointer, HeapValue, IterablePointer, RecordPointer},
+    intern::{Symbol, SymbolMap},
     parser::Rule,
     precedence::PRATT,
     values::{
@@ -18,12 +19,7 @@ use crate::{
 use anyhow::{Result as AnyhowResult, anyhow};
 use indexmap::IndexMap;
 use pest::iterators::{Pair, Pairs};
-use std::{
-    cell::RefCell,
-    cmp::Ordering,
-    collections::{HashMap, HashSet},
-    rc::Rc,
-};
+use std::{cell::RefCell, cmp::Ordering, collections::HashSet, rc::Rc};
 
 /// Helper to evaluate ordering comparisons with proper type error handling.
 /// Returns true if the ordering matches any of the expected orderings, false otherwise.
@@ -143,11 +139,11 @@ fn evaluate_do_block_expr(
         if let Value::Lambda(lambda_ptr) = val {
             let mut borrowed_heap = heap.borrow_mut();
             if let Some(HeapValue::Lambda(lambda_def)) = borrowed_heap.get_mut(lambda_ptr.index()) {
-                lambda_def.name = Some(Rc::from(ident.as_str()));
+                lambda_def.name = Some(*ident);
             }
         }
 
-        bindings.insert(ident.clone(), val);
+        bindings.insert(*ident, val);
         return Ok(val);
     }
 
@@ -171,9 +167,9 @@ pub fn evaluate_ast(
             "infinity" => Ok(Number(f64::INFINITY)),
             "inf" => Ok(Number(f64::INFINITY)),
             "constants" => Ok(Value::Record(RecordPointer::new(0))),
-            _ => bindings.get(ident).ok_or_else(|| {
+            _ => bindings.get(*ident).ok_or_else(|| {
                 use crate::heap::CONSTANTS;
-                let message = if CONSTANTS.contains_key(ident) {
+                let message = if CONSTANTS.contains_key(ident.as_str()) {
                     format!(
                         "unknown identifier: {}. Did you mean constants.{}?",
                         ident, ident
@@ -187,7 +183,7 @@ pub fn evaluate_ast(
         Expr::InputReference(field) => {
             // Desugar #field to inputs.field
             let inputs_value = bindings
-                .get("inputs")
+                .get(crate::intern::inputs_symbol())
                 .ok_or(anyhow!("inputs not found (required for #{} syntax)", field))?;
 
             match inputs_value {
@@ -270,7 +266,7 @@ pub fn evaluate_ast(
                     }
                     RecordKey::Shorthand(ident) => {
                         let value = bindings
-                            .get(ident)
+                            .get(Symbol::intern(ident))
                             .ok_or(anyhow!("unknown identifier: {}", ident))?;
                         record.insert(ident.clone(), value);
                     }
@@ -331,11 +327,12 @@ pub fn evaluate_ast(
             captures,
         } => {
             // Capture the current values of the lambda's free variables (precomputed at parse time).
-            let mut captured_scope = HashMap::with_capacity(captures.len());
+            let mut captured_scope =
+                SymbolMap::with_capacity_and_hasher(captures.len(), Default::default());
 
             for var in captures {
-                if let Some(value) = bindings.get(var) {
-                    captured_scope.insert(var.clone(), value);
+                if let Some(value) = bindings.get(*var) {
+                    captured_scope.insert(*var, value);
                 }
             }
 
@@ -350,7 +347,7 @@ pub fn evaluate_ast(
             Ok(lambda)
         }
         Expr::Assignment { ident, value } => {
-            if is_built_in_function(ident) {
+            if is_built_in_function(ident.as_str()) {
                 return Err(RuntimeError::with_span(
                     format!(
                         "{} is the name of a built-in function, and cannot be reassigned",
@@ -361,17 +358,19 @@ pub fn evaluate_ast(
                 ));
             }
 
-            if ident == "constants"
-                || ident == "if"
-                || ident == "then"
-                || ident == "else"
-                || ident == "true"
-                || ident == "false"
-                || ident == "null"
-                || ident == "inputs"
-                || ident == "and"
-                || ident == "or"
-            {
+            if matches!(
+                ident.as_str(),
+                "constants"
+                    | "if"
+                    | "then"
+                    | "else"
+                    | "true"
+                    | "false"
+                    | "null"
+                    | "inputs"
+                    | "and"
+                    | "or"
+            ) {
                 return Err(RuntimeError::with_span(
                     format!("{} is a keyword, and cannot be reassigned", ident),
                     expr.span,
@@ -380,7 +379,7 @@ pub fn evaluate_ast(
             }
 
             // Check if the variable already exists (immutability check)
-            if bindings.contains_key(ident) {
+            if bindings.contains_key(*ident) {
                 return Err(RuntimeError::with_span(
                     format!("{} is already defined, and cannot be reassigned", ident),
                     expr.span,
@@ -402,11 +401,11 @@ pub fn evaluate_ast(
                 if let Some(HeapValue::Lambda(lambda_def)) =
                     borrowed_heap.get_mut(lambda_ptr.index())
                 {
-                    lambda_def.name = Some(Rc::from(ident.as_str()));
+                    lambda_def.name = Some(*ident);
                 }
             }
 
-            bindings.insert(ident.clone(), val);
+            bindings.insert(*ident, val);
             Ok(val)
         }
         Expr::Output { expr: inner_expr } => {
@@ -520,7 +519,7 @@ pub fn evaluate_ast(
                 })?
             };
 
-            def.call(func_val, arg_vals, heap, bindings, call_depth, &source)
+            def.call(func_val, &arg_vals, heap, bindings, call_depth, &source)
                 .map_err(|e| e.with_call_site(expr.span, source.clone()))
         }
         Expr::Access { expr, index } => {
@@ -662,17 +661,17 @@ pub fn evaluate_ast(
 }
 
 // Helper function to collect free variables in an expression
-fn collect_free_variables(expr: &SpannedExpr, vars: &mut Vec<String>, bound: &mut HashSet<String>) {
+fn collect_free_variables(expr: &SpannedExpr, vars: &mut Vec<Symbol>, bound: &mut HashSet<Symbol>) {
     match &expr.node {
         Expr::Identifier(name) => {
-            if !bound.contains(name) && name != "infinity" && name != "inf" && name != "constants" {
-                vars.push(name.clone());
+            if !bound.contains(name) && !matches!(name.as_str(), "infinity" | "inf" | "constants") {
+                vars.push(*name);
             }
         }
         Expr::Lambda { args, body, .. } => {
             let mut new_bound = bound.clone();
             for arg in args {
-                new_bound.insert(arg.get_name().to_string());
+                new_bound.insert(arg.get_name());
             }
             collect_free_variables(body, vars, &mut new_bound);
         }
@@ -741,7 +740,7 @@ fn collect_free_variables(expr: &SpannedExpr, vars: &mut Vec<String>, bound: &mu
                     // First collect free variables from the value
                     collect_free_variables(value, vars, &mut block_bound);
                     // Then add the assigned variable to the block's bound set
-                    block_bound.insert(ident.clone());
+                    block_bound.insert(*ident);
                 } else {
                     collect_free_variables(expr, vars, &mut block_bound);
                 }
@@ -768,12 +767,12 @@ pub fn validate_portable_value(
 
                 // Add lambda arguments to bound variables
                 for arg in lambda_def.args.iter() {
-                    bound_vars.insert(arg.get_name().to_string());
+                    bound_vars.insert(arg.get_name());
                 }
 
                 // Also add variables from the captured scope as bound
                 for (key, _) in lambda_def.scope.iter() {
-                    bound_vars.insert(key.clone());
+                    bound_vars.insert(*key);
                 }
 
                 collect_free_variables(&lambda_def.body, &mut free_vars, &mut bound_vars);
@@ -784,12 +783,12 @@ pub fn validate_portable_value(
                 // 3. Self-reference (for recursion) - if the lambda has a name
                 // 4. Currently bound in the environment (for late-bound functions)
                 for var in &free_vars {
-                    let is_self_reference = lambda_def.name.as_deref() == Some(var.as_str());
+                    let is_self_reference = lambda_def.name == Some(*var);
 
-                    if !lambda_def.scope.contains_key(var)
-                        && !is_built_in_function(var)
+                    if !lambda_def.scope.contains_key(*var)
+                        && !is_built_in_function(var.as_str())
                         && !is_self_reference
-                        && !bindings.contains_key(var)
+                        && !bindings.contains_key(*var)
                     {
                         return Err(anyhow!(
                             "Function contains unbound variable \"{}\". Output functions must be self-contained.",
@@ -1118,14 +1117,19 @@ fn evaluate_binary_op_ast(
                 }
                 BinaryOp::Via => {
                     let source_owned = source.clone();
+
+                    // Copy the element pairs out once: the heap can't stay borrowed across the
+                    // callback calls below (they may allocate), and re-borrowing per element is
+                    // slower.
+                    let pairs: Vec<(Value, Value)> = {
+                        let borrowed_heap = heap.borrow();
+                        let l_list = list_l.reify(&borrowed_heap).as_list()?;
+                        let r_list = list_r.reify(&borrowed_heap).as_list()?;
+                        l_list.iter().copied().zip(r_list.iter().copied()).collect()
+                    };
+
                     let mut mapped_list = Vec::with_capacity(list_len);
-                    for idx in 0..list_len {
-                        let (l, r) = {
-                            let borrowed_heap = heap.borrow();
-                            let l_list = list_l.reify(&borrowed_heap).as_list()?;
-                            let r_list = list_r.reify(&borrowed_heap).as_list()?;
-                            (l_list[idx], r_list[idx])
-                        };
+                    for (l, r) in pairs {
                         if !r.is_lambda() && !r.is_built_in() {
                             return Err(RuntimeError::with_span(
                                 format!(
@@ -1150,7 +1154,7 @@ fn evaluate_binary_op_ast(
                         let value = def
                             .call(
                                 r,
-                                vec![l],
+                                &[l],
                                 Rc::clone(&heap),
                                 Rc::clone(&bindings),
                                 call_depth,
@@ -1486,22 +1490,26 @@ fn evaluate_binary_op_ast(
                             (def, accepts_two)
                         };
 
+                        // Copy the items out once: the heap can't stay borrowed across the
+                        // callback calls below (they may allocate), and re-borrowing per element
+                        // is slower.
+                        let items = {
+                            let borrowed_heap = heap.borrow();
+                            list.reify(&borrowed_heap).as_list()?.clone()
+                        };
+
                         let mut mapped_list = Vec::with_capacity(list_len);
-                        for idx in 0..list_len {
-                            let item = {
-                                let borrowed_heap = heap.borrow();
-                                let list_ref = list.reify(&borrowed_heap).as_list()?;
-                                list_ref[idx]
-                            };
-                            let args = if func_accepts_two_args {
-                                vec![item, Value::Number(idx as f64)]
+                        for (idx, &item) in items.iter().enumerate() {
+                            let call_args = [item, Value::Number(idx as f64)];
+                            let call_args = if func_accepts_two_args {
+                                &call_args[..]
                             } else {
-                                vec![item]
+                                &call_args[..1]
                             };
                             let value = def
                                 .call(
                                     scalar,
-                                    args,
+                                    call_args,
                                     Rc::clone(&heap),
                                     Rc::clone(&bindings),
                                     call_depth,
@@ -1550,7 +1558,7 @@ fn evaluate_binary_op_ast(
 
                         def.call(
                             scalar,
-                            vec![list],
+                            &[list],
                             Rc::clone(&heap),
                             Rc::clone(&bindings),
                             call_depth,
@@ -1595,23 +1603,27 @@ fn evaluate_binary_op_ast(
                             (def, accepts_two)
                         };
 
+                        // Copy the items out once: the heap can't stay borrowed across the
+                        // callback calls below (they may allocate), and re-borrowing per element
+                        // is slower.
+                        let items = {
+                            let borrowed_heap = heap.borrow();
+                            list.reify(&borrowed_heap).as_list()?.clone()
+                        };
+
                         let mut filtered_list = vec![];
-                        for idx in 0..list_len {
-                            let item = {
-                                let borrowed_heap = heap.borrow();
-                                let list_ref = list.reify(&borrowed_heap).as_list()?;
-                                list_ref[idx]
-                            };
-                            let args = if func_accepts_two_args {
-                                vec![item, Value::Number(idx as f64)]
+                        for (idx, &item) in items.iter().enumerate() {
+                            let call_args = [item, Value::Number(idx as f64)];
+                            let call_args = if func_accepts_two_args {
+                                &call_args[..]
                             } else {
-                                vec![item]
+                                &call_args[..1]
                             };
 
                             let result = def
                                 .call(
                                     scalar,
-                                    args,
+                                    call_args,
                                     Rc::clone(&heap),
                                     Rc::clone(&bindings),
                                     call_depth,
@@ -1745,7 +1757,7 @@ fn evaluate_binary_op_ast(
                 def.unwrap()
                     .call(
                         rhs,
-                        vec![lhs],
+                        &[lhs],
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth,
@@ -1785,7 +1797,7 @@ fn evaluate_binary_op_ast(
                 def.unwrap()
                     .call(
                         rhs,
-                        vec![lhs],
+                        &[lhs],
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth,
@@ -2076,7 +2088,7 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                 }
                 Rule::assignment => {
                     let mut inner_pairs = primary.into_inner();
-                    let ident = inner_pairs.next().unwrap().as_str().to_string();
+                    let ident = Symbol::intern(inner_pairs.next().unwrap().as_str());
                     let value = Box::new(pairs_to_expr_inner(
                         inner_pairs.next().unwrap().into_inner(),
                         preserve_comments,
@@ -2092,19 +2104,19 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                     for arg_pair in arg_list.into_inner() {
                         match arg_pair.as_rule() {
                             Rule::required_arg => {
-                                args.push(LambdaArg::Required(
-                                    arg_pair.into_inner().as_str().to_string(),
-                                ));
+                                args.push(LambdaArg::Required(Symbol::intern(
+                                    arg_pair.into_inner().as_str(),
+                                )));
                             }
                             Rule::optional_arg => {
-                                args.push(LambdaArg::Optional(
-                                    arg_pair.into_inner().as_str().to_string(),
-                                ));
+                                args.push(LambdaArg::Optional(Symbol::intern(
+                                    arg_pair.into_inner().as_str(),
+                                )));
                             }
                             Rule::rest_arg => {
-                                args.push(LambdaArg::Rest(
-                                    arg_pair.into_inner().as_str().to_string(),
-                                ));
+                                args.push(LambdaArg::Rest(Symbol::intern(
+                                    arg_pair.into_inner().as_str(),
+                                )));
                             }
                             _ => {}
                         }
@@ -2120,7 +2132,7 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                     // and built-ins are resolved statically, so neither needs capturing.
                     let mut bound = HashSet::new();
                     for arg in &args {
-                        bound.insert(arg.get_name().to_string());
+                        bound.insert(arg.get_name());
                     }
 
                     let mut free_vars = Vec::new();
@@ -2128,7 +2140,7 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
 
                     let mut captures = Vec::new();
                     for var in free_vars {
-                        if !is_built_in_function(&var) && !captures.contains(&var) {
+                        if !is_built_in_function(var.as_str()) && !captures.contains(&var) {
                             captures.push(var);
                         }
                     }
@@ -2237,7 +2249,7 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                     if let Some(built_in) = BuiltInFunction::from_ident(ident) {
                         Ok(Spanned::new(Expr::BuiltIn(built_in), span))
                     } else {
-                        Ok(Spanned::new(Expr::Identifier(ident.to_string()), span))
+                        Ok(Spanned::new(Expr::Identifier(Symbol::intern(ident)), span))
                     }
                 }
                 Rule::input_reference => {
@@ -2775,7 +2787,10 @@ mod tests {
         let result = parse_and_evaluate("x = 5", None, Some(Rc::clone(&bindings))).unwrap();
 
         assert_eq!(result, Value::Number(5.0));
-        assert_eq!(bindings.get("x").unwrap(), Value::Number(5.0));
+        assert_eq!(
+            bindings.get(Symbol::intern("x")).unwrap(),
+            Value::Number(5.0)
+        );
     }
 
     #[test]
@@ -2783,7 +2798,10 @@ mod tests {
         let bindings = Rc::new(Environment::new());
         let result = parse_and_evaluate("x = 5 + 2", None, Some(Rc::clone(&bindings))).unwrap();
         assert_eq!(result, Value::Number(7.0));
-        assert_eq!(bindings.get("x").unwrap(), Value::Number(7.0));
+        assert_eq!(
+            bindings.get(Symbol::intern("x")).unwrap(),
+            Value::Number(7.0)
+        );
     }
 
     #[test]
@@ -2800,8 +2818,11 @@ mod tests {
         {
             let heap_borrow = heap.borrow();
             let lambda_def = result.as_lambda(&heap_borrow).unwrap();
-            assert_eq!(lambda_def.name.as_deref(), Some("f"));
-            assert_eq!(*lambda_def.args, vec![LambdaArg::Required("x".to_string())]);
+            assert_eq!(lambda_def.name, Some(Symbol::intern("f")));
+            assert_eq!(
+                *lambda_def.args,
+                vec![LambdaArg::Required(Symbol::intern("x"))]
+            );
             assert!(lambda_def.scope.is_empty());
             // The body should be a BinaryOp(Add) with Identifier("x") and Number(1)
             match &lambda_def.body.node {
@@ -2811,7 +2832,7 @@ mod tests {
                     right,
                 } => match (&left.node, &right.node) {
                     (Expr::Identifier(x), Expr::Number(n)) => {
-                        assert_eq!(x, "x");
+                        assert_eq!(x.as_str(), "x");
                         assert_eq!(*n, 1.0);
                     }
                     _ => panic!("Expected Identifier('x') + Number(1)"),
@@ -2820,7 +2841,7 @@ mod tests {
             }
         }
         assert_eq!(
-            bindings.get("f").unwrap(),
+            bindings.get(Symbol::intern("f")).unwrap(),
             Value::Lambda(LambdaPointer::new(1))
         );
     }

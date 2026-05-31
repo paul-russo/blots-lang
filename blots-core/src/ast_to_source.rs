@@ -56,7 +56,7 @@ pub fn expr_to_source(spanned_expr: &SpannedExpr) -> String {
         Expr::String(s) => format!("\"{}\"", s.replace("\\", "\\\\").replace("\"", "\\\"")),
         Expr::Bool(b) => b.to_string(),
         Expr::Null => "null".to_string(),
-        Expr::Identifier(name) => name.clone(),
+        Expr::Identifier(name) => name.to_string(),
         Expr::InputReference(field) => format!("#{}", field),
         Expr::BuiltIn(built_in) => built_in.name().to_string(),
         Expr::List(items) => {
@@ -154,7 +154,7 @@ pub fn expr_to_source(spanned_expr: &SpannedExpr) -> String {
 
 fn lambda_arg_to_source(arg: &LambdaArg) -> String {
     match arg {
-        LambdaArg::Required(name) => name.clone(),
+        LambdaArg::Required(name) => name.to_string(),
         LambdaArg::Optional(name) => format!("{}?", name),
         LambdaArg::Rest(name) => format!("...{}", name),
     }
@@ -272,10 +272,10 @@ pub fn expr_to_source_with_scope(
     match &spanned_expr.node {
         Expr::Identifier(name) => {
             // If the identifier is in the scope, inline its value
-            if let Some(value) = scope.get(name) {
+            if let Some(value) = scope.get(name.as_str()) {
                 serializable_value_to_source(value)
             } else {
-                name.clone()
+                name.to_string()
             }
         }
         Expr::InputReference(field) => format!("#{}", field),
@@ -311,7 +311,7 @@ pub fn expr_to_source_with_scope(
             // Filter out parameter names from the scope before processing the body
             let mut filtered_scope = scope.clone();
             for arg in args {
-                filtered_scope.shift_remove(arg.get_name());
+                filtered_scope.shift_remove(arg.get_name().as_str());
             }
             format!(
                 "({}) => {}",

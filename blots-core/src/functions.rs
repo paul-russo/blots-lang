@@ -3,13 +3,14 @@ use crate::{
     error::RuntimeError,
     expressions::evaluate_ast,
     heap::{Heap, HeapPointer, IterablePointer},
+    intern::SymbolMap,
     units,
     values::{FunctionArity, LambdaArg, LambdaDef, ReifiedValue, Value},
 };
 use anyhow::Result as AnyhowResult;
 use dyn_fmt::AsStrFormatExt;
 use indexmap::IndexMap;
-use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::LazyLock};
+use std::{cell::RefCell, rc::Rc, sync::LazyLock};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Mutex;
@@ -397,7 +398,7 @@ impl BuiltInFunction {
 
     pub fn call(
         &self,
-        args: Vec<Value>,
+        args: &[Value],
         heap: Rc<RefCell<Heap>>,
         bindings: Rc<Environment>,
         call_depth: usize,
@@ -613,7 +614,7 @@ impl BuiltInFunction {
                         _ => vec![args[0].as_number()?],
                     }
                 } else {
-                    args.into_iter()
+                    args.iter()
                         .map(|a| a.as_number())
                         .collect::<AnyhowResult<Vec<f64>>>()?
                 };
@@ -743,7 +744,7 @@ impl BuiltInFunction {
             Self::Concat => {
                 let mut list = vec![];
 
-                for arg in args {
+                for &arg in args {
                     match arg {
                         Value::List(p) => {
                             let borrowed_heap = heap.borrow();
@@ -1052,21 +1053,16 @@ impl BuiltInFunction {
                     get_function_def(func, &borrowed_heap)
                         .ok_or_else(|| RuntimeError::from("second argument must be a function"))?
                 };
-                let list_len = {
+                let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list()?.len()
+                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
                 };
 
                 let mut groups: IndexMap<String, Vec<Value>> = IndexMap::new();
-                for idx in 0..list_len {
-                    let item = {
-                        let borrowed_heap = heap.borrow();
-                        let list = list_ptr.reify(&borrowed_heap).as_list()?;
-                        list[idx]
-                    };
+                for &item in items.iter() {
                     let key_result = func_def.call(
                         Value::Null,
-                        vec![item],
+                        &[item],
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
@@ -1103,21 +1099,16 @@ impl BuiltInFunction {
                     get_function_def(func, &borrowed_heap)
                         .ok_or_else(|| RuntimeError::from("second argument must be a function"))?
                 };
-                let list_len = {
+                let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list()?.len()
+                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
                 };
 
                 let mut counts: IndexMap<String, f64> = IndexMap::new();
-                for idx in 0..list_len {
-                    let item = {
-                        let borrowed_heap = heap.borrow();
-                        let list = list_ptr.reify(&borrowed_heap).as_list()?;
-                        list[idx]
-                    };
+                for &item in items.iter() {
                     let key_result = func_def.call(
                         Value::Null,
-                        vec![item],
+                        &[item],
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
@@ -1313,28 +1304,26 @@ impl BuiltInFunction {
                     get_function_def(func, &borrowed_heap)
                         .ok_or_else(|| RuntimeError::from("second argument must be a function"))?
                 };
-                let list_len = {
+                // Copy the items out once: the heap can't stay borrowed across callback calls
+                // (the callback may allocate), and re-borrowing per element is slower.
+                let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list()?.len()
+                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
                 };
                 let func_accepts_two_args = func_def.arity().can_accept(2);
 
-                let mut mapped_list = Vec::with_capacity(list_len);
-                for idx in 0..list_len {
-                    let item = {
-                        let borrowed_heap = heap.borrow();
-                        let list = list_ptr.reify(&borrowed_heap).as_list()?;
-                        list[idx]
-                    };
-                    let args = if func_accepts_two_args {
-                        vec![item, Value::Number(idx as f64)]
+                let mut mapped_list = Vec::with_capacity(items.len());
+                for (idx, &item) in items.iter().enumerate() {
+                    let call_args = [item, Value::Number(idx as f64)];
+                    let call_args = if func_accepts_two_args {
+                        &call_args[..]
                     } else {
-                        vec![item]
+                        &call_args[..1]
                     };
 
                     let result = func_def.call(
                         Value::Null,
-                        args,
+                        call_args,
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
@@ -1354,28 +1343,24 @@ impl BuiltInFunction {
                     get_function_def(func, &borrowed_heap)
                         .ok_or_else(|| RuntimeError::from("second argument must be a function"))?
                 };
-                let list_len = {
+                let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list()?.len()
+                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
                 };
                 let func_accepts_two_args = func_def.arity().can_accept(2);
 
                 let mut filtered_list = vec![];
-                for idx in 0..list_len {
-                    let item = {
-                        let borrowed_heap = heap.borrow();
-                        let list = list_ptr.reify(&borrowed_heap).as_list()?;
-                        list[idx]
-                    };
-                    let args = if func_accepts_two_args {
-                        vec![item, Value::Number(idx as f64)]
+                for (idx, &item) in items.iter().enumerate() {
+                    let call_args = [item, Value::Number(idx as f64)];
+                    let call_args = if func_accepts_two_args {
+                        &call_args[..]
                     } else {
-                        vec![item]
+                        &call_args[..1]
                     };
 
                     let result = func_def.call(
                         Value::Null,
-                        args,
+                        call_args,
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
@@ -1398,28 +1383,24 @@ impl BuiltInFunction {
                     get_function_def(func, &borrowed_heap)
                         .ok_or_else(|| RuntimeError::from("second argument must be a function"))?
                 };
-                let list_len = {
+                let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list()?.len()
+                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
                 };
                 let func_accepts_three_args = func_def.arity().can_accept(3);
 
                 let mut accumulator = initial;
-                for idx in 0..list_len {
-                    let item = {
-                        let borrowed_heap = heap.borrow();
-                        let list = list_ptr.reify(&borrowed_heap).as_list()?;
-                        list[idx]
-                    };
-                    let args = if func_accepts_three_args {
-                        vec![accumulator, item, Value::Number(idx as f64)]
+                for (idx, &item) in items.iter().enumerate() {
+                    let call_args = [accumulator, item, Value::Number(idx as f64)];
+                    let call_args = if func_accepts_three_args {
+                        &call_args[..]
                     } else {
-                        vec![accumulator, item]
+                        &call_args[..2]
                     };
 
                     accumulator = func_def.call(
                         Value::Null,
-                        args,
+                        call_args,
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
@@ -1438,27 +1419,23 @@ impl BuiltInFunction {
                     get_function_def(func, &borrowed_heap)
                         .ok_or_else(|| RuntimeError::from("second argument must be a function"))?
                 };
-                let list_len = {
+                let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list()?.len()
+                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
                 };
                 let func_accepts_two_args = func_def.arity().can_accept(2);
 
-                for idx in 0..list_len {
-                    let item = {
-                        let borrowed_heap = heap.borrow();
-                        let list = list_ptr.reify(&borrowed_heap).as_list()?;
-                        list[idx]
-                    };
-                    let args = if func_accepts_two_args {
-                        vec![item, Value::Number(idx as f64)]
+                for (idx, &item) in items.iter().enumerate() {
+                    let call_args = [item, Value::Number(idx as f64)];
+                    let call_args = if func_accepts_two_args {
+                        &call_args[..]
                     } else {
-                        vec![item]
+                        &call_args[..1]
                     };
 
                     let result = func_def.call(
                         Value::Null,
-                        args,
+                        call_args,
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
@@ -1480,27 +1457,23 @@ impl BuiltInFunction {
                     get_function_def(func, &borrowed_heap)
                         .ok_or_else(|| RuntimeError::from("second argument must be a function"))?
                 };
-                let list_len = {
+                let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list()?.len()
+                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
                 };
                 let func_accepts_two_args = func_def.arity().can_accept(2);
 
-                for idx in 0..list_len {
-                    let item = {
-                        let borrowed_heap = heap.borrow();
-                        let list = list_ptr.reify(&borrowed_heap).as_list()?;
-                        list[idx]
-                    };
-                    let args = if func_accepts_two_args {
-                        vec![item, Value::Number(idx as f64)]
+                for (idx, &item) in items.iter().enumerate() {
+                    let call_args = [item, Value::Number(idx as f64)];
+                    let call_args = if func_accepts_two_args {
+                        &call_args[..]
                     } else {
-                        vec![item]
+                        &call_args[..1]
                     };
 
                     let result = func_def.call(
                         Value::Null,
-                        args,
+                        call_args,
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
                         call_depth + 1,
@@ -1521,39 +1494,40 @@ impl BuiltInFunction {
                     args[0].as_list(borrowed_heap)?.clone()
                 };
 
-                list.sort_by(|a, b| {
-                    // Only look up the function once, not twice
-                    let func_def = get_function_def(func, &heap.borrow());
+                // Look up (and clone) the key function once rather than once per comparison.
+                let func_def = {
+                    let borrowed_heap = heap.borrow();
+                    get_function_def(func, &borrowed_heap)
+                };
 
-                    match func_def {
-                        Some(fd) => {
-                            let result_a = fd.call(
-                                Value::Null,
-                                vec![*a],
-                                Rc::clone(&heap),
-                                Rc::clone(&bindings),
-                                call_depth + 1,
-                                source,
-                            );
-                            let result_b = fd.call(
-                                Value::Null,
-                                vec![*b],
-                                Rc::clone(&heap),
-                                Rc::clone(&bindings),
-                                call_depth + 1,
-                                source,
-                            );
+                list.sort_by(|a, b| match &func_def {
+                    Some(fd) => {
+                        let result_a = fd.call(
+                            Value::Null,
+                            &[*a],
+                            Rc::clone(&heap),
+                            Rc::clone(&bindings),
+                            call_depth + 1,
+                            source,
+                        );
+                        let result_b = fd.call(
+                            Value::Null,
+                            &[*b],
+                            Rc::clone(&heap),
+                            Rc::clone(&bindings),
+                            call_depth + 1,
+                            source,
+                        );
 
-                            match (result_a, result_b) {
-                                (Ok(val_a), Ok(val_b)) => val_a
-                                    .compare(&val_b, &heap.borrow())
-                                    .unwrap_or(None)
-                                    .unwrap_or(std::cmp::Ordering::Equal),
-                                _ => std::cmp::Ordering::Equal,
-                            }
+                        match (result_a, result_b) {
+                            (Ok(val_a), Ok(val_b)) => val_a
+                                .compare(&val_b, &heap.borrow())
+                                .unwrap_or(None)
+                                .unwrap_or(std::cmp::Ordering::Equal),
+                            _ => std::cmp::Ordering::Equal,
                         }
-                        _ => std::cmp::Ordering::Equal,
                     }
+                    _ => std::cmp::Ordering::Equal,
                 });
 
                 Ok(heap.borrow_mut().insert_list(list))
@@ -1669,7 +1643,6 @@ impl FunctionDef {
                 format!("built-in function \"{}\"", built_in.name())
             }
             FunctionDef::Lambda(LambdaDef { name, .. }) => name
-                .clone()
                 .map_or(String::from("anonymous function"), |n| {
                     format!("function \"{}\"", n)
                 }),
@@ -1773,7 +1746,7 @@ impl FunctionDef {
     pub fn call(
         &self,
         this_value: Value,
-        args: Vec<Value>,
+        args: &[Value],
         heap: Rc<RefCell<Heap>>,
         bindings: Rc<Environment>,
         call_depth: usize,
@@ -1805,33 +1778,33 @@ impl FunctionDef {
                 let start_var_env = profiling_start.map(|_| std::time::Instant::now());
 
                 // Build local bindings for this call (O(1) - no clone of parent environment!)
-                let mut local_bindings = HashMap::new();
+                // Keys are interned symbols, so nothing here allocates or hashes strings.
+                let mut local_bindings = SymbolMap::default();
 
                 // Add self-reference if named
                 if let Some(fn_name) = name {
-                    local_bindings.insert(fn_name.to_string(), this_value);
+                    local_bindings.insert(*fn_name, this_value);
                 }
 
                 // Preserve inputs if present in parent
-                if let Some(inputs) = bindings.get("inputs") {
-                    local_bindings.insert(String::from("inputs"), inputs);
+                let inputs_symbol = crate::intern::inputs_symbol();
+                if let Some(inputs) = bindings.get(inputs_symbol) {
+                    local_bindings.insert(inputs_symbol, inputs);
                 }
 
                 // Add function arguments (highest precedence)
                 for (idx, expected_arg) in expected_args.iter().enumerate() {
                     match expected_arg {
                         LambdaArg::Required(arg_name) => {
-                            local_bindings.insert(arg_name.clone(), args[idx]);
+                            local_bindings.insert(*arg_name, args[idx]);
                         }
                         LambdaArg::Optional(arg_name) => {
-                            local_bindings.insert(
-                                arg_name.clone(),
-                                args.get(idx).copied().unwrap_or(Value::Null),
-                            );
+                            local_bindings
+                                .insert(*arg_name, args.get(idx).copied().unwrap_or(Value::Null));
                         }
                         LambdaArg::Rest(arg_name) => {
                             local_bindings.insert(
-                                arg_name.clone(),
+                                *arg_name,
                                 heap.borrow_mut()
                                     .insert_list(args.iter().skip(idx).copied().collect()),
                             );
@@ -1936,7 +1909,7 @@ mod tests {
         // Test range(4) - exclusive, so [0, 1, 2, 3]
         let args = vec![Value::Number(4.0)];
         let result = range_fn
-            .call(args, heap.clone(), bindings.clone(), 0, "")
+            .call(&args, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
 
         let heap_borrow = heap.borrow();
@@ -1956,7 +1929,7 @@ mod tests {
         // Test range(4, 10) - exclusive, so [4, 5, 6, 7, 8, 9]
         let args = vec![Value::Number(4.0), Value::Number(10.0)];
         let result = range_fn
-            .call(args, heap.clone(), bindings.clone(), 0, "")
+            .call(&args, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
 
         let heap_borrow = heap.borrow();
@@ -1988,7 +1961,7 @@ mod tests {
         for (input, expected) in test_cases {
             let args = vec![Value::Number(input)];
             let result = round_fn
-                .call(args, heap.clone(), bindings.clone(), 0, "")
+                .call(&args, heap.clone(), bindings.clone(), 0, "")
                 .unwrap();
             assert_eq!(
                 result,
@@ -2025,7 +1998,7 @@ mod tests {
         for (input, places, expected) in test_cases {
             let args = vec![Value::Number(input), Value::Number(places)];
             let result = round_fn
-                .call(args, heap.clone(), bindings.clone(), 0, "")
+                .call(&args, heap.clone(), bindings.clone(), 0, "")
                 .unwrap();
 
             // Use approximate comparison for floating point
@@ -2068,7 +2041,7 @@ mod tests {
         for (input, places, expected) in test_cases {
             let args = vec![Value::Number(input), Value::Number(places)];
             let result = round_fn
-                .call(args, heap.clone(), bindings.clone(), 0, "")
+                .call(&args, heap.clone(), bindings.clone(), 0, "")
                 .unwrap();
             assert_eq!(
                 result,
@@ -2100,7 +2073,7 @@ mod tests {
         for (input, places, expected) in test_cases {
             let args = vec![Value::Number(input), Value::Number(places)];
             let result = round_fn
-                .call(args, heap.clone(), bindings.clone(), 0, "")
+                .call(&args, heap.clone(), bindings.clone(), 0, "")
                 .unwrap();
 
             if let Value::Number(result_num) = result {
@@ -2147,12 +2120,12 @@ mod tests {
         let seed = 42.0;
         let args1 = vec![Value::Number(seed)];
         let result1 = random_fn
-            .call(args1, heap.clone(), bindings.clone(), 0, "")
+            .call(&args1, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
 
         let args2 = vec![Value::Number(seed)];
         let result2 = random_fn
-            .call(args2, heap.clone(), bindings.clone(), 0, "")
+            .call(&args2, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
 
         assert_eq!(result1, result2, "Same seed should produce same result");
@@ -2167,12 +2140,12 @@ mod tests {
         // Test that different seeds produce different results
         let args1 = vec![Value::Number(42.0)];
         let result1 = random_fn
-            .call(args1, heap.clone(), bindings.clone(), 0, "")
+            .call(&args1, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
 
         let args2 = vec![Value::Number(100.0)];
         let result2 = random_fn
-            .call(args2, heap.clone(), bindings.clone(), 0, "")
+            .call(&args2, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
 
         assert_ne!(
@@ -2191,7 +2164,7 @@ mod tests {
         for seed in [0.0, 1.0, 42.0, 100.0, 999.0, 12345.0] {
             let args = vec![Value::Number(seed)];
             let result = random_fn
-                .call(args, heap.clone(), bindings.clone(), 0, "")
+                .call(&args, heap.clone(), bindings.clone(), 0, "")
                 .unwrap();
 
             if let Value::Number(num) = result {
@@ -2215,7 +2188,7 @@ mod tests {
         // Test with negative seeds (they get cast to u64)
         let args = vec![Value::Number(-42.0)];
         let result = random_fn
-            .call(args, heap.clone(), bindings.clone(), 0, "")
+            .call(&args, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
 
         if let Value::Number(num) = result {
@@ -2247,16 +2220,16 @@ mod tests {
         let lambda = LambdaDef {
             name: None,
             args: Rc::new(vec![
-                crate::values::LambdaArg::Required("x".to_string()),
-                crate::values::LambdaArg::Required("i".to_string()),
+                crate::values::LambdaArg::Required(crate::intern::Symbol::intern("x")),
+                crate::values::LambdaArg::Required(crate::intern::Symbol::intern("i")),
             ]),
             body: Rc::new(crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
                 op: crate::ast::BinaryOp::Add,
                 left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
-                    "x".to_string(),
+                    crate::intern::Symbol::intern("x"),
                 ))),
                 right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
-                    "i".to_string(),
+                    crate::intern::Symbol::intern("i"),
                 ))),
             })),
             scope: CapturedScope::default(),
@@ -2266,13 +2239,7 @@ mod tests {
 
         // Call map
         let result = BuiltInFunction::Map
-            .call(
-                vec![list, lambda_value],
-                heap.clone(),
-                bindings.clone(),
-                0,
-                "",
-            )
+            .call(&[list, lambda_value], heap.clone(), bindings.clone(), 0, "")
             .unwrap();
 
         // Verify result is [10, 21, 32]
@@ -2303,13 +2270,13 @@ mod tests {
         let lambda = LambdaDef {
             name: None,
             args: Rc::new(vec![
-                crate::values::LambdaArg::Required("x".to_string()),
-                crate::values::LambdaArg::Required("i".to_string()),
+                crate::values::LambdaArg::Required(crate::intern::Symbol::intern("x")),
+                crate::values::LambdaArg::Required(crate::intern::Symbol::intern("i")),
             ]),
             body: Rc::new(crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
                 op: crate::ast::BinaryOp::Greater,
                 left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
-                    "i".to_string(),
+                    crate::intern::Symbol::intern("i"),
                 ))),
                 right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Number(1.0))),
             })),
@@ -2320,13 +2287,7 @@ mod tests {
 
         // Call filter
         let result = BuiltInFunction::Filter
-            .call(
-                vec![list, lambda_value],
-                heap.clone(),
-                bindings.clone(),
-                0,
-                "",
-            )
+            .call(&[list, lambda_value], heap.clone(), bindings.clone(), 0, "")
             .unwrap();
 
         // Verify result is [30, 40] (indices 2 and 3)
@@ -2355,23 +2316,23 @@ mod tests {
         let lambda = LambdaDef {
             name: None,
             args: Rc::new(vec![
-                crate::values::LambdaArg::Required("acc".to_string()),
-                crate::values::LambdaArg::Required("x".to_string()),
-                crate::values::LambdaArg::Required("i".to_string()),
+                crate::values::LambdaArg::Required(crate::intern::Symbol::intern("acc")),
+                crate::values::LambdaArg::Required(crate::intern::Symbol::intern("x")),
+                crate::values::LambdaArg::Required(crate::intern::Symbol::intern("i")),
             ]),
             body: Rc::new(crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
                 op: crate::ast::BinaryOp::Add,
                 left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
                     op: crate::ast::BinaryOp::Add,
                     left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
-                        "acc".to_string(),
+                        crate::intern::Symbol::intern("acc"),
                     ))),
                     right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
-                        "x".to_string(),
+                        crate::intern::Symbol::intern("x"),
                     ))),
                 })),
                 right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
-                    "i".to_string(),
+                    crate::intern::Symbol::intern("i"),
                 ))),
             })),
             scope: CapturedScope::default(),
@@ -2382,7 +2343,7 @@ mod tests {
         // Call reduce with initial value 0
         let result = BuiltInFunction::Reduce
             .call(
-                vec![list, lambda_value, Value::Number(0.0)],
+                &[list, lambda_value, Value::Number(0.0)],
                 heap.clone(),
                 bindings.clone(),
                 0,
@@ -2411,11 +2372,13 @@ mod tests {
         // Create a lambda x => x * 2 (only one argument)
         let lambda = LambdaDef {
             name: None,
-            args: Rc::new(vec![crate::values::LambdaArg::Required("x".to_string())]),
+            args: Rc::new(vec![crate::values::LambdaArg::Required(
+                crate::intern::Symbol::intern("x"),
+            )]),
             body: Rc::new(crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
                 op: crate::ast::BinaryOp::Multiply,
                 left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
-                    "x".to_string(),
+                    crate::intern::Symbol::intern("x"),
                 ))),
                 right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Number(2.0))),
             })),
@@ -2426,13 +2389,7 @@ mod tests {
 
         // Call map
         let result = BuiltInFunction::Map
-            .call(
-                vec![list, lambda_value],
-                heap.clone(),
-                bindings.clone(),
-                0,
-                "",
-            )
+            .call(&[list, lambda_value], heap.clone(), bindings.clone(), 0, "")
             .unwrap();
 
         // Verify result is [20, 40, 60] - backward compatible, no index passed
@@ -2455,7 +2412,7 @@ mod tests {
         let to_unit = heap.borrow_mut().insert_string("m".to_string());
         let args = vec![Value::Number(1.0), from_unit, to_unit];
         let result = convert_fn
-            .call(args, heap.clone(), bindings.clone(), 0, "")
+            .call(&args, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
         assert_eq!(result, Value::Number(1000.0));
 
@@ -2464,7 +2421,7 @@ mod tests {
         let to_unit = heap.borrow_mut().insert_string("km".to_string());
         let args = vec![Value::Number(1.0), from_unit, to_unit];
         let result = convert_fn
-            .call(args, heap.clone(), bindings.clone(), 0, "")
+            .call(&args, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
         if let Value::Number(n) = result {
             assert!((n - 1.609344).abs() < 1e-6);
@@ -2484,7 +2441,7 @@ mod tests {
         let to_unit = heap.borrow_mut().insert_string("fahrenheit".to_string());
         let args = vec![Value::Number(0.0), from_unit, to_unit];
         let result = convert_fn
-            .call(args, heap.clone(), bindings.clone(), 0, "")
+            .call(&args, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
         if let Value::Number(n) = result {
             assert!((n - 32.0).abs() < 1e-10);
@@ -2495,7 +2452,7 @@ mod tests {
         let to_unit = heap.borrow_mut().insert_string("fahrenheit".to_string());
         let args = vec![Value::Number(100.0), from_unit, to_unit];
         let result = convert_fn
-            .call(args, heap.clone(), bindings.clone(), 0, "")
+            .call(&args, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
         if let Value::Number(n) = result {
             assert!((n - 212.0).abs() < 1e-10);
@@ -2513,7 +2470,7 @@ mod tests {
         let to_unit = heap.borrow_mut().insert_string("lbs".to_string());
         let args = vec![Value::Number(1.0), from_unit, to_unit];
         let result = convert_fn
-            .call(args, heap.clone(), bindings.clone(), 0, "")
+            .call(&args, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
         if let Value::Number(n) = result {
             assert!((n - 2.20462).abs() < 0.001);
@@ -2531,7 +2488,7 @@ mod tests {
         let to_unit = heap.borrow_mut().insert_string("bytes".to_string());
         let args = vec![Value::Number(1.0), from_unit, to_unit];
         let result = convert_fn
-            .call(args, heap.clone(), bindings.clone(), 0, "")
+            .call(&args, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
         assert_eq!(result, Value::Number(1024.0));
     }
@@ -2547,7 +2504,7 @@ mod tests {
         let to_unit = heap.borrow_mut().insert_string("m".to_string());
         let args = vec![Value::Number(42.0), from_unit, to_unit];
         let result = convert_fn
-            .call(args, heap.clone(), bindings.clone(), 0, "")
+            .call(&args, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
         assert_eq!(result, Value::Number(42.0));
     }
@@ -2562,7 +2519,7 @@ mod tests {
         let from_unit = heap.borrow_mut().insert_string("kg".to_string());
         let to_unit = heap.borrow_mut().insert_string("meters".to_string());
         let args = vec![Value::Number(1.0), from_unit, to_unit];
-        let result = convert_fn.call(args, heap.clone(), bindings.clone(), 0, "");
+        let result = convert_fn.call(&args, heap.clone(), bindings.clone(), 0, "");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Cannot convert"));
     }
@@ -2577,7 +2534,7 @@ mod tests {
         let from_unit = heap.borrow_mut().insert_string("foobar".to_string());
         let to_unit = heap.borrow_mut().insert_string("meters".to_string());
         let args = vec![Value::Number(1.0), from_unit, to_unit];
-        let result = convert_fn.call(args, heap.clone(), bindings.clone(), 0, "");
+        let result = convert_fn.call(&args, heap.clone(), bindings.clone(), 0, "");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Unknown unit"));
     }
@@ -2593,7 +2550,7 @@ mod tests {
         let to_unit = heap.borrow_mut().insert_string("M".to_string());
         let args = vec![Value::Number(1.0), from_unit, to_unit];
         let result = convert_fn
-            .call(args, heap.clone(), bindings.clone(), 0, "")
+            .call(&args, heap.clone(), bindings.clone(), 0, "")
             .unwrap();
         assert_eq!(result, Value::Number(1000.0));
     }
@@ -2613,7 +2570,7 @@ mod tests {
         let list = heap.borrow_mut().insert_list(vec![inner1, inner2]);
 
         let result = BuiltInFunction::Flatten
-            .call(vec![list], heap.clone(), bindings.clone(), 0, "")
+            .call(&[list], heap.clone(), bindings.clone(), 0, "")
             .unwrap();
 
         let heap_borrow = heap.borrow();
@@ -2642,7 +2599,7 @@ mod tests {
             .insert_list(vec![inner1, Value::Number(3.0), inner2]);
 
         let result = BuiltInFunction::Flatten
-            .call(vec![list], heap.clone(), bindings.clone(), 0, "")
+            .call(&[list], heap.clone(), bindings.clone(), 0, "")
             .unwrap();
 
         let heap_borrow = heap.borrow();
@@ -2671,7 +2628,7 @@ mod tests {
         let list = heap.borrow_mut().insert_list(vec![inner1, inner2]);
 
         let result = BuiltInFunction::Flatten
-            .call(vec![list], heap.clone(), bindings.clone(), 0, "")
+            .call(&[list], heap.clone(), bindings.clone(), 0, "")
             .unwrap();
 
         let heap_borrow = heap.borrow();
@@ -2697,7 +2654,7 @@ mod tests {
         let list2 = heap.borrow_mut().insert_list(vec![str_a, str_b]);
 
         let result = BuiltInFunction::Zip
-            .call(vec![list1, list2], heap.clone(), bindings.clone(), 0, "")
+            .call(&[list1, list2], heap.clone(), bindings.clone(), 0, "")
             .unwrap();
 
         let heap_borrow = heap.borrow();
@@ -2725,7 +2682,7 @@ mod tests {
         let list2 = heap.borrow_mut().insert_list(vec![str_a, str_b, str_c]);
 
         let result = BuiltInFunction::Zip
-            .call(vec![list1, list2], heap.clone(), bindings.clone(), 0, "")
+            .call(&[list1, list2], heap.clone(), bindings.clone(), 0, "")
             .unwrap();
 
         let heap_borrow = heap.borrow();
@@ -2759,7 +2716,7 @@ mod tests {
 
         let result = BuiltInFunction::Zip
             .call(
-                vec![list1, list2, list3],
+                &[list1, list2, list3],
                 heap.clone(),
                 bindings.clone(),
                 0,
@@ -2792,7 +2749,7 @@ mod tests {
 
         let result = BuiltInFunction::Chunk
             .call(
-                vec![list, Value::Number(2.0)],
+                &[list, Value::Number(2.0)],
                 heap.clone(),
                 bindings.clone(),
                 0,
@@ -2829,7 +2786,7 @@ mod tests {
             .insert_list(vec![Value::Number(1.0), Value::Number(2.0)]);
 
         let result = BuiltInFunction::Chunk.call(
-            vec![list, Value::Number(0.0)],
+            &[list, Value::Number(0.0)],
             heap.clone(),
             bindings.clone(),
             0,
@@ -2854,7 +2811,7 @@ mod tests {
 
         let result = BuiltInFunction::Chunk
             .call(
-                vec![list, Value::Number(2.0)],
+                &[list, Value::Number(2.0)],
                 heap.clone(),
                 bindings.clone(),
                 0,
@@ -2883,9 +2840,11 @@ mod tests {
         // Identity lambda: x => x
         let lambda = LambdaDef {
             name: None,
-            args: Rc::new(vec![crate::values::LambdaArg::Required("x".to_string())]),
+            args: Rc::new(vec![crate::values::LambdaArg::Required(
+                crate::intern::Symbol::intern("x"),
+            )]),
             body: Rc::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
-                "x".to_string(),
+                crate::intern::Symbol::intern("x"),
             ))),
             scope: CapturedScope::default(),
             source: Rc::from(""),
@@ -2894,7 +2853,7 @@ mod tests {
 
         let result = BuiltInFunction::GroupBy
             .call(
-                vec![simple_list, lambda_value],
+                &[simple_list, lambda_value],
                 heap.clone(),
                 bindings.clone(),
                 0,
@@ -2929,9 +2888,11 @@ mod tests {
         // Lambda that returns a number: x => x
         let lambda = LambdaDef {
             name: None,
-            args: Rc::new(vec![crate::values::LambdaArg::Required("x".to_string())]),
+            args: Rc::new(vec![crate::values::LambdaArg::Required(
+                crate::intern::Symbol::intern("x"),
+            )]),
             body: Rc::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
-                "x".to_string(),
+                crate::intern::Symbol::intern("x"),
             ))),
             scope: CapturedScope::default(),
             source: Rc::from(""),
@@ -2939,7 +2900,7 @@ mod tests {
         let lambda_value = heap.borrow_mut().insert_lambda(lambda);
 
         let result = BuiltInFunction::GroupBy.call(
-            vec![list, lambda_value],
+            &[list, lambda_value],
             heap.clone(),
             bindings.clone(),
             0,
@@ -2974,9 +2935,11 @@ mod tests {
         // Identity lambda: x => x
         let lambda = LambdaDef {
             name: None,
-            args: Rc::new(vec![crate::values::LambdaArg::Required("x".to_string())]),
+            args: Rc::new(vec![crate::values::LambdaArg::Required(
+                crate::intern::Symbol::intern("x"),
+            )]),
             body: Rc::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
-                "x".to_string(),
+                crate::intern::Symbol::intern("x"),
             ))),
             scope: CapturedScope::default(),
             source: Rc::from(""),
@@ -2984,13 +2947,7 @@ mod tests {
         let lambda_value = heap.borrow_mut().insert_lambda(lambda);
 
         let result = BuiltInFunction::CountBy
-            .call(
-                vec![list, lambda_value],
-                heap.clone(),
-                bindings.clone(),
-                0,
-                "",
-            )
+            .call(&[list, lambda_value], heap.clone(), bindings.clone(), 0, "")
             .unwrap();
 
         let heap_borrow = heap.borrow();
@@ -3013,9 +2970,11 @@ mod tests {
         // Identity lambda: x => x
         let lambda = LambdaDef {
             name: None,
-            args: Rc::new(vec![crate::values::LambdaArg::Required("x".to_string())]),
+            args: Rc::new(vec![crate::values::LambdaArg::Required(
+                crate::intern::Symbol::intern("x"),
+            )]),
             body: Rc::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
-                "x".to_string(),
+                crate::intern::Symbol::intern("x"),
             ))),
             scope: CapturedScope::default(),
             source: Rc::from(""),
@@ -3023,13 +2982,7 @@ mod tests {
         let lambda_value = heap.borrow_mut().insert_lambda(lambda);
 
         let result = BuiltInFunction::CountBy
-            .call(
-                vec![list, lambda_value],
-                heap.clone(),
-                bindings.clone(),
-                0,
-                "",
-            )
+            .call(&[list, lambda_value], heap.clone(), bindings.clone(), 0, "")
             .unwrap();
 
         let heap_borrow = heap.borrow();
@@ -3045,7 +2998,7 @@ mod tests {
         // 5 > 3 = true
         let result = BuiltInFunction::Ugt
             .call(
-                vec![Value::Number(5.0), Value::Number(3.0)],
+                &[Value::Number(5.0), Value::Number(3.0)],
                 heap.clone(),
                 bindings.clone(),
                 0,
@@ -3057,7 +3010,7 @@ mod tests {
         // 3 > 5 = false
         let result = BuiltInFunction::Ugt
             .call(
-                vec![Value::Number(3.0), Value::Number(5.0)],
+                &[Value::Number(3.0), Value::Number(5.0)],
                 heap.clone(),
                 bindings.clone(),
                 0,
@@ -3069,7 +3022,7 @@ mod tests {
         // 5 > 5 = false
         let result = BuiltInFunction::Ugt
             .call(
-                vec![Value::Number(5.0), Value::Number(5.0)],
+                &[Value::Number(5.0), Value::Number(5.0)],
                 heap.clone(),
                 bindings.clone(),
                 0,
@@ -3087,7 +3040,7 @@ mod tests {
         // 3 < 5 = true
         let result = BuiltInFunction::Ult
             .call(
-                vec![Value::Number(3.0), Value::Number(5.0)],
+                &[Value::Number(3.0), Value::Number(5.0)],
                 heap.clone(),
                 bindings.clone(),
                 0,
@@ -3099,7 +3052,7 @@ mod tests {
         // 5 < 3 = false
         let result = BuiltInFunction::Ult
             .call(
-                vec![Value::Number(5.0), Value::Number(3.0)],
+                &[Value::Number(5.0), Value::Number(3.0)],
                 heap.clone(),
                 bindings.clone(),
                 0,
@@ -3117,7 +3070,7 @@ mod tests {
         // 5 >= 3 = true
         let result = BuiltInFunction::Ugte
             .call(
-                vec![Value::Number(5.0), Value::Number(3.0)],
+                &[Value::Number(5.0), Value::Number(3.0)],
                 heap.clone(),
                 bindings.clone(),
                 0,
@@ -3129,7 +3082,7 @@ mod tests {
         // 5 >= 5 = true
         let result = BuiltInFunction::Ugte
             .call(
-                vec![Value::Number(5.0), Value::Number(5.0)],
+                &[Value::Number(5.0), Value::Number(5.0)],
                 heap.clone(),
                 bindings.clone(),
                 0,
@@ -3141,7 +3094,7 @@ mod tests {
         // 3 >= 5 = false
         let result = BuiltInFunction::Ugte
             .call(
-                vec![Value::Number(3.0), Value::Number(5.0)],
+                &[Value::Number(3.0), Value::Number(5.0)],
                 heap.clone(),
                 bindings.clone(),
                 0,
@@ -3159,7 +3112,7 @@ mod tests {
         // 3 <= 5 = true
         let result = BuiltInFunction::Ulte
             .call(
-                vec![Value::Number(3.0), Value::Number(5.0)],
+                &[Value::Number(3.0), Value::Number(5.0)],
                 heap.clone(),
                 bindings.clone(),
                 0,
@@ -3171,7 +3124,7 @@ mod tests {
         // 5 <= 5 = true
         let result = BuiltInFunction::Ulte
             .call(
-                vec![Value::Number(5.0), Value::Number(5.0)],
+                &[Value::Number(5.0), Value::Number(5.0)],
                 heap.clone(),
                 bindings.clone(),
                 0,
@@ -3183,7 +3136,7 @@ mod tests {
         // 5 <= 3 = false
         let result = BuiltInFunction::Ulte
             .call(
-                vec![Value::Number(5.0), Value::Number(3.0)],
+                &[Value::Number(5.0), Value::Number(3.0)],
                 heap.clone(),
                 bindings.clone(),
                 0,
@@ -3201,7 +3154,7 @@ mod tests {
         // null > 0 = false (not an error)
         let result = BuiltInFunction::Ugt
             .call(
-                vec![Value::Null, Value::Number(0.0)],
+                &[Value::Null, Value::Number(0.0)],
                 heap.clone(),
                 bindings.clone(),
                 0,
@@ -3213,7 +3166,7 @@ mod tests {
         // null < 5 = false (not an error)
         let result = BuiltInFunction::Ult
             .call(
-                vec![Value::Null, Value::Number(5.0)],
+                &[Value::Null, Value::Number(5.0)],
                 heap.clone(),
                 bindings.clone(),
                 0,
@@ -3225,7 +3178,7 @@ mod tests {
         // null >= 0 = false (not an error)
         let result = BuiltInFunction::Ugte
             .call(
-                vec![Value::Null, Value::Number(0.0)],
+                &[Value::Null, Value::Number(0.0)],
                 heap.clone(),
                 bindings.clone(),
                 0,
@@ -3237,7 +3190,7 @@ mod tests {
         // null <= 0 = false (not an error)
         let result = BuiltInFunction::Ulte
             .call(
-                vec![Value::Null, Value::Number(0.0)],
+                &[Value::Null, Value::Number(0.0)],
                 heap.clone(),
                 bindings.clone(),
                 0,
@@ -3250,7 +3203,7 @@ mod tests {
         let str_val = heap.borrow_mut().insert_string("hello".to_string());
         let result = BuiltInFunction::Ugt
             .call(
-                vec![str_val, Value::Number(5.0)],
+                &[str_val, Value::Number(5.0)],
                 heap.clone(),
                 bindings.clone(),
                 0,
@@ -3262,7 +3215,7 @@ mod tests {
         // bool vs number: true > 5 = false (not an error)
         let result = BuiltInFunction::Ugt
             .call(
-                vec![Value::Bool(true), Value::Number(5.0)],
+                &[Value::Bool(true), Value::Number(5.0)],
                 heap.clone(),
                 bindings.clone(),
                 0,
@@ -3279,7 +3232,7 @@ mod tests {
         ]);
         let result = BuiltInFunction::Ugt
             .call(
-                vec![list, Value::Number(5.0)],
+                &[list, Value::Number(5.0)],
                 heap.clone(),
                 bindings.clone(),
                 0,

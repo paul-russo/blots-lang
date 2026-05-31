@@ -7,6 +7,7 @@ use blots_core::{
     formatter::{format_expr, join_statements_with_spacing},
     functions::get_built_in_function_idents,
     heap::{CONSTANTS, Heap},
+    intern::Symbol,
     parser::{Rule, Token, get_pairs, get_tokens},
     values::SerializableValue,
 };
@@ -132,7 +133,7 @@ pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
 
     let bindings = Rc::new(Environment::new());
     bindings.insert(
-        String::from("inputs"),
+        Symbol::intern("inputs"),
         heap.borrow_mut().insert_record(inputs),
     );
 
@@ -257,7 +258,7 @@ pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
         .iter()
         .map(|(k, v)| {
             v.to_serializable_value(&heap.borrow())
-                .map(|sv| (k.clone(), sv))
+                .map(|sv| (k.to_string(), sv))
                 .map_err(|e| {
                     RuntimeError::new(format!("Serialization error for binding '{}': {}", k, e))
                 })
@@ -391,13 +392,13 @@ fn evaluate_single_inline_expression(
 
     // Add inputs record
     bindings.insert(
-        String::from("inputs"),
+        Symbol::intern("inputs"),
         heap.borrow_mut().insert_record(inputs.clone()),
     );
 
     // Inject all input values directly into bindings for inline access
     for (key, value) in inputs {
-        bindings.insert(key, value);
+        bindings.insert(Symbol::intern(&key), value);
     }
 
     // Parse the expression

@@ -196,6 +196,7 @@ impl Completer for BlotsHighlighter {
             let mut completions: Vec<String> = self
                 .bindings
                 .keys()
+                .map(|key| key.as_str())
                 .filter(|key| key.starts_with(last_word))
                 .map(|key| key[rel_pos..].to_string())
                 .collect();

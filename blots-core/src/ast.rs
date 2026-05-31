@@ -1,4 +1,5 @@
 use crate::functions::BuiltInFunction;
+use crate::intern::Symbol;
 use crate::values::LambdaArg;
 use serde::{Deserialize, Serialize};
 use std::rc::Rc;
@@ -119,7 +120,7 @@ pub enum Expr {
     Null,
 
     // Variables and functions
-    Identifier(String),
+    Identifier(Symbol),
     InputReference(String),   // Shorthand for inputs.field (e.g., #field)
     BuiltIn(BuiltInFunction), // Built-in function
 
@@ -137,7 +138,7 @@ pub enum Expr {
 
         /// Free variables referenced by the body (excluding parameters and built-ins),
         /// computed once at parse time so closure creation doesn't re-walk the body.
-        captures: Vec<String>,
+        captures: Vec<Symbol>,
     },
 
     // Control flow
@@ -154,7 +155,7 @@ pub enum Expr {
 
     // Operations
     Assignment {
-        ident: String,
+        ident: Symbol,
         value: Box<SpannedExpr>,
     },
 

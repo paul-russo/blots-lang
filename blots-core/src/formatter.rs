@@ -121,7 +121,7 @@ fn format_multiline(expr: &SpannedExpr, max_cols: usize, indent: usize) -> Strin
             format!("output {}", formatted_inner)
         }
         Expr::Assignment { ident, value } => {
-            format_assignment_multiline(ident, value, max_cols, indent)
+            format_assignment_multiline(ident.as_str(), value, max_cols, indent)
         }
         Expr::List(items) => format_list_multiline(items, max_cols, indent),
         Expr::Record(entries) => format_record_multiline(entries, max_cols, indent),
@@ -567,7 +567,7 @@ fn format_do_block_multiline(
 /// Convert lambda argument to string
 fn lambda_arg_to_str(arg: &LambdaArg) -> String {
     match arg {
-        LambdaArg::Required(name) => name.clone(),
+        LambdaArg::Required(name) => name.to_string(),
         LambdaArg::Optional(name) => format!("{}?", name),
         LambdaArg::Rest(name) => format!("...{}", name),
     }

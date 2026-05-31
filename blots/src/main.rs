@@ -12,6 +12,7 @@ use blots_core::functions::{
     clear_function_call_stats, get_function_call_stats, set_profiling_enabled,
 };
 use blots_core::heap::Heap;
+use blots_core::intern::Symbol;
 use blots_core::parser::{Rule, get_pairs};
 use blots_core::stats::ProfilingSummary;
 use blots_core::values::{SerializableValue, Value};
@@ -139,7 +140,7 @@ fn evaluate_source(
                             match pair.as_rule() {
                                 Rule::identifier => {
                                     let identifier = pair.as_str();
-                                    if let Some(value) = bindings.get(identifier) {
+                                    if let Some(value) = bindings.get(Symbol::intern(identifier)) {
                                         // Validate that the value is portable
                                         if let Err(e) = validate_portable_value(
                                             &value,
@@ -377,7 +378,7 @@ fn main() -> ! {
 
     let inputs_record = { heap.borrow_mut().insert_record(inputs_map) };
 
-    bindings.insert("inputs".to_string(), inputs_record);
+    bindings.insert(Symbol::intern("inputs"), inputs_record);
 
     // Check if we should evaluate from stdin with -e flag
     if ARGS.evaluate && ARGS.file_or_source.is_none() {
@@ -643,7 +644,9 @@ fn main() -> ! {
                                     Rule::identifier => {
                                         // output x - reference existing binding
                                         let identifier = pair.as_str();
-                                        if let Some(value) = bindings.get(identifier) {
+                                        if let Some(value) =
+                                            bindings.get(Symbol::intern(identifier))
+                                        {
                                             // Validate that the value is portable
                                             if let Err(e) = validate_portable_value(
                                                 &value,
