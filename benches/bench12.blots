@@ -1,0 +1,60 @@
+start = time_now()
+
+// Dead-allocation stress: a long, flat script (REPL/playground style) where each
+// statement allocates a large intermediate list but binds only a scalar, so the
+// heap accumulates garbage monotonically across statements.
+n = 200000
+base = range(n)
+
+r01 = sum(base via x => x * 2)
+r02 = sum(base via x => x + 7)
+r03 = sum(base where x => x % 2 == 0)
+r04 = len(base where x => x % 3 == 0)
+r05 = sum((base + 1) * 2)
+r06 = sum((base - 3) * (base + 3))
+r07 = avg(base * 5 + 1)
+r08 = max(base % 12345)
+r09 = min((base + 99) % 54321)
+r10 = sum(map(base, x => x * x % 1000))
+r11 = len(filter(base, x => x % 7 == 0))
+r12 = reduce(base, (acc, x) => acc + x % 13, 0)
+r13 = sum(base via x => (x * 31 + 17) % 1009)
+r14 = len(base where x => (x * 13) % 11 == 5)
+r15 = avg((base * base) % 4096)
+r16 = sum((base + n) / 2)
+r17 = max(base via x => x % 257)
+r18 = min(base via x => (x + 129) % 263)
+r19 = sum(base where x => x % 5 == 1)
+r20 = len(map(base, x => x + 1))
+r21 = sum((base * 3 - 1) % 2048)
+r22 = avg(base via x => x % 999 + 1)
+r23 = sum(filter(base, x => x % 4 == 2))
+r24 = len(base where x => (x * x) % 9 == 0)
+r25 = sum(base via x => (x % 17) * (x % 19))
+r26 = max((base + 7) * 3 % 8191)
+r27 = min(base via x => (x * 5 + 3) % 6007)
+r28 = sum(base where x => x % 11 == 4)
+r29 = avg(map(base, x => (x + 2) * (x + 3) % 512))
+r30 = reduce(base, (acc, x) => acc + (x % 29), 0)
+r31 = sum((base % 365) + 1)
+r32 = len(filter(base, x => (x * 7 + 5) % 6 == 1))
+r33 = sum(base via x => x * 2 % 100003)
+r34 = max(base where x => x % 23 == 7)
+r35 = min((base * 11) % 9973 + 1)
+r36 = avg(base via x => (x % 47) * 2)
+r37 = sum(map(base, x => (x % 53) + (x % 59)))
+r38 = len(base where x => x % 13 == 6)
+r39 = sum((base + 1) % 727)
+r40 = reduce(base, (acc, x) => acc + (x % 37) * 2, 0)
+
+first_half = (
+  r01 + r02 + r03 + r04 + r05 + r06 + r07 + r08 + r09 + r10
+    + r11 + r12 + r13 + r14 + r15 + r16 + r17 + r18 + r19 + r20
+)
+second_half = (
+  r21 + r22 + r23 + r24 + r25 + r26 + r27 + r28 + r29 + r30
+    + r31 + r32 + r33 + r34 + r35 + r36 + r37 + r38 + r39 + r40
+)
+
+print("sanity: {}", first_half + second_half)
+print("total: {}s", time_now() - start)

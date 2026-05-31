@@ -1,0 +1,31 @@
+start = time_now()
+
+// Dead-allocation stress: every step builds large intermediate lists that are
+// immediately reduced to a scalar, so almost everything allocated here is garbage.
+n = 500000
+xs = range(n)
+
+// Chained broadcast intermediates reduced to scalars
+t1 = time_now()
+s1 = sum(((xs + 1) * 2 - 3) / 4)
+s2 = sum((xs * xs + xs) / (xs + 1))
+s3 = avg((xs - 250000) * 2)
+print("chained broadcast reductions: {}s", time_now() - t1)
+
+// Comparison lists consumed by any/all/where
+t2 = time_now()
+has_negative = any((xs * 2 - n) < 0)
+all_in_range = all(xs / n <= 1)
+multiples = len(xs where x => (x * 3 + 7) % 5 == 0)
+print("comparison lists + where: {}s", time_now() - t2)
+
+// More large intermediates that only survive as a single number
+t3 = time_now()
+m1 = max((xs + 17) % 1000)
+m2 = min((xs * 7) % 991)
+m3 = median(xs % 1024 + 1)
+print("reduced intermediates: {}s", time_now() - t3)
+
+flags = (if has_negative then 1 else 0) + (if all_in_range then 1 else 0)
+print("sanity: {}", s1 + s2 + s3 + multiples + m1 + m2 + m3 + flags)
+print("total: {}s", time_now() - start)

@@ -1,0 +1,33 @@
+start = time_now()
+
+// Dead-allocation stress: each call builds several large temporary lists inside a
+// do block, but only a scalar survives the call.
+m = 50000
+calls = 200
+
+churn = seed => do {
+  base = range(m) via x => x + seed
+  doubled = base via x => x * 2
+  filtered = doubled where x => x % 3 == 0
+  squared = filtered via x => x * x
+  return (squared into sum) % 1000003
+}
+
+t1 = time_now()
+checksums = range(calls) via churn
+print("do-block churn: {}s", time_now() - t1)
+
+// Per-element record and string temporaries where only a number survives
+describe = i => do {
+  rec = { idx: i, name: "item-" + to_string(i), tags: [i, i * 2, i * 3] }
+  label = rec.name + "/" + to_string(rec.idx)
+  return len(label) + sum(rec.tags)
+}
+
+k = 100000
+t2 = time_now()
+weights = range(k) via describe
+print("record/string temporaries: {}s", time_now() - t2)
+
+print("sanity: {}", sum(checksums) + sum(weights))
+print("total: {}s", time_now() - start)
