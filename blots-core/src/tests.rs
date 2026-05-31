@@ -1613,7 +1613,10 @@ mod function_error_span_tests {
         //                     ^--- "asdf" starts at position 9
 
         let result = parse_and_evaluate(source);
-        assert!(result.is_err(), "Should have error for undefined identifier 'asdf'");
+        assert!(
+            result.is_err(),
+            "Should have error for undefined identifier 'asdf'"
+        );
 
         let error = result.unwrap_err();
 
@@ -1650,7 +1653,10 @@ mod function_error_span_tests {
         //                         ^--- "undefined_var" starts at position 13
 
         let result = parse_and_evaluate(source);
-        assert!(result.is_err(), "Should have error for undefined identifier");
+        assert!(
+            result.is_err(),
+            "Should have error for undefined identifier"
+        );
 
         let error = result.unwrap_err();
         let span = error.span.expect("Error should have a span");
@@ -2121,5 +2127,219 @@ mod binary_hex_number_tests {
         assert_eq!(list[0], Value::Number(1.0));
         assert_eq!(list[1], Value::Number(10.0));
         assert_eq!(list[2], Value::Number(255.0));
+    }
+}
+
+// Tests for statement-boundary heap compaction
+#[cfg(test)]
+mod heap_compaction_tests {
+    use crate::environment::Environment;
+    use crate::expressions::evaluate_pairs;
+    use crate::heap::{Heap, HeapValue};
+    use crate::parser::{Rule, get_pairs};
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    fn parse_and_evaluate(
+        code: &str,
+        heap: Option<Rc<RefCell<Heap>>>,
+        bindings: Option<Rc<Environment>>,
+    ) -> Result<Value, crate::error::RuntimeError> {
+        let pairs = get_pairs(code).map_err(|e| crate::error::RuntimeError::new(e.to_string()))?;
+
+        let heap = heap.unwrap_or_else(|| Rc::new(RefCell::new(Heap::new())));
+        let bindings = bindings.unwrap_or_else(|| Rc::new(Environment::new()));
+
+        let mut result = Value::Null;
+        for pair in pairs {
+            match pair.as_rule() {
+                Rule::statement => {
+                    if let Some(inner_pair) = pair.into_inner().next() {
+                        match inner_pair.as_rule() {
+                            Rule::expression | Rule::assignment => {
+                                result = evaluate_pairs(
+                                    inner_pair.into_inner(),
+                                    Rc::clone(&heap),
+                                    Rc::clone(&bindings),
+                                    0,
+                                    code,
+                                )?;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Rule::EOI => {}
+                _ => {}
+            }
+        }
+        Ok(result)
+    }
+
+    /// Fill the heap with string allocations that nothing references.
+    fn insert_garbage(heap: &Rc<RefCell<Heap>>, count: usize) {
+        for i in 0..count {
+            heap.borrow_mut().insert_string(format!("garbage {}", i));
+        }
+    }
+
+    #[test]
+    fn compact_drops_garbage_and_keeps_bindings() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        parse_and_evaluate(
+            "xs = [1, 2, 3]",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        insert_garbage(&heap, 100);
+        let len_before = heap.borrow().len();
+
+        heap.borrow_mut().compact(&bindings, &mut []);
+
+        assert!(heap.borrow().len() < len_before);
+        let result = parse_and_evaluate(
+            "sum(xs)",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        assert_eq!(result, Value::Number(6.0));
+    }
+
+    #[test]
+    fn compact_preserves_lambda_captured_scope() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        parse_and_evaluate(
+            "make = n => do { ys = [n, n * 2, n * 3]; return x => x + sum(ys) }",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        parse_and_evaluate(
+            "g = make(10)",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        insert_garbage(&heap, 100);
+
+        heap.borrow_mut().compact(&bindings, &mut []);
+
+        let result =
+            parse_and_evaluate("g(1)", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
+        assert_eq!(result, Value::Number(61.0));
+    }
+
+    #[test]
+    fn compact_preserves_nested_lists_records_and_equality() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        parse_and_evaluate(
+            "a = { items: [[1, 2], [3, 4]], meta: { tag: \"t\" } }",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        parse_and_evaluate(
+            "b = { items: [[1, 2], [3, 4]], meta: { tag: \"t\" } }",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        insert_garbage(&heap, 100);
+
+        heap.borrow_mut().compact(&bindings, &mut []);
+
+        let equal =
+            parse_and_evaluate("a == b", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings)))
+                .unwrap();
+        assert_eq!(equal, Value::Bool(true));
+
+        let nested_sum = parse_and_evaluate(
+            "sum(a.items[0]) + sum(a.items[1])",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        assert_eq!(nested_sum, Value::Number(10.0));
+
+        let tag_matches = parse_and_evaluate(
+            "a.meta.tag == \"t\"",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        assert_eq!(tag_matches, Value::Bool(true));
+    }
+
+    #[test]
+    fn compact_keeps_constants_record_pinned_at_slot_zero() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        insert_garbage(&heap, 100);
+        heap.borrow_mut().compact(&bindings, &mut []);
+
+        match heap.borrow().get(0) {
+            Some(HeapValue::Record(record)) => assert!(record.contains_key("pi")),
+            other => panic!("expected the constants record at slot 0, got {:?}", other),
+        }
+
+        let result = parse_and_evaluate(
+            "constants.pi",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        assert_eq!(result, Value::Number(std::f64::consts::PI));
+    }
+
+    #[test]
+    fn compact_rewrites_extra_roots() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        insert_garbage(&heap, 100);
+        let mut root = {
+            heap.borrow_mut()
+                .insert_list(vec![Value::Number(7.0), Value::Number(8.0)])
+        };
+        insert_garbage(&heap, 100);
+
+        heap.borrow_mut().compact(&bindings, &mut [&mut root]);
+
+        let borrowed_heap = heap.borrow();
+        let list = root.as_list(&borrowed_heap).unwrap();
+        assert_eq!(list, &vec![Value::Number(7.0), Value::Number(8.0)]);
+    }
+
+    #[test]
+    fn compact_if_grown_respects_minimum_size_and_growth_thresholds() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        // Small heaps are never compacted, even when everything in them is garbage.
+        insert_garbage(&heap, 10);
+        assert!(!heap.borrow_mut().compact_if_grown(&bindings, &mut []));
+
+        // Dead payload bytes trigger compaction even when the slot count stays small: a handful
+        // of large unreferenced lists is enough.
+        for _ in 0..40 {
+            heap.borrow_mut()
+                .insert_list(vec![Value::Number(0.0); 4096]);
+        }
+        let len_before = heap.borrow().len();
+        assert!(heap.borrow_mut().compact_if_grown(&bindings, &mut []));
+        assert!(heap.borrow().len() < len_before);
+
+        // Immediately afterwards the heap has not grown again, so nothing happens.
+        assert!(!heap.borrow_mut().compact_if_grown(&bindings, &mut []));
     }
 }

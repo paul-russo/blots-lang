@@ -190,6 +190,10 @@ fn evaluate_source(
                     Rule::comment => {}
                     _ => unreachable!("unexpected rule: {:?}", inner_pair.as_rule()),
                 }
+
+                // Statement boundary: safe point to reclaim heap garbage, since only the root
+                // bindings (and the pinned constants record) need to survive past this point.
+                heap.borrow_mut().compact_if_grown(bindings, &mut []);
             }
         }
         Rule::EOI => {}
@@ -717,6 +721,10 @@ fn main() -> ! {
             Rule::EOI => {}
             rule => unreachable!("unexpected rule: {:?}", rule),
         });
+
+        // Input boundary: reclaim heap garbage between REPL entries. Recorded outputs are
+        // already serialized, so the root bindings are the only values that must survive.
+        heap.borrow_mut().compact_if_grown(&bindings, &mut []);
 
         // Reset for next input
         accumulated_input.clear();

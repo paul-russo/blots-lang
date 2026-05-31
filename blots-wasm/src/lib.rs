@@ -9,7 +9,7 @@ use blots_core::{
     heap::{CONSTANTS, Heap},
     intern::Symbol,
     parser::{Rule, Token, get_pairs, get_tokens},
-    values::SerializableValue,
+    values::{SerializableValue, Value},
 };
 use indexmap::{IndexMap, IndexSet};
 use pest::error::InputLocation;
@@ -223,6 +223,13 @@ pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
                     };
 
                     values.insert(col_id, value);
+
+                    // Statement boundary: reclaim heap garbage. Earlier statements' values are
+                    // still serialized at the end, so they count as roots and are rewritten in
+                    // place if compaction moves them.
+                    let mut extra_roots: Vec<&mut Value> = values.values_mut().collect();
+                    heap.borrow_mut()
+                        .compact_if_grown(&bindings, &mut extra_roots);
                 }
             }
             Rule::EOI => {}

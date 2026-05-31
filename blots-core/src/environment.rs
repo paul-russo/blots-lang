@@ -117,6 +117,28 @@ impl Environment {
             LocalBindings::Shared(map) => map.contains_key(&key),
         }
     }
+
+    /// Rewrite every binding value in this scope chain in place.
+    ///
+    /// Used by heap compaction to remap heap pointers held by the root environment. Every scope
+    /// in the chain must own its bindings; shared scopes only exist inside in-progress lambda
+    /// calls, which never span a compaction point.
+    pub fn rewrite_binding_values(&self, rewrite: &mut impl FnMut(Value) -> Value) {
+        match &self.local {
+            LocalBindings::Owned(map) => {
+                for value in map.borrow_mut().values_mut() {
+                    *value = rewrite(*value);
+                }
+            }
+            LocalBindings::Shared(_) => {
+                panic!("cannot rewrite bindings in a shared environment");
+            }
+        }
+
+        if let Some(parent) = &self.parent {
+            parent.rewrite_binding_values(rewrite);
+        }
+    }
 }
 
 impl Default for Environment {
