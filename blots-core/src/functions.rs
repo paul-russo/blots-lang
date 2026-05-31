@@ -1779,18 +1779,18 @@ impl FunctionDef {
                 let start_var_env = profiling_start.map(|_| std::time::Instant::now());
 
                 // Build local bindings for this call (O(1) - no clone of parent environment!)
-                // Keys are interned symbols, so nothing here allocates or hashes strings.
-                let mut local_bindings = SymbolMap::default();
+                // Keys are interned symbols, so nothing here allocates or hashes strings. The
+                // frame holds only the arguments and the optional self-reference; everything
+                // else, including the late-bound `inputs` keyword, resolves through the scope
+                // chain (captured scope, then the call-site environment).
+                let mut local_bindings = SymbolMap::with_capacity_and_hasher(
+                    expected_args.len() + usize::from(name.is_some()),
+                    Default::default(),
+                );
 
                 // Add self-reference if named
                 if let Some(fn_name) = name {
                     local_bindings.insert(*fn_name, this_value);
-                }
-
-                // Preserve inputs if present in parent
-                let inputs_symbol = crate::intern::inputs_symbol();
-                if let Some(inputs) = bindings.get(inputs_symbol) {
-                    local_bindings.insert(inputs_symbol, inputs);
                 }
 
                 // Add function arguments (highest precedence)

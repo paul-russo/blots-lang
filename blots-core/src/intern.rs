@@ -46,8 +46,8 @@ impl Symbol {
     }
 }
 
-/// The interned name of the implicit `inputs` binding, cached because the function-call path
-/// re-binds it on every call and should not pay for an interner lookup each time.
+/// The interned name of the implicit `inputs` binding, cached because `#field` references
+/// resolve it on every evaluation and should not pay for an interner lookup each time.
 pub fn inputs_symbol() -> Symbol {
     static INPUTS: OnceLock<Symbol> = OnceLock::new();
     *INPUTS.get_or_init(|| Symbol::intern("inputs"))

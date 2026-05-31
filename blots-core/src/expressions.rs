@@ -490,18 +490,28 @@ pub fn evaluate_ast(
                 })
                 .collect::<Result<Vec<_>, RuntimeError>>()?;
 
-            // Flatten any spread arguments
-            let mut arg_vals = Vec::new();
+            // Flatten spread arguments. Most calls have none, so the evaluated values are passed
+            // through as-is rather than being copied into a second vector.
+            let arg_vals = if arg_vals_raw
+                .iter()
+                .any(|value| matches!(value, Value::Spread(_)))
+            {
+                let mut flattened = Vec::with_capacity(arg_vals_raw.len());
 
-            for value in arg_vals_raw {
-                match value {
-                    Value::Spread(spread_ptr) => {
-                        let spread_values = flatten_spread_value(&spread_ptr, &heap)?;
-                        arg_vals.extend(spread_values.iter().copied());
+                for value in arg_vals_raw {
+                    match value {
+                        Value::Spread(spread_ptr) => {
+                            let spread_values = flatten_spread_value(&spread_ptr, &heap)?;
+                            flattened.extend(spread_values.iter().copied());
+                        }
+                        _ => flattened.push(value),
                     }
-                    _ => arg_vals.push(value),
                 }
-            }
+
+                flattened
+            } else {
+                arg_vals_raw
+            };
 
             if !func_val.is_lambda() && !func_val.is_built_in() {
                 return Err(RuntimeError::with_span(
@@ -854,6 +864,36 @@ fn evaluate_binary_op_ast(
         call_depth,
         source.clone(),
     )?;
+
+    // Fast path: arithmetic and comparisons between two plain numbers can never broadcast,
+    // touch the heap, or fail, so they skip the span bookkeeping and the broadcasting match
+    // below. Ordering comparisons fall through when a NaN is involved so the general path can
+    // report the "cannot compare" error exactly as before.
+    if let (Number(a), Number(b)) = (lhs, rhs) {
+        match op {
+            BinaryOp::Add => return Ok(Number(a + b)),
+            BinaryOp::Subtract => return Ok(Number(a - b)),
+            BinaryOp::Multiply => return Ok(Number(a * b)),
+            BinaryOp::Divide => return Ok(Number(a / b)),
+            BinaryOp::Modulo => return Ok(Number(a % b)),
+            BinaryOp::Power => return Ok(Number(a.powf(b))),
+            BinaryOp::Equal | BinaryOp::DotEqual => return Ok(Bool(a == b)),
+            BinaryOp::NotEqual | BinaryOp::DotNotEqual => return Ok(Bool(a != b)),
+            BinaryOp::Less | BinaryOp::DotLess if !a.is_nan() && !b.is_nan() => {
+                return Ok(Bool(a < b));
+            }
+            BinaryOp::LessEq | BinaryOp::DotLessEq if !a.is_nan() && !b.is_nan() => {
+                return Ok(Bool(a <= b));
+            }
+            BinaryOp::Greater | BinaryOp::DotGreater if !a.is_nan() && !b.is_nan() => {
+                return Ok(Bool(a > b));
+            }
+            BinaryOp::GreaterEq | BinaryOp::DotGreaterEq if !a.is_nan() && !b.is_nan() => {
+                return Ok(Bool(a >= b));
+            }
+            _ => {}
+        }
+    }
 
     // Create a combined span for the entire binary operation
     let op_span = Span::new(
