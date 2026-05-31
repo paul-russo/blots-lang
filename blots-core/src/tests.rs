@@ -402,6 +402,95 @@ mod input_reference_tests {
     }
 
     #[test]
+    fn test_input_reference_in_function_called_through_hof() {
+        // `#x` inside a lambda must resolve when the lambda is invoked from inside a
+        // higher-order builtin, where the call frame is built by the builtin rather than a
+        // direct call expression.
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+        setup_inputs(&heap, &bindings);
+
+        parse_and_evaluate(
+            "scale = n => n * #x",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+
+        let result = parse_and_evaluate(
+            "map([1, 2, 3], scale)",
+            Some(Rc::clone(&heap)),
+            Some(bindings),
+        )
+        .unwrap();
+
+        let borrowed_heap = heap.borrow();
+        let list = result.as_list(&borrowed_heap).unwrap();
+        assert_eq!(list[0], Value::Number(42.0));
+        assert_eq!(list[1], Value::Number(84.0));
+        assert_eq!(list[2], Value::Number(126.0));
+    }
+
+    /// Bind an `inputs` record containing only `x` into the given environment.
+    fn setup_inputs_with_x(heap: &Rc<RefCell<Heap>>, bindings: &Rc<Environment>, x: f64) {
+        let mut inputs_map = IndexMap::new();
+        inputs_map.insert("x".to_string(), Value::Number(x));
+
+        let inputs_value = heap.borrow_mut().insert_record(inputs_map);
+        bindings.insert(Symbol::intern("inputs"), inputs_value);
+    }
+
+    #[test]
+    fn test_input_reference_lambda_uses_call_time_inputs() {
+        // A lambda using `#x` defined under one inputs record and called under another (sharing
+        // the same heap) reads the inputs of the environment it is called in. This is the
+        // in-memory half of the portability contract: input references are late-bound.
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        let producer = Rc::new(Environment::new());
+        setup_inputs_with_x(&heap, &producer, 42.0);
+        parse_and_evaluate(
+            "f = () => #x * 2",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&producer)),
+        )
+        .unwrap();
+        let f_value = producer.get(Symbol::intern("f")).unwrap();
+
+        let consumer = Rc::new(Environment::new());
+        setup_inputs_with_x(&heap, &consumer, 100.0);
+        consumer.insert(Symbol::intern("f"), f_value);
+
+        let result = parse_and_evaluate("f()", Some(heap), Some(consumer)).unwrap();
+        assert_eq!(result, Value::Number(200.0));
+    }
+
+    #[test]
+    fn test_inputs_identifier_lambda_uses_call_time_inputs_in_memory() {
+        // `inputs.x` is captured at definition time, but for in-memory calls the call-site
+        // inputs still take precedence over the captured snapshot. (Serialization is where the
+        // captured snapshot becomes permanent; see the function portability CLI tests.)
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        let producer = Rc::new(Environment::new());
+        setup_inputs_with_x(&heap, &producer, 42.0);
+        parse_and_evaluate(
+            "g = () => inputs.x * 2",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&producer)),
+        )
+        .unwrap();
+        let g_value = producer.get(Symbol::intern("g")).unwrap();
+
+        let consumer = Rc::new(Environment::new());
+        setup_inputs_with_x(&heap, &consumer, 100.0);
+        consumer.insert(Symbol::intern("g"), g_value);
+
+        let result = parse_and_evaluate("g()", Some(heap), Some(consumer)).unwrap();
+        assert_eq!(result, Value::Number(200.0));
+    }
+
+    #[test]
     fn test_input_reference_multiple_uses() {
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(Environment::new());
