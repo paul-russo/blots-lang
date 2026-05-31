@@ -1055,7 +1055,7 @@ impl BuiltInFunction {
                 };
                 let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
+                    list_ptr.reify(&borrowed_heap).as_list_rc()?
                 };
 
                 let mut groups: IndexMap<String, Vec<Value>> = IndexMap::new();
@@ -1101,7 +1101,7 @@ impl BuiltInFunction {
                 };
                 let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
+                    list_ptr.reify(&borrowed_heap).as_list_rc()?
                 };
 
                 let mut counts: IndexMap<String, f64> = IndexMap::new();
@@ -1304,11 +1304,12 @@ impl BuiltInFunction {
                     get_function_def(func, &borrowed_heap)
                         .ok_or_else(|| RuntimeError::from("second argument must be a function"))?
                 };
-                // Copy the items out once: the heap can't stay borrowed across callback calls
-                // (the callback may allocate), and re-borrowing per element is slower.
+                // Take a shared handle to the items once: the heap can't stay borrowed across
+                // callback calls (the callback may allocate), and re-borrowing per element is
+                // slower.
                 let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
+                    list_ptr.reify(&borrowed_heap).as_list_rc()?
                 };
                 let func_accepts_two_args = func_def.arity().can_accept(2);
 
@@ -1345,7 +1346,7 @@ impl BuiltInFunction {
                 };
                 let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
+                    list_ptr.reify(&borrowed_heap).as_list_rc()?
                 };
                 let func_accepts_two_args = func_def.arity().can_accept(2);
 
@@ -1385,7 +1386,7 @@ impl BuiltInFunction {
                 };
                 let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
+                    list_ptr.reify(&borrowed_heap).as_list_rc()?
                 };
                 let func_accepts_three_args = func_def.arity().can_accept(3);
 
@@ -1421,7 +1422,7 @@ impl BuiltInFunction {
                 };
                 let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
+                    list_ptr.reify(&borrowed_heap).as_list_rc()?
                 };
                 let func_accepts_two_args = func_def.arity().can_accept(2);
 
@@ -1459,7 +1460,7 @@ impl BuiltInFunction {
                 };
                 let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
+                    list_ptr.reify(&borrowed_heap).as_list_rc()?
                 };
                 let func_accepts_two_args = func_def.arity().can_accept(2);
 

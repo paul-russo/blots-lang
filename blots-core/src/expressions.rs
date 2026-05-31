@@ -60,16 +60,17 @@ pub fn evaluate_pairs(
     evaluate_ast(&ast, heap, bindings, call_depth, source_rc)
 }
 
-// Evaluate an AST expression
-/// Helper function to flatten spread values into a vector
+/// Helper function to flatten a spread value into the values it expands to. For list spreads
+/// this returns a shared handle to the existing elements; strings and records build a fresh
+/// (Rc-wrapped) vector of the expanded values.
 fn flatten_spread_value(
     spread_ptr: &IterablePointer,
     heap: &Rc<RefCell<Heap>>,
-) -> AnyhowResult<Vec<Value>> {
+) -> AnyhowResult<Rc<Vec<Value>>> {
     match spread_ptr {
         IterablePointer::List(list_ptr) => {
             let borrowed_heap = heap.borrow();
-            Ok(list_ptr.reify(&borrowed_heap).as_list()?.to_vec())
+            list_ptr.reify(&borrowed_heap).as_list_rc()
         }
         IterablePointer::String(string_ptr) => {
             let string = {
@@ -77,10 +78,12 @@ fn flatten_spread_value(
                 string_ptr.reify(&borrowed_heap).as_string()?.to_string()
             };
             // Convert string to list of character values
-            Ok(string
-                .chars()
-                .map(|c| heap.borrow_mut().insert_string(c.to_string()))
-                .collect())
+            Ok(Rc::new(
+                string
+                    .chars()
+                    .map(|c| heap.borrow_mut().insert_string(c.to_string()))
+                    .collect(),
+            ))
         }
         IterablePointer::Record(record_ptr) => {
             let entries = {
@@ -93,13 +96,15 @@ fn flatten_spread_value(
                     .collect::<Vec<(String, Value)>>()
             };
             // Convert record to list of [key, value] pairs
-            Ok(entries
-                .into_iter()
-                .map(|(k, v)| {
-                    let key = heap.borrow_mut().insert_string(k);
-                    heap.borrow_mut().insert_list(vec![key, v])
-                })
-                .collect())
+            Ok(Rc::new(
+                entries
+                    .into_iter()
+                    .map(|(k, v)| {
+                        let key = heap.borrow_mut().insert_string(k);
+                        heap.borrow_mut().insert_list(vec![key, v])
+                    })
+                    .collect(),
+            ))
         }
     }
 }
@@ -222,7 +227,7 @@ pub fn evaluate_ast(
                 match value {
                     Value::Spread(spread_ptr) => {
                         let spread_values = flatten_spread_value(&spread_ptr, &heap)?;
-                        flattened.extend(spread_values);
+                        flattened.extend(spread_values.iter().copied());
                     }
                     _ => flattened.push(value),
                 }
@@ -492,7 +497,7 @@ pub fn evaluate_ast(
                 match value {
                     Value::Spread(spread_ptr) => {
                         let spread_values = flatten_spread_value(&spread_ptr, &heap)?;
-                        arg_vals.extend(spread_values);
+                        arg_vals.extend(spread_values.iter().copied());
                     }
                     _ => arg_vals.push(value),
                 }
@@ -1490,12 +1495,12 @@ fn evaluate_binary_op_ast(
                             (def, accepts_two)
                         };
 
-                        // Copy the items out once: the heap can't stay borrowed across the
-                        // callback calls below (they may allocate), and re-borrowing per element
-                        // is slower.
+                        // Take a shared handle to the items once: the heap can't stay borrowed
+                        // across the callback calls below (they may allocate), and re-borrowing
+                        // per element is slower.
                         let items = {
                             let borrowed_heap = heap.borrow();
-                            list.reify(&borrowed_heap).as_list()?.clone()
+                            list.reify(&borrowed_heap).as_list_rc()?
                         };
 
                         let mut mapped_list = Vec::with_capacity(list_len);
@@ -1603,12 +1608,12 @@ fn evaluate_binary_op_ast(
                             (def, accepts_two)
                         };
 
-                        // Copy the items out once: the heap can't stay borrowed across the
-                        // callback calls below (they may allocate), and re-borrowing per element
-                        // is slower.
+                        // Take a shared handle to the items once: the heap can't stay borrowed
+                        // across the callback calls below (they may allocate), and re-borrowing
+                        // per element is slower.
                         let items = {
                             let borrowed_heap = heap.borrow();
-                            list.reify(&borrowed_heap).as_list()?.clone()
+                            list.reify(&borrowed_heap).as_list_rc()?
                         };
 
                         let mut filtered_list = vec![];

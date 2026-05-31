@@ -3,6 +3,7 @@ use anyhow::{Result, anyhow};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display, Formatter};
+use std::rc::Rc;
 use std::sync::LazyLock;
 
 pub static CONSTANTS: LazyLock<IndexMap<String, PrimitiveValue>> = LazyLock::new(|| {
@@ -25,7 +26,9 @@ pub static CONSTANTS: LazyLock<IndexMap<String, PrimitiveValue>> = LazyLock::new
 
 #[derive(Debug, Clone)]
 pub enum HeapValue {
-    List(Vec<Value>),
+    /// List elements are shared via `Rc` so that iterating a list outside of a heap borrow
+    /// (e.g. higher-order builtins and broadcasting loops) clones a pointer, not the elements.
+    List(Rc<Vec<Value>>),
     String(String),
     Record(IndexMap<String, Value>),
     Lambda(LambdaDef),
@@ -44,6 +47,15 @@ impl HeapValue {
     pub fn as_list(&self) -> Result<&Vec<Value>> {
         match self {
             HeapValue::List(list) => Ok(list),
+            _ => Err(anyhow!("expected a list, but got a {}", self.get_type())),
+        }
+    }
+
+    /// Cheap shared handle to a list's elements, for callers that need to iterate the list
+    /// without holding a borrow of the heap (the elements are not copied).
+    pub fn as_list_rc(&self) -> Result<Rc<Vec<Value>>> {
+        match self {
+            HeapValue::List(list) => Ok(Rc::clone(list)),
             _ => Err(anyhow!("expected a list, but got a {}", self.get_type())),
         }
     }
@@ -108,7 +120,9 @@ impl Heap {
     }
 
     pub fn insert_list(&mut self, list: Vec<Value>) -> Value {
-        Value::List(ListPointer::new(self.insert(HeapValue::List(list))))
+        Value::List(ListPointer::new(
+            self.insert(HeapValue::List(Rc::new(list))),
+        ))
     }
 
     pub fn insert_string(&mut self, string: String) -> Value {
