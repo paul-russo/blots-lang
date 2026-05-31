@@ -14,7 +14,7 @@ pub fn format_expr(expr: &SpannedExpr, max_columns: Option<usize>) -> String {
 /// Internal formatting implementation with indentation tracking
 fn format_expr_impl(expr: &SpannedExpr, max_cols: usize, indent: usize) -> String {
     // Special handling for lambdas to ensure correct argument formatting
-    if let Expr::Lambda { args, body } = &expr.node {
+    if let Expr::Lambda { args, body, .. } = &expr.node {
         return format_lambda(args, body, max_cols, indent);
     }
 
@@ -50,7 +50,7 @@ fn format_single_line(expr: &SpannedExpr) -> String {
         Expr::Output { expr: inner_expr } => {
             format!("output {}", format_single_line(inner_expr))
         }
-        Expr::Lambda { args, body } => {
+        Expr::Lambda { args, body, .. } => {
             let args_str: Vec<String> = args.iter().map(lambda_arg_to_str).collect();
             let args_part = if args.len() == 1 && matches!(args[0], LambdaArg::Required(_)) {
                 args_str[0].clone()

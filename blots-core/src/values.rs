@@ -328,19 +328,22 @@ impl CapturedScope {
     }
 }
 
+/// A function value. Cloning a `LambdaDef` is cheap (reference-count bumps only), which matters
+/// because every call expression clones the definition out of the heap before invoking it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LambdaDef {
-    pub name: Option<String>,
-    pub args: Vec<LambdaArg>,
-    pub body: SpannedExpr,
+    pub name: Option<Rc<str>>,
+    pub args: Rc<Vec<LambdaArg>>,
+    pub body: Rc<SpannedExpr>,
     pub scope: CapturedScope,
+
     /// The source code string that the body's spans refer to (shared via Rc for efficiency)
     pub source: Rc<str>,
 }
 
 impl LambdaDef {
     pub fn set_name(&mut self, name: String, _value: Value) {
-        self.name = Some(name.clone());
+        self.name = Some(Rc::from(name));
     }
 
     pub fn get_arity(&self) -> FunctionArity {
@@ -599,7 +602,7 @@ impl SerializableValue {
                 let expr = pairs_to_expr(inner_pair.into_inner())?;
 
                 // Check if it's a lambda
-                if let crate::ast::Expr::Lambda { args, body } = expr.node {
+                if let crate::ast::Expr::Lambda { args, body, .. } = expr.node {
                     // Since the function is already inlined (no scope needed),
                     // we create a SerializableLambdaDef with the source as the body
                     return Ok(SerializableLambdaDef {
@@ -712,8 +715,8 @@ impl SerializableValue {
                 );
 
                 Ok(SerializableValue::Lambda(SerializableLambdaDef {
-                    name: lambda.name.clone(),
-                    args: lambda.args.clone(),
+                    name: lambda.name.as_ref().map(|n| n.to_string()),
+                    args: lambda.args.as_ref().clone(),
                     body: body_with_inlined_scope,
                     scope: Some(serializable_scope),
                 }))
@@ -764,9 +767,9 @@ impl SerializableValue {
                 )?;
 
                 let lambda = LambdaDef {
-                    name: s_lambda.name.clone(),
-                    args: s_lambda.args.clone(),
-                    body: body_ast,
+                    name: s_lambda.name.as_deref().map(Rc::from),
+                    args: Rc::new(s_lambda.args.clone()),
+                    body: Rc::new(body_ast),
                     scope: CapturedScope::new(scope),
                     source: Rc::from(""), // Deserialized lambdas don't have original source
                 };

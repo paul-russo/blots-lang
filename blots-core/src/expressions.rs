@@ -143,7 +143,7 @@ fn evaluate_do_block_expr(
         if let Value::Lambda(lambda_ptr) = val {
             let mut borrowed_heap = heap.borrow_mut();
             if let Some(HeapValue::Lambda(lambda_def)) = borrowed_heap.get_mut(lambda_ptr.index()) {
-                lambda_def.name = Some(ident.clone());
+                lambda_def.name = Some(Rc::from(ident.as_str()));
             }
         }
 
@@ -325,30 +325,24 @@ pub fn evaluate_ast(
 
             Ok(heap.borrow_mut().insert_record(record))
         }
-        Expr::Lambda { args, body } => {
-            // Capture variables used in the lambda body
-            let mut captured_scope = HashMap::new();
-            let mut referenced_vars = Vec::new();
+        Expr::Lambda {
+            args,
+            body,
+            captures,
+        } => {
+            // Capture the current values of the lambda's free variables (precomputed at parse time).
+            let mut captured_scope = HashMap::with_capacity(captures.len());
 
-            // Initialize bound set with lambda parameters to exclude them from free variables
-            let mut bound = HashSet::new();
-            for arg in args {
-                bound.insert(arg.get_name().to_string());
-            }
-            collect_free_variables(body, &mut referenced_vars, &mut bound);
-
-            for var in referenced_vars {
-                if let Some(value) = bindings.get(&var)
-                    && !is_built_in_function(&var)
-                {
+            for var in captures {
+                if let Some(value) = bindings.get(var) {
                     captured_scope.insert(var.clone(), value);
                 }
             }
 
             let lambda = heap.borrow_mut().insert_lambda(LambdaDef {
                 name: None,
-                args: args.clone(),
-                body: (**body).clone(),
+                args: Rc::new(args.clone()),
+                body: Rc::clone(body),
                 scope: CapturedScope::new(captured_scope),
                 source: source.clone(),
             });
@@ -408,7 +402,7 @@ pub fn evaluate_ast(
                 if let Some(HeapValue::Lambda(lambda_def)) =
                     borrowed_heap.get_mut(lambda_ptr.index())
                 {
-                    lambda_def.name = Some(ident.clone());
+                    lambda_def.name = Some(Rc::from(ident.as_str()));
                 }
             }
 
@@ -675,7 +669,7 @@ fn collect_free_variables(expr: &SpannedExpr, vars: &mut Vec<String>, bound: &mu
                 vars.push(name.clone());
             }
         }
-        Expr::Lambda { args, body } => {
+        Expr::Lambda { args, body, .. } => {
             let mut new_bound = bound.clone();
             for arg in args {
                 new_bound.insert(arg.get_name().to_string());
@@ -773,7 +767,7 @@ pub fn validate_portable_value(
                 let mut bound_vars = HashSet::new();
 
                 // Add lambda arguments to bound variables
-                for arg in &lambda_def.args {
+                for arg in lambda_def.args.iter() {
                     bound_vars.insert(arg.get_name().to_string());
                 }
 
@@ -790,7 +784,7 @@ pub fn validate_portable_value(
                 // 3. Self-reference (for recursion) - if the lambda has a name
                 // 4. Currently bound in the environment (for late-bound functions)
                 for var in &free_vars {
-                    let is_self_reference = lambda_def.name.as_ref() == Some(var);
+                    let is_self_reference = lambda_def.name.as_deref() == Some(var.as_str());
 
                     if !lambda_def.scope.contains_key(var)
                         && !is_built_in_function(var)
@@ -2116,11 +2110,37 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                         }
                     }
 
-                    let body = Box::new(pairs_to_expr_inner(
+                    let body = Rc::new(pairs_to_expr_inner(
                         body_pairs.into_inner(),
                         preserve_comments,
                     )?);
-                    Ok(Spanned::new(Expr::Lambda { args, body }, span))
+
+                    // Precompute the lambda's free variables (its captures) so that closure
+                    // creation at runtime doesn't have to re-walk the body. Parameters are bound,
+                    // and built-ins are resolved statically, so neither needs capturing.
+                    let mut bound = HashSet::new();
+                    for arg in &args {
+                        bound.insert(arg.get_name().to_string());
+                    }
+
+                    let mut free_vars = Vec::new();
+                    collect_free_variables(&body, &mut free_vars, &mut bound);
+
+                    let mut captures = Vec::new();
+                    for var in free_vars {
+                        if !is_built_in_function(&var) && !captures.contains(&var) {
+                            captures.push(var);
+                        }
+                    }
+
+                    Ok(Spanned::new(
+                        Expr::Lambda {
+                            args,
+                            body,
+                            captures,
+                        },
+                        span,
+                    ))
                 }
                 Rule::conditional => {
                     let mut inner_pairs = primary.into_inner();
@@ -2780,8 +2800,8 @@ mod tests {
         {
             let heap_borrow = heap.borrow();
             let lambda_def = result.as_lambda(&heap_borrow).unwrap();
-            assert_eq!(lambda_def.name, Some("f".to_string()));
-            assert_eq!(lambda_def.args, vec![LambdaArg::Required("x".to_string())]);
+            assert_eq!(lambda_def.name.as_deref(), Some("f"));
+            assert_eq!(*lambda_def.args, vec![LambdaArg::Required("x".to_string())]);
             assert!(lambda_def.scope.is_empty());
             // The body should be a BinaryOp(Add) with Identifier("x") and Number(1)
             match &lambda_def.body.node {

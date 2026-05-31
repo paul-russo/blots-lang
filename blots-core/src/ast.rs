@@ -1,6 +1,7 @@
 use crate::functions::BuiltInFunction;
 use crate::values::LambdaArg;
 use serde::{Deserialize, Serialize};
+use std::rc::Rc;
 
 /// Represents a source code location for error reporting
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -129,7 +130,14 @@ pub enum Expr {
     // Lambda
     Lambda {
         args: Vec<LambdaArg>,
-        body: Box<SpannedExpr>,
+
+        /// The lambda body, shared via `Rc` so that creating a closure value from this node
+        /// (and cloning its `LambdaDef` on each call) never deep-copies the AST.
+        body: Rc<SpannedExpr>,
+
+        /// Free variables referenced by the body (excluding parameters and built-ins),
+        /// computed once at parse time so closure creation doesn't re-walk the body.
+        captures: Vec<String>,
     },
 
     // Control flow

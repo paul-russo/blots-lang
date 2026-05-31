@@ -21,6 +21,24 @@ use crate::stats::FunctionCallStats;
 pub static FUNCTION_CALLS: LazyLock<Mutex<Vec<FunctionCallStats>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 
+/// Whether per-call profiling stats should be recorded. Off by default: recording costs a
+/// timestamp pair, a String, and a mutex push on every call, and the stats vector grows without
+/// bound, so it should only be paid for when the embedder (e.g. `blots --profile`) asks for it.
+#[cfg(not(target_arch = "wasm32"))]
+static PROFILING_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Enable or disable recording of per-call profiling stats.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_profiling_enabled(enabled: bool) {
+    PROFILING_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Returns true if per-call profiling stats are currently being recorded.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn is_profiling_enabled() -> bool {
+    PROFILING_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn get_function_call_stats() -> Vec<FunctionCallStats> {
     FUNCTION_CALLS.lock().unwrap().clone()
@@ -531,7 +549,7 @@ impl BuiltInFunction {
 
                 if start > end {
                     return Err(RuntimeError::from(
-                        "range requires start to be less than or equal to end"
+                        "range requires start to be less than or equal to end",
                     ));
                 }
 
@@ -763,7 +781,7 @@ impl BuiltInFunction {
 
                 if a.len() != b.len() {
                     return Err(RuntimeError::from(
-                        "cannot calculate dot product of lists with different lengths"
+                        "cannot calculate dot product of lists with different lengths",
                     ));
                 }
 
@@ -914,12 +932,16 @@ impl BuiltInFunction {
                             let borrowed_heap = &heap.borrow();
                             args[1]
                                 .as_string(borrowed_heap)
-                                .map_err(|_| RuntimeError::from("second argument must be a string"))?
+                                .map_err(|_| {
+                                    RuntimeError::from("second argument must be a string")
+                                })?
                                 .to_string()
                         };
                         Ok(Value::Bool(s.contains(&needle)))
                     }
-                    _ => Err(RuntimeError::from("first argument must be a list or string")),
+                    _ => Err(RuntimeError::from(
+                        "first argument must be a list or string",
+                    )),
                 }
             }
 
@@ -954,7 +976,11 @@ impl BuiltInFunction {
                 let arity = match args[0] {
                     Value::Lambda(p) => p.reify(&heap.borrow()).as_lambda()?.get_arity(),
                     Value::BuiltIn(built_in) => built_in.arity(),
-                    _ => return Err(RuntimeError::from("argument must be a function or built-in function")),
+                    _ => {
+                        return Err(RuntimeError::from(
+                            "argument must be a function or built-in function",
+                        ));
+                    }
                 };
 
                 Ok(Value::Number(match arity {
@@ -1753,8 +1779,10 @@ impl FunctionDef {
         call_depth: usize,
         source: &str,
     ) -> Result<Value, RuntimeError> {
+        // Per-call timing is only recorded when profiling has been enabled by the embedder
+        // (e.g. `blots --profile`); otherwise calls skip the timestamps and stats push entirely.
         #[cfg(not(target_arch = "wasm32"))]
-        let start = std::time::Instant::now();
+        let profiling_start = is_profiling_enabled().then(std::time::Instant::now);
 
         self.check_arity(args.len())?;
 
@@ -1774,14 +1802,14 @@ impl FunctionDef {
                 source: lambda_source,
             }) => {
                 #[cfg(not(target_arch = "wasm32"))]
-                let start_var_env = std::time::Instant::now();
+                let start_var_env = profiling_start.map(|_| std::time::Instant::now());
 
                 // Build local bindings for this call (O(1) - no clone of parent environment!)
                 let mut local_bindings = HashMap::new();
 
                 // Add self-reference if named
                 if let Some(fn_name) = name {
-                    local_bindings.insert(fn_name.clone(), this_value);
+                    local_bindings.insert(fn_name.to_string(), this_value);
                 }
 
                 // Preserve inputs if present in parent
@@ -1812,7 +1840,7 @@ impl FunctionDef {
                 }
 
                 #[cfg(not(target_arch = "wasm32"))]
-                let end_var_env = std::time::Instant::now();
+                let end_var_env = profiling_start.map(|_| std::time::Instant::now());
 
                 let parent_env = if scope.is_empty() {
                     Rc::clone(&bindings)
@@ -1835,13 +1863,15 @@ impl FunctionDef {
                 .map_err(|error| error.with_function_context(&self.get_name()));
 
                 #[cfg(not(target_arch = "wasm32"))]
-                FUNCTION_CALLS.lock().unwrap().push(FunctionCallStats {
-                    name: self.get_name(),
-                    start,
-                    end: std::time::Instant::now(),
-                    start_var_env: Some(start_var_env),
-                    end_var_env: Some(end_var_env),
-                });
+                if let Some(start) = profiling_start {
+                    FUNCTION_CALLS.lock().unwrap().push(FunctionCallStats {
+                        name: self.get_name(),
+                        start,
+                        end: std::time::Instant::now(),
+                        start_var_env,
+                        end_var_env,
+                    });
+                }
 
                 return_value
             }
@@ -1851,13 +1881,15 @@ impl FunctionDef {
                     .map_err(|error| error.with_function_context(&self.get_name()));
 
                 #[cfg(not(target_arch = "wasm32"))]
-                FUNCTION_CALLS.lock().unwrap().push(FunctionCallStats {
-                    name: self.get_name(),
-                    start,
-                    end: std::time::Instant::now(),
-                    start_var_env: None,
-                    end_var_env: None,
-                });
+                if let Some(start) = profiling_start {
+                    FUNCTION_CALLS.lock().unwrap().push(FunctionCallStats {
+                        name: self.get_name(),
+                        start,
+                        end: std::time::Instant::now(),
+                        start_var_env: None,
+                        end_var_env: None,
+                    });
+                }
 
                 return_value
             }
@@ -2214,11 +2246,11 @@ mod tests {
         // Create a lambda (x, i) => x + i
         let lambda = LambdaDef {
             name: None,
-            args: vec![
+            args: Rc::new(vec![
                 crate::values::LambdaArg::Required("x".to_string()),
                 crate::values::LambdaArg::Required("i".to_string()),
-            ],
-            body: crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
+            ]),
+            body: Rc::new(crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
                 op: crate::ast::BinaryOp::Add,
                 left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
                     "x".to_string(),
@@ -2226,7 +2258,7 @@ mod tests {
                 right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
                     "i".to_string(),
                 ))),
-            }),
+            })),
             scope: CapturedScope::default(),
             source: Rc::from(""),
         };
@@ -2270,17 +2302,17 @@ mod tests {
         // Create a lambda (x, i) => i > 1
         let lambda = LambdaDef {
             name: None,
-            args: vec![
+            args: Rc::new(vec![
                 crate::values::LambdaArg::Required("x".to_string()),
                 crate::values::LambdaArg::Required("i".to_string()),
-            ],
-            body: crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
+            ]),
+            body: Rc::new(crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
                 op: crate::ast::BinaryOp::Greater,
                 left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
                     "i".to_string(),
                 ))),
                 right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Number(1.0))),
-            }),
+            })),
             scope: CapturedScope::default(),
             source: Rc::from(""),
         };
@@ -2322,12 +2354,12 @@ mod tests {
         // Create a lambda (acc, x, i) => acc + x + i
         let lambda = LambdaDef {
             name: None,
-            args: vec![
+            args: Rc::new(vec![
                 crate::values::LambdaArg::Required("acc".to_string()),
                 crate::values::LambdaArg::Required("x".to_string()),
                 crate::values::LambdaArg::Required("i".to_string()),
-            ],
-            body: crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
+            ]),
+            body: Rc::new(crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
                 op: crate::ast::BinaryOp::Add,
                 left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
                     op: crate::ast::BinaryOp::Add,
@@ -2341,7 +2373,7 @@ mod tests {
                 right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
                     "i".to_string(),
                 ))),
-            }),
+            })),
             scope: CapturedScope::default(),
             source: Rc::from(""),
         };
@@ -2379,14 +2411,14 @@ mod tests {
         // Create a lambda x => x * 2 (only one argument)
         let lambda = LambdaDef {
             name: None,
-            args: vec![crate::values::LambdaArg::Required("x".to_string())],
-            body: crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
+            args: Rc::new(vec![crate::values::LambdaArg::Required("x".to_string())]),
+            body: Rc::new(crate::ast::Spanned::dummy(crate::ast::Expr::BinaryOp {
                 op: crate::ast::BinaryOp::Multiply,
                 left: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
                     "x".to_string(),
                 ))),
                 right: Box::new(crate::ast::Spanned::dummy(crate::ast::Expr::Number(2.0))),
-            }),
+            })),
             scope: CapturedScope::default(),
             source: Rc::from(""),
         };
@@ -2851,8 +2883,10 @@ mod tests {
         // Identity lambda: x => x
         let lambda = LambdaDef {
             name: None,
-            args: vec![crate::values::LambdaArg::Required("x".to_string())],
-            body: crate::ast::Spanned::dummy(crate::ast::Expr::Identifier("x".to_string())),
+            args: Rc::new(vec![crate::values::LambdaArg::Required("x".to_string())]),
+            body: Rc::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
+                "x".to_string(),
+            ))),
             scope: CapturedScope::default(),
             source: Rc::from(""),
         };
@@ -2895,8 +2929,10 @@ mod tests {
         // Lambda that returns a number: x => x
         let lambda = LambdaDef {
             name: None,
-            args: vec![crate::values::LambdaArg::Required("x".to_string())],
-            body: crate::ast::Spanned::dummy(crate::ast::Expr::Identifier("x".to_string())),
+            args: Rc::new(vec![crate::values::LambdaArg::Required("x".to_string())]),
+            body: Rc::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
+                "x".to_string(),
+            ))),
             scope: CapturedScope::default(),
             source: Rc::from(""),
         };
@@ -2938,8 +2974,10 @@ mod tests {
         // Identity lambda: x => x
         let lambda = LambdaDef {
             name: None,
-            args: vec![crate::values::LambdaArg::Required("x".to_string())],
-            body: crate::ast::Spanned::dummy(crate::ast::Expr::Identifier("x".to_string())),
+            args: Rc::new(vec![crate::values::LambdaArg::Required("x".to_string())]),
+            body: Rc::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
+                "x".to_string(),
+            ))),
             scope: CapturedScope::default(),
             source: Rc::from(""),
         };
@@ -2975,8 +3013,10 @@ mod tests {
         // Identity lambda: x => x
         let lambda = LambdaDef {
             name: None,
-            args: vec![crate::values::LambdaArg::Required("x".to_string())],
-            body: crate::ast::Spanned::dummy(crate::ast::Expr::Identifier("x".to_string())),
+            args: Rc::new(vec![crate::values::LambdaArg::Required("x".to_string())]),
+            body: Rc::new(crate::ast::Spanned::dummy(crate::ast::Expr::Identifier(
+                "x".to_string(),
+            ))),
             scope: CapturedScope::default(),
             source: Rc::from(""),
         };

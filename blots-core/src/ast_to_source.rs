@@ -70,7 +70,7 @@ pub fn expr_to_source(spanned_expr: &SpannedExpr) -> String {
                 .collect();
             format!("{{{}}}", entries_str.join(", "))
         }
-        Expr::Lambda { args, body } => {
+        Expr::Lambda { args, body, .. } => {
             let args_str: Vec<String> = args.iter().map(lambda_arg_to_source).collect();
             format!("({}) => {}", args_str.join(", "), expr_to_source(body))
         }
@@ -305,7 +305,7 @@ pub fn expr_to_source_with_scope(
                 .collect();
             format!("{{{}}}", entries_str.join(", "))
         }
-        Expr::Lambda { args, body } => {
+        Expr::Lambda { args, body, .. } => {
             let args_str: Vec<String> = args.iter().map(lambda_arg_to_source).collect();
             // Lambda bodies should not inline their own parameters
             // Filter out parameter names from the scope before processing the body

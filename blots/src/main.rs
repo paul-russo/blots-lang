@@ -8,7 +8,9 @@ use blots_core::expressions::{
     evaluate_pairs, pairs_to_expr_with_comments, validate_portable_value,
 };
 use blots_core::formatter::format_expr;
-use blots_core::functions::{clear_function_call_stats, get_function_call_stats};
+use blots_core::functions::{
+    clear_function_call_stats, get_function_call_stats, set_profiling_enabled,
+};
 use blots_core::heap::Heap;
 use blots_core::parser::{Rule, get_pairs};
 use blots_core::stats::ProfilingSummary;
@@ -322,9 +324,10 @@ fn main() -> ! {
     let bindings = Rc::new(Environment::new());
     let mut outputs: IndexMap<String, SerializableValue> = IndexMap::new();
 
-    // Clear profiling stats if profiling is enabled
+    // Turn on per-call stats recording (off by default for performance) and start clean
     #[cfg(not(target_arch = "wasm32"))]
     if ARGS.profile {
+        set_profiling_enabled(true);
         clear_function_call_stats();
     }
 
