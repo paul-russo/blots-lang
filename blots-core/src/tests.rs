@@ -466,10 +466,9 @@ mod input_reference_tests {
     }
 
     #[test]
-    fn test_inputs_identifier_lambda_uses_call_time_inputs_in_memory() {
-        // `inputs.x` is captured at definition time, but for in-memory calls the call-site
-        // inputs still take precedence over the captured snapshot. (Serialization is where the
-        // captured snapshot becomes permanent; see the function portability CLI tests.)
+    fn test_inputs_identifier_lambda_uses_call_time_inputs() {
+        // `inputs.x` behaves identically to the `#x` shorthand: `inputs` is never captured into
+        // a lambda's scope, so the lambda reads the inputs of the environment it is called in.
         let heap = Rc::new(RefCell::new(Heap::new()));
 
         let producer = Rc::new(Environment::new());

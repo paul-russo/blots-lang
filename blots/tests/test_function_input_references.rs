@@ -1,10 +1,10 @@
 //! Pins the interaction between function portability and input references.
 //!
 //! Functions cross document boundaries via the `__blots_function` JSON encoding: captured
-//! bindings are inlined into the serialized source, `#field` references stay symbolic and
-//! re-bind to the consuming document's inputs, and `inputs.field` is captured (and therefore
-//! frozen) like any other binding. These tests lock that contract in end to end so call-path
-//! optimizations cannot regress it silently.
+//! bindings are inlined into the serialized source, while input references stay symbolic and
+//! re-bind to the consuming document's inputs. The `#field` shorthand and the spelled-out
+//! `inputs.field` form are equivalent — `inputs` is never captured. These tests lock that
+//! contract in end to end so call-path optimizations cannot regress it silently.
 
 use serde_json::json;
 
@@ -74,11 +74,11 @@ fn test_output_function_keeps_input_reference_symbolic() {
 }
 
 #[test]
-fn test_output_function_inlines_captured_inputs_record() {
-    // `inputs.x` is captured like any other binding, so the producing document's inputs record
-    // is inlined into the serialized source.
+fn test_output_function_keeps_inputs_field_symbolic() {
+    // `inputs.x` is just the spelled-out form of `#x`: `inputs` is never captured, so the
+    // serialized source keeps the reference symbolic instead of inlining the producer's record.
     let output = run_blots("output f = () => inputs.x * 2", Some(json!({ "x": 42 })));
-    assert_eq!(function_source(&output, "f"), "() => {x: 42}.x * 2");
+    assert_eq!(function_source(&output, "f"), "() => inputs.x * 2");
 }
 
 #[test]
@@ -107,17 +107,18 @@ fn test_round_trip_input_reference_rebinds_to_consuming_inputs() {
 }
 
 #[test]
-fn test_round_trip_inputs_field_keeps_producer_snapshot() {
-    // Produce a function that reads `inputs.x`: the producer's inputs record is inlined...
+fn test_round_trip_inputs_field_rebinds_to_consuming_inputs() {
+    // Produce a function that reads `inputs.x` under one set of inputs...
     let producer_output = run_blots("output f = () => inputs.x * 2", Some(json!({ "x": 42 })));
     let producer_json: serde_json::Value = serde_json::from_str(&producer_output).unwrap();
 
-    // ...so the consuming document's different `x` does not affect the result.
+    // ...and consume it in a document with different inputs: like `#x`, it must resolve to the
+    // consuming document's value, not the producer's.
     let consumer_inputs = json!({ "x": 100, "f": producer_json["f"] });
     let consumer_output = run_blots("output result = inputs.f()", Some(consumer_inputs));
 
     let result: serde_json::Value = serde_json::from_str(&consumer_output).unwrap();
-    assert_eq!(result["result"], 84.0);
+    assert_eq!(result["result"], 200.0);
 }
 
 #[test]

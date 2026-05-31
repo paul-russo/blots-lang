@@ -669,7 +669,12 @@ pub fn evaluate_ast(
 fn collect_free_variables(expr: &SpannedExpr, vars: &mut Vec<Symbol>, bound: &mut HashSet<Symbol>) {
     match &expr.node {
         Expr::Identifier(name) => {
-            if !bound.contains(name) && !matches!(name.as_str(), "infinity" | "inf" | "constants") {
+            // `inputs` is excluded because it is a late-bound keyword: like the `#field`
+            // shorthand, it must resolve against the calling document's inputs at call time,
+            // never get captured into a lambda's scope or inlined during serialization.
+            if !bound.contains(name)
+                && !matches!(name.as_str(), "infinity" | "inf" | "constants" | "inputs")
+            {
                 vars.push(*name);
             }
         }
