@@ -2431,3 +2431,243 @@ mod heap_compaction_tests {
         assert!(!heap.borrow_mut().compact_if_grown(&bindings, &mut []));
     }
 }
+
+// Tests pinning the slot-resolved call path: parameters and captures are read by position
+// inside lambda bodies, while shadowed, late-bound, and deserialized references keep their
+// dynamic, by-name resolution.
+#[cfg(test)]
+mod slot_frame_tests {
+    use crate::environment::Environment;
+    use crate::expressions::evaluate_pairs;
+    use crate::heap::Heap;
+    use crate::intern::Symbol;
+    use crate::parser::{Rule, get_pairs};
+    use crate::values::{SerializableValue, Value};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    fn parse_and_evaluate(
+        code: &str,
+        heap: Option<Rc<RefCell<Heap>>>,
+        bindings: Option<Rc<Environment>>,
+    ) -> Result<Value, crate::error::RuntimeError> {
+        let pairs = get_pairs(code).map_err(|e| crate::error::RuntimeError::new(e.to_string()))?;
+
+        let heap = heap.unwrap_or_else(|| Rc::new(RefCell::new(Heap::new())));
+        let bindings = bindings.unwrap_or_else(|| Rc::new(Environment::new()));
+
+        let mut result = Value::Null;
+        for pair in pairs {
+            match pair.as_rule() {
+                Rule::statement => {
+                    if let Some(inner_pair) = pair.into_inner().next() {
+                        match inner_pair.as_rule() {
+                            Rule::expression | Rule::assignment => {
+                                result = evaluate_pairs(
+                                    inner_pair.into_inner(),
+                                    Rc::clone(&heap),
+                                    Rc::clone(&bindings),
+                                    0,
+                                    code,
+                                )?;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Rule::EOI => {}
+                _ => {}
+            }
+        }
+        Ok(result)
+    }
+
+    #[test]
+    fn test_do_block_shadowing_of_parameter() {
+        // Before the block-local assignment the name resolves to the parameter slot; after it,
+        // the reference must see the do-block local instead.
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        parse_and_evaluate(
+            "f = x => do { before = x * 10; x = 7; after = x * 10; return [before, after] }",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        parse_and_evaluate(
+            "r = f(3)",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+
+        let before = parse_and_evaluate(
+            "r[0]",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        let after = parse_and_evaluate(
+            "r[1]",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        assert_eq!(before, Value::Number(30.0));
+        assert_eq!(after, Value::Number(70.0));
+    }
+
+    #[test]
+    fn test_shorthand_record_key_reads_parameter() {
+        // Shorthand record keys are looked up by name at evaluation time, so the call frame
+        // must answer name-based queries for its positional argument slots.
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        parse_and_evaluate(
+            "f = name => { name }",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+
+        let result = parse_and_evaluate(
+            "f(\"alice\").name == \"alice\"",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn test_recursion_through_self_binding() {
+        // The recursive name is an unbound capture at definition time, so each call falls back
+        // to the by-name lookup and finds the frame's self-binding.
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        parse_and_evaluate(
+            "fact = n => if n <= 1 then 1 else n * fact(n - 1)",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+
+        let result = parse_and_evaluate(
+            "fact(5)",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        assert_eq!(result, Value::Number(120.0));
+    }
+
+    #[test]
+    fn test_captured_null_is_not_treated_as_unbound() {
+        // `y` is captured with the value null and is out of scope by the time the closure is
+        // called: the capture slot must answer (with null) rather than fall back to a by-name
+        // lookup, which would fail.
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        parse_and_evaluate(
+            "g = do { y = null; return () => y }",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+
+        let result =
+            parse_and_evaluate("g()", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
+        assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn test_unbound_capture_falls_back_to_late_binding() {
+        // `z` is unbound when the closure is created, so the capture slot stays empty and the
+        // reference resolves through the call-site chain to the later definition.
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        parse_and_evaluate(
+            "h = () => z",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        parse_and_evaluate("z = 42", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
+
+        let result =
+            parse_and_evaluate("h()", Some(Rc::clone(&heap)), Some(Rc::clone(&bindings))).unwrap();
+        assert_eq!(result, Value::Number(42.0));
+    }
+
+    #[test]
+    fn test_optional_and_rest_parameters_fill_slots() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        parse_and_evaluate(
+            "f = (a, b?) => if b == null then a else a + b",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        parse_and_evaluate(
+            "g = (first, ...rest) => first + len(rest)",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+
+        let result = parse_and_evaluate(
+            "f(1) + 10 * f(1, 2) + 100 * g(1) + 1000 * g(1, 2, 3)",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        // f(1) = 1, f(1, 2) = 3, g(1) = 1 (empty rest), g(1, 2, 3) = 3.
+        assert_eq!(result, Value::Number(1.0 + 30.0 + 100.0 + 3000.0));
+    }
+
+    #[test]
+    fn test_deserialized_function_with_unresolved_body_is_callable() {
+        // Deserialized lambdas re-parse their body outside any lambda parse arm, so their
+        // identifiers stay unresolved and must keep working through the dynamic name lookup.
+        let producer_heap = Rc::new(RefCell::new(Heap::new()));
+        let producer_bindings = Rc::new(Environment::new());
+
+        parse_and_evaluate(
+            "base = 100",
+            Some(Rc::clone(&producer_heap)),
+            Some(Rc::clone(&producer_bindings)),
+        )
+        .unwrap();
+        parse_and_evaluate(
+            "f = (a, b) => base + a * 10 + b",
+            Some(Rc::clone(&producer_heap)),
+            Some(Rc::clone(&producer_bindings)),
+        )
+        .unwrap();
+
+        let f_value = producer_bindings.get(Symbol::intern("f")).unwrap();
+        let serialized =
+            SerializableValue::from_value(&f_value, &producer_heap.borrow()).unwrap();
+
+        // Rebuild the function in a fresh consumer document and call it with arguments.
+        let consumer_heap = Rc::new(RefCell::new(Heap::new()));
+        let consumer_bindings = Rc::new(Environment::new());
+        let g_value = serialized.to_value(&mut consumer_heap.borrow_mut()).unwrap();
+        consumer_bindings.insert(Symbol::intern("g"), g_value);
+
+        let result = parse_and_evaluate(
+            "g(3, 4)",
+            Some(Rc::clone(&consumer_heap)),
+            Some(Rc::clone(&consumer_bindings)),
+        )
+        .unwrap();
+        assert_eq!(result, Value::Number(134.0));
+    }
+}

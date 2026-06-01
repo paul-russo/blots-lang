@@ -10,7 +10,7 @@ use crate::{
         Heap, HeapPointer, HeapValue, IterablePointer, LambdaPointer, ListPointer, RecordPointer,
         StringPointer,
     },
-    intern::{Symbol, SymbolMap},
+    intern::Symbol,
 };
 
 /// Format a number for display output, matching the JS displayNumber function:
@@ -298,38 +298,83 @@ impl Display for LambdaArg {
     }
 }
 
-/// The variables captured by a closure, keyed by interned name and shared via `Rc` so that
-/// calling the closure never copies the captured bindings.
+/// The variables captured by a closure, stored in the slot order of the lambda's parse-time
+/// captures list and shared via `Rc` so that calling the closure never copies the captured
+/// bindings.
+///
+/// A `None` slot means the name was not bound when the closure was created; references to it
+/// fall back to a late-bound lookup through the call-site environment chain.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct CapturedScope(Rc<SymbolMap<Value>>);
+pub struct CapturedScope {
+    names: Rc<Vec<Symbol>>,
+    values: Rc<Vec<Option<Value>>>,
+}
 
 impl CapturedScope {
-    pub fn new(map: SymbolMap<Value>) -> Self {
-        Self(Rc::new(map))
+    /// Build a scope from capture names (in slot order) and the values, if any, that each name
+    /// was bound to when the closure was created.
+    pub fn new(names: Vec<Symbol>, values: Vec<Option<Value>>) -> Self {
+        debug_assert_eq!(names.len(), values.len());
+        Self {
+            names: Rc::new(names),
+            values: Rc::new(values),
+        }
+    }
+
+    /// Build a scope where every entry is bound, e.g. when reconstructing a deserialized
+    /// function's captured bindings.
+    pub fn from_bound_pairs(pairs: impl IntoIterator<Item = (Symbol, Value)>) -> Self {
+        let (names, values): (Vec<_>, Vec<_>) = pairs
+            .into_iter()
+            .map(|(name, value)| (name, Some(value)))
+            .unzip();
+
+        Self::new(names, values)
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.values.is_empty()
     }
 
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.values.len()
     }
 
+    /// Whether `key` was captured and bound at closure creation time.
     pub fn contains_key(&self, key: Symbol) -> bool {
-        self.0.contains_key(&key)
+        self.get(key).is_some()
     }
 
+    /// Look up a bound capture by name (used by dynamic, non-slot lookups).
     pub fn get(&self, key: Symbol) -> Option<Value> {
-        self.0.get(&key).copied()
+        self.names
+            .iter()
+            .position(|name| *name == key)
+            .and_then(|index| self.values[index])
     }
 
+    /// Look up a capture by its slot index; `None` if the slot was unbound at creation.
+    pub fn get_slot(&self, index: usize) -> Option<Value> {
+        self.values.get(index).copied().flatten()
+    }
+
+    /// Iterate over the bound captures as (name, value) pairs.
     pub fn iter(&self) -> impl Iterator<Item = (&Symbol, &Value)> {
-        self.0.iter()
+        self.names
+            .iter()
+            .zip(self.values.iter())
+            .filter_map(|(name, value)| value.as_ref().map(|value| (name, value)))
     }
 
-    pub fn as_rc(&self) -> Rc<SymbolMap<Value>> {
-        Rc::clone(&self.0)
+    /// Rewrite every bound capture value in place (used by heap compaction to remap pointers).
+    pub fn rewrite_values(&mut self, rewrite: &mut impl FnMut(Value) -> Value) {
+        if self.values.is_empty() {
+            return;
+        }
+
+        for value in Rc::make_mut(&mut self.values).iter_mut().flatten() {
+            *value = rewrite(*value);
+        }
     }
 }
 
@@ -756,14 +801,16 @@ impl SerializableValue {
             }
             SerializableValue::Lambda(s_lambda) => {
                 let scope = if let Some(scope) = s_lambda.scope.as_ref() {
-                    scope
+                    let pairs = scope
                         .iter()
                         .map(|(k, v)| {
                             Ok((Symbol::intern(k), SerializableValue::to_value(v, heap)?))
                         })
-                        .collect::<Result<SymbolMap<Value>>>()?
+                        .collect::<Result<Vec<(Symbol, Value)>>>()?;
+
+                    CapturedScope::from_bound_pairs(pairs)
                 } else {
-                    SymbolMap::default()
+                    CapturedScope::default()
                 };
 
                 // For now, parse the body string back to AST
@@ -779,7 +826,7 @@ impl SerializableValue {
                     name: s_lambda.name.as_deref().map(Symbol::intern),
                     args: Rc::new(s_lambda.args.clone()),
                     body: Rc::new(body_ast),
-                    scope: CapturedScope::new(scope),
+                    scope,
                     source: Rc::from(""), // Deserialized lambdas don't have original source
                 };
 

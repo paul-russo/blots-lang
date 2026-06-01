@@ -1,6 +1,5 @@
 use crate::environment::Environment;
-use crate::intern::SymbolMap;
-use crate::values::{CapturedScope, LambdaDef, PrimitiveValue, ReifiedIterableValue, Value};
+use crate::values::{LambdaDef, PrimitiveValue, ReifiedIterableValue, Value};
 use anyhow::{Result, anyhow};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -306,14 +305,8 @@ impl Heap {
                     }
                 }
                 HeapValue::Lambda(def) => {
-                    if !def.scope.is_empty() {
-                        let scope: SymbolMap<Value> = def
-                            .scope
-                            .iter()
-                            .map(|(key, item)| (*key, remap_value(*item, &remap)))
-                            .collect();
-                        def.scope = CapturedScope::new(scope);
-                    }
+                    def.scope
+                        .rewrite_values(&mut |item| remap_value(item, &remap));
                 }
                 HeapValue::String(_) => {}
             }

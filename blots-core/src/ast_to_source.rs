@@ -57,6 +57,8 @@ pub fn expr_to_source(spanned_expr: &SpannedExpr) -> String {
         Expr::Bool(b) => b.to_string(),
         Expr::Null => "null".to_string(),
         Expr::Identifier(name) => name.to_string(),
+        // Slot-resolved references print as their original name.
+        Expr::ParamSlot { name, .. } | Expr::CaptureSlot { name, .. } => name.to_string(),
         Expr::InputReference(field) => format!("#{}", field),
         Expr::BuiltIn(built_in) => built_in.name().to_string(),
         Expr::List(items) => {
@@ -270,7 +272,12 @@ pub fn expr_to_source_with_scope(
     scope: &IndexMap<String, SerializableValue>,
 ) -> String {
     match &spanned_expr.node {
-        Expr::Identifier(name) => {
+        // Slot-resolved references serialize by name exactly like plain identifiers: bound
+        // captures get inlined, parameters are filtered out of the scope by the Lambda arm
+        // below, and late-bound names stay symbolic.
+        Expr::Identifier(name)
+        | Expr::ParamSlot { name, .. }
+        | Expr::CaptureSlot { name, .. } => {
             // If the identifier is in the scope, inline its value
             if let Some(value) = scope.get(name.as_str()) {
                 serializable_value_to_source(value)

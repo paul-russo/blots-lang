@@ -7,7 +7,7 @@ use crate::{
     error::RuntimeError,
     functions::{BuiltInFunction, get_function_def, is_built_in_function},
     heap::{Heap, HeapPointer, HeapValue, IterablePointer, RecordPointer},
-    intern::{Symbol, SymbolMap},
+    intern::Symbol,
     parser::Rule,
     precedence::PRATT,
     values::{
@@ -20,6 +20,28 @@ use anyhow::{Result as AnyhowResult, anyhow};
 use indexmap::IndexMap;
 use pest::iterators::{Pair, Pairs};
 use std::{cell::RefCell, cmp::Ordering, collections::HashSet, rc::Rc};
+
+/// Resolve an identifier through the environment chain, producing the standard
+/// "unknown identifier" error (with a constants hint) when the name is unbound.
+fn lookup_identifier_value(
+    ident: Symbol,
+    bindings: &Environment,
+    span: Span,
+    source: &Rc<str>,
+) -> Result<Value, RuntimeError> {
+    bindings.get(ident).ok_or_else(|| {
+        use crate::heap::CONSTANTS;
+        let message = if CONSTANTS.contains_key(ident.as_str()) {
+            format!(
+                "unknown identifier: {}. Did you mean constants.{}?",
+                ident, ident
+            )
+        } else {
+            format!("unknown identifier: {}", ident)
+        };
+        RuntimeError::with_span(message, span, source.clone())
+    })
+}
 
 /// Helper to evaluate ordering comparisons with proper type error handling.
 /// Returns true if the ordering matches any of the expected orderings, false otherwise.
@@ -172,19 +194,28 @@ pub fn evaluate_ast(
             "infinity" => Ok(Number(f64::INFINITY)),
             "inf" => Ok(Number(f64::INFINITY)),
             "constants" => Ok(Value::Record(RecordPointer::new(0))),
-            _ => bindings.get(*ident).ok_or_else(|| {
-                use crate::heap::CONSTANTS;
-                let message = if CONSTANTS.contains_key(ident.as_str()) {
-                    format!(
-                        "unknown identifier: {}. Did you mean constants.{}?",
-                        ident, ident
-                    )
-                } else {
-                    format!("unknown identifier: {}", ident)
-                };
-                RuntimeError::with_span(message, expr.span, source.clone())
-            }),
+            _ => lookup_identifier_value(*ident, &bindings, expr.span, &source),
         },
+        Expr::ParamSlot { name, index } => {
+            // Fast path: read the argument by position from the nearest call frame. The name
+            // fallback covers bodies evaluated outside their own call (e.g. a lambda body
+            // re-evaluated directly in tests).
+            if let Some(value) = bindings.get_param_slot(*index as usize) {
+                return Ok(value);
+            }
+
+            lookup_identifier_value(*name, &bindings, expr.span, &source)
+        }
+        Expr::CaptureSlot { name, index } => {
+            // Fast path: read the captured value by position. `None` means the capture was
+            // unbound at closure creation (a late-bound name) or no frame is active, so the
+            // name resolves through the environment chain exactly like a plain identifier.
+            if let Some(value) = bindings.get_capture_slot(*index as usize) {
+                return Ok(value);
+            }
+
+            lookup_identifier_value(*name, &bindings, expr.span, &source)
+        }
         Expr::InputReference(field) => {
             // Desugar #field to inputs.field
             let inputs_value = bindings
@@ -331,21 +362,31 @@ pub fn evaluate_ast(
             body,
             captures,
         } => {
-            // Capture the current values of the lambda's free variables (precomputed at parse time).
-            let mut captured_scope =
-                SymbolMap::with_capacity_and_hasher(captures.len(), Default::default());
+            // Capture the current values of the lambda's free variables (precomputed at parse
+            // time), in slot order so `CaptureSlot` references can read them by index. Names
+            // that aren't bound yet stay `None` and resolve late through the call-site chain.
+            let mut captured_values = Vec::with_capacity(captures.len());
+            let mut any_bound = false;
 
             for var in captures {
-                if let Some(value) = bindings.get(*var) {
-                    captured_scope.insert(*var, value);
-                }
+                let value = bindings.get(*var);
+                any_bound |= value.is_some();
+                captured_values.push(value);
             }
+
+            // When nothing was bound at definition time, an empty scope avoids pushing a
+            // useless captures layer onto the environment chain on every call.
+            let scope = if any_bound {
+                CapturedScope::new(captures.clone(), captured_values)
+            } else {
+                CapturedScope::default()
+            };
 
             let lambda = heap.borrow_mut().insert_lambda(LambdaDef {
                 name: None,
                 args: Rc::new(args.clone()),
                 body: Rc::clone(body),
-                scope: CapturedScope::new(captured_scope),
+                scope,
                 source: source.clone(),
             });
 
@@ -678,7 +719,12 @@ pub fn evaluate_ast(
 // Helper function to collect free variables in an expression
 fn collect_free_variables(expr: &SpannedExpr, vars: &mut Vec<Symbol>, bound: &mut HashSet<Symbol>) {
     match &expr.node {
-        Expr::Identifier(name) => {
+        // Slot variants are name references just like plain identifiers; they appear inside
+        // already-resolved nested lambda bodies and must still count as free variables of any
+        // enclosing lambda so capture propagation keeps working.
+        Expr::Identifier(name)
+        | Expr::ParamSlot { name, .. }
+        | Expr::CaptureSlot { name, .. } => {
             // `inputs` is excluded because it is a late-bound keyword: like the `#field`
             // shorthand, it must resolve against the calling document's inputs at call time,
             // never get captured into a lambda's scope or inlined during serialization.
@@ -768,6 +814,144 @@ fn collect_free_variables(expr: &SpannedExpr, vars: &mut Vec<Symbol>, bound: &mu
             collect_free_variables(&return_expr.node, vars, &mut block_bound);
         }
         _ => {}
+    }
+}
+
+/// Rewrite parameter and capture references in a lambda body into slot-indexed accesses.
+///
+/// Runs once at parse time, after the lambda's captures have been computed. Identifiers that
+/// name a parameter become [`Expr::ParamSlot`] and identifiers that name a capture become
+/// [`Expr::CaptureSlot`]; everything else (late-bound names, names shadowed by an earlier
+/// do-block assignment, the special `infinity`/`inf`/`constants` identifiers) is left as a
+/// plain `Identifier` so it keeps resolving dynamically through the environment chain.
+fn resolve_lambda_body(body: &mut SpannedExpr, args: &[LambdaArg], captures: &[Symbol]) {
+    let mut shadowed = HashSet::new();
+    resolve_lambda_expr(body, args, captures, &mut shadowed);
+}
+
+fn resolve_lambda_expr(
+    expr: &mut SpannedExpr,
+    args: &[LambdaArg],
+    captures: &[Symbol],
+    shadowed: &mut HashSet<Symbol>,
+) {
+    match &mut expr.node {
+        Expr::Identifier(name) => {
+            let name = *name;
+
+            // Names with special evaluation rules keep their dynamic lookup: shadowed names
+            // must see the do-block local, and the constant identifiers are handled before any
+            // environment lookup at evaluation time.
+            if shadowed.contains(&name)
+                || matches!(name.as_str(), "infinity" | "inf" | "constants")
+            {
+                return;
+            }
+
+            if let Some(index) = args.iter().position(|arg| arg.get_name() == name) {
+                if let Ok(index) = u16::try_from(index) {
+                    expr.node = Expr::ParamSlot { name, index };
+                }
+                return;
+            }
+
+            if let Some(index) = captures.iter().position(|capture| *capture == name)
+                && let Ok(index) = u16::try_from(index)
+            {
+                expr.node = Expr::CaptureSlot { name, index };
+            }
+        }
+        // Nested lambdas were already resolved against their own parameters and captures when
+        // their parse arm ran; their bodies must not be rewritten against this lambda's frame.
+        Expr::Lambda { .. } => {}
+        Expr::BinaryOp { left, right, .. } => {
+            resolve_lambda_expr(left, args, captures, shadowed);
+            resolve_lambda_expr(right, args, captures, shadowed);
+        }
+        Expr::UnaryOp { expr: inner, .. }
+        | Expr::PostfixOp { expr: inner, .. }
+        | Expr::Spread(inner)
+        | Expr::DotAccess { expr: inner, .. }
+        | Expr::Assignment { value: inner, .. }
+        | Expr::Output { expr: inner } => {
+            resolve_lambda_expr(inner, args, captures, shadowed);
+        }
+        Expr::Call {
+            func,
+            args: call_args,
+        } => {
+            resolve_lambda_expr(func, args, captures, shadowed);
+            for arg in call_args {
+                resolve_lambda_expr(arg, args, captures, shadowed);
+            }
+        }
+        Expr::Access { expr: inner, index } => {
+            resolve_lambda_expr(inner, args, captures, shadowed);
+            resolve_lambda_expr(index, args, captures, shadowed);
+        }
+        Expr::Conditional {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            resolve_lambda_expr(condition, args, captures, shadowed);
+            resolve_lambda_expr(then_expr, args, captures, shadowed);
+            resolve_lambda_expr(else_expr, args, captures, shadowed);
+        }
+        Expr::List(items) => {
+            for item in items {
+                resolve_lambda_expr(&mut item.node, args, captures, shadowed);
+            }
+        }
+        Expr::Record(entries) => {
+            for commented_entry in entries {
+                let entry = &mut commented_entry.node;
+
+                match &mut entry.key {
+                    RecordKey::Dynamic(key_expr) | RecordKey::Spread(key_expr) => {
+                        resolve_lambda_expr(key_expr, args, captures, shadowed);
+                    }
+                    _ => {}
+                }
+
+                // Shorthand entries are evaluated through their key name (the value node is
+                // unused), and spread entries carry their expression in the key, so only the
+                // remaining entry kinds have a value worth resolving. Mirrors
+                // collect_free_variables.
+                if !matches!(entry.key, RecordKey::Shorthand(_) | RecordKey::Spread(_)) {
+                    resolve_lambda_expr(&mut entry.value, args, captures, shadowed);
+                }
+            }
+        }
+        Expr::DoBlock {
+            statements,
+            return_expr,
+        } => {
+            // Mirror the runtime scoping: a block-local assignment shadows the name only for
+            // the statements (and return expression) that come after it, so references before
+            // the assignment still resolve to the parameter or capture.
+            let mut block_shadowed = shadowed.clone();
+
+            for stmt in statements {
+                if let Expr::Assignment { ident, value } = &mut stmt.node.node {
+                    let ident = *ident;
+                    resolve_lambda_expr(value, args, captures, &mut block_shadowed);
+                    block_shadowed.insert(ident);
+                } else {
+                    resolve_lambda_expr(&mut stmt.node, args, captures, &mut block_shadowed);
+                }
+            }
+
+            resolve_lambda_expr(&mut return_expr.node, args, captures, &mut block_shadowed);
+        }
+        Expr::Number(_)
+        | Expr::String(_)
+        | Expr::Bool(_)
+        | Expr::Null
+        | Expr::InputReference(_)
+        | Expr::BuiltIn(_)
+        | Expr::ParamSlot { .. }
+        | Expr::CaptureSlot { .. } => {}
     }
 }
 
@@ -2172,10 +2356,8 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                         }
                     }
 
-                    let body = Rc::new(pairs_to_expr_inner(
-                        body_pairs.into_inner(),
-                        preserve_comments,
-                    )?);
+                    let mut body =
+                        pairs_to_expr_inner(body_pairs.into_inner(), preserve_comments)?;
 
                     // Precompute the lambda's free variables (its captures) so that closure
                     // creation at runtime doesn't have to re-walk the body. Parameters are bound,
@@ -2195,10 +2377,14 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                         }
                     }
 
+                    // Resolve parameter and capture references in the body to slot indices so
+                    // that calls read them by position instead of by hashed name lookup.
+                    resolve_lambda_body(&mut body, &args, &captures);
+
                     Ok(Spanned::new(
                         Expr::Lambda {
                             args,
-                            body,
+                            body: Rc::new(body),
                             captures,
                         },
                         span,
@@ -2874,18 +3060,20 @@ mod tests {
                 vec![LambdaArg::Required(Symbol::intern("x"))]
             );
             assert!(lambda_def.scope.is_empty());
-            // The body should be a BinaryOp(Add) with Identifier("x") and Number(1)
+            // The body should be a BinaryOp(Add) with the parameter `x` (resolved to its
+            // positional slot at parse time) and Number(1)
             match &lambda_def.body.node {
                 Expr::BinaryOp {
                     op: BinaryOp::Add,
                     left,
                     right,
                 } => match (&left.node, &right.node) {
-                    (Expr::Identifier(x), Expr::Number(n)) => {
-                        assert_eq!(x.as_str(), "x");
+                    (Expr::ParamSlot { name, index }, Expr::Number(n)) => {
+                        assert_eq!(name.as_str(), "x");
+                        assert_eq!(*index, 0);
                         assert_eq!(*n, 1.0);
                     }
-                    _ => panic!("Expected Identifier('x') + Number(1)"),
+                    _ => panic!("Expected ParamSlot('x', 0) + Number(1)"),
                 },
                 _ => panic!("Expected BinaryOp(Add)"),
             }

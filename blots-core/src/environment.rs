@@ -1,12 +1,28 @@
 use crate::intern::{Symbol, SymbolMap};
-use crate::values::Value;
+use crate::values::{CapturedScope, LambdaArg, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
 
 #[derive(Debug)]
 enum LocalBindings {
+    /// A general-purpose scope that owns its bindings (the root document scope, do-block
+    /// scopes, and embedder-provided binding sets).
     Owned(RefCell<SymbolMap<Value>>),
-    Shared(Rc<SymbolMap<Value>>),
+
+    /// A lambda call frame: argument values stored positionally (matching the lambda's
+    /// parameter order), the optional self-binding for named recursion, and the closure's
+    /// captured scope. Name lookups use linear scans -- functions have a handful of
+    /// parameters, so this avoids hashing and per-call map allocation entirely.
+    Frame {
+        params: Rc<Vec<LambdaArg>>,
+        self_binding: Option<(Symbol, Value)>,
+        values: Vec<Value>,
+        captures: CapturedScope,
+
+        /// Bindings created by assignments evaluated directly against the frame (do-blocks get
+        /// their own scope, so this is a cold path that stays empty for ordinary calls).
+        spill: RefCell<SymbolMap<Value>>,
+    },
 }
 
 /// A scope chain environment for variable bindings.
@@ -50,30 +66,32 @@ impl Environment {
         }
     }
 
-    /// Create a child environment with initial local bindings
-    pub fn extend_with(parent: Rc<Environment>, local: SymbolMap<Value>) -> Self {
+    /// Create a lambda call frame as a child of the call-site environment.
+    ///
+    /// `values` holds one entry per parameter, in declaration order, so resolved `ParamSlot`
+    /// references can read arguments by index while name-based lookups scan `params`.
+    pub fn extend_frame(
+        parent: Rc<Environment>,
+        params: Rc<Vec<LambdaArg>>,
+        self_binding: Option<(Symbol, Value)>,
+        values: Vec<Value>,
+        captures: CapturedScope,
+    ) -> Self {
         Environment {
-            local: LocalBindings::Owned(RefCell::new(local)),
-            parent: Some(parent),
-        }
-    }
-
-    /// Create a child environment with shared local bindings
-    pub fn extend_shared(parent: Rc<Environment>, local: Rc<SymbolMap<Value>>) -> Self {
-        Environment {
-            local: LocalBindings::Shared(local),
+            local: LocalBindings::Frame {
+                params,
+                self_binding,
+                values,
+                captures,
+                spill: RefCell::new(SymbolMap::default()),
+            },
             parent: Some(parent),
         }
     }
 
     /// Look up a variable, walking the scope chain
     pub fn get(&self, key: Symbol) -> Option<Value> {
-        // Check local scope first
-        let local_value = match &self.local {
-            LocalBindings::Owned(map) => map.borrow().get(&key).copied(),
-            LocalBindings::Shared(map) => map.get(&key).copied(),
-        };
-        if let Some(value) = local_value {
+        if let Some(value) = self.get_local(key) {
             return Some(value);
         }
         // Then check parent scope
@@ -83,25 +101,82 @@ impl Environment {
         None
     }
 
+    /// Look up a variable in this scope only (no parent traversal).
+    fn get_local(&self, key: Symbol) -> Option<Value> {
+        match &self.local {
+            LocalBindings::Owned(map) => map.borrow().get(&key).copied(),
+            LocalBindings::Frame {
+                params,
+                self_binding,
+                values,
+                captures,
+                spill,
+            } => {
+                // Parameters take precedence over the self-binding and captures, mirroring the
+                // insertion order of the per-call map this frame replaces.
+                if let Some(index) = params.iter().position(|param| param.get_name() == key) {
+                    return values.get(index).copied();
+                }
+                if let Some((name, value)) = self_binding
+                    && *name == key
+                {
+                    return Some(*value);
+                }
+                if let Some(value) = captures.get(key) {
+                    return Some(value);
+                }
+                spill.borrow().get(&key).copied()
+            }
+        }
+    }
+
+    /// Read a parameter of the nearest enclosing lambda call frame by its positional slot.
+    ///
+    /// Resolved `ParamSlot` references only evaluate inside their own lambda's call, where the
+    /// nearest frame on the chain is always that lambda's own frame; do-block scopes sit below
+    /// it and the call-site environment sits above it.
+    pub fn get_param_slot(&self, index: usize) -> Option<Value> {
+        let mut env = self;
+        loop {
+            if let LocalBindings::Frame { values, .. } = &env.local {
+                return values.get(index).copied();
+            }
+            env = env.parent.as_deref()?;
+        }
+    }
+
+    /// Read a captured value of the nearest enclosing lambda call frame by its slot index.
+    ///
+    /// Returns `None` when the slot was unbound at closure creation (late-bound names) or when
+    /// no frame is on the chain (e.g. during tests that evaluate bodies directly); callers fall
+    /// back to a by-name lookup in both cases.
+    pub fn get_capture_slot(&self, index: usize) -> Option<Value> {
+        let mut env = self;
+        loop {
+            if let LocalBindings::Frame { captures, .. } = &env.local {
+                return captures.get_slot(index);
+            }
+            env = env.parent.as_deref()?;
+        }
+    }
+
     /// Insert or update a binding in the local scope
     pub fn insert(&self, key: Symbol, value: Value) {
         match &self.local {
             LocalBindings::Owned(map) => {
                 map.borrow_mut().insert(key, value);
             }
-            LocalBindings::Shared(_) => {
-                panic!("cannot insert into shared environment");
+            LocalBindings::Frame { spill, .. } => {
+                // Assignments evaluated directly against a call frame (outside any do-block)
+                // spill into the side map rather than the positional argument slots.
+                spill.borrow_mut().insert(key, value);
             }
         }
     }
 
     /// Check if a key exists in any scope
     pub fn contains_key(&self, key: Symbol) -> bool {
-        let contains_local = match &self.local {
-            LocalBindings::Owned(map) => map.borrow().contains_key(&key),
-            LocalBindings::Shared(map) => map.contains_key(&key),
-        };
-        if contains_local {
+        if self.contains_key_local(key) {
             return true;
         }
         if let Some(parent) = &self.parent {
@@ -114,14 +189,25 @@ impl Environment {
     pub fn contains_key_local(&self, key: Symbol) -> bool {
         match &self.local {
             LocalBindings::Owned(map) => map.borrow().contains_key(&key),
-            LocalBindings::Shared(map) => map.contains_key(&key),
+            LocalBindings::Frame {
+                params,
+                self_binding,
+                captures,
+                spill,
+                ..
+            } => {
+                params.iter().any(|param| param.get_name() == key)
+                    || self_binding.as_ref().is_some_and(|(name, _)| *name == key)
+                    || captures.contains_key(key)
+                    || spill.borrow().contains_key(&key)
+            }
         }
     }
 
     /// Rewrite every binding value in this scope chain in place.
     ///
     /// Used by heap compaction to remap heap pointers held by the root environment. Every scope
-    /// in the chain must own its bindings; shared scopes only exist inside in-progress lambda
+    /// in the chain must own its bindings; call frames only exist inside in-progress lambda
     /// calls, which never span a compaction point.
     pub fn rewrite_binding_values(&self, rewrite: &mut impl FnMut(Value) -> Value) {
         match &self.local {
@@ -130,8 +216,8 @@ impl Environment {
                     *value = rewrite(*value);
                 }
             }
-            LocalBindings::Shared(_) => {
-                panic!("cannot rewrite bindings in a shared environment");
+            LocalBindings::Frame { .. } => {
+                panic!("cannot rewrite bindings in a lambda call frame");
             }
         }
 
@@ -172,15 +258,32 @@ impl Environment {
         if let Some(parent) = &self.parent {
             parent.flatten_into(result);
         }
-        // Then add local bindings
+
+        // Then add local bindings, lowest precedence first so that higher-precedence names
+        // (parameters over the self-binding over captures) overwrite as they are inserted.
         match &self.local {
             LocalBindings::Owned(map) => {
                 for (key, value) in map.borrow().iter() {
                     result.insert(*key, *value);
                 }
             }
-            LocalBindings::Shared(map) => {
-                for (key, value) in map.iter() {
+            LocalBindings::Frame {
+                params,
+                self_binding,
+                values,
+                captures,
+                spill,
+            } => {
+                for (key, value) in captures.iter() {
+                    result.insert(*key, *value);
+                }
+                if let Some((name, value)) = self_binding {
+                    result.insert(*name, *value);
+                }
+                for (param, value) in params.iter().zip(values.iter()) {
+                    result.insert(param.get_name(), *value);
+                }
+                for (key, value) in spill.borrow().iter() {
                     result.insert(*key, *value);
                 }
             }

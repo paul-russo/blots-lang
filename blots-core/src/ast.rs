@@ -124,6 +124,16 @@ pub enum Expr {
     InputReference(String),   // Shorthand for inputs.field (e.g., #field)
     BuiltIn(BuiltInFunction), // Built-in function
 
+    /// A reference to a parameter of the enclosing lambda, resolved at parse time to its
+    /// position in the call frame. Carries the original name so printing, serialization, and
+    /// free-variable analysis treat it exactly like an `Identifier`.
+    ParamSlot { name: Symbol, index: u16 },
+
+    /// A reference to a captured variable of the enclosing lambda, resolved at parse time to
+    /// its position in the lambda's captures list. A capture that was unbound when the closure
+    /// was created falls back to a late-bound name lookup at evaluation time.
+    CaptureSlot { name: Symbol, index: u16 },
+
     // Collections (elements wrapped in Commented for formatting)
     List(Vec<Commented<SpannedExpr>>),
     Record(Vec<Commented<RecordEntry>>),

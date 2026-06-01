@@ -3,7 +3,6 @@ use crate::{
     error::RuntimeError,
     expressions::evaluate_ast,
     heap::{Heap, HeapPointer, IterablePointer},
-    intern::SymbolMap,
     units,
     values::{FunctionArity, LambdaArg, LambdaDef, ReifiedValue, Value},
 };
@@ -1778,54 +1777,39 @@ impl FunctionDef {
                 #[cfg(not(target_arch = "wasm32"))]
                 let start_var_env = profiling_start.map(|_| std::time::Instant::now());
 
-                // Build local bindings for this call (O(1) - no clone of parent environment!)
-                // Keys are interned symbols, so nothing here allocates or hashes strings. The
-                // frame holds only the arguments and the optional self-reference; everything
-                // else, including the late-bound `inputs` keyword, resolves through the scope
-                // chain (captured scope, then the call-site environment).
-                let mut local_bindings = SymbolMap::with_capacity_and_hasher(
-                    expected_args.len() + usize::from(name.is_some()),
-                    Default::default(),
-                );
+                // Build the positional argument slots for this call (no per-call map, no
+                // hashing). Slots line up with the parameter declaration order so resolved
+                // `ParamSlot` references index them directly: required and optional parameters
+                // fill by position (a missing optional becomes null, as before), and a rest
+                // parameter collects the remaining arguments into a list.
+                let mut slot_values = Vec::with_capacity(expected_args.len());
 
-                // Add self-reference if named
-                if let Some(fn_name) = name {
-                    local_bindings.insert(*fn_name, this_value);
-                }
-
-                // Add function arguments (highest precedence)
                 for (idx, expected_arg) in expected_args.iter().enumerate() {
                     match expected_arg {
-                        LambdaArg::Required(arg_name) => {
-                            local_bindings.insert(*arg_name, args[idx]);
+                        LambdaArg::Required(_) => slot_values.push(args[idx]),
+                        LambdaArg::Optional(_) => {
+                            slot_values.push(args.get(idx).copied().unwrap_or(Value::Null))
                         }
-                        LambdaArg::Optional(arg_name) => {
-                            local_bindings
-                                .insert(*arg_name, args.get(idx).copied().unwrap_or(Value::Null));
-                        }
-                        LambdaArg::Rest(arg_name) => {
-                            local_bindings.insert(
-                                *arg_name,
-                                heap.borrow_mut()
-                                    .insert_list(args.iter().skip(idx).copied().collect()),
-                            );
-                        }
+                        LambdaArg::Rest(_) => slot_values.push(
+                            heap.borrow_mut()
+                                .insert_list(args.iter().skip(idx).copied().collect()),
+                        ),
                     }
                 }
 
                 #[cfg(not(target_arch = "wasm32"))]
                 let end_var_env = profiling_start.map(|_| std::time::Instant::now());
 
-                let parent_env = if scope.is_empty() {
-                    Rc::clone(&bindings)
-                } else {
-                    Rc::new(Environment::extend_shared(
-                        Rc::clone(&bindings),
-                        scope.as_rc(),
-                    ))
-                };
-                // Create new environment that extends captured scope (O(1) instead of O(n) clone!)
-                let new_env = Rc::new(Environment::extend_with(parent_env, local_bindings));
+                // The frame holds the arguments, the optional self-reference for named
+                // recursion, and the captured scope; everything else, including the late-bound
+                // `inputs` keyword, resolves through the call-site environment chain.
+                let new_env = Rc::new(Environment::extend_frame(
+                    Rc::clone(&bindings),
+                    Rc::clone(expected_args),
+                    name.map(|fn_name| (fn_name, this_value)),
+                    slot_values,
+                    scope.clone(),
+                ));
 
                 let return_value = evaluate_ast(
                     body,
