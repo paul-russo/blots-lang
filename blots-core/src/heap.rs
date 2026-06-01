@@ -45,7 +45,10 @@ pub enum HeapValue {
     List(Rc<Vec<Value>>),
     String(String),
     Record(IndexMap<String, Value>),
-    Lambda(LambdaDef),
+
+    /// Lambda definitions are shared via `Rc` so that resolving a callee for a call expression
+    /// hands out a pointer to the definition instead of copying it field by field.
+    Lambda(Rc<LambdaDef>),
 }
 
 impl HeapValue {
@@ -90,8 +93,20 @@ impl HeapValue {
 
     pub fn as_lambda(&self) -> Result<&LambdaDef> {
         match self {
-            HeapValue::Lambda(lambda) => Ok(lambda),
+            HeapValue::Lambda(lambda) => Ok(lambda.as_ref()),
             _ => Err(anyhow!("expected a list, but got a {}", self.get_type())),
+        }
+    }
+
+    /// Cheap shared handle to a lambda's definition, for callers that need to keep the
+    /// definition (e.g. to invoke it) without holding a borrow of the heap or copying it.
+    pub fn as_lambda_rc(&self) -> Result<Rc<LambdaDef>> {
+        match self {
+            HeapValue::Lambda(lambda) => Ok(Rc::clone(lambda)),
+            _ => Err(anyhow!(
+                "expected a function, but got a {}",
+                self.get_type()
+            )),
         }
     }
 
@@ -167,7 +182,9 @@ impl Heap {
     }
 
     pub fn insert_lambda(&mut self, lambda: LambdaDef) -> Value {
-        Value::Lambda(LambdaPointer::new(self.insert(HeapValue::Lambda(lambda))))
+        Value::Lambda(LambdaPointer::new(
+            self.insert(HeapValue::Lambda(Rc::new(lambda))),
+        ))
     }
 
     pub fn get(&self, id: usize) -> Option<&HeapValue> {
@@ -305,7 +322,10 @@ impl Heap {
                     }
                 }
                 HeapValue::Lambda(def) => {
-                    def.scope
+                    // The heap is the only holder of this Rc during compaction (callers do not
+                    // retain `FunctionDef`s across statements), so `make_mut` rewrites in place.
+                    Rc::make_mut(def)
+                        .scope
                         .rewrite_values(&mut |item| remap_value(item, &remap));
                 }
                 HeapValue::String(_) => {}

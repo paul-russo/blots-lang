@@ -162,11 +162,12 @@ fn evaluate_do_block_expr(
             source.clone(),
         )?;
 
-        // Set lambda name if assigning a lambda
+        // Set lambda name if assigning a lambda. The lambda was just created, so the heap slot
+        // holds the only Rc and `make_mut` mutates it in place.
         if let Value::Lambda(lambda_ptr) = val {
             let mut borrowed_heap = heap.borrow_mut();
             if let Some(HeapValue::Lambda(lambda_def)) = borrowed_heap.get_mut(lambda_ptr.index()) {
-                lambda_def.name = Some(*ident);
+                Rc::make_mut(lambda_def).name = Some(*ident);
             }
         }
 
@@ -441,13 +442,14 @@ pub fn evaluate_ast(
                 source.clone(),
             )?;
 
-            // Set lambda name if assigning a lambda
+            // Set lambda name if assigning a lambda. The lambda was just created, so the heap
+            // slot holds the only Rc and `make_mut` mutates it in place.
             if let Value::Lambda(lambda_ptr) = val {
                 let mut borrowed_heap = heap.borrow_mut();
                 if let Some(HeapValue::Lambda(lambda_def)) =
                     borrowed_heap.get_mut(lambda_ptr.index())
                 {
-                    lambda_def.name = Some(*ident);
+                    Rc::make_mut(lambda_def).name = Some(*ident);
                 }
             }
 

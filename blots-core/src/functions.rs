@@ -154,7 +154,10 @@ pub enum BuiltInFunction {
 #[derive(Debug, Clone)]
 pub enum FunctionDef {
     BuiltIn(BuiltInFunction),
-    Lambda(LambdaDef),
+
+    /// A user-defined function. The definition is shared with the heap slot via `Rc`, so
+    /// resolving a callee for a call expression clones a pointer rather than the definition.
+    Lambda(Rc<LambdaDef>),
 }
 
 impl BuiltInFunction {
@@ -1642,7 +1645,8 @@ impl FunctionDef {
             FunctionDef::BuiltIn(built_in) => {
                 format!("built-in function \"{}\"", built_in.name())
             }
-            FunctionDef::Lambda(LambdaDef { name, .. }) => name
+            FunctionDef::Lambda(def) => def
+                .name
                 .map_or(String::from("anonymous function"), |n| {
                     format!("function \"{}\"", n)
                 }),
@@ -1767,13 +1771,7 @@ impl FunctionDef {
         }
 
         match self {
-            FunctionDef::Lambda(LambdaDef {
-                name,
-                args: expected_args,
-                body,
-                scope,
-                source: lambda_source,
-            }) => {
+            FunctionDef::Lambda(def) => {
                 #[cfg(not(target_arch = "wasm32"))]
                 let start_var_env = profiling_start.map(|_| std::time::Instant::now());
 
@@ -1782,9 +1780,9 @@ impl FunctionDef {
                 // `ParamSlot` references index them directly: required and optional parameters
                 // fill by position (a missing optional becomes null, as before), and a rest
                 // parameter collects the remaining arguments into a list.
-                let mut slot_values = Vec::with_capacity(expected_args.len());
+                let mut slot_values = Vec::with_capacity(def.args.len());
 
-                for (idx, expected_arg) in expected_args.iter().enumerate() {
+                for (idx, expected_arg) in def.args.iter().enumerate() {
                     match expected_arg {
                         LambdaArg::Required(_) => slot_values.push(args[idx]),
                         LambdaArg::Optional(_) => {
@@ -1805,18 +1803,18 @@ impl FunctionDef {
                 // `inputs` keyword, resolves through the call-site environment chain.
                 let new_env = Rc::new(Environment::extend_frame(
                     Rc::clone(&bindings),
-                    Rc::clone(expected_args),
-                    name.map(|fn_name| (fn_name, this_value)),
+                    Rc::clone(&def.args),
+                    def.name.map(|fn_name| (fn_name, this_value)),
                     slot_values,
-                    scope.clone(),
+                    def.scope.clone(),
                 ));
 
                 let return_value = evaluate_ast(
-                    body,
+                    &def.body,
                     Rc::clone(&heap),
                     new_env,
                     call_depth + 1,
-                    lambda_source.clone(),
+                    def.source.clone(),
                 )
                 .map_err(|error| error.with_function_context(&self.get_name()));
 
@@ -1870,7 +1868,7 @@ pub fn get_built_in_function_idents() -> Vec<&'static str> {
 pub fn get_function_def(value: &Value, heap: &Heap) -> Option<FunctionDef> {
     match value {
         Value::Lambda(pointer) => Some(FunctionDef::Lambda(
-            pointer.reify(heap).as_lambda().ok()?.clone(),
+            pointer.reify(heap).as_lambda_rc().ok()?,
         )),
         Value::BuiltIn(built_in) => Some(FunctionDef::BuiltIn(*built_in)),
         _ => None,
