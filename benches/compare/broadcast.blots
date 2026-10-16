@@ -1,0 +1,2 @@
+xs = range(2000000)
+print(sum((xs * 2 + 1) / 3) + sum(xs * xs % 7))
