@@ -1,10 +1,10 @@
 use crate::{
     environment::Environment,
     error::RuntimeError,
-    expressions::evaluate_ast,
     heap::{Heap, HeapPointer, IterablePointer},
     units,
-    values::{FunctionArity, LambdaArg, LambdaDef, ReifiedValue, Value},
+    values::{FunctionArity, LambdaDef, ReifiedValue, Value},
+    vm::Vm,
 };
 use anyhow::Result as AnyhowResult;
 use dyn_fmt::AsStrFormatExt;
@@ -48,6 +48,11 @@ pub fn get_function_call_stats() -> Vec<FunctionCallStats> {
 pub fn clear_function_call_stats() {
     FUNCTION_CALLS.lock().unwrap().clear();
 }
+
+/// Calls a function value with the given `this` value and arguments at the given call depth,
+/// on behalf of a built-in or operator that takes callbacks.
+pub(crate) type Invoke<'a> =
+    dyn FnMut(&FunctionDef, Value, &[Value], usize) -> Result<Value, RuntimeError> + 'a;
 
 // Cache built-in function names since they're static
 pub static BUILTIN_FUNCTION_NAMES: LazyLock<Vec<&'static str>> =
@@ -398,6 +403,24 @@ impl BuiltInFunction {
         }
     }
 
+    /// Whether the built-in calls functions it is given, and can therefore re-enter the VM
+    /// while it runs.
+    pub(crate) fn takes_callback(&self) -> bool {
+        matches!(
+            self,
+            Self::Map
+                | Self::Filter
+                | Self::Reduce
+                | Self::Every
+                | Self::Some
+                | Self::SortBy
+                | Self::GroupBy
+                | Self::CountBy
+        )
+    }
+
+    /// Call the built-in from outside of a running VM. Callbacks it invokes (the functions
+    /// passed to `map`, `sort_by`, ...) resolve late-bound names through `bindings`.
     pub fn call(
         &self,
         args: &[Value],
@@ -405,6 +428,34 @@ impl BuiltInFunction {
         bindings: Rc<Environment>,
         call_depth: usize,
         source: &str,
+    ) -> Result<Value, RuntimeError> {
+        let callback_heap = Rc::clone(&heap);
+
+        self.call_with(
+            args,
+            &heap,
+            call_depth,
+            &mut |def, this_value, args, depth| {
+                def.call(
+                    this_value,
+                    args,
+                    Rc::clone(&callback_heap),
+                    Rc::clone(&bindings),
+                    depth,
+                    source,
+                )
+            },
+        )
+    }
+
+    /// The implementation of the built-in. `invoke` calls a function value on its behalf, at
+    /// the given call depth; the VM passes itself so callbacks run on the current VM stack.
+    pub(crate) fn call_with(
+        &self,
+        args: &[Value],
+        heap: &Rc<RefCell<Heap>>,
+        call_depth: usize,
+        invoke: &mut Invoke,
     ) -> Result<Value, RuntimeError> {
         match self {
             // Math functions
@@ -1062,14 +1113,7 @@ impl BuiltInFunction {
 
                 let mut groups: IndexMap<String, Vec<Value>> = IndexMap::new();
                 for &item in items.iter() {
-                    let key_result = func_def.call(
-                        Value::Null,
-                        &[item],
-                        Rc::clone(&heap),
-                        Rc::clone(&bindings),
-                        call_depth + 1,
-                        source,
-                    )?;
+                    let key_result = invoke(&func_def, Value::Null, &[item], call_depth + 1)?;
 
                     let key = match key_result {
                         Value::String(_) => key_result.as_string(&heap.borrow())?.to_string(),
@@ -1108,14 +1152,7 @@ impl BuiltInFunction {
 
                 let mut counts: IndexMap<String, f64> = IndexMap::new();
                 for &item in items.iter() {
-                    let key_result = func_def.call(
-                        Value::Null,
-                        &[item],
-                        Rc::clone(&heap),
-                        Rc::clone(&bindings),
-                        call_depth + 1,
-                        source,
-                    )?;
+                    let key_result = invoke(&func_def, Value::Null, &[item], call_depth + 1)?;
 
                     let key = match key_result {
                         Value::String(_) => key_result.as_string(&heap.borrow())?.to_string(),
@@ -1324,14 +1361,7 @@ impl BuiltInFunction {
                         &call_args[..1]
                     };
 
-                    let result = func_def.call(
-                        Value::Null,
-                        call_args,
-                        Rc::clone(&heap),
-                        Rc::clone(&bindings),
-                        call_depth + 1,
-                        source,
-                    )?;
+                    let result = invoke(&func_def, Value::Null, call_args, call_depth + 1)?;
                     mapped_list.push(result);
                 }
 
@@ -1361,14 +1391,7 @@ impl BuiltInFunction {
                         &call_args[..1]
                     };
 
-                    let result = func_def.call(
-                        Value::Null,
-                        call_args,
-                        Rc::clone(&heap),
-                        Rc::clone(&bindings),
-                        call_depth + 1,
-                        source,
-                    )?;
+                    let result = invoke(&func_def, Value::Null, call_args, call_depth + 1)?;
                     if result.as_bool()? {
                         filtered_list.push(item);
                     }
@@ -1401,14 +1424,7 @@ impl BuiltInFunction {
                         &call_args[..2]
                     };
 
-                    accumulator = func_def.call(
-                        Value::Null,
-                        call_args,
-                        Rc::clone(&heap),
-                        Rc::clone(&bindings),
-                        call_depth + 1,
-                        source,
-                    )?;
+                    accumulator = invoke(&func_def, Value::Null, call_args, call_depth + 1)?;
                 }
 
                 Ok(accumulator)
@@ -1436,14 +1452,7 @@ impl BuiltInFunction {
                         &call_args[..1]
                     };
 
-                    let result = func_def.call(
-                        Value::Null,
-                        call_args,
-                        Rc::clone(&heap),
-                        Rc::clone(&bindings),
-                        call_depth + 1,
-                        source,
-                    )?;
+                    let result = invoke(&func_def, Value::Null, call_args, call_depth + 1)?;
                     if !result.as_bool()? {
                         return Ok(Value::Bool(false));
                     }
@@ -1474,14 +1483,7 @@ impl BuiltInFunction {
                         &call_args[..1]
                     };
 
-                    let result = func_def.call(
-                        Value::Null,
-                        call_args,
-                        Rc::clone(&heap),
-                        Rc::clone(&bindings),
-                        call_depth + 1,
-                        source,
-                    )?;
+                    let result = invoke(&func_def, Value::Null, call_args, call_depth + 1)?;
                     if result.as_bool()? {
                         return Ok(Value::Bool(true));
                     }
@@ -1505,22 +1507,8 @@ impl BuiltInFunction {
 
                 list.sort_by(|a, b| match &func_def {
                     Some(fd) => {
-                        let result_a = fd.call(
-                            Value::Null,
-                            &[*a],
-                            Rc::clone(&heap),
-                            Rc::clone(&bindings),
-                            call_depth + 1,
-                            source,
-                        );
-                        let result_b = fd.call(
-                            Value::Null,
-                            &[*b],
-                            Rc::clone(&heap),
-                            Rc::clone(&bindings),
-                            call_depth + 1,
-                            source,
-                        );
+                        let result_a = invoke(fd, Value::Null, &[*a], call_depth + 1);
+                        let result_b = invoke(fd, Value::Null, &[*b], call_depth + 1);
 
                         match (result_a, result_b) {
                             (Ok(val_a), Ok(val_b)) => val_a
@@ -1645,11 +1633,9 @@ impl FunctionDef {
             FunctionDef::BuiltIn(built_in) => {
                 format!("built-in function \"{}\"", built_in.name())
             }
-            FunctionDef::Lambda(def) => def
-                .name
-                .map_or(String::from("anonymous function"), |n| {
-                    format!("function \"{}\"", n)
-                }),
+            FunctionDef::Lambda(def) => def.name.map_or(String::from("anonymous function"), |n| {
+                format!("function \"{}\"", n)
+            }),
         }
     }
 
@@ -1747,6 +1733,8 @@ impl FunctionDef {
         }
     }
 
+    /// Call the function from outside of a running VM. Late-bound names resolve through
+    /// `bindings`, which plays the role of the call site.
     pub fn call(
         &self,
         this_value: Value,
@@ -1754,102 +1742,9 @@ impl FunctionDef {
         heap: Rc<RefCell<Heap>>,
         bindings: Rc<Environment>,
         call_depth: usize,
-        source: &str,
+        _source: &str,
     ) -> Result<Value, RuntimeError> {
-        // Per-call timing is only recorded when profiling has been enabled by the embedder
-        // (e.g. `blots --profile`); otherwise calls skip the timestamps and stats push entirely.
-        #[cfg(not(target_arch = "wasm32"))]
-        let profiling_start = is_profiling_enabled().then(std::time::Instant::now);
-
-        self.check_arity(args.len())?;
-
-        if call_depth > 1000 {
-            return Err(RuntimeError::new(format!(
-                "in {}: maximum call depth of 1000 exceeded",
-                self.get_name()
-            )));
-        }
-
-        match self {
-            FunctionDef::Lambda(def) => {
-                #[cfg(not(target_arch = "wasm32"))]
-                let start_var_env = profiling_start.map(|_| std::time::Instant::now());
-
-                // Build the positional argument slots for this call (no per-call map, no
-                // hashing). Slots line up with the parameter declaration order so resolved
-                // `ParamSlot` references index them directly: required and optional parameters
-                // fill by position (a missing optional becomes null, as before), and a rest
-                // parameter collects the remaining arguments into a list.
-                let mut slot_values = Vec::with_capacity(def.args.len());
-
-                for (idx, expected_arg) in def.args.iter().enumerate() {
-                    match expected_arg {
-                        LambdaArg::Required(_) => slot_values.push(args[idx]),
-                        LambdaArg::Optional(_) => {
-                            slot_values.push(args.get(idx).copied().unwrap_or(Value::Null))
-                        }
-                        LambdaArg::Rest(_) => slot_values.push(
-                            heap.borrow_mut()
-                                .insert_list(args.iter().skip(idx).copied().collect()),
-                        ),
-                    }
-                }
-
-                #[cfg(not(target_arch = "wasm32"))]
-                let end_var_env = profiling_start.map(|_| std::time::Instant::now());
-
-                // The frame holds the arguments, the optional self-reference for named
-                // recursion, and the captured scope; everything else, including the late-bound
-                // `inputs` keyword, resolves through the call-site environment chain.
-                let new_env = Rc::new(Environment::extend_frame(
-                    Rc::clone(&bindings),
-                    Rc::clone(&def.args),
-                    def.name.map(|fn_name| (fn_name, this_value)),
-                    slot_values,
-                    def.scope.clone(),
-                ));
-
-                let return_value = evaluate_ast(
-                    &def.body,
-                    Rc::clone(&heap),
-                    new_env,
-                    call_depth + 1,
-                    def.source.clone(),
-                )
-                .map_err(|error| error.with_function_context(&self.get_name()));
-
-                #[cfg(not(target_arch = "wasm32"))]
-                if let Some(start) = profiling_start {
-                    FUNCTION_CALLS.lock().unwrap().push(FunctionCallStats {
-                        name: self.get_name(),
-                        start,
-                        end: std::time::Instant::now(),
-                        start_var_env,
-                        end_var_env,
-                    });
-                }
-
-                return_value
-            }
-            FunctionDef::BuiltIn(built_in) => {
-                let return_value = built_in
-                    .call(args, heap, bindings, call_depth + 1, source)
-                    .map_err(|error| error.with_function_context(&self.get_name()));
-
-                #[cfg(not(target_arch = "wasm32"))]
-                if let Some(start) = profiling_start {
-                    FUNCTION_CALLS.lock().unwrap().push(FunctionCallStats {
-                        name: self.get_name(),
-                        start,
-                        end: std::time::Instant::now(),
-                        start_var_env: None,
-                        end_var_env: None,
-                    });
-                }
-
-                return_value
-            }
-        }
+        Vm::new(heap, bindings).call_function(self, this_value, args, call_depth)
     }
 }
 

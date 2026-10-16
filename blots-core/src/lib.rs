@@ -3,6 +3,8 @@ extern crate pest_derive;
 
 pub mod ast;
 pub mod ast_to_source;
+mod bytecode;
+mod compiler;
 pub mod do_block_tests;
 pub mod environment;
 pub mod error;
@@ -17,3 +19,4 @@ pub mod stats;
 pub mod tests;
 pub mod units;
 pub mod values;
+mod vm;

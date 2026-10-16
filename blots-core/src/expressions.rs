@@ -3,45 +3,24 @@ use crate::{
         BinaryOp, Commented, Expr, PostfixOp, RecordEntry, RecordKey, Span, Spanned, SpannedExpr,
         UnaryOp,
     },
+    compiler::compile_chunk,
     environment::Environment,
     error::RuntimeError,
-    functions::{BuiltInFunction, get_function_def, is_built_in_function},
-    heap::{Heap, HeapPointer, HeapValue, IterablePointer, RecordPointer},
+    functions::{BuiltInFunction, Invoke, get_function_def, is_built_in_function},
+    heap::{Heap, HeapPointer, HeapValue, IterablePointer},
     intern::Symbol,
     parser::Rule,
     precedence::PRATT,
     values::{
-        CapturedScope, LambdaArg, LambdaDef,
-        Value::{self, Bool, List, Number, Spread},
+        LambdaArg,
+        Value::{self, Bool, Number},
         ValueType,
     },
+    vm::Vm,
 };
 use anyhow::{Result as AnyhowResult, anyhow};
-use indexmap::IndexMap;
 use pest::iterators::{Pair, Pairs};
 use std::{cell::RefCell, cmp::Ordering, collections::HashSet, rc::Rc};
-
-/// Resolve an identifier through the environment chain, producing the standard
-/// "unknown identifier" error (with a constants hint) when the name is unbound.
-fn lookup_identifier_value(
-    ident: Symbol,
-    bindings: &Environment,
-    span: Span,
-    source: &Rc<str>,
-) -> Result<Value, RuntimeError> {
-    bindings.get(ident).ok_or_else(|| {
-        use crate::heap::CONSTANTS;
-        let message = if CONSTANTS.contains_key(ident.as_str()) {
-            format!(
-                "unknown identifier: {}. Did you mean constants.{}?",
-                ident, ident
-            )
-        } else {
-            format!("unknown identifier: {}", ident)
-        };
-        RuntimeError::with_span(message, span, source.clone())
-    })
-}
 
 /// Helper to evaluate ordering comparisons with proper type error handling.
 /// Returns true if the ordering matches any of the expected orderings, false otherwise.
@@ -85,7 +64,7 @@ pub fn evaluate_pairs(
 /// Helper function to flatten a spread value into the values it expands to. For list spreads
 /// this returns a shared handle to the existing elements; strings and records build a fresh
 /// (Rc-wrapped) vector of the expanded values.
-fn flatten_spread_value(
+pub(crate) fn flatten_spread_value(
     spread_ptr: &IterablePointer,
     heap: &Rc<RefCell<Heap>>,
 ) -> AnyhowResult<Rc<Vec<Value>>> {
@@ -131,54 +110,8 @@ fn flatten_spread_value(
     }
 }
 
-// Helper function for evaluating expressions inside do blocks with shadowing allowed
-fn evaluate_do_block_expr(
-    expr: &SpannedExpr,
-    heap: Rc<RefCell<Heap>>,
-    bindings: Rc<Environment>,
-    call_depth: usize,
-    source: Rc<str>,
-) -> Result<Value, RuntimeError> {
-    // For assignments in do blocks, skip the immutability check
-    if let Expr::Assignment { ident, value } = &expr.node {
-        // Still check for keywords
-        if matches!(
-            ident.as_str(),
-            "return" | "if" | "then" | "else" | "do" | "true" | "false" | "null" | "output"
-        ) {
-            return Err(RuntimeError::with_span(
-                format!("{} is a keyword, and cannot be reassigned", ident),
-                expr.span,
-                source.clone(),
-            ));
-        }
-
-        // Evaluate the value (allow shadowing - no check for existing binding)
-        let val = evaluate_ast(
-            value,
-            Rc::clone(&heap),
-            Rc::clone(&bindings),
-            call_depth,
-            source.clone(),
-        )?;
-
-        // Set lambda name if assigning a lambda. The lambda was just created, so the heap slot
-        // holds the only Rc and `make_mut` mutates it in place.
-        if let Value::Lambda(lambda_ptr) = val {
-            let mut borrowed_heap = heap.borrow_mut();
-            if let Some(HeapValue::Lambda(lambda_def)) = borrowed_heap.get_mut(lambda_ptr.index()) {
-                Rc::make_mut(lambda_def).name = Some(*ident);
-            }
-        }
-
-        bindings.insert(*ident, val);
-        return Ok(val);
-    }
-
-    // For all other expressions, use the regular evaluate_ast
-    evaluate_ast(expr, heap, bindings, call_depth, source.clone())
-}
-
+/// Evaluate an expression against `bindings`: the expression is compiled to bytecode and run on
+/// a fresh VM whose late-bound names resolve through `bindings`.
 pub fn evaluate_ast(
     expr: &SpannedExpr,
     heap: Rc<RefCell<Heap>>,
@@ -186,536 +119,10 @@ pub fn evaluate_ast(
     call_depth: usize,
     source: Rc<str>,
 ) -> Result<Value, RuntimeError> {
-    match &expr.node {
-        Expr::Number(n) => Ok(Number(*n)),
-        Expr::String(s) => Ok(heap.borrow_mut().insert_string(s.clone())),
-        Expr::Bool(b) => Ok(Bool(*b)),
-        Expr::Null => Ok(Value::Null),
-        Expr::Identifier(ident) => match ident.as_str() {
-            "infinity" => Ok(Number(f64::INFINITY)),
-            "inf" => Ok(Number(f64::INFINITY)),
-            "constants" => Ok(Value::Record(RecordPointer::new(0))),
-            _ => lookup_identifier_value(*ident, &bindings, expr.span, &source),
-        },
-        Expr::ParamSlot { name, index } => {
-            // Fast path: read the argument by position from the nearest call frame. The name
-            // fallback covers bodies evaluated outside their own call (e.g. a lambda body
-            // re-evaluated directly in tests).
-            if let Some(value) = bindings.get_param_slot(*index as usize) {
-                return Ok(value);
-            }
+    let mut vm = Vm::new(heap, bindings);
+    let chunk = compile_chunk(expr, vm.inlines_callbacks())?;
 
-            lookup_identifier_value(*name, &bindings, expr.span, &source)
-        }
-        Expr::CaptureSlot { name, index } => {
-            // Fast path: read the captured value by position. `None` means the capture was
-            // unbound at closure creation (a late-bound name) or no frame is active, so the
-            // name resolves through the environment chain exactly like a plain identifier.
-            if let Some(value) = bindings.get_capture_slot(*index as usize) {
-                return Ok(value);
-            }
-
-            lookup_identifier_value(*name, &bindings, expr.span, &source)
-        }
-        Expr::InputReference(field) => {
-            // Desugar #field to inputs.field
-            let inputs_value = bindings
-                .get(crate::intern::inputs_symbol())
-                .ok_or(anyhow!("inputs not found (required for #{} syntax)", field))?;
-
-            match inputs_value {
-                Value::Record(record_ptr) => {
-                    let borrowed_heap = heap.borrow();
-                    let record = record_ptr.reify(&borrowed_heap).as_record()?;
-                    // Return null if field doesn't exist (consistent with inputs.field behavior)
-                    Ok(record.get(field).copied().unwrap_or(Value::Null))
-                }
-                _ => Err(RuntimeError::with_span(
-                    format!("inputs must be a record to use #{} syntax", field),
-                    expr.span,
-                    source.clone(),
-                )),
-            }
-        }
-        Expr::BuiltIn(built_in) => Ok(Value::BuiltIn(*built_in)),
-        Expr::List(exprs) => {
-            let values = exprs
-                .iter()
-                .map(|e| {
-                    evaluate_ast(
-                        &e.node,
-                        Rc::clone(&heap),
-                        Rc::clone(&bindings),
-                        call_depth,
-                        source.clone(),
-                    )
-                })
-                .collect::<Result<Vec<Value>, RuntimeError>>()?;
-
-            // Flatten spreads
-            let mut flattened = Vec::new();
-
-            for value in values {
-                match value {
-                    Value::Spread(spread_ptr) => {
-                        let spread_values = flatten_spread_value(&spread_ptr, &heap)?;
-                        flattened.extend(spread_values.iter().copied());
-                    }
-                    _ => flattened.push(value),
-                }
-            }
-
-            Ok(heap.borrow_mut().insert_list(flattened))
-        }
-        Expr::Record(entries) => {
-            let mut record = IndexMap::new();
-
-            for commented_entry in entries {
-                let entry = &commented_entry.node;
-                match &entry.key {
-                    RecordKey::Static(key) => {
-                        let value = evaluate_ast(
-                            &entry.value,
-                            Rc::clone(&heap),
-                            Rc::clone(&bindings),
-                            call_depth,
-                            source.clone(),
-                        )?;
-                        record.insert(key.clone(), value);
-                    }
-                    RecordKey::Dynamic(key_expr) => {
-                        let key_value = evaluate_ast(
-                            key_expr,
-                            Rc::clone(&heap),
-                            Rc::clone(&bindings),
-                            call_depth,
-                            source.clone(),
-                        )?;
-                        let key = key_value.as_string(&heap.borrow())?.to_string();
-                        let value = evaluate_ast(
-                            &entry.value,
-                            Rc::clone(&heap),
-                            Rc::clone(&bindings),
-                            call_depth,
-                            source.clone(),
-                        )?;
-                        record.insert(key, value);
-                    }
-                    RecordKey::Shorthand(ident) => {
-                        let value = bindings
-                            .get(Symbol::intern(ident))
-                            .ok_or(anyhow!("unknown identifier: {}", ident))?;
-                        record.insert(ident.clone(), value);
-                    }
-                    RecordKey::Spread(spread_expr) => {
-                        let spread_value = evaluate_ast(
-                            spread_expr,
-                            Rc::clone(&heap),
-                            Rc::clone(&bindings),
-                            call_depth,
-                            source.clone(),
-                        )?;
-
-                        if let Spread(iterable) = spread_value {
-                            match iterable {
-                                IterablePointer::List(pointer) => {
-                                    let borrowed_heap = &heap.borrow();
-                                    pointer
-                                        .reify(borrowed_heap)
-                                        .as_list()?
-                                        .iter()
-                                        .enumerate()
-                                        .for_each(|(i, value)| {
-                                            record.insert(i.to_string(), *value);
-                                        });
-                                }
-                                IterablePointer::String(pointer) => {
-                                    let s = {
-                                        let borrowed_heap = &heap.borrow();
-                                        pointer.reify(borrowed_heap).as_string()?.to_string()
-                                    };
-
-                                    s.chars().enumerate().for_each(|(i, c)| {
-                                        record.insert(
-                                            i.to_string(),
-                                            heap.borrow_mut().insert_string(c.to_string()),
-                                        );
-                                    });
-                                }
-                                IterablePointer::Record(pointer) => {
-                                    let borrowed_heap = &heap.borrow();
-                                    let spread_record = pointer.reify(borrowed_heap).as_record()?;
-
-                                    for (k, v) in spread_record {
-                                        record.insert(k.clone(), *v);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            Ok(heap.borrow_mut().insert_record(record))
-        }
-        Expr::Lambda {
-            args,
-            body,
-            captures,
-        } => {
-            // Capture the current values of the lambda's free variables (precomputed at parse
-            // time), in slot order so `CaptureSlot` references can read them by index. Names
-            // that aren't bound yet stay `None` and resolve late through the call-site chain.
-            let mut captured_values = Vec::with_capacity(captures.len());
-            let mut any_bound = false;
-
-            for var in captures {
-                let value = bindings.get(*var);
-                any_bound |= value.is_some();
-                captured_values.push(value);
-            }
-
-            // When nothing was bound at definition time, an empty scope avoids pushing a
-            // useless captures layer onto the environment chain on every call.
-            let scope = if any_bound {
-                CapturedScope::new(captures.clone(), captured_values)
-            } else {
-                CapturedScope::default()
-            };
-
-            let lambda = heap.borrow_mut().insert_lambda(LambdaDef {
-                name: None,
-                args: Rc::new(args.clone()),
-                body: Rc::clone(body),
-                scope,
-                source: source.clone(),
-            });
-
-            Ok(lambda)
-        }
-        Expr::Assignment { ident, value } => {
-            if is_built_in_function(ident.as_str()) {
-                return Err(RuntimeError::with_span(
-                    format!(
-                        "{} is the name of a built-in function, and cannot be reassigned",
-                        ident
-                    ),
-                    expr.span,
-                    source.clone(),
-                ));
-            }
-
-            if matches!(
-                ident.as_str(),
-                "constants"
-                    | "if"
-                    | "then"
-                    | "else"
-                    | "true"
-                    | "false"
-                    | "null"
-                    | "inputs"
-                    | "and"
-                    | "or"
-            ) {
-                return Err(RuntimeError::with_span(
-                    format!("{} is a keyword, and cannot be reassigned", ident),
-                    expr.span,
-                    source.clone(),
-                ));
-            }
-
-            // Check if the variable already exists (immutability check)
-            if bindings.contains_key(*ident) {
-                return Err(RuntimeError::with_span(
-                    format!("{} is already defined, and cannot be reassigned", ident),
-                    expr.span,
-                    source.clone(),
-                ));
-            }
-
-            let val = evaluate_ast(
-                value,
-                Rc::clone(&heap),
-                Rc::clone(&bindings),
-                call_depth,
-                source.clone(),
-            )?;
-
-            // Set lambda name if assigning a lambda. The lambda was just created, so the heap
-            // slot holds the only Rc and `make_mut` mutates it in place.
-            if let Value::Lambda(lambda_ptr) = val {
-                let mut borrowed_heap = heap.borrow_mut();
-                if let Some(HeapValue::Lambda(lambda_def)) =
-                    borrowed_heap.get_mut(lambda_ptr.index())
-                {
-                    Rc::make_mut(lambda_def).name = Some(*ident);
-                }
-            }
-
-            bindings.insert(*ident, val);
-            Ok(val)
-        }
-        Expr::Output { expr: inner_expr } => {
-            // Output is just an annotation - evaluate the inner expression
-            evaluate_ast(
-                inner_expr,
-                Rc::clone(&heap),
-                Rc::clone(&bindings),
-                call_depth,
-                source.clone(),
-            )
-        }
-        Expr::Conditional {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            let cond_val = evaluate_ast(
-                condition,
-                Rc::clone(&heap),
-                Rc::clone(&bindings),
-                call_depth,
-                source.clone(),
-            )?;
-
-            if cond_val.as_bool()? {
-                evaluate_ast(then_expr, heap, bindings, call_depth, source.clone())
-            } else {
-                evaluate_ast(else_expr, heap, bindings, call_depth, source.clone())
-            }
-        }
-        Expr::DoBlock {
-            statements,
-            return_expr,
-        } => {
-            // Create new scope that extends current bindings (O(1) instead of clone)
-            let block_bindings = Rc::new(Environment::extend(Rc::clone(&bindings)));
-
-            // Execute statements with shadowing allowed (comments are ignored)
-            for stmt in statements {
-                evaluate_do_block_expr(
-                    &stmt.node,
-                    Rc::clone(&heap),
-                    Rc::clone(&block_bindings),
-                    call_depth,
-                    source.clone(),
-                )?;
-            }
-
-            // Return the final expression
-            evaluate_do_block_expr(
-                &return_expr.node,
-                heap,
-                block_bindings,
-                call_depth,
-                source.clone(),
-            )
-        }
-        Expr::Call { func, args } => {
-            let func_val = evaluate_ast(
-                func,
-                Rc::clone(&heap),
-                Rc::clone(&bindings),
-                call_depth,
-                source.clone(),
-            )?;
-            let arg_vals_raw = args
-                .iter()
-                .map(|arg| {
-                    evaluate_ast(
-                        arg,
-                        Rc::clone(&heap),
-                        Rc::clone(&bindings),
-                        call_depth,
-                        source.clone(),
-                    )
-                })
-                .collect::<Result<Vec<_>, RuntimeError>>()?;
-
-            // Flatten spread arguments. Most calls have none, so the evaluated values are passed
-            // through as-is rather than being copied into a second vector.
-            let arg_vals = if arg_vals_raw
-                .iter()
-                .any(|value| matches!(value, Value::Spread(_)))
-            {
-                let mut flattened = Vec::with_capacity(arg_vals_raw.len());
-
-                for value in arg_vals_raw {
-                    match value {
-                        Value::Spread(spread_ptr) => {
-                            let spread_values = flatten_spread_value(&spread_ptr, &heap)?;
-                            flattened.extend(spread_values.iter().copied());
-                        }
-                        _ => flattened.push(value),
-                    }
-                }
-
-                flattened
-            } else {
-                arg_vals_raw
-            };
-
-            if !func_val.is_lambda() && !func_val.is_built_in() {
-                return Err(RuntimeError::with_span(
-                    format!(
-                        "can't call a non-function: {}",
-                        func_val.stringify_internal(&heap.borrow())
-                    ),
-                    expr.span,
-                    source.clone(),
-                ));
-            }
-
-            let def = {
-                let borrowed_heap = &heap.borrow();
-                get_function_def(&func_val, borrowed_heap).ok_or_else(|| {
-                    anyhow!(
-                        "unknown function: {}",
-                        func_val.stringify_internal(borrowed_heap)
-                    )
-                })?
-            };
-
-            def.call(func_val, &arg_vals, heap, bindings, call_depth, &source)
-                .map_err(|e| e.with_call_site(expr.span, source.clone()))
-        }
-        Expr::Access { expr, index } => {
-            let val = evaluate_ast(
-                expr,
-                Rc::clone(&heap),
-                Rc::clone(&bindings),
-                call_depth,
-                source.clone(),
-            )?;
-            let idx_val = evaluate_ast(
-                index,
-                Rc::clone(&heap),
-                Rc::clone(&bindings),
-                call_depth,
-                source.clone(),
-            )?;
-
-            match val {
-                Value::Record(record) => {
-                    let borrowed_heap = &heap.borrow();
-                    let record = record.reify(borrowed_heap).as_record()?;
-                    let key = idx_val.as_string(borrowed_heap)?;
-                    Ok(record.get(key).copied().unwrap_or(Value::Null))
-                }
-                Value::List(list) => {
-                    let borrowed_heap = &heap.borrow();
-                    let list = list.reify(borrowed_heap).as_list()?;
-                    let raw_index = idx_val.as_number()? as i64;
-                    let index = if raw_index < 0 {
-                        let adjusted = list.len() as i64 + raw_index;
-                        if adjusted < 0 {
-                            return Ok(Value::Null);
-                        }
-                        adjusted as usize
-                    } else {
-                        raw_index as usize
-                    };
-                    Ok(list.get(index).copied().unwrap_or(Value::Null))
-                }
-                Value::String(string) => {
-                    let string = string.reify(&heap.borrow()).as_string()?.to_string();
-                    let char_count = string.chars().count();
-                    let raw_index = idx_val.as_number()? as i64;
-                    let index = if raw_index < 0 {
-                        let adjusted = char_count as i64 + raw_index;
-                        if adjusted < 0 {
-                            return Ok(Value::Null);
-                        }
-                        adjusted as usize
-                    } else {
-                        raw_index as usize
-                    };
-
-                    Ok(string
-                        .chars()
-                        .nth(index)
-                        .map(|c| heap.borrow_mut().insert_string(c.to_string()))
-                        .unwrap_or(Value::Null))
-                }
-                _ => Err(RuntimeError::with_span(
-                    format!(
-                        "expected a record, list, or string, but got a {}",
-                        val.get_type()
-                    ),
-                    expr.span,
-                    source.clone(),
-                )),
-            }
-        }
-        Expr::DotAccess { expr, field } => {
-            let val = evaluate_ast(
-                expr,
-                Rc::clone(&heap),
-                Rc::clone(&bindings),
-                call_depth,
-                source.clone(),
-            )?;
-            let borrowed_heap = &heap.borrow();
-
-            match val {
-                Value::Record(record) => {
-                    let record = record.reify(borrowed_heap).as_record()?;
-                    Ok(record.get(field).copied().unwrap_or(Value::Null))
-                }
-                _ => Err(RuntimeError::with_span(
-                    format!("expected a record, but got a {}", val.get_type()),
-                    expr.span,
-                    source.clone(),
-                )),
-            }
-        }
-        Expr::BinaryOp { op, left, right } => {
-            evaluate_binary_op_ast(*op, left, right, heap, bindings, call_depth, source.clone())
-        }
-        Expr::UnaryOp { op, expr } => {
-            let val = evaluate_ast(expr, heap, bindings, call_depth, source.clone())?;
-
-            match op {
-                UnaryOp::Negate => Ok(Number(-val.as_number()?)),
-                UnaryOp::Not | UnaryOp::Invert => Ok(Bool(!val.as_bool()?)),
-            }
-        }
-        Expr::PostfixOp { op, expr } => {
-            let val = evaluate_ast(expr, heap, bindings, call_depth, source.clone())?;
-
-            match op {
-                PostfixOp::Factorial => {
-                    let n = val.as_number()?;
-                    if n >= 0.0 && n == (n as u64) as f64 {
-                        Ok(Number(
-                            (1..(n as u64) + 1).map(|x| x as f64).product::<f64>(),
-                        ))
-                    } else {
-                        Err(RuntimeError::with_span(
-                            "factorial only works on non-negative integers".to_string(),
-                            expr.span,
-                            source.clone(),
-                        ))
-                    }
-                }
-            }
-        }
-        Expr::Spread(expr) => {
-            let val = evaluate_ast(expr, heap, bindings, call_depth, source.clone())?;
-
-            match val {
-                List(pointer) => Ok(Spread(IterablePointer::List(pointer))),
-                Value::String(pointer) => Ok(Spread(IterablePointer::String(pointer))),
-                Value::Record(pointer) => Ok(Spread(IterablePointer::Record(pointer))),
-                _ => Err(RuntimeError::with_span(
-                    "expected a list, record, or string".to_string(),
-                    expr.span,
-                    source.clone(),
-                )),
-            }
-        }
-    }
+    vm.run_chunk(&chunk, source, call_depth)
 }
 
 // Helper function to collect free variables in an expression
@@ -724,9 +131,7 @@ fn collect_free_variables(expr: &SpannedExpr, vars: &mut Vec<Symbol>, bound: &mu
         // Slot variants are name references just like plain identifiers; they appear inside
         // already-resolved nested lambda bodies and must still count as free variables of any
         // enclosing lambda so capture propagation keeps working.
-        Expr::Identifier(name)
-        | Expr::ParamSlot { name, .. }
-        | Expr::CaptureSlot { name, .. } => {
+        Expr::Identifier(name) | Expr::ParamSlot { name, .. } | Expr::CaptureSlot { name, .. } => {
             // `inputs` is excluded because it is a late-bound keyword: like the `#field`
             // shorthand, it must resolve against the calling document's inputs at call time,
             // never get captured into a lambda's scope or inlined during serialization.
@@ -844,8 +249,7 @@ fn resolve_lambda_expr(
             // Names with special evaluation rules keep their dynamic lookup: shadowed names
             // must see the do-block local, and the constant identifiers are handled before any
             // environment lookup at evaluation time.
-            if shadowed.contains(&name)
-                || matches!(name.as_str(), "infinity" | "inf" | "constants")
+            if shadowed.contains(&name) || matches!(name.as_str(), "infinity" | "inf" | "constants")
             {
                 return;
             }
@@ -1026,35 +430,30 @@ pub fn validate_portable_value(
     }
 }
 
-// Evaluate binary operations on AST
-fn evaluate_binary_op_ast(
+/// Where a binary operation sits in the program: the span of the whole operation and the
+/// source text that span refers to. Used for error reporting.
+pub(crate) struct OpSite<'a> {
+    pub span: Span,
+    pub source: &'a Rc<str>,
+}
+
+/// Apply a binary operator to two already-evaluated operands. `invoke` calls the function
+/// operand of `via`, `into` and `where`.
+pub(crate) fn apply_binary_op(
     op: BinaryOp,
-    left: &SpannedExpr,
-    right: &SpannedExpr,
-    heap: Rc<RefCell<Heap>>,
-    bindings: Rc<Environment>,
+    lhs: Value,
+    rhs: Value,
+    heap: &Rc<RefCell<Heap>>,
+    site: OpSite,
     call_depth: usize,
-    source: Rc<str>,
+    invoke: &mut Invoke,
 ) -> Result<Value, RuntimeError> {
-    let lhs = evaluate_ast(
-        left,
-        Rc::clone(&heap),
-        Rc::clone(&bindings),
-        call_depth,
-        source.clone(),
-    )?;
-    let rhs = evaluate_ast(
-        right,
-        Rc::clone(&heap),
-        Rc::clone(&bindings),
-        call_depth,
-        source.clone(),
-    )?;
+    let (op_span, source) = (site.span, site.source);
 
     // Fast path: arithmetic and comparisons between two plain numbers can never broadcast,
-    // touch the heap, or fail, so they skip the span bookkeeping and the broadcasting match
-    // below. Ordering comparisons fall through when a NaN is involved so the general path can
-    // report the "cannot compare" error exactly as before.
+    // touch the heap, or fail, so they skip the broadcasting match below. Ordering comparisons
+    // fall through when a NaN is involved so the general path can report the "cannot compare"
+    // error.
     if let (Number(a), Number(b)) = (lhs, rhs) {
         match op {
             BinaryOp::Add => return Ok(Number(a + b)),
@@ -1080,14 +479,6 @@ fn evaluate_binary_op_ast(
             _ => {}
         }
     }
-
-    // Create a combined span for the entire binary operation
-    let op_span = Span::new(
-        left.span.start_byte,
-        right.span.end_byte,
-        left.span.start_line,
-        left.span.start_col,
-    );
 
     // Handle dot operators first - they never broadcast
     match op {
@@ -1387,19 +778,10 @@ fn evaluate_binary_op_ast(
                             })?
                         };
 
-                        let value = def
-                            .call(
-                                r,
-                                &[l],
-                                Rc::clone(&heap),
-                                Rc::clone(&bindings),
-                                call_depth,
-                                &source,
-                            )
-                            .map_err(|e| {
-                                e.with_function_context("\"via\" callback")
-                                    .with_call_site(op_span, source_owned.clone())
-                            })?;
+                        let value = invoke(&def, r, &[l], call_depth).map_err(|e| {
+                            e.with_function_context("\"via\" callback")
+                                .with_call_site(op_span, source_owned.clone())
+                        })?;
                         mapped_list.push(value);
                     }
                     Ok(heap.borrow_mut().insert_list(mapped_list))
@@ -1742,16 +1124,8 @@ fn evaluate_binary_op_ast(
                             } else {
                                 &call_args[..1]
                             };
-                            let value = def
-                                .call(
-                                    scalar,
-                                    call_args,
-                                    Rc::clone(&heap),
-                                    Rc::clone(&bindings),
-                                    call_depth,
-                                    &source,
-                                )
-                                .map_err(|e| {
+                            let value =
+                                invoke(&def, scalar, call_args, call_depth).map_err(|e| {
                                     e.with_function_context("\"via\" callback")
                                         .with_call_site(op_span, source_owned.clone())
                                 })?;
@@ -1792,15 +1166,7 @@ fn evaluate_binary_op_ast(
                             })?
                         };
 
-                        def.call(
-                            scalar,
-                            &[list],
-                            Rc::clone(&heap),
-                            Rc::clone(&bindings),
-                            call_depth,
-                            &source,
-                        )
-                        .map_err(|e| {
+                        invoke(&def, scalar, &[list], call_depth).map_err(|e| {
                             e.with_function_context("\"into\" callback")
                                 .with_call_site(op_span, source.clone())
                         })
@@ -1856,16 +1222,8 @@ fn evaluate_binary_op_ast(
                                 &call_args[..1]
                             };
 
-                            let result = def
-                                .call(
-                                    scalar,
-                                    call_args,
-                                    Rc::clone(&heap),
-                                    Rc::clone(&bindings),
-                                    call_depth,
-                                    &source,
-                                )
-                                .map_err(|e| {
+                            let result =
+                                invoke(&def, scalar, call_args, call_depth).map_err(|e| {
                                     e.with_function_context("\"where\" callback")
                                         .with_call_site(op_span, source_owned.clone())
                                 })?;
@@ -1990,19 +1348,10 @@ fn evaluate_binary_op_ast(
                     ));
                 }
 
-                def.unwrap()
-                    .call(
-                        rhs,
-                        &[lhs],
-                        Rc::clone(&heap),
-                        Rc::clone(&bindings),
-                        call_depth,
-                        &source,
-                    )
-                    .map_err(|e| {
-                        e.with_function_context("\"via\" callback")
-                            .with_call_site(op_span, source.clone())
-                    })
+                invoke(&def.unwrap(), rhs, &[lhs], call_depth).map_err(|e| {
+                    e.with_function_context("\"via\" callback")
+                        .with_call_site(op_span, source.clone())
+                })
             }
             BinaryOp::Into => {
                 if !rhs.is_callable() {
@@ -2030,19 +1379,10 @@ fn evaluate_binary_op_ast(
                     ));
                 }
 
-                def.unwrap()
-                    .call(
-                        rhs,
-                        &[lhs],
-                        Rc::clone(&heap),
-                        Rc::clone(&bindings),
-                        call_depth,
-                        &source,
-                    )
-                    .map_err(|e| {
-                        e.with_function_context("\"into\" callback")
-                            .with_call_site(op_span, source.clone())
-                    })
+                invoke(&def.unwrap(), rhs, &[lhs], call_depth).map_err(|e| {
+                    e.with_function_context("\"into\" callback")
+                        .with_call_site(op_span, source.clone())
+                })
             }
             BinaryOp::Where => Err(RuntimeError::with_span(
                 "where operator requires a list on the left side".to_string(),
@@ -2358,8 +1698,7 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                         }
                     }
 
-                    let mut body =
-                        pairs_to_expr_inner(body_pairs.into_inner(), preserve_comments)?;
+                    let mut body = pairs_to_expr_inner(body_pairs.into_inner(), preserve_comments)?;
 
                     // Precompute the lambda's free variables (its captures) so that closure
                     // creation at runtime doesn't have to re-walk the body. Parameters are bound,

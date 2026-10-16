@@ -462,11 +462,11 @@ macro_rules! define_pointer {
         pub struct $name(usize);
 
         impl $name {
-            pub fn new(index: usize) -> Self {
+            pub const fn new(index: usize) -> Self {
                 $name(index)
             }
 
-            pub fn index(&self) -> usize {
+            pub const fn index(&self) -> usize {
                 self.0
             }
         }

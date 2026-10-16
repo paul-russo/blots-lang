@@ -1,10 +1,15 @@
 use anyhow::{Result, anyhow};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::{cell::RefCell, fmt::Display, rc::Rc};
+use std::{
+    cell::{OnceCell, RefCell},
+    fmt::Display,
+    rc::Rc,
+};
 
 use crate::{
     ast::SpannedExpr,
+    bytecode::Proto,
     functions::BuiltInFunction,
     heap::{
         Heap, HeapPointer, HeapValue, IterablePointer, LambdaPointer, ListPointer, RecordPointer,
@@ -304,10 +309,31 @@ impl Display for LambdaArg {
 ///
 /// A `None` slot means the name was not bound when the closure was created; references to it
 /// fall back to a late-bound lookup through the call-site environment chain.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Clone, Default)]
 pub struct CapturedScope {
     names: Rc<Vec<Symbol>>,
     values: Rc<Vec<Option<Value>>>,
+
+    /// The compiled body of the function this scope belongs to. It lives here rather than on
+    /// [`LambdaDef`] so that definitions can still be built field by field; it is a cache that
+    /// is filled in on the first call when the closure was not created by the VM itself, and
+    /// it never takes part in comparisons.
+    pub(crate) code: OnceCell<Rc<Proto>>,
+}
+
+impl PartialEq for CapturedScope {
+    fn eq(&self, other: &Self) -> bool {
+        self.names == other.names && self.values == other.values
+    }
+}
+
+impl std::fmt::Debug for CapturedScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CapturedScope")
+            .field("names", &self.names)
+            .field("values", &self.values)
+            .finish()
+    }
 }
 
 impl CapturedScope {
@@ -318,6 +344,31 @@ impl CapturedScope {
         Self {
             names: Rc::new(names),
             values: Rc::new(values),
+            code: OnceCell::new(),
+        }
+    }
+
+    /// Build the scope of a closure created by the VM: the capture names are shared with the
+    /// lambda expression the closure came from, and the compiled body is attached up front.
+    pub(crate) fn compiled(
+        names: Rc<Vec<Symbol>>,
+        values: Vec<Option<Value>>,
+        code: Rc<Proto>,
+    ) -> Self {
+        debug_assert_eq!(names.len(), values.len());
+        Self {
+            names,
+            values: Rc::new(values),
+            code: OnceCell::from(code),
+        }
+    }
+
+    /// The scope of a closure created by the VM when none of its captures were bound: like
+    /// [`CapturedScope::default`], but with the compiled body attached.
+    pub(crate) fn unbound(code: Rc<Proto>) -> Self {
+        Self {
+            code: OnceCell::from(code),
+            ..Self::default()
         }
     }
 
