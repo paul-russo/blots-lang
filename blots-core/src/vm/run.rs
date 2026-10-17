@@ -22,6 +22,28 @@ use crate::{
 };
 use std::rc::Rc;
 
+/// The jump offset of the instruction in the code word before `ip`.
+///
+/// The offset is read from the code again, on its own, rather than taken out of the decoded
+/// instruction. That keeps the path from one instruction pointer to the next short (a single
+/// load), and since the compiler has to leave the load where it is, a conditional jump stays
+/// a branch the CPU can predict instead of becoming a conditional move, which would make
+/// fetching the next instruction wait for the operands of the comparison.
+///
+/// # Safety
+/// `ip` must point right after an instruction word.
+#[inline(always)]
+unsafe fn jump_offset(ip: *const u64) -> isize {
+    // SAFETY: guaranteed by the caller. `b` and `c`, which hold the offset, are the upper
+    // half of the instruction word.
+    #[cfg(target_endian = "little")]
+    let offset = unsafe { ip.sub(1).cast::<i32>().add(1).read_volatile() as isize };
+    #[cfg(not(target_endian = "little"))]
+    let offset = unsafe { Instr::decode(ip.sub(1).read_volatile()).sbx() };
+
+    offset
+}
+
 /// Run the innermost frame of `vm`, and every frame it calls, until it returns or fails.
 ///
 /// # Safety
@@ -145,8 +167,10 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                             $holds
                         }
                     {
-                        let jump = if holds { 0 } else { Instr::decode(*ip).sbx() };
-                        ip = ip.add(1).offset(jump);
+                        ip = ip.add(1);
+                        if !holds {
+                            ip = ip.offset(jump_offset(ip));
+                        }
                         continue 'run;
                     }
                 }};
@@ -162,7 +186,11 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                             $holds
                         }
                     {
-                        ip = ip.offset(if holds { 1 } else { instr.sbx() });
+                        if holds {
+                            ip = ip.add(1);
+                        } else {
+                            ip = ip.offset(jump_offset(ip));
+                        }
                         continue 'run;
                     }
                 }};
@@ -297,7 +325,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     if !matches!(operand, Value::List(_)) {
                         let is_null = matches!(operand, Value::Null);
                         if is_null != (instr.op == Op::JmpNotEqNull) {
-                            ip = ip.offset(instr.sbx());
+                            ip = ip.offset(jump_offset(ip));
                         }
                         continue 'run;
                     }
@@ -317,13 +345,13 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 }
 
                 Op::Jmp => {
-                    ip = ip.offset(instr.sbx());
+                    ip = ip.offset(jump_offset(ip));
                     continue 'run;
                 }
                 Op::JmpIfFalse => {
                     if let Value::Bool(holds) = &*reg!(instr.a) {
                         if !*holds {
-                            ip = ip.offset(instr.sbx());
+                            ip = ip.offset(jump_offset(ip));
                         }
                         continue 'run;
                     }
@@ -485,25 +513,25 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 }
                 Op::ForRange => {
                     if !range_next(reg!(instr.a), instr.x == 1) {
-                        ip = ip.offset(instr.sbx());
+                        ip = ip.offset(jump_offset(ip));
                     }
                     continue 'run;
                 }
                 Op::ForRangeNext => {
                     if range_next(reg!(instr.a), instr.x == 1) {
-                        ip = ip.offset(instr.sbx());
+                        ip = ip.offset(jump_offset(ip));
                     }
                     continue 'run;
                 }
                 Op::ForList => {
                     if !list_next(reg!(instr.a), instr.x == 1, true) {
-                        ip = ip.offset(instr.sbx());
+                        ip = ip.offset(jump_offset(ip));
                     }
                     continue 'run;
                 }
                 Op::ForListNext => {
                     if list_next(reg!(instr.a), instr.x == 1, false) {
-                        ip = ip.offset(instr.sbx());
+                        ip = ip.offset(jump_offset(ip));
                     }
                     continue 'run;
                 }
