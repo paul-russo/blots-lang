@@ -126,14 +126,15 @@ unsafe fn store_value(dst: *mut Value, value: Value) {
         return;
     }
 
-    let words = (&raw const value).cast::<MaybeUninit<u64>>();
+    let mut words = [MaybeUninit::new(0u64); 2];
     let dst = dst.cast::<MaybeUninit<u64>>();
 
     // SAFETY: as in `copy_value`; the volatile writes keep the stores from being narrowed to
     // the bytes of the payload that are actually defined.
     unsafe {
-        dst.write_volatile(words.read());
-        dst.add(1).write_volatile(words.add(1).read());
+        (&raw mut words).cast::<Value>().write(value);
+        dst.write_volatile(words[0]);
+        dst.add(1).write_volatile(words[1]);
     }
 }
 
