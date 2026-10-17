@@ -60,6 +60,14 @@ const CALLBACK_DEPTH: i32 = 3;
 /// with a flag.
 const MAX_SELF_CALL_ARGS: usize = 127;
 
+/// A call with at most this many arguments evaluates them into consecutive registers; one
+/// with more gathers them in a list, so that the size of a call is not bounded by the number
+/// of registers a function has.
+const MAX_DIRECT_ARGS: usize = 255;
+
+/// The number of record layouts an instruction can tell apart.
+const MAX_LAYOUTS: usize = u16::MAX as usize + 1;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ScopeKind {
     /// The function body or chunk itself.
@@ -1598,8 +1606,8 @@ impl FnCompiler {
             .iter()
             .all(|entry| matches!(entry.node.key, RecordKey::Static(_)));
 
-        if all_static && entries.len() <= MAX_SHAPE_KEYS {
-            let first = self.free_reg;
+        // A function that has used up its layouts builds the rest of its records key by key.
+        if all_static && entries.len() <= MAX_SHAPE_KEYS && self.layouts.len() < MAX_LAYOUTS {
             let mut keys = IndexSet::new();
             let mut slots = Vec::with_capacity(entries.len());
 
@@ -1608,18 +1616,23 @@ impl FnCompiler {
                     let (slot, _) = keys.insert_full(key.clone());
                     slots.push(slot as u16);
                 }
-
-                let reg = self.alloc()?;
-                self.expr_into(&entry.node.value, reg)?;
             }
 
-            let layout =
-                u16::try_from(self.layouts.len()).map_err(|_| too_complex("too many records"))?;
+            // The layout takes its place before the values are compiled: they can hold record
+            // literals of their own, which may use up the layouts that are left.
+            let layout = self.layouts.len() as u16;
             self.layouts.push(RecordLayout {
                 distinct: keys.len() == slots.len(),
                 shape: Shape::interned(keys),
                 slots,
             });
+
+            let first = self.free_reg;
+            for entry in entries {
+                let reg = self.alloc()?;
+                self.expr_into(&entry.node.value, reg)?;
+            }
+
             self.emit(Instr::abc(Op::NewRecord, dst, first, layout));
             self.free_reg = mark;
 
@@ -1759,9 +1772,11 @@ impl FnCompiler {
         let func_reg = self.alloc()?;
         self.expr_into(func, func_reg)?;
 
-        if args.iter().any(|arg| matches!(arg.node, Expr::Spread(_))) {
-            // The argument count is only known at runtime: gather the (flattened) arguments in
-            // a list builder and call with its contents.
+        let has_spread = args.iter().any(|arg| matches!(arg.node, Expr::Spread(_)));
+        if has_spread || args.len() > MAX_DIRECT_ARGS {
+            // The argument count is only known at runtime, or there are more arguments than
+            // should be live in registers at once: gather the (flattened) arguments in a list
+            // builder and call with its contents.
             self.emit(Instr::abc(Op::ListBegin, 0, 0, 0));
 
             for batch in args.chunks(LIST_BATCH) {
@@ -1783,14 +1798,12 @@ impl FnCompiler {
 
         // The callee and its arguments occupy consecutive registers; the callee's frame is
         // laid directly over the arguments.
-        let arg_count =
-            u16::try_from(args.len()).map_err(|_| too_complex("too many call arguments"))?;
         for arg in args {
             let reg = self.alloc()?;
             self.expr_into(arg, reg)?;
         }
 
-        let mut instr = Instr::abc(Op::Call, func_reg, arg_count, dst);
+        let mut instr = Instr::abc(Op::Call, func_reg, args.len() as u16, dst);
         instr.x = args.iter().all(never_spread) as u8;
         self.emit_spanned(instr, span);
         self.free_reg = mark;

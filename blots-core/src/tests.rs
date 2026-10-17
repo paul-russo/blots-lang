@@ -2836,3 +2836,121 @@ mod list_arithmetic_tests {
         );
     }
 }
+
+// Programs far larger than anyone writes by hand (generated code, tables pasted in as
+// literals) must not run into the sizes of the instruction operands.
+#[cfg(test)]
+mod large_program_tests {
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code` and render the value of the last one.
+    fn evaluate(code: &str) -> Result<String, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+            result = evaluate_ast(
+                &expr,
+                Rc::clone(&heap),
+                Rc::clone(&bindings),
+                0,
+                Rc::clone(&source),
+            )?;
+        }
+
+        Ok(result.stringify_internal(&heap.borrow()))
+    }
+
+    fn assert_evaluates_to(code: &str, expected: &str) {
+        assert_eq!(evaluate(code).unwrap(), expected);
+    }
+
+    fn joined(count: usize, item: impl Fn(usize) -> String) -> String {
+        (0..count).map(item).collect::<Vec<_>>().join(", ")
+    }
+
+    #[test]
+    fn a_call_takes_more_arguments_than_a_function_has_registers() {
+        for count in [255, 256, 257, 1000, 70_000] {
+            let args = joined(count, |i| i.to_string());
+            let total = count * (count - 1) / 2;
+
+            assert_evaluates_to(&format!("sum({args})"), &total.to_string());
+            assert_evaluates_to(
+                &format!("f = (first, ...rest) => first + sum(rest)\nf({args})"),
+                &total.to_string(),
+            );
+            assert_evaluates_to(&format!("sum({args}, ...[1, 2])"), &(total + 3).to_string());
+        }
+    }
+
+    #[test]
+    fn a_call_with_many_arguments_is_checked_like_any_other() {
+        let args = joined(300, |i| i.to_string());
+
+        let error = evaluate(&format!("f = (a, b) => a + b\nf({args})"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("takes exactly 2 arguments, but 300 were given"),
+            "{error}"
+        );
+
+        let error = evaluate(&format!("typeof({args})"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("takes exactly 1 arguments, but 300 were given"),
+            "{error}"
+        );
+
+        let error = evaluate(&format!("f = 5\nf({args})"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("can't call a non-function: 5"), "{error}");
+    }
+
+    #[test]
+    fn a_function_builds_more_records_than_it_has_layouts() {
+        let count = 70_000;
+
+        let rows = joined(count, |i| format!("{{id: {i}, half: {i} / 2}}"));
+        assert_evaluates_to(
+            &format!("rows = [{rows}]\n[len(rows), rows[0].id, rows[69999].id, rows[69999].half]"),
+            "[70000, 0, 69999, 34999.5]",
+        );
+
+        // Each row takes two layouts, and the last one that is left goes to either the record
+        // or the record inside it, depending on how many came before.
+        let nested = joined(count, |i| format!("{{id: {i}, at: {{x: {i}, y: 1}}}}"));
+        for before in ["", "{z: 0}, "] {
+            assert_evaluates_to(
+                &format!(
+                    "rows = [{before}{nested}]\nlast = rows[-1]\n[rows[-37233], rows[-37232], last.at.x - last.id, last.at]"
+                ),
+                "[{id: 32767, at: {x: 32767, y: 1}}, {id: 32768, at: {x: 32768, y: 1}}, 0, {x: 69999, y: 1}]",
+            );
+        }
+
+        let distinct = joined(count, |i| format!("{{k{i}: {i}, k{i}: {i} + 1}}"));
+        assert_evaluates_to(
+            &format!(
+                "rows = [{distinct}]\n[len(rows), rows[1], rows[65535], rows[65536], rows[69999].k69999]"
+            ),
+            "[70000, {k1: 2}, {k65535: 65536}, {k65536: 65537}, 70000]",
+        );
+    }
+}
