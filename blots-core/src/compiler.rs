@@ -37,7 +37,7 @@ use crate::{
     values::{LambdaArg, Value},
 };
 use indexmap::IndexSet;
-use std::{cell::OnceCell, rc::Rc};
+use std::{borrow::Borrow, cell::OnceCell, collections::HashMap, hash::Hash, rc::Rc};
 
 type CResult<T> = Result<T, RuntimeError>;
 
@@ -67,6 +67,60 @@ const MAX_DIRECT_ARGS: usize = 255;
 
 /// The number of record layouts an instruction can tell apart.
 const MAX_LAYOUTS: usize = u16::MAX as usize + 1;
+
+/// A table of up to this many entries is searched from the start for an entry.
+const MAX_SCANNED_ENTRIES: usize = 16;
+
+/// The distinct strings or names an instruction of a function refers to by index, in the
+/// order they were first used.
+///
+/// Most functions refer to a handful, and comparing against each is the fastest way to find
+/// one. A table pasted into a program can hold tens of thousands of different strings,
+/// though, so a table that outgrows a scan is indexed.
+struct Table<T> {
+    entries: Vec<T>,
+
+    /// The position of every entry, once there are more than [`MAX_SCANNED_ENTRIES`].
+    positions: HashMap<T, u32>,
+}
+
+impl<T: Clone + Eq + Hash> Table<T> {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            positions: HashMap::new(),
+        }
+    }
+
+    /// The index of `entry`, which is added if the table does not hold it yet.
+    fn index_of<Q>(&mut self, entry: &Q) -> u32
+    where
+        T: Borrow<Q>,
+        Q: Eq + Hash + ToOwned<Owned = T> + ?Sized,
+    {
+        let next = self.entries.len() as u32;
+
+        if self.entries.len() <= MAX_SCANNED_ENTRIES {
+            let found = self.entries.iter().position(|own| own.borrow() == entry);
+            if let Some(position) = found {
+                return position as u32;
+            }
+        } else {
+            if self.positions.is_empty() {
+                self.positions = self.entries.iter().cloned().zip(0..).collect();
+            }
+
+            match self.positions.get(entry) {
+                Some(position) => return *position,
+                None => self.positions.insert(entry.to_owned(), next),
+            };
+        }
+
+        self.entries.push(entry.to_owned());
+
+        next
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ScopeKind {
@@ -544,8 +598,8 @@ struct FnCompiler {
     span_index: Vec<u32>,
     spans: Vec<Span>,
     consts: Vec<Value>,
-    strings: Vec<String>,
-    names: Vec<Symbol>,
+    strings: Table<String>,
+    names: Table<Symbol>,
     slot_refs: Vec<(u16, Symbol)>,
     self_refs: Vec<SelfRef>,
     lambdas: Vec<LambdaTemplate>,
@@ -588,8 +642,8 @@ impl FnCompiler {
             span_index: Vec::new(),
             spans: Vec::new(),
             consts: Vec::new(),
-            strings: Vec::new(),
-            names: Vec::new(),
+            strings: Table::new(),
+            names: Table::new(),
             slot_refs: Vec::new(),
             self_refs: Vec::new(),
             lambdas: Vec::new(),
@@ -635,8 +689,8 @@ impl FnCompiler {
         Proto {
             code: self.code,
             consts: self.consts,
-            strings: self.strings,
-            names: self.names,
+            strings: self.strings.entries,
+            names: self.names.entries,
             slot_refs: self.slot_refs,
             self_refs: self.self_refs,
             lambdas: self.lambdas,
@@ -744,21 +798,11 @@ impl FnCompiler {
     }
 
     fn string(&mut self, text: &str) -> u32 {
-        if let Some(index) = self.strings.iter().position(|existing| existing == text) {
-            return index as u32;
-        }
-
-        self.strings.push(text.to_string());
-        (self.strings.len() - 1) as u32
+        self.strings.index_of(text)
     }
 
     fn name(&mut self, name: Symbol) -> u32 {
-        if let Some(index) = self.names.iter().position(|existing| *existing == name) {
-            return index as u32;
-        }
-
-        self.names.push(name);
-        (self.names.len() - 1) as u32
+        self.names.index_of(&name)
     }
 
     /// The table index of a parameter or capture slot reference.

@@ -2924,6 +2924,41 @@ mod large_program_tests {
     }
 
     #[test]
+    fn a_function_refers_to_many_strings_and_names() {
+        // Every string and name is used twice: before and after the function has seen all of
+        // them.
+        for count in [3, 16, 17, 18, 40, 5000] {
+            let there_and_back = |item: &dyn Fn(usize) -> String| {
+                let there = joined(count, item);
+                let back = joined(count, |i| item(count - 1 - i));
+                format!("[{there}, {back}]")
+            };
+
+            assert_evaluates_to(
+                &there_and_back(&|i| format!("\"s{i}\"")),
+                &there_and_back(&|i| format!("s{i}")),
+            );
+
+            let fields = joined(count, |i| format!("f{i}: {i}"));
+            assert_evaluates_to(
+                &format!(
+                    "r = {{{fields}}}\n{}",
+                    there_and_back(&|i| format!("r.f{i}"))
+                ),
+                &there_and_back(&|i| i.to_string()),
+            );
+
+            let definitions = (0..count)
+                .map(|i| format!("v{i} = {i} * 2\n"))
+                .collect::<String>();
+            assert_evaluates_to(
+                &format!("{definitions}{}", there_and_back(&|i| format!("v{i}"))),
+                &there_and_back(&|i| (i * 2).to_string()),
+            );
+        }
+    }
+
+    #[test]
     fn a_function_builds_more_records_than_it_has_layouts() {
         let count = 70_000;
 
