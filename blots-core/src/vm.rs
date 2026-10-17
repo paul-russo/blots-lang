@@ -33,7 +33,13 @@ use crate::{
     record::{Record, RecordBuilder},
     values::{CapturedScope, LambdaArg, LambdaDef, Value},
 };
-use std::{cell::RefCell, hint::unreachable_unchecked, mem::MaybeUninit, ptr, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    hint::unreachable_unchecked,
+    mem::{self, MaybeUninit},
+    ptr,
+    rc::Rc,
+};
 
 /// A call made from a body that is itself nested this deep fails.
 const MAX_CALL_DEPTH: usize = 1000;
@@ -47,6 +53,10 @@ const MIN_STACK: usize = 1024;
 
 /// The smallest frame stack worth allocating.
 const MIN_FRAMES: usize = 32;
+
+/// The longest value stack that is kept for the next VM (see [`SPARE`]). One that grew beyond
+/// this did so for a deep recursion, and is given back rather than held on to.
+const MAX_SPARE_STACK: usize = 1 << 16;
 
 /// The call depth a frame's body runs at lives in these bits of [`Frame::meta`].
 const DEPTH_MASK: u64 = 0x7fff_ffff;
@@ -445,6 +455,21 @@ impl Frame {
     }
 }
 
+/// The stacks of a VM that has finished.
+struct Stacks {
+    values: Vec<Value>,
+    frames: Vec<Frame>,
+}
+
+thread_local! {
+    /// The stacks of the VM that was dropped last, for the next one to start out with.
+    ///
+    /// A program runs one statement at a time, each on a VM of its own, and a short statement
+    /// takes less time to run than a value stack takes to allocate and clear. What the stacks
+    /// still hold is of no consequence: a register is always written before it is read.
+    static SPARE: Cell<Option<Stacks>> = const { Cell::new(None) };
+}
+
 pub struct Vm {
     heap: Rc<RefCell<Heap>>,
 
@@ -488,9 +513,22 @@ pub struct Vm {
     profiles: Vec<CallProfile>,
 }
 
+impl Drop for Vm {
+    fn drop(&mut self) {
+        if self.stack.is_empty() || self.stack.len() > MAX_SPARE_STACK {
+            return;
+        }
+
+        SPARE.set(Some(Stacks {
+            values: mem::take(&mut self.stack),
+            frames: mem::take(&mut self.frames),
+        }));
+    }
+}
+
 impl Vm {
     pub fn new(heap: Rc<RefCell<Heap>>, bindings: Rc<Environment>) -> Self {
-        Self {
+        let mut vm = Self {
             heap,
             env: bindings,
             stack: Vec::new(),
@@ -506,6 +544,42 @@ impl Vm {
             profiling: crate::functions::is_profiling_enabled(),
             #[cfg(not(target_arch = "wasm32"))]
             profiles: Vec::new(),
+        };
+
+        if let Some(spare) = SPARE.take() {
+            vm.stack = spare.values;
+            vm.frames = spare.frames;
+            vm.point_at_stacks(0);
+        }
+
+        vm
+    }
+
+    /// Set the pointers into the value stack and the frame records after either was replaced,
+    /// with `frame_count` frames active.
+    fn point_at_stacks(&mut self, frame_count: usize) {
+        self.stack_limit = if self.is_profiling() || self.stack.len() < FAST_FRAME_SLOTS {
+            ptr::null_mut()
+        } else {
+            // SAFETY: the stack is at least as long as the headroom.
+            unsafe {
+                self.stack
+                    .as_mut_ptr()
+                    .add(self.stack.len() - FAST_FRAME_SLOTS)
+            }
+        };
+
+        if self.frames.is_empty() {
+            self.top = ptr::null_mut();
+            self.frame_limit = ptr::null_mut();
+            return;
+        }
+
+        // SAFETY: the records hold at least the placeholder and every active frame.
+        unsafe {
+            let start = self.frames.as_mut_ptr();
+            self.top = start.add(frame_count);
+            self.frame_limit = start.add(self.frames.len() - 1);
         }
     }
 
@@ -713,13 +787,7 @@ impl Vm {
         let count = self.frame_count();
         let len = (self.frames.len() * 2).max(MIN_FRAMES);
         self.frames.resize(len, NO_FRAME);
-
-        // SAFETY: the records hold at least the placeholder and every active frame.
-        unsafe {
-            let start = self.frames.as_mut_ptr();
-            self.top = start.add(count);
-            self.frame_limit = start.add(len - 1);
-        }
+        self.point_at_stacks(count);
     }
 
     /// Drop the innermost frame because its function returned, reporting whether it was
@@ -775,12 +843,7 @@ impl Vm {
             frame.base = unsafe { start.add(base) };
         }
 
-        self.stack_limit = if self.is_profiling() {
-            ptr::null_mut()
-        } else {
-            // SAFETY: the stack is longer than the headroom.
-            unsafe { start.add(len - FAST_FRAME_SLOTS) }
-        };
+        self.point_at_stacks(self.frame_count());
     }
 
     fn source_of(&self, frame: &Frame) -> Rc<str> {
