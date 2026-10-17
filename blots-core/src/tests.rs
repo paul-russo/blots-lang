@@ -2671,3 +2671,168 @@ mod slot_frame_tests {
         assert_eq!(result, Value::Number(134.0));
     }
 }
+
+// Tests pinning arithmetic over whole lists: a run of operators is evaluated in one pass over
+// the elements and may feed an aggregate function directly, and none of that is allowed to be
+// observable.
+#[cfg(test)]
+mod list_arithmetic_tests {
+    use crate::environment::Environment;
+    use crate::expressions::evaluate_pairs;
+    use crate::heap::Heap;
+    use crate::parser::{Rule, get_pairs};
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code` and render the value of the last one.
+    fn evaluate(code: &str) -> Result<String, crate::error::RuntimeError> {
+        let pairs = get_pairs(code).map_err(|e| crate::error::RuntimeError::new(e.to_string()))?;
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        let mut result = Value::Null;
+        for pair in pairs {
+            if pair.as_rule() != Rule::statement {
+                continue;
+            }
+
+            let Some(inner) = pair.into_inner().next() else {
+                continue;
+            };
+            if matches!(inner.as_rule(), Rule::expression | Rule::assignment) {
+                result = evaluate_pairs(
+                    inner.into_inner(),
+                    Rc::clone(&heap),
+                    Rc::clone(&bindings),
+                    0,
+                    code,
+                )?;
+            }
+        }
+
+        Ok(result.stringify_internal(&heap.borrow()))
+    }
+
+    fn assert_evaluates_to(code: &str, expected: &str) {
+        assert_eq!(evaluate(code).unwrap(), expected, "{code}");
+    }
+
+    #[test]
+    fn chains_match_the_operators_applied_one_at_a_time() {
+        assert_evaluates_to(
+            "xs = range(1, 6)\n(xs * 2 + 1) / 4",
+            "[0.75, 1.25, 1.75, 2.25, 2.75]",
+        );
+        assert_evaluates_to("xs = range(1, 6)\n10 - xs * xs % 7", "[9, 6, 8, 8, 6]");
+        assert_evaluates_to(
+            "xs = range(1, 6)\n2 ^ (xs - 1) - xs / 2",
+            "[0.5, 1, 2.5, 6, 13.5]",
+        );
+        assert_evaluates_to(
+            "xs = [1, 2, 3]\nys = [10, 20, 30]\n(xs + ys) * ys - xs / ys",
+            "[109.9, 439.9, 989.9]",
+        );
+    }
+
+    #[test]
+    fn chains_longer_than_a_block_of_elements_are_complete() {
+        assert_evaluates_to(
+            "xs = range(1000)\nys = xs * 2 + 1\n[len(ys), ys[0], ys[127], ys[128], ys[999]]",
+            "[1000, 1, 255, 257, 1999]",
+        );
+        assert_evaluates_to("xs = range(1000)\nsum(xs * 2 + 1)", "1000000");
+        assert_evaluates_to("xs = range(1000)\nsum((xs + xs) * xs % 7)", "2000");
+    }
+
+    #[test]
+    fn aggregates_of_chains_match_aggregates_of_lists() {
+        let cases = [
+            ("sum", "35"),
+            ("avg", "7"),
+            ("prod", "10395"),
+            ("min", "3"),
+            ("max", "11"),
+            ("median", "7"),
+            ("len", "5"),
+        ];
+        for (function, expected) in cases {
+            assert_evaluates_to(
+                &format!("xs = range(1, 6)\n{function}(xs * 2 + 1)"),
+                expected,
+            );
+            assert_evaluates_to(
+                &format!("xs = range(1, 6)\nys = xs * 2 + 1\n{function}(ys)"),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn aggregates_follow_floating_point_conventions() {
+        assert_evaluates_to("sum([0.1, 0.2, 0.3] * 1)", "0.6000000000000001");
+        assert_evaluates_to("max([1, 2, 3] * (0 / 0))", "-inf");
+        assert_evaluates_to("min([1, 2, 3] * (0 / 0))", "inf");
+        assert_evaluates_to("sum([1, 2, 3] * infinity - infinity)", "NaN");
+        assert_evaluates_to("1 / sum([0] * -1)", "-inf");
+        assert_evaluates_to("1 / prod([0, 5] * -1 + 0)", "-inf");
+    }
+
+    #[test]
+    fn operands_of_a_chain_keep_their_values() {
+        assert_evaluates_to(
+            "xs = [1, 2, 3]\nys = xs * 2 + 1\nzs = ys - xs\n[xs, ys, zs, sum(ys * 2 + xs)]",
+            "[[1, 2, 3], [3, 5, 7], [2, 3, 4], 36]",
+        );
+        assert_evaluates_to(
+            "f = t => do { a = t * 2; b = a + 1; c = (a - b) * 3 + a; return [sum(b * 2 + a), c, a, t] }\nf([1, 2, 3])",
+            "[42, [-1, 1, 3], [2, 4, 6], [1, 2, 3]]",
+        );
+    }
+
+    #[test]
+    fn empty_lists_reach_the_aggregate_as_lists() {
+        assert_evaluates_to("[] * 2 + 1", "[]");
+
+        let error = evaluate("sum([] * 2 + 1)").unwrap_err().to_string();
+        assert!(
+            error.contains("sum requires at least one number"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn values_that_are_not_numbers_take_the_general_path() {
+        assert_evaluates_to("[\"a\", \"b\"] + [\"c\", \"d\"]", "[ac, bd]");
+        assert_evaluates_to("[1, \"b\"] + [2, \"d\"]", "[3, bd]");
+
+        let error = evaluate("xs = [1, 2, \"x\"]\nsum(xs * 2 + 1)")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("expected a number, but got a string"),
+            "{error}"
+        );
+
+        let error = evaluate("xs = [1, 2, 3]\nsum((xs * 2 + 1) - [1, null, 3])")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("expected a number, but got a null"),
+            "{error}"
+        );
+
+        let error = evaluate("xs = [1, 2, 3]\nxs * 2 + [1, 2]")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("lists must be the same length"), "{error}");
+
+        let error = evaluate("xs = [1, 2, 3]\nsum(xs * 2 + 1, 4)")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("expected a number, but got a list"),
+            "{error}"
+        );
+    }
+}

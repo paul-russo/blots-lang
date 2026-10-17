@@ -57,7 +57,9 @@ pub(crate) enum Op {
     GetInput,
 
     // Binary operators: `R[a] = R[b] <op> R[c]`. Numbers take an inline fast path; everything
-    // else goes through the shared broadcasting implementation.
+    // else goes through the shared broadcasting implementation. On the arithmetic operators
+    // (in all three forms), `x` says which operand registers hold a temporary that nothing
+    // reads after this instruction (see [`LAST_USE_B`] and [`LAST_USE_C`]).
     Add,
     Sub,
     Mul,
@@ -260,6 +262,13 @@ const _: () = assert!(size_of::<Instr>() == size_of::<u64>());
 /// The VM keeps this many registers free above the highest frame base it accepts without
 /// checking, so a call into a frame no larger than this needs a single stack check.
 pub(crate) const FAST_FRAME_SLOTS: usize = 256;
+
+/// Set in `x` of an arithmetic instruction whose operand register `b` holds a temporary that
+/// this instruction is the last to read.
+pub(crate) const LAST_USE_B: u8 = 1;
+
+/// The same for operand register `c`.
+pub(crate) const LAST_USE_C: u8 = 2;
 
 impl Instr {
     pub fn abc(op: Op, a: u16, b: u16, c: u16) -> Self {

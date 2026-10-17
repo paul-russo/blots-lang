@@ -195,7 +195,14 @@ impl Vm {
             | Op::Via
             | Op::Into
             | Op::Where => {
-                let value = self.binary_slow(operator_of(instr.op), self.reg(b), self.reg(c))?;
+                let (lhs, rhs) = (self.reg(b), self.reg(c));
+
+                // SAFETY: the state of the loop is published, as `broadcast` needs it.
+                if (lhs.is_list() || rhs.is_list()) && unsafe { self.broadcast(instr) } {
+                    return Ok(Flow::Continue);
+                }
+
+                let value = self.binary_slow(operator_of(instr.op), lhs, rhs)?;
                 self.set_reg(a, value);
             }
             Op::Coalesce => {
@@ -222,14 +229,28 @@ impl Vm {
             | Op::LeK
             | Op::GtK
             | Op::GeK => {
+                let lhs = self.reg(b);
+
+                // SAFETY: the state of the loop is published, as `broadcast` needs it.
+                if lhs.is_list() && unsafe { self.broadcast(instr) } {
+                    return Ok(Flow::Continue);
+                }
+
                 let rhs = Value::Number(self.operand());
-                let value = self.binary_slow(operator_of(instr.op), self.reg(b), rhs)?;
+                let value = self.binary_slow(operator_of(instr.op), lhs, rhs)?;
                 self.set_reg(a, value);
                 self.skip(1);
             }
             Op::KAdd | Op::KSub | Op::KMul | Op::KDiv | Op::KMod | Op::KPow => {
+                let rhs = self.reg(b);
+
+                // SAFETY: the state of the loop is published, as `broadcast` needs it.
+                if rhs.is_list() && unsafe { self.broadcast(instr) } {
+                    return Ok(Flow::Continue);
+                }
+
                 let lhs = Value::Number(self.operand());
-                let value = self.binary_slow(operator_of(instr.op), lhs, self.reg(b))?;
+                let value = self.binary_slow(operator_of(instr.op), lhs, rhs)?;
                 self.set_reg(a, value);
                 self.skip(1);
             }

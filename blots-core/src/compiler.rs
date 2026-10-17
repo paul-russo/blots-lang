@@ -24,8 +24,8 @@ use crate::{
         BinaryOp, Commented, Expr, PostfixOp, RecordEntry, RecordKey, Span, SpannedExpr, UnaryOp,
     },
     bytecode::{
-        CaptureSource, FAST_FRAME_SLOTS, FieldCache, Handler, Instr, LambdaTemplate, LocalVar, Op,
-        Proto, RecordLayout, SelfRef, Wrap, binary_opcode,
+        CaptureSource, FAST_FRAME_SLOTS, FieldCache, Handler, Instr, LAST_USE_B, LAST_USE_C,
+        LambdaTemplate, LocalVar, Op, Proto, RecordLayout, SelfRef, Wrap, binary_opcode,
     },
     error::RuntimeError,
     functions::{BuiltInFunction, is_built_in_function},
@@ -1225,21 +1225,24 @@ impl FnCompiler {
             && let Some(constant) = Self::number_operand(right)
         {
             let left_reg = self.expr_any(left)?;
-            self.emit_spanned(Instr::abc(const_op, dst, left_reg, 0), span);
+            let mut instr = Instr::abc(const_op, dst, left_reg, 0);
+            instr.x = last_use_flags(op, left_reg >= mark, false);
+            self.emit_spanned(instr, span);
             self.emit_number(constant);
         } else if let Some(const_op) = const_lhs_opcode(op)
             && let Some(constant) = Self::number_operand(left)
         {
             let right_reg = self.expr_any(right)?;
-            self.emit_spanned(Instr::abc(const_op, dst, right_reg, 0), span);
+            let mut instr = Instr::abc(const_op, dst, right_reg, 0);
+            instr.x = last_use_flags(op, right_reg >= mark, false);
+            self.emit_spanned(instr, span);
             self.emit_number(constant);
         } else {
             let left_reg = self.expr_any(left)?;
             let right_reg = self.expr_any(right)?;
-            self.emit_spanned(
-                Instr::abc(binary_opcode(op), dst, left_reg, right_reg),
-                span,
-            );
+            let mut instr = Instr::abc(binary_opcode(op), dst, left_reg, right_reg);
+            instr.x = last_use_flags(op, left_reg >= mark, right_reg >= mark);
+            self.emit_spanned(instr, span);
         }
 
         self.free_reg = mark;
@@ -2006,6 +2009,26 @@ fn binary_span(left: &SpannedExpr, right: &SpannedExpr) -> Span {
         left.span.start_line,
         left.span.start_col,
     )
+}
+
+/// The `x` operand of the instruction for an arithmetic `op`: which of its operand registers
+/// `b` and `c` are temporaries that are released right after it. A register allocated for an
+/// operand is written by the code of that operand and read by this instruction alone.
+fn last_use_flags(op: BinaryOp, b: bool, c: bool) -> u8 {
+    let arithmetic = matches!(
+        op,
+        BinaryOp::Add
+            | BinaryOp::Subtract
+            | BinaryOp::Multiply
+            | BinaryOp::Divide
+            | BinaryOp::Modulo
+            | BinaryOp::Power
+    );
+    if !arithmetic {
+        return 0;
+    }
+
+    (if b { LAST_USE_B } else { 0 }) | (if c { LAST_USE_C } else { 0 })
 }
 
 /// The operand that is compared against a `null` literal, and whether the literal comes first.

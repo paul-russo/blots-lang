@@ -14,6 +14,7 @@
 //! This module holds the VM's state, its entry points and everything that does not run once
 //! per instruction; the instruction loop itself lives in [`run`].
 
+mod broadcast;
 mod run;
 mod step;
 
