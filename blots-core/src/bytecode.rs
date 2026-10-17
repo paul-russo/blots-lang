@@ -246,9 +246,169 @@ pub(crate) enum Op {
     ListPush,
 }
 
+/// Operand `a` of an instruction (see [`Op::registers`]).
+const OPERAND_A: u8 = 1;
+
+/// Operand `b` of an instruction.
+const OPERAND_B: u8 = 2;
+
+/// Operand `c` of an instruction.
+const OPERAND_C: u8 = 4;
+
+impl Op {
+    /// Which of the operands `a`, `b` and `c` of an instruction with this opcode name a
+    /// register.
+    const fn registers(self) -> u8 {
+        const A: u8 = OPERAND_A;
+        const B: u8 = OPERAND_B;
+        const C: u8 = OPERAND_C;
+
+        match self {
+            Op::Add
+            | Op::Sub
+            | Op::Mul
+            | Op::Div
+            | Op::Mod
+            | Op::Pow
+            | Op::Eq
+            | Op::Ne
+            | Op::Lt
+            | Op::Le
+            | Op::Gt
+            | Op::Ge
+            | Op::DotEq
+            | Op::DotNe
+            | Op::DotLt
+            | Op::DotLe
+            | Op::DotGt
+            | Op::DotGe
+            | Op::And
+            | Op::NaturalAnd
+            | Op::Or
+            | Op::NaturalOr
+            | Op::Via
+            | Op::Into
+            | Op::Where
+            | Op::Coalesce
+            | Op::Index => A | B | C,
+
+            Op::Move
+            | Op::AddK
+            | Op::SubK
+            | Op::MulK
+            | Op::DivK
+            | Op::ModK
+            | Op::PowK
+            | Op::EqK
+            | Op::NeK
+            | Op::LtK
+            | Op::LeK
+            | Op::GtK
+            | Op::GeK
+            | Op::KAdd
+            | Op::KSub
+            | Op::KMul
+            | Op::KDiv
+            | Op::KMod
+            | Op::KPow
+            | Op::EqNull
+            | Op::NeNull
+            | Op::Neg
+            | Op::Not
+            | Op::Factorial
+            | Op::NewList
+            | Op::NewRecord
+            | Op::GetField
+            | Op::Spread
+            | Op::RangePrep => A | B,
+
+            Op::Call | Op::CallList | Op::CallSelf | Op::TailSelf => A | C,
+
+            Op::JmpNotEq
+            | Op::JmpNotNe
+            | Op::JmpNotLt
+            | Op::JmpNotLe
+            | Op::JmpNotGt
+            | Op::JmpNotGe => B | C,
+
+            Op::LoadK
+            | Op::LoadNum
+            | Op::LoadStr
+            | Op::LoadUnbound
+            | Op::GetName
+            | Op::EnsureGlobal
+            | Op::GetCapture
+            | Op::GetCaptureRef
+            | Op::GetEnvParam
+            | Op::GetEnvCapture
+            | Op::GetInput
+            | Op::JmpNotEqK
+            | Op::JmpNotNeK
+            | Op::JmpNotLtK
+            | Op::JmpNotLeK
+            | Op::JmpNotGtK
+            | Op::JmpNotGeK
+            | Op::JmpNotEqNull
+            | Op::JmpNotNeNull
+            | Op::JmpIfFalse
+            | Op::Return
+            | Op::Closure
+            | Op::ListBegin
+            | Op::ListAppend
+            | Op::ListEnd
+            | Op::RecordSet
+            | Op::RecordKey
+            | Op::RecordValue
+            | Op::RecordSpread
+            | Op::RecordEnd
+            | Op::NameLambda
+            | Op::SetGlobal
+            | Op::ForRange
+            | Op::ForRangeNext
+            | Op::IterPrep
+            | Op::ForList
+            | Op::ForListNext
+            | Op::ListPush => A,
+
+            Op::Jmp
+            | Op::RecordBegin
+            | Op::Raise
+            | Op::CheckUnbound
+            | Op::AddDepth
+            | Op::CallbackDepth => 0,
+        }
+    }
+}
+
+/// A register operand counts the halves of a value between the frame's first register and
+/// the register it names.
+pub(crate) const REGISTER_SCALE: usize = 2;
+
+/// The number of registers a frame can address.
+pub(crate) const MAX_REGISTERS: usize = (u16::MAX as usize + 1) / REGISTER_SCALE;
+
+/// The operand that names register `index`.
+const fn register_operand(index: u16) -> u16 {
+    debug_assert!((index as usize) < MAX_REGISTERS);
+
+    index * REGISTER_SCALE as u16
+}
+
+/// The index of the register that `operand` names.
+#[inline(always)]
+pub(crate) const fn register_index(operand: u16) -> usize {
+    operand as usize / REGISTER_SCALE
+}
+
 /// A single instruction word. `x` is a small flag/extra operand, `a`, `b` and `c` are register,
 /// constant or table indices; `b` and `c` combine into the 32-bit operand `bx`. Some
 /// instructions are followed by a second code word holding a number operand.
+///
+/// An operand that names a register does not hold the register's index but twice that: the
+/// distance of the register from the first one of the frame, in halves of a value. A value is
+/// two machine words wide, and an address can be scaled by one word but not by two, so this
+/// is the form in which an operand locates its register without first being shifted. The
+/// constructors take register indices and do the conversion.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub(crate) struct Instr {
@@ -260,6 +420,7 @@ pub(crate) struct Instr {
 }
 
 const _: () = assert!(size_of::<Instr>() == size_of::<u64>());
+const _: () = assert!(size_of::<Value>() % REGISTER_SCALE == 0);
 
 /// The VM keeps this many registers free above the highest frame base it accepts without
 /// checking, so a call into a frame no larger than this needs a single stack check.
@@ -273,15 +434,37 @@ pub(crate) const LAST_USE_B: u8 = 1;
 pub(crate) const LAST_USE_C: u8 = 2;
 
 impl Instr {
+    /// An instruction with the operands `a`, `b` and `c`, where those that name a register
+    /// are given as its index.
     pub fn abc(op: Op, a: u16, b: u16, c: u16) -> Self {
-        Self { op, x: 0, a, b, c }
-    }
+        let registers = op.registers();
+        let operand = |value: u16, which: u8| match registers & which {
+            0 => value,
+            _ => register_operand(value),
+        };
 
-    pub fn abx(op: Op, a: u16, bx: u32) -> Self {
         Self {
             op,
             x: 0,
-            a,
+            a: operand(a, OPERAND_A),
+            b: operand(b, OPERAND_B),
+            c: operand(c, OPERAND_C),
+        }
+    }
+
+    /// An instruction with the operands `a` (a register index, if it names a register) and
+    /// `bx`.
+    pub fn abx(op: Op, a: u16, bx: u32) -> Self {
+        let registers = op.registers();
+        debug_assert!(registers & (OPERAND_B | OPERAND_C) == 0);
+
+        Self {
+            op,
+            x: 0,
+            a: match registers & OPERAND_A {
+                0 => a,
+                _ => register_operand(a),
+            },
             b: bx as u16,
             c: (bx >> 16) as u16,
         }
@@ -533,15 +716,22 @@ impl fmt::Debug for Proto {
         while pc < self.code.len() {
             // SAFETY: `pc` only ever lands on instruction words; number operands are skipped.
             let instr = unsafe { Instr::decode(self.code[pc]) };
+
+            // Register operands are shown as the register indices they stand for.
+            let registers = instr.op.registers();
+            let shown = |operand: u16, which: u8| match registers & which {
+                0 => operand as usize,
+                _ => register_index(operand),
+            };
             write!(
                 f,
                 "  {:4}  {:<14} x={} a={} b={} c={}",
                 pc,
                 format!("{:?}", instr.op),
                 instr.x,
-                instr.a,
-                instr.b,
-                instr.c
+                shown(instr.a, OPERAND_A),
+                shown(instr.b, OPERAND_B),
+                shown(instr.c, OPERAND_C)
             )?;
             pc += 1;
 

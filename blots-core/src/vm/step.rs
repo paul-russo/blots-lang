@@ -8,11 +8,11 @@
 
 use super::{
     Builder, CALLBACK_CALL_DEPTH, MAX_CALL_DEPTH, UNBOUND, Vm, depth_exceeded, is_unbound,
-    list_next, range_next, set_state, store_value,
+    list_next, range_next, register, set_state, store_value,
 };
 use crate::{
     ast::BinaryOp,
-    bytecode::{Instr, Op},
+    bytecode::{Instr, Op, register_index},
     error::RuntimeError,
     values::Value,
 };
@@ -79,25 +79,26 @@ impl Vm {
         }
     }
 
+    /// The value in the register of the innermost frame that `operand` names.
     #[inline(always)]
-    fn reg(&self, index: u16) -> Value {
-        // SAFETY: the compiler only emits register indices that lie within the frame.
-        unsafe { *self.top().base.add(index as usize) }
+    fn reg(&self, operand: u16) -> Value {
+        // SAFETY: the compiler only emits register operands that lie within the frame.
+        unsafe { *register(self.top().base, operand) }
     }
 
     /// Write a register of the innermost frame, wherever the value stack is by now.
     #[inline(always)]
-    fn set_reg(&mut self, index: u16, value: Value) {
+    fn set_reg(&mut self, operand: u16, value: Value) {
         // SAFETY: as in `reg`.
-        unsafe { store_value(self.top().base.add(index as usize), value) }
+        unsafe { store_value(register(self.top().base, operand), value) }
     }
 
     /// The address of a register of the innermost frame. It is only good until the next call
     /// that may grow the value stack.
     #[inline(always)]
-    fn reg_ptr(&self, index: u16) -> *mut Value {
+    fn reg_ptr(&self, operand: u16) -> *mut Value {
         // SAFETY: as in `reg`.
-        unsafe { self.top().base.add(index as usize) }
+        unsafe { register(self.top().base, operand) }
     }
 
     /// The number operand in the code word after the instruction being executed.
@@ -321,10 +322,10 @@ impl Vm {
                 }
             }
 
-            Op::Call => self.call_slow(a as usize, b as usize, c)?,
+            Op::Call => self.call_slow(register_index(a), b as usize, c)?,
             Op::CallList => {
-                let argc = self.place_list_args(a as usize);
-                self.call_slow(a as usize, argc, c)?;
+                let argc = self.place_list_args(register_index(a));
+                self.call_slow(register_index(a), argc, c)?;
             }
             Op::CallSelf | Op::TailSelf => {
                 // The function calls itself through its own name: the value the frame was
@@ -332,7 +333,7 @@ impl Vm {
                 // an ordinary call, whose result the following instruction returns.
                 let callee = self.top().this_value();
                 self.set_reg(a, callee);
-                self.call_slow(a as usize, (instr.x & 0x7f) as usize, c)?;
+                self.call_slow(register_index(a), (instr.x & 0x7f) as usize, c)?;
             }
             Op::Return => {
                 let value = self.reg(a);
@@ -355,7 +356,8 @@ impl Vm {
                 let value = self.new_list(self.reg_ptr(b), c as usize);
                 self.set_reg(a, value);
             }
-            Op::ListBegin => self.list_begin(instr.x, self.reg_ptr(a + 1)),
+            // SAFETY: the register after a loop state's first one lies within the frame.
+            Op::ListBegin => self.list_begin(instr.x, unsafe { self.reg_ptr(a).add(1) }),
             Op::ListAppend => self.list_append(self.reg_ptr(a), b as usize)?,
             Op::ListPush => {
                 let value = self.reg(a);
@@ -441,7 +443,9 @@ impl Vm {
                 }
             }
             Op::IterPrep => {
-                let (first, end) = self.iter_bounds(self.reg(a + 1))?;
+                // SAFETY: the loop state registers lie within the frame.
+                let list = unsafe { *self.reg_ptr(a).add(1) };
+                let (first, end) = self.iter_bounds(list)?;
                 let state = self.reg_ptr(a);
 
                 // SAFETY: the loop state registers lie within the frame.

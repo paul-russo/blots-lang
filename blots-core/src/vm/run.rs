@@ -11,10 +11,10 @@
 use super::{
     Builder, CALLBACK_CALL_DEPTH, DEPTH_MASK, ENTRY, Frame, MAX_CALL_DEPTH, NOT_TRUNCATED,
     PROFILED, TAIL_SHIFT, UNBOUND, Vm, copy_value, has_spread, is_unbound, less, less_eq,
-    list_next, range_next, step::Flow, store_value, truncate,
+    list_next, range_next, register, step::Flow, store_value, truncate,
 };
 use crate::{
-    bytecode::{Instr, Op, Proto},
+    bytecode::{Instr, Op, Proto, register_index},
     error::RuntimeError,
     expressions::modulo,
     heap::{Heap, HeapValue},
@@ -70,10 +70,11 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
         'run: loop {
             let instr = &*ip.cast::<Instr>();
 
+            // The register an operand of the instruction names.
             macro_rules! reg {
-                ($index:expr) => {{
-                    debug_assert!(($index as usize) < (*(*frame).proto).max_stack);
-                    base.add($index as usize)
+                ($operand:expr) => {{
+                    debug_assert!(register_index($operand) < (*(*frame).proto).max_stack);
+                    register(base, $operand)
                 }};
             }
 
@@ -376,16 +377,16 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 // A call to a user function whose code is already known and needs no argument
                 // adjustment only has to push a frame record.
                 Op::Call => {
-                    let a = instr.a as usize;
+                    let callee = reg!(instr.a);
                     let argc = instr.b as usize;
 
-                    if let Value::Lambda(pointer) = &*reg!(a)
+                    if let Value::Lambda(pointer) = &*callee
                         && let Some(HeapValue::Lambda(def)) = (*heap).get(pointer.index())
                         && let Some(code) = def.scope.code.get()
                     {
                         let def: *const LambdaDef = Rc::as_ptr(def);
                         let proto: *const Proto = Rc::as_ptr(code);
-                        let callee_base = base.add(a + 1);
+                        let callee_base = callee.add(1);
                         let meta = (*frame).meta;
 
                         if (*proto).fast_arity as usize == argc
@@ -409,7 +410,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 }
                 Op::CallSelf => {
                     let argc = (instr.x & 0x7f) as usize;
-                    let callee_base = base.add(instr.a as usize + 1);
+                    let callee_base = reg!(instr.a).add(1);
                     let meta = (*frame).meta;
 
                     // The low half of `meta` is the depth, plus a high bit when the function
@@ -437,7 +438,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 }
                 Op::TailSelf => {
                     let argc = (instr.x & 0x7f) as usize;
-                    let args = base.add(instr.a as usize + 1);
+                    let args = reg!(instr.a).add(1);
                     let meta = (*frame).meta;
 
                     if meta as u32 <= MAX_CALL_DEPTH as u32
@@ -464,7 +465,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                         ip = (*frame).ip;
                         let caller = (*frame).base;
                         let target = (*ip.sub(1).cast::<Instr>()).c;
-                        copy_value(caller.add(target as usize), value);
+                        copy_value(register(caller, target), value);
                         base = caller;
                         continue 'run;
                     }

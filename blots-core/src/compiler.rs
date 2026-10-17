@@ -25,7 +25,8 @@ use crate::{
     },
     bytecode::{
         CaptureSource, FAST_FRAME_SLOTS, FieldCache, Handler, Instr, LAST_USE_B, LAST_USE_C,
-        LambdaTemplate, LocalVar, Op, Proto, RecordLayout, SelfRef, Wrap, binary_opcode,
+        LambdaTemplate, LocalVar, MAX_REGISTERS, Op, Proto, RecordLayout, SelfRef, Wrap,
+        binary_opcode,
     },
     environment::Environment,
     error::RuntimeError,
@@ -706,7 +707,7 @@ impl FnCompiler {
 
     fn alloc(&mut self) -> CResult<u16> {
         let reg = self.free_reg;
-        if reg == u16::MAX {
+        if reg as usize >= MAX_REGISTERS {
             return Err(too_complex("too many values are live at once"));
         }
 

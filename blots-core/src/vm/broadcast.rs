@@ -15,9 +15,9 @@
 //! has. Arithmetic on numbers has no side effects, so giving up part of the way through a
 //! chain is invisible.
 
-use super::{MAX_CALL_DEPTH, Vm};
+use super::{MAX_CALL_DEPTH, Vm, register, store_value};
 use crate::{
-    bytecode::{Instr, LAST_USE_B, LAST_USE_C, Op},
+    bytecode::{Instr, LAST_USE_B, LAST_USE_C, Op, register_index},
     expressions::modulo,
     functions::{BuiltInFunction, product_of_nothing, sum_of_nothing},
     heap::{Heap, HeapValue},
@@ -269,27 +269,27 @@ impl Vm {
             Outcome::Number(number) => Value::Number(number),
         };
 
-        // SAFETY: `target` is a register of the innermost frame, and `resume` points at the
-        // instruction after the last one of the chain.
+        // SAFETY: `target` names a register of the innermost frame, and `resume` points at
+        // the instruction after the last one of the chain.
         unsafe {
-            super::store_value(self.top().base.add(target as usize), value);
+            store_value(register(self.top().base, target), value);
             (*self.top).ip = resume;
         }
 
         true
     }
 
-    /// Evaluate the chain that starts with `instr`: what it comes to, the register that gets
-    /// it, and where execution continues.
+    /// Evaluate the chain that starts with `instr`: what it comes to, the operand naming the
+    /// register that gets it, and where execution continues.
     ///
     /// # Safety
     /// As for [`Vm::broadcast`].
     unsafe fn evaluate_chain(&self, instr: Instr) -> Option<(Outcome, u16, *const u64)> {
         let (op, form) = arithmetic_of(instr.op)?;
         let frame = self.top();
-        let register = |index: u16| -> Value {
-            // SAFETY: the compiler only emits register indices that lie within the frame.
-            unsafe { *frame.base.add(index as usize) }
+        let value_in = |operand: u16| -> Value {
+            // SAFETY: the compiler only emits register operands that lie within the frame.
+            unsafe { *register(frame.base, operand) }
         };
 
         // SAFETY (for every read through `cursor` below): arithmetic instructions are
@@ -298,9 +298,9 @@ impl Vm {
         let mut cursor = frame.ip;
         let number_operand = |cursor: *const u64| Value::Number(f64::from_bits(unsafe { *cursor }));
         let (lhs, rhs) = match form {
-            Form::Registers => (register(instr.b), register(instr.c)),
-            Form::NumberRight => (register(instr.b), number_operand(cursor)),
-            Form::NumberLeft => (number_operand(cursor), register(instr.b)),
+            Form::Registers => (value_in(instr.b), value_in(instr.c)),
+            Form::NumberRight => (value_in(instr.b), number_operand(cursor)),
+            Form::NumberLeft => (number_operand(cursor), value_in(instr.b)),
         };
         if !matches!(form, Form::Registers) {
             cursor = unsafe { cursor.add(1) };
@@ -344,10 +344,10 @@ impl Vm {
             let takes = |operand: u16, flag: u8| operand == result && next.x & flag != 0;
             let (other, flipped) = match form {
                 Form::Registers if takes(next.b, LAST_USE_B) && next.c != result => {
-                    (register(next.c), false)
+                    (value_in(next.c), false)
                 }
                 Form::Registers if takes(next.c, LAST_USE_C) && next.b != result => {
-                    (register(next.b), true)
+                    (value_in(next.b), true)
                 }
                 Form::NumberRight if takes(next.b, LAST_USE_B) => {
                     (number_operand(unsafe { cursor.add(1) }), false)
@@ -398,11 +398,14 @@ impl Vm {
         Some((Outcome::List(map(source, steps)?), result, cursor))
     }
 
-    /// When `call` passes register `argument` (and nothing else) to a built-in that folds a
-    /// list of numbers, and would get as far as running it: the fold and the register the
-    /// call stores its result in.
+    /// When `call` passes the register that operand `argument` names (and nothing else) to a
+    /// built-in that folds a list of numbers, and would get as far as running it: the fold
+    /// and the operand naming the register the call stores its result in.
     fn fold_after(&self, call: Instr, argument: u16) -> Option<(Fold, u16)> {
-        if call.op != Op::Call || call.b != 1 || call.a as usize + 1 != argument as usize {
+        if call.op != Op::Call
+            || call.b != 1
+            || register_index(call.a) + 1 != register_index(argument)
+        {
             return None;
         }
 
@@ -412,8 +415,8 @@ impl Vm {
             return None;
         }
 
-        // SAFETY: the compiler only emits register indices that lie within the frame.
-        let Value::BuiltIn(built_in) = (unsafe { *frame.base.add(call.a as usize) }) else {
+        // SAFETY: the compiler only emits register operands that lie within the frame.
+        let Value::BuiltIn(built_in) = (unsafe { *register(frame.base, call.a) }) else {
             return None;
         };
 

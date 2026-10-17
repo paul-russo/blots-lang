@@ -20,7 +20,7 @@ mod step;
 
 use crate::{
     ast::{BinaryOp, Span},
-    bytecode::{CaptureSource, FAST_FRAME_SLOTS, Proto, Wrap},
+    bytecode::{CaptureSource, FAST_FRAME_SLOTS, Proto, REGISTER_SCALE, Wrap, register_index},
     compiler::{compile_lambda, compile_self_variant},
     environment::Environment,
     error::RuntimeError,
@@ -170,6 +170,17 @@ fn less_eq(x: f64, y: f64) -> Option<bool> {
     } else {
         None
     }
+}
+
+/// The register that `operand` names in the frame whose first register is `base` (see
+/// [`crate::bytecode::Instr`] for the form of an operand that names a register).
+///
+/// # Safety
+/// `operand` must name a register of that frame.
+#[inline(always)]
+unsafe fn register(base: *mut Value, operand: u16) -> *mut Value {
+    // SAFETY: guaranteed by the caller.
+    unsafe { base.byte_add(operand as usize * (size_of::<Value>() / REGISTER_SCALE)) }
 }
 
 /// The number in a register that is known to hold one.
@@ -1076,8 +1087,9 @@ impl Vm {
 
     /// Call the value in register `a` of the innermost frame (whose `ip` is saved) with the
     /// `argc` arguments that follow it. A built-in runs to completion and its result is
-    /// stored in register `dst`; for a user function a frame is pushed, to be run by the
-    /// caller. Either way the caller continues with the innermost frame.
+    /// stored in the register that operand `dst` names; for a user function a frame is
+    /// pushed, to be run by the caller. Either way the caller continues with the innermost
+    /// frame.
     #[inline(never)]
     fn call_slow(&mut self, a: usize, argc: usize, dst: u16) -> Result<(), RuntimeError> {
         let argc = self.flatten_args(a, argc)?;
@@ -1164,7 +1176,7 @@ impl Vm {
 
                 match result {
                     Ok(value) => {
-                        let target = self.slot_index(self.top().base) + dst as usize;
+                        let target = self.slot_index(self.top().base) + register_index(dst);
                         self.stack[target] = value;
 
                         Ok(())
