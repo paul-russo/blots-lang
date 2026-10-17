@@ -27,6 +27,7 @@ use crate::{
         CaptureSource, FAST_FRAME_SLOTS, FieldCache, Handler, Instr, LAST_USE_B, LAST_USE_C,
         LambdaTemplate, LocalVar, Op, Proto, RecordLayout, SelfRef, Wrap, binary_opcode,
     },
+    environment::Environment,
     error::RuntimeError,
     functions::{BuiltInFunction, is_built_in_function},
     heap::RecordPointer,
@@ -427,8 +428,18 @@ fn too_complex(what: &str) -> RuntimeError {
     RuntimeError::new(format!("expression is too complex to evaluate: {}", what))
 }
 
-/// Compile an expression evaluated directly against an environment (a top-level statement).
-pub(crate) fn compile_chunk(expr: &SpannedExpr, inline: bool) -> CResult<Rc<Proto>> {
+/// Compile an expression evaluated directly against `env` (a top-level statement). The code
+/// is only good for one run, against `env` as it is now.
+///
+/// A name that `env` binds keeps its value for as long as the chunk runs: nothing removes a
+/// binding, and an assignment to a name that is visible anywhere fails. So the chunk reads
+/// such names from registers that are loaded before it starts (see [`Proto::preloaded`]),
+/// and only the names that are still unbound are looked up, where the program reads them.
+pub(crate) fn compile_chunk(
+    expr: &SpannedExpr,
+    inline: bool,
+    env: &Environment,
+) -> CResult<Rc<Proto>> {
     let mut compiler = FnCompiler::new(true, Vec::new(), false, inline);
 
     let mut names = Vec::new();
@@ -436,6 +447,11 @@ pub(crate) fn compile_chunk(expr: &SpannedExpr, inline: bool) -> CResult<Rc<Prot
     for name in names {
         let reg = compiler.alloc()?;
         compiler.globals.push((name, reg));
+
+        if env.get(name).is_some() {
+            compiler.preloaded.push((reg, name));
+            compiler.ensured.push(name);
+        }
     }
 
     compiler.scopes.push(Scope {
@@ -542,7 +558,11 @@ struct FnCompiler {
     /// Chunk only: the cache register of each late-bound name.
     globals: Vec<(Symbol, u16)>,
 
+    /// Chunk only: the cache registers that are loaded before the chunk starts.
+    preloaded: Vec<(u16, Symbol)>,
+
     /// Chunk only: names whose cache register is known to be loaded at the current point.
+    /// The preloaded ones come first and stay for good.
     ensured: Vec<Symbol>,
 
     /// Whether higher-order built-in calls may be compiled as inline loops.
@@ -575,6 +595,7 @@ impl FnCompiler {
             params,
             simple_params,
             globals: Vec::new(),
+            preloaded: Vec::new(),
             ensured: Vec::new(),
             inline,
             self_target: None,
@@ -622,6 +643,7 @@ impl FnCompiler {
             simple_arity,
             fast_arity,
             cache_regs: self.globals.len(),
+            preloaded: self.preloaded,
             max_stack: self.max_reg as usize,
             body,
             args,

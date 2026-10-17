@@ -119,8 +119,8 @@ pub fn evaluate_ast(
     call_depth: usize,
     source: Rc<str>,
 ) -> Result<Value, RuntimeError> {
-    let mut vm = Vm::new(heap, bindings);
-    let chunk = compile_chunk(expr, vm.inlines_callbacks())?;
+    let mut vm = Vm::new(heap, Rc::clone(&bindings));
+    let chunk = compile_chunk(expr, vm.inlines_callbacks(), &bindings)?;
 
     vm.run_chunk(&chunk, source, call_depth)
 }

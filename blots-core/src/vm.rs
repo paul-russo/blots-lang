@@ -540,6 +540,15 @@ impl Vm {
         let base = 1;
         self.ensure_stack(base + chunk.max_stack);
         self.stack[base..base + chunk.cache_regs].fill(UNBOUND);
+
+        for (reg, name) in &chunk.preloaded {
+            // The chunk was compiled against the environment it runs in, where the name was
+            // bound; without a value in the register its code would read an unbound one.
+            let Some(value) = self.env.get(*name) else {
+                return Err(RuntimeError::new(format!("unknown identifier: {}", name)));
+            };
+            self.stack[base + *reg as usize] = value;
+        }
         self.chunk_source = Some(source);
 
         // SAFETY: the stack was just sized to hold the chunk's registers from `base` on.

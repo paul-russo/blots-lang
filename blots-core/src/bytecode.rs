@@ -37,6 +37,8 @@ pub(crate) enum Op {
     GetName,
     /// Chunk frames only: `if R[a] is unbound { R[a] = lookup of N[bx] in the boundary
     /// environment }`. The value is then read straight from `R[a]` for the rest of the chunk.
+    /// Names that are bound before the chunk starts need no such check (see
+    /// [`Proto::preloaded`]).
     EnsureGlobal,
     /// `R[a] = ` the value captured in slot `b`, which is that of slot reference `T[c]`. When
     /// the slot was unbound at closure creation this falls back to the frame's self-binding
@@ -489,6 +491,11 @@ pub(crate) struct Proto {
 
     /// Chunks only: the first `cache_regs` registers cache late-bound names and start unbound.
     pub cache_regs: usize,
+
+    /// Chunks only: the cache registers (and names) the code reads without checking them,
+    /// because the names were bound when the chunk was compiled. They are loaded before the
+    /// chunk runs.
+    pub preloaded: Vec<(u16, Symbol)>,
 
     /// Number of registers a frame running this proto needs.
     pub max_stack: usize,
