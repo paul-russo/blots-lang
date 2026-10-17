@@ -22,26 +22,27 @@ use crate::{
 };
 use std::rc::Rc;
 
-/// The jump offset of the instruction in the code word before `ip`.
+/// Where the jump in the code word at `at` leads: its offset counts from the following word.
 ///
-/// The offset is read from the code again, on its own, rather than taken out of the decoded
-/// instruction. That keeps the path from one instruction pointer to the next short (a single
-/// load), and since the compiler has to leave the load where it is, a conditional jump stays
-/// a branch the CPU can predict instead of becoming a conditional move, which would make
-/// fetching the next instruction wait for the operands of the comparison.
+/// The offset is read with a volatile load, which the compiler has to leave where it is. That
+/// keeps a conditional jump a branch the CPU can predict instead of turning it into a
+/// conditional move, which would make fetching the next instruction wait for the operands of
+/// the comparison.
 ///
 /// # Safety
-/// `ip` must point right after an instruction word.
+/// `at` must point at an instruction word whose jump offset leads to an instruction.
 #[inline(always)]
-unsafe fn jump_offset(ip: *const u64) -> isize {
+unsafe fn jump_target(at: *const u64) -> *const u64 {
     // SAFETY: guaranteed by the caller. `b` and `c`, which hold the offset, are the upper
     // half of the instruction word.
-    #[cfg(target_endian = "little")]
-    let offset = unsafe { ip.sub(1).cast::<i32>().add(1).read_volatile() as isize };
-    #[cfg(not(target_endian = "little"))]
-    let offset = unsafe { Instr::decode(ip.sub(1).read_volatile()).sbx() };
+    unsafe {
+        #[cfg(target_endian = "little")]
+        let offset = at.cast::<i32>().add(1).read_volatile() as isize;
+        #[cfg(not(target_endian = "little"))]
+        let offset = Instr::decode(at.read_volatile()).sbx();
 
-    offset
+        at.add(1).offset(offset)
+    }
 }
 
 /// Run the innermost frame of `vm`, and every frame it calls, until it returns or fails.
@@ -67,13 +68,28 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
         let mut base: *mut Value = (*frame).base;
 
         'run: loop {
-            let instr = Instr::decode(*ip);
-            ip = ip.add(1);
+            let instr = &*ip.cast::<Instr>();
 
             macro_rules! reg {
                 ($index:expr) => {{
                     debug_assert!(($index as usize) < (*(*frame).proto).max_stack);
                     base.add($index as usize)
+                }};
+            }
+
+            // The instruction is done: carry on `$words` code words further on.
+            macro_rules! next {
+                ($words:expr) => {{
+                    ip = ip.add($words);
+                    continue 'run;
+                }};
+            }
+
+            // The instruction is done: carry on where the jump in the code word at `$at` leads.
+            macro_rules! jump {
+                ($at:expr) => {{
+                    ip = jump_target($at);
+                    continue 'run;
                 }};
             }
 
@@ -85,7 +101,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     {
                         let ($x, $y) = (*$x, *$y);
                         reg!(instr.a).write(Value::Number($value));
-                        continue 'run;
+                        next!(1);
                     }
                 }};
             }
@@ -94,10 +110,9 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
             macro_rules! arithmetic_k {
                 (|$x:ident, $y:ident| $value:expr) => {{
                     if let Value::Number($x) = &*reg!(instr.b) {
-                        let ($x, $y) = (*$x, f64::from_bits(*ip));
+                        let ($x, $y) = (*$x, f64::from_bits(*ip.add(1)));
                         reg!(instr.a).write(Value::Number($value));
-                        ip = ip.add(1);
-                        continue 'run;
+                        next!(2);
                     }
                 }};
             }
@@ -106,10 +121,9 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
             macro_rules! k_arithmetic {
                 (|$x:ident, $y:ident| $value:expr) => {{
                     if let Value::Number($y) = &*reg!(instr.b) {
-                        let ($x, $y) = (f64::from_bits(*ip), *$y);
+                        let ($x, $y) = (f64::from_bits(*ip.add(1)), *$y);
                         reg!(instr.a).write(Value::Number($value));
-                        ip = ip.add(1);
-                        continue 'run;
+                        next!(2);
                     }
                 }};
             }
@@ -125,7 +139,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                         }
                     {
                         store_value(reg!(instr.a), Value::Bool(holds));
-                        continue 'run;
+                        next!(1);
                     }
                 }};
             }
@@ -135,13 +149,12 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 (|$x:ident, $y:ident| $holds:expr) => {{
                     if let Value::Number($x) = &*reg!(instr.b)
                         && let Some(holds) = {
-                            let ($x, $y) = (*$x, f64::from_bits(*ip));
+                            let ($x, $y) = (*$x, f64::from_bits(*ip.add(1)));
                             $holds
                         }
                     {
                         store_value(reg!(instr.a), Value::Bool(holds));
-                        ip = ip.add(1);
-                        continue 'run;
+                        next!(2);
                     }
                 }};
             }
@@ -151,7 +164,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     if let (Value::Bool($x), Value::Bool($y)) = (&*reg!(instr.b), &*reg!(instr.c)) {
                         let ($x, $y) = (*$x, *$y);
                         store_value(reg!(instr.a), Value::Bool($value));
-                        continue 'run;
+                        next!(1);
                     }
                 }};
             }
@@ -167,11 +180,10 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                             $holds
                         }
                     {
-                        ip = ip.add(1);
-                        if !holds {
-                            ip = ip.offset(jump_offset(ip));
+                        if holds {
+                            next!(2);
                         }
-                        continue 'run;
+                        jump!(ip.add(1));
                     }
                 }};
             }
@@ -182,16 +194,42 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 (|$x:ident, $y:ident| $holds:expr) => {{
                     if let Value::Number($x) = &*reg!(instr.a)
                         && let Some(holds) = {
-                            let ($x, $y) = (*$x, f64::from_bits(*ip));
+                            let ($x, $y) = (*$x, f64::from_bits(*ip.add(1)));
                             $holds
                         }
                     {
                         if holds {
-                            ip = ip.add(1);
-                        } else {
-                            ip = ip.offset(jump_offset(ip));
+                            next!(2);
                         }
-                        continue 'run;
+                        jump!(ip);
+                    }
+                }};
+            }
+
+            // `R[a] = (R[b] == null)` when `$null` is true, `R[a] = (R[b] != null)` otherwise.
+            // Comparing a list against `null` broadcasts over its elements.
+            macro_rules! null_test {
+                ($null:expr) => {{
+                    let operand = &*reg!(instr.b);
+
+                    if !matches!(operand, Value::List(_)) {
+                        let holds = matches!(operand, Value::Null) == $null;
+                        store_value(reg!(instr.a), Value::Bool(holds));
+                        next!(1);
+                    }
+                }};
+            }
+
+            // The fused compare-and-branch form of `null_test` on `R[a]`.
+            macro_rules! null_branch {
+                ($null:expr) => {{
+                    let operand = &*reg!(instr.a);
+
+                    if !matches!(operand, Value::List(_)) {
+                        if matches!(operand, Value::Null) == $null {
+                            next!(1);
+                        }
+                        jump!(ip);
                     }
                 }};
             }
@@ -205,26 +243,25 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
 
                 Op::Move => {
                     copy_value(reg!(instr.a), reg!(instr.b));
-                    continue 'run;
+                    next!(1);
                 }
                 Op::LoadK => {
                     let consts = &(*(*frame).proto).consts;
                     debug_assert!(instr.bx() < consts.len());
                     copy_value(reg!(instr.a), consts.as_ptr().add(instr.bx()));
-                    continue 'run;
+                    next!(1);
                 }
                 Op::LoadNum => {
-                    reg!(instr.a).write(Value::Number(f64::from_bits(*ip)));
-                    ip = ip.add(1);
-                    continue 'run;
+                    reg!(instr.a).write(Value::Number(f64::from_bits(*ip.add(1))));
+                    next!(2);
                 }
                 Op::LoadUnbound => {
                     store_value(reg!(instr.a), UNBOUND);
-                    continue 'run;
+                    next!(1);
                 }
                 Op::EnsureGlobal => {
                     if !is_unbound(&*reg!(instr.a)) {
-                        continue 'run;
+                        next!(1);
                     }
                 }
                 Op::GetCapture => {
@@ -232,7 +269,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
 
                     if let Some(value) = (*(*frame).def).scope.slot_ref(instr.b as usize) {
                         copy_value(reg!(instr.a), value);
-                        continue 'run;
+                        next!(1);
                     }
                 }
                 Op::GetCaptureRef => {
@@ -241,7 +278,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
 
                     if let Some(value) = (*(*frame).def).scope.slot_ref(slot as usize) {
                         copy_value(reg!(instr.a), value);
-                        continue 'run;
+                        next!(1);
                     }
                 }
 
@@ -266,11 +303,11 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                         (Value::List(_), _) | (_, Value::List(_)) => {}
                         (Value::Null, _) => {
                             copy_value(reg!(instr.a), rhs);
-                            continue 'run;
+                            next!(1);
                         }
                         _ => {
                             copy_value(reg!(instr.a), lhs);
-                            continue 'run;
+                            next!(1);
                         }
                     }
                 }
@@ -308,52 +345,31 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 Op::JmpNotGtK => branch_k!(|x, y| less(y, x)),
                 Op::JmpNotGeK => branch_k!(|x, y| less_eq(y, x)),
 
-                // Comparing a list against `null` broadcasts over its elements.
-                Op::EqNull | Op::NeNull => {
-                    let operand = &*reg!(instr.b);
-
-                    if !matches!(operand, Value::List(_)) {
-                        let is_null = matches!(operand, Value::Null);
-                        let holds = is_null == (instr.op == Op::EqNull);
-                        store_value(reg!(instr.a), Value::Bool(holds));
-                        continue 'run;
-                    }
-                }
-                Op::JmpNotEqNull | Op::JmpNotNeNull => {
-                    let operand = &*reg!(instr.a);
-
-                    if !matches!(operand, Value::List(_)) {
-                        let is_null = matches!(operand, Value::Null);
-                        if is_null != (instr.op == Op::JmpNotEqNull) {
-                            ip = ip.offset(jump_offset(ip));
-                        }
-                        continue 'run;
-                    }
-                }
+                Op::EqNull => null_test!(true),
+                Op::NeNull => null_test!(false),
+                Op::JmpNotEqNull => null_branch!(true),
+                Op::JmpNotNeNull => null_branch!(false),
 
                 Op::Neg => {
                     if let Value::Number(number) = &*reg!(instr.b) {
                         reg!(instr.a).write(Value::Number(-*number));
-                        continue 'run;
+                        next!(1);
                     }
                 }
                 Op::Not => {
                     if let Value::Bool(boolean) = &*reg!(instr.b) {
                         store_value(reg!(instr.a), Value::Bool(!*boolean));
-                        continue 'run;
+                        next!(1);
                     }
                 }
 
-                Op::Jmp => {
-                    ip = ip.offset(jump_offset(ip));
-                    continue 'run;
-                }
+                Op::Jmp => jump!(ip),
                 Op::JmpIfFalse => {
                     if let Value::Bool(holds) = &*reg!(instr.a) {
-                        if !*holds {
-                            ip = ip.offset(jump_offset(ip));
+                        if *holds {
+                            next!(1);
                         }
-                        continue 'run;
+                        jump!(ip);
                     }
                 }
 
@@ -379,7 +395,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                             && (meta & DEPTH_MASK) as usize <= MAX_CALL_DEPTH
                             && (instr.x == 1 || !has_spread(callee_base, argc))
                         {
-                            (*frame).ip = ip;
+                            (*frame).ip = ip.add(1);
                             frame = frame.add(1);
                             (*frame).base = callee_base;
                             (*frame).proto = proto;
@@ -408,13 +424,13 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                         copy_value(callee_base.sub(1), base.sub(1));
 
                         let (proto, def) = ((*frame).proto, (*frame).def);
-                        (*frame).ip = ip;
+                        (*frame).ip = ip.add(1);
                         frame = frame.add(1);
                         (*frame).base = callee_base;
                         (*frame).proto = proto;
                         (*frame).def = def;
                         (*frame).meta = (meta & DEPTH_MASK) + 1;
-                        ip = ip.sub(instr.b as usize);
+                        ip = ip.add(1).sub(instr.b as usize);
                         base = callee_base;
                         continue 'run;
                     }
@@ -433,8 +449,8 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                             copy_value(base.add(offset), args.add(offset));
                         }
                         (*frame).meta = meta + 1 + (1 << TAIL_SHIFT);
-                        (*frame).tail_ip = ip;
-                        ip = ip.sub(instr.b as usize);
+                        (*frame).tail_ip = ip.add(1);
+                        ip = ip.add(1).sub(instr.b as usize);
                         continue 'run;
                     }
                 }
@@ -442,11 +458,12 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     if (*frame).meta & (ENTRY | PROFILED) == 0 {
                         let value = reg!(instr.a);
 
-                        // The result goes where the call instruction of the caller wants it.
+                        // The result goes where the call instruction of the caller wants it,
+                        // and the caller carries on after that instruction.
                         frame = frame.sub(1);
                         ip = (*frame).ip;
                         let caller = (*frame).base;
-                        let target = Instr::decode(*ip.sub(1)).c;
+                        let target = (*ip.sub(1).cast::<Instr>()).c;
                         copy_value(caller.add(target as usize), value);
                         base = caller;
                         continue 'run;
@@ -460,7 +477,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                         let len = list.len();
                         copy_value(list.as_mut_ptr().add(len), reg!(instr.a));
                         list.set_len(len + 1);
-                        continue 'run;
+                        next!(1);
                     }
                 }
 
@@ -480,7 +497,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                             Some(item) => copy_value(reg!(instr.a), item),
                             None => store_value(reg!(instr.a), Value::Null),
                         }
-                        continue 'run;
+                        next!(1);
                     }
                 }
                 Op::GetField => {
@@ -499,61 +516,92 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                         if Rc::as_ptr(record.shape()) == cache.shape.get() {
                             debug_assert!(position < record.len());
                             copy_value(reg!(instr.a), record.as_slice().as_ptr().add(position));
-                            continue 'run;
+                            next!(1);
                         }
 
                         if let Some((key, value)) = record.get_index(position)
                             && *key == proto.fields[site]
                         {
                             copy_value(reg!(instr.a), value);
-                            continue 'run;
+                            next!(1);
                         }
                     }
                 }
 
                 Op::AddDepth => {
                     (*frame).meta = (*frame).meta.wrapping_add(instr.sbx() as u64);
-                    continue 'run;
+                    next!(1);
                 }
                 Op::CallbackDepth => {
                     let depth = ((*frame).meta & DEPTH_MASK) as usize;
                     if depth + CALLBACK_CALL_DEPTH <= MAX_CALL_DEPTH {
-                        continue 'run;
+                        next!(1);
                     }
                 }
                 Op::ForRange => {
-                    if !range_next(reg!(instr.a), instr.x == 1) {
-                        ip = ip.offset(jump_offset(ip));
+                    if range_next(reg!(instr.a), instr.x == 1) {
+                        next!(1);
                     }
-                    continue 'run;
+                    jump!(ip);
                 }
                 Op::ForRangeNext => {
                     if range_next(reg!(instr.a), instr.x == 1) {
-                        ip = ip.offset(jump_offset(ip));
+                        jump!(ip);
                     }
-                    continue 'run;
+                    next!(1);
                 }
                 Op::ForList => {
-                    if !list_next(reg!(instr.a), instr.x == 1, true) {
-                        ip = ip.offset(jump_offset(ip));
+                    if list_next(reg!(instr.a), instr.x == 1, true) {
+                        next!(1);
                     }
-                    continue 'run;
+                    jump!(ip);
                 }
                 Op::ForListNext => {
                     if list_next(reg!(instr.a), instr.x == 1, false) {
-                        ip = ip.offset(jump_offset(ip));
+                        jump!(ip);
                     }
-                    continue 'run;
+                    next!(1);
                 }
 
-                _ => {}
+                // These always take a call into the rest of the VM. Naming them, instead of
+                // leaving them to a wildcard, tells the compiler that every opcode has an arm,
+                // so the jump to the arm needs no range check.
+                Op::LoadStr
+                | Op::GetName
+                | Op::GetEnvParam
+                | Op::GetEnvCapture
+                | Op::GetInput
+                | Op::Via
+                | Op::Into
+                | Op::Where
+                | Op::Factorial
+                | Op::CallList
+                | Op::Closure
+                | Op::NewList
+                | Op::ListBegin
+                | Op::ListAppend
+                | Op::ListEnd
+                | Op::NewRecord
+                | Op::RecordBegin
+                | Op::RecordSet
+                | Op::RecordKey
+                | Op::RecordValue
+                | Op::RecordSpread
+                | Op::RecordEnd
+                | Op::Spread
+                | Op::Raise
+                | Op::CheckUnbound
+                | Op::NameLambda
+                | Op::SetGlobal
+                | Op::RangePrep
+                | Op::IterPrep => {}
             }
 
             // Whatever the fast paths above do not cover.
-            (*frame).ip = ip;
+            (*frame).ip = ip.add(1);
             (*vm).top = frame;
 
-            match (*vm).step(instr) {
+            match (*vm).step(*instr) {
                 Ok(Flow::Continue) => {}
                 Ok(Flow::Finished(value)) => return Ok(value),
                 Err(error) => return Err(error),
