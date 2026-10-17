@@ -1,3 +1,4 @@
+mod allocator;
 mod cli;
 mod commands;
 mod highlighter;
@@ -28,6 +29,9 @@ use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
 use std::rc::Rc;
 use std::sync::LazyLock;
+
+#[global_allocator]
+static ALLOCATOR: allocator::Allocator = allocator::Allocator;
 
 static ARGS: LazyLock<Args> = LazyLock::new(Args::parse);
 
