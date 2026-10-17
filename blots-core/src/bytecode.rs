@@ -9,12 +9,12 @@
 use crate::{
     ast::{BinaryOp, Span, SpannedExpr},
     intern::Symbol,
+    record::Shape,
     values::{LambdaArg, Value},
 };
-use indexmap::IndexMap;
 use std::{
     cell::{Cell, OnceCell},
-    fmt,
+    fmt, ptr,
     rc::Rc,
 };
 
@@ -180,7 +180,7 @@ pub(crate) enum Op {
     /// `R[a] = ` the finished list.
     ListEnd,
 
-    /// `R[a] = ` record of shape `H[c]` with the values `R[b], R[b+1], ...`
+    /// `R[a] = ` record of layout `H[c]` with the values `R[b], R[b+1], ...`
     NewRecord,
     /// Start building a record.
     RecordBegin,
@@ -386,13 +386,38 @@ pub(crate) struct LambdaTemplate {
 
 /// The layout of a record literal whose keys are all static.
 #[derive(Debug)]
-pub(crate) struct Shape {
-    /// A record holding every distinct key in first-occurrence order.
-    pub template: IndexMap<String, Value>,
+pub(crate) struct RecordLayout {
+    /// Every distinct key in first-occurrence order. This is the canonical shape of those
+    /// keys, so every record built from literals with the same keys shares it.
+    pub shape: Rc<Shape>,
 
-    /// For each entry of the literal, the position of its key in `template` (a repeated key
+    /// For each entry of the literal, the position of its key in `shape` (a repeated key
     /// maps to the position of its first occurrence, which later entries overwrite).
     pub slots: Vec<u16>,
+
+    /// Whether no key is repeated, so that entry `i` of the literal is the value at
+    /// position `i`.
+    pub distinct: bool,
+}
+
+/// What a `GetField` access site remembers about the last record it found its field in.
+#[derive(Debug)]
+pub(crate) struct FieldCache {
+    /// The shape of that record if it is a canonical one, null otherwise. Canonical shapes
+    /// are never freed, so the address is enough to recognise the shape again.
+    pub shape: Cell<*const Shape>,
+
+    /// The position the field was found at.
+    pub position: Cell<u32>,
+}
+
+impl FieldCache {
+    pub fn new() -> Self {
+        Self {
+            shape: Cell::new(ptr::null()),
+            position: Cell::new(0),
+        }
+    }
 }
 
 /// A capture a function calls with exactly its own (all required) parameters. When the
@@ -419,7 +444,7 @@ pub(crate) struct Proto {
     /// Parameter and capture slot references: the slot index and the name to fall back to.
     pub slot_refs: Vec<(u16, Symbol)>,
     pub lambdas: Vec<LambdaTemplate>,
-    pub shapes: Vec<Shape>,
+    pub layouts: Vec<RecordLayout>,
 
     /// The field name of each `GetField` access site.
     pub fields: Vec<String>,
@@ -431,9 +456,8 @@ pub(crate) struct Proto {
     pub locals: Vec<LocalVar>,
     pub handlers: Vec<Handler>,
 
-    /// One inline-cache slot per `GetField` access site: the entry index at which the field
-    /// was last found.
-    pub field_caches: Vec<Cell<u32>>,
+    /// One inline cache per `GetField` access site.
+    pub field_caches: Vec<FieldCache>,
 
     /// Parameter names in declaration order; parameter `i` lives in register `i`.
     pub params: Vec<Symbol>,

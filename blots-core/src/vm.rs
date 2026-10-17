@@ -29,9 +29,9 @@ use crate::{
         CONSTANTS, Heap, HeapPointer, HeapValue, IterablePointer, LambdaPointer, StringPointer,
     },
     intern::{Symbol, inputs_symbol},
+    record::{Record, RecordBuilder},
     values::{CapturedScope, LambdaArg, LambdaDef, Value},
 };
-use indexmap::IndexMap;
 use std::{cell::RefCell, hint::unreachable_unchecked, mem::MaybeUninit, ptr, rc::Rc};
 
 /// A call made from a body that is itself nested this deep fails.
@@ -300,7 +300,7 @@ fn depth_exceeded(function_name: &str) -> RuntimeError {
 /// under their positions, records contribute their entries.
 fn spread_into_record(
     heap: &Rc<RefCell<Heap>>,
-    entries: &mut IndexMap<String, Value>,
+    entries: &mut RecordBuilder,
     iterable: IterablePointer,
 ) -> Result<(), RuntimeError> {
     match iterable {
@@ -332,7 +332,7 @@ fn spread_into_record(
 enum Builder {
     List(Vec<Value>),
     Record {
-        entries: IndexMap<String, Value>,
+        entries: RecordBuilder,
 
         /// The evaluated key of a `[key]: value` entry whose value is being computed.
         key: Option<String>,
@@ -1537,23 +1537,35 @@ impl Vm {
         self.heap.borrow_mut().insert_list(list)
     }
 
-    /// Build a record of shape `index` of the innermost frame's proto from the consecutive
+    /// Build a record of layout `index` of the innermost frame's proto from the consecutive
     /// registers starting at `first`.
     #[inline(never)]
     fn new_record(&mut self, index: usize, first: *const Value) -> Value {
-        let shape = &self.top().proto().shapes[index];
-        let mut entries = shape.template.clone();
+        let layout = &self.top().proto().layouts[index];
+        let count = layout.shape.len();
+        let mut values: Vec<Value> = Vec::with_capacity(count);
 
-        for (offset, slot) in shape.slots.iter().enumerate() {
-            // SAFETY: the values are consecutive registers of the innermost frame, one per
-            // entry of the shape.
-            unsafe { copy_value(&mut entries[*slot as usize], first.add(offset)) };
+        // SAFETY: the values are consecutive registers of the innermost frame, one per entry
+        // of the layout, and every position of the shape is the slot of at least one entry.
+        unsafe {
+            if layout.distinct {
+                for offset in 0..count {
+                    copy_value(values.as_mut_ptr().add(offset), first.add(offset));
+                }
+            } else {
+                for (offset, slot) in layout.slots.iter().enumerate() {
+                    copy_value(values.as_mut_ptr().add(*slot as usize), first.add(offset));
+                }
+            }
+            values.set_len(count);
         }
 
-        self.heap.borrow_mut().insert_record(entries)
+        let record = Record::new(Rc::clone(&layout.shape), values.into_boxed_slice());
+
+        self.heap.borrow_mut().insert_record(record)
     }
 
-    fn record_builder(&mut self) -> (&mut IndexMap<String, Value>, &mut Option<String>) {
+    fn record_builder(&mut self) -> (&mut RecordBuilder, &mut Option<String>) {
         match self.builders.last_mut() {
             Some(Builder::Record { entries, key }) => (entries, key),
             _ => unreachable!("no record is being built"),
@@ -1563,7 +1575,7 @@ impl Vm {
     #[inline(never)]
     fn record_begin(&mut self) {
         self.builders.push(Builder::Record {
-            entries: IndexMap::new(),
+            entries: RecordBuilder::default(),
             key: None,
         });
     }
@@ -1605,7 +1617,7 @@ impl Vm {
             unreachable!("no record is being built");
         };
 
-        self.heap.borrow_mut().insert_record(entries)
+        self.heap.borrow_mut().insert_record(entries.finish())
     }
 
     #[inline(never)]
@@ -1662,7 +1674,14 @@ impl Vm {
         let Some((position, _, value)) = record.get_full(&proto.fields[site]) else {
             return Ok(Value::Null);
         };
-        proto.field_caches[site].set(position as u32);
+
+        let cache = &proto.field_caches[site];
+        let shape = record.shape();
+        cache.position.set(position as u32);
+        cache.shape.set(match shape.is_interned() {
+            true => Rc::as_ptr(shape),
+            false => ptr::null(),
+        });
 
         Ok(*value)
     }

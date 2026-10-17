@@ -1,4 +1,5 @@
 use crate::environment::Environment;
+use crate::record::Record;
 use crate::values::{LambdaDef, PrimitiveValue, ReifiedIterableValue, Value};
 use anyhow::{Result, anyhow};
 use indexmap::IndexMap;
@@ -44,7 +45,7 @@ pub enum HeapValue {
     /// (e.g. higher-order builtins and broadcasting loops) clones a pointer, not the elements.
     List(Rc<Vec<Value>>),
     String(String),
-    Record(IndexMap<String, Value>),
+    Record(Record),
 
     /// Lambda definitions are shared via `Rc` so that resolving a callee for a call expression
     /// hands out a pointer to the definition instead of copying it field by field.
@@ -84,7 +85,7 @@ impl HeapValue {
         }
     }
 
-    pub fn as_record(&self) -> Result<&IndexMap<String, Value>> {
+    pub fn as_record(&self) -> Result<&Record> {
         match self {
             HeapValue::Record(record) => Ok(record),
             _ => Err(anyhow!("expected a list, but got a {}", self.get_type())),
@@ -151,10 +152,9 @@ impl Heap {
         };
         s.insert_record(
             CONSTANTS
-                .clone()
-                .into_iter()
-                .map(|(k, v)| (k, v.into()))
-                .collect(),
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::from(*v)))
+                .collect::<Record>(),
         );
 
         s
@@ -177,8 +177,10 @@ impl Heap {
         Value::String(StringPointer::new(self.insert(HeapValue::String(string))))
     }
 
-    pub fn insert_record(&mut self, record: IndexMap<String, Value>) -> Value {
-        Value::Record(RecordPointer::new(self.insert(HeapValue::Record(record))))
+    pub fn insert_record(&mut self, record: impl Into<Record>) -> Value {
+        Value::Record(RecordPointer::new(
+            self.insert(HeapValue::Record(record.into())),
+        ))
     }
 
     pub fn insert_lambda(&mut self, lambda: LambdaDef) -> Value {
@@ -404,7 +406,7 @@ fn approx_heap_value_bytes(value: &HeapValue) -> usize {
     let payload = match value {
         HeapValue::List(items) => items.len() * size_of::<Value>(),
         HeapValue::String(string) => string.len(),
-        HeapValue::Record(record) => record.len() * (size_of::<String>() + size_of::<Value>() + 16),
+        HeapValue::Record(record) => record.len() * size_of::<Value>() + 16,
         HeapValue::Lambda(def) => 64 + def.scope.len() * (size_of::<Value>() + size_of::<usize>()),
     };
 

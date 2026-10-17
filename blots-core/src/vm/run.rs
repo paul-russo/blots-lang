@@ -490,9 +490,19 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     {
                         let site = instr.c as usize | (instr.x as usize) << 16;
                         let proto = &*(*frame).proto;
-                        let cached = proto.field_caches[site].get() as usize;
+                        debug_assert!(site < proto.field_caches.len());
+                        let cache = proto.field_caches.get_unchecked(site);
+                        let position = cache.position.get() as usize;
 
-                        if let Some((key, value)) = record.get_index(cached)
+                        // A record of the shape seen last time has the field in the same
+                        // place. Shapes that are not canonical are told apart by the key.
+                        if Rc::as_ptr(record.shape()) == cache.shape.get() {
+                            debug_assert!(position < record.len());
+                            copy_value(reg!(instr.a), record.as_slice().as_ptr().add(position));
+                            continue 'run;
+                        }
+
+                        if let Some((key, value)) = record.get_index(position)
                             && *key == proto.fields[site]
                         {
                             copy_value(reg!(instr.a), value);

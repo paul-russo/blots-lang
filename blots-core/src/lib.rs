@@ -15,6 +15,7 @@ pub mod heap;
 pub mod intern;
 pub mod parser;
 pub mod precedence;
+pub mod record;
 pub mod stats;
 pub mod tests;
 pub mod units;

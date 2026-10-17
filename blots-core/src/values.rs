@@ -16,6 +16,7 @@ use crate::{
         StringPointer,
     },
     intern::Symbol,
+    record::Record,
 };
 
 /// Format a number for display output, matching the JS displayNumber function:
@@ -498,7 +499,7 @@ pub struct WithHeap<'h, T> {
 pub enum ReifiedIterableValue<'h> {
     List(&'h Vec<Value>),
     String(&'h String),
-    Record(&'h IndexMap<String, Value>),
+    Record(&'h Record),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -604,7 +605,7 @@ pub enum ReifiedValue<'h> {
     /// A string is a sequence of characters.
     String(&'h str, StringPointer),
     /// A record is a collection of key-value pairs.
-    Record(&'h IndexMap<String, Value>, RecordPointer),
+    Record(&'h Record, RecordPointer),
     /// A lambda is a function definition.
     Lambda(&'h LambdaDef, LambdaPointer),
     /// A spread value is "spread" into its container when it is used in a list, record, or function call. (internal only)
@@ -1190,7 +1191,7 @@ impl Value {
         }
     }
 
-    pub fn as_record<'h>(&self, heap: &'h Heap) -> Result<&'h IndexMap<String, Value>> {
+    pub fn as_record<'h>(&self, heap: &'h Heap) -> Result<&'h Record> {
         match self {
             Value::Record(r) => r.reify(heap).as_record(),
             _ => Err(anyhow!("expected a record, but got a {}", self.get_type())),

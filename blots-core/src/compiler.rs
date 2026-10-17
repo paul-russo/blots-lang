@@ -24,20 +24,18 @@ use crate::{
         BinaryOp, Commented, Expr, PostfixOp, RecordEntry, RecordKey, Span, SpannedExpr, UnaryOp,
     },
     bytecode::{
-        CaptureSource, FAST_FRAME_SLOTS, Handler, Instr, LambdaTemplate, LocalVar, Op, Proto,
-        SelfRef, Shape, Wrap, binary_opcode,
+        CaptureSource, FAST_FRAME_SLOTS, FieldCache, Handler, Instr, LambdaTemplate, LocalVar, Op,
+        Proto, RecordLayout, SelfRef, Wrap, binary_opcode,
     },
     error::RuntimeError,
     functions::{BuiltInFunction, is_built_in_function},
     heap::RecordPointer,
     intern::Symbol,
+    record::Shape,
     values::{LambdaArg, Value},
 };
-use indexmap::IndexMap;
-use std::{
-    cell::{Cell, OnceCell},
-    rc::Rc,
-};
+use indexmap::IndexSet;
+use std::{cell::OnceCell, rc::Rc};
 
 type CResult<T> = Result<T, RuntimeError>;
 
@@ -526,7 +524,7 @@ struct FnCompiler {
     slot_refs: Vec<(u16, Symbol)>,
     self_refs: Vec<SelfRef>,
     lambdas: Vec<LambdaTemplate>,
-    shapes: Vec<Shape>,
+    layouts: Vec<RecordLayout>,
     fields: Vec<String>,
     locals: Vec<LocalVar>,
     handlers: Vec<Handler>,
@@ -566,7 +564,7 @@ impl FnCompiler {
             slot_refs: Vec::new(),
             self_refs: Vec::new(),
             lambdas: Vec::new(),
-            shapes: Vec::new(),
+            layouts: Vec::new(),
             fields: Vec::new(),
             locals: Vec::new(),
             handlers: Vec::new(),
@@ -612,8 +610,8 @@ impl FnCompiler {
             slot_refs: self.slot_refs,
             self_refs: self.self_refs,
             lambdas: self.lambdas,
-            shapes: self.shapes,
-            field_caches: self.fields.iter().map(|_| Cell::new(u32::MAX)).collect(),
+            layouts: self.layouts,
+            field_caches: self.fields.iter().map(|_| FieldCache::new()).collect(),
             fields: self.fields,
             span_index: self.span_index,
             spans: self.spans,
@@ -1576,12 +1574,12 @@ impl FnCompiler {
 
         if all_static && entries.len() <= MAX_SHAPE_KEYS {
             let first = self.free_reg;
-            let mut template = IndexMap::new();
+            let mut keys = IndexSet::new();
             let mut slots = Vec::with_capacity(entries.len());
 
             for entry in entries {
                 if let RecordKey::Static(key) = &entry.node.key {
-                    let (slot, _) = template.insert_full(key.clone(), Value::Null);
+                    let (slot, _) = keys.insert_full(key.clone());
                     slots.push(slot as u16);
                 }
 
@@ -1589,10 +1587,14 @@ impl FnCompiler {
                 self.expr_into(&entry.node.value, reg)?;
             }
 
-            let shape =
-                u16::try_from(self.shapes.len()).map_err(|_| too_complex("too many records"))?;
-            self.shapes.push(Shape { template, slots });
-            self.emit(Instr::abc(Op::NewRecord, dst, first, shape));
+            let layout =
+                u16::try_from(self.layouts.len()).map_err(|_| too_complex("too many records"))?;
+            self.layouts.push(RecordLayout {
+                distinct: keys.len() == slots.len(),
+                shape: Shape::interned(keys),
+                slots,
+            });
+            self.emit(Instr::abc(Op::NewRecord, dst, first, layout));
             self.free_reg = mark;
 
             return Ok(());
