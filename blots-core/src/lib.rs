@@ -9,6 +9,7 @@ pub mod do_block_tests;
 pub mod environment;
 pub mod error;
 pub mod expressions;
+pub mod fast_parser;
 pub mod formatter;
 pub mod functions;
 pub mod heap;

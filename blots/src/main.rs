@@ -6,8 +6,9 @@ mod highlighter;
 use blots_core::ast::{Expr, Spanned};
 use blots_core::environment::Environment;
 use blots_core::expressions::{
-    evaluate_pairs, pairs_to_expr_with_comments, validate_portable_value,
+    evaluate_ast, evaluate_pairs, pairs_to_expr_with_comments, validate_portable_value,
 };
+use blots_core::fast_parser::{Statement, parse_program};
 use blots_core::formatter::format_expr;
 use blots_core::functions::{
     clear_function_call_stats, get_function_call_stats, set_profiling_enabled,
@@ -102,6 +103,85 @@ fn write_outputs(outputs: &IndexMap<String, SerializableValue>, output_path: Opt
     }
 }
 
+/// Record `value` as the output called `name`, or exit if it cannot leave the program.
+fn record_output(
+    name: &str,
+    value: &Value,
+    heap: &Rc<RefCell<Heap>>,
+    bindings: &Rc<Environment>,
+    outputs: &mut IndexMap<String, SerializableValue>,
+) {
+    if let Err(e) = validate_portable_value(value, &heap.borrow(), bindings) {
+        eprintln!("[output error] {}", e);
+        std::process::exit(1);
+    }
+
+    if let Ok(serializable) = value.to_serializable_value(&heap.borrow()) {
+        outputs.insert(name.to_string(), serializable);
+    }
+}
+
+/// Evaluate the statements of a program that `parse_program` read, in order.
+fn evaluate_statements(
+    statements: Vec<Statement>,
+    source: &str,
+    heap: &Rc<RefCell<Heap>>,
+    bindings: &Rc<Environment>,
+    outputs: &mut IndexMap<String, SerializableValue>,
+) {
+    let source: Rc<str> = source.into();
+
+    for statement in statements {
+        match statement {
+            Statement::Expression(expr) => {
+                let result = evaluate_ast(
+                    &expr,
+                    Rc::clone(heap),
+                    Rc::clone(bindings),
+                    0,
+                    Rc::clone(&source),
+                );
+
+                if let Err(error) = result {
+                    println!("[evaluation error] {}", error);
+                    std::process::exit(1);
+                }
+            }
+            Statement::Output {
+                name,
+                expr,
+                assigns,
+            } => {
+                let result = evaluate_ast(
+                    &expr,
+                    Rc::clone(heap),
+                    Rc::clone(bindings),
+                    0,
+                    Rc::clone(&source),
+                );
+
+                if assigns {
+                    if let Ok(value) = &result {
+                        record_output(name.as_str(), value, heap, bindings, outputs);
+                    }
+                } else if let Some(value) = bindings.get(name) {
+                    record_output(name.as_str(), &value, heap, bindings, outputs);
+                }
+
+                if let Err(error) = result {
+                    println!("[evaluation error] {}", error);
+                    std::process::exit(1);
+                }
+            }
+            Statement::Comment => {}
+        }
+
+        // Statement boundary: safe point to reclaim heap garbage, since only the root
+        // bindings (and the pinned constants record) need to survive past this point.
+        heap.borrow_mut().compact_if_grown(bindings, &mut []);
+    }
+}
+
 /// Evaluate Blots source code and collect outputs
 fn evaluate_source(
     source: &str,
@@ -109,6 +189,11 @@ fn evaluate_source(
     bindings: &Rc<Environment>,
     outputs: &mut IndexMap<String, SerializableValue>,
 ) -> Result<(), String> {
+    if let Some(statements) = parse_program(source) {
+        evaluate_statements(statements, source, heap, bindings, outputs);
+        return Ok(());
+    }
+
     let pairs = get_pairs(source).map_err(|e| format!("Parse error: {}", e))?;
 
     pairs.for_each(|pair| match pair.as_rule() {
