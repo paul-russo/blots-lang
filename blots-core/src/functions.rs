@@ -493,105 +493,40 @@ impl BuiltInFunction {
 
             // Aggregate functions
             Self::Min => {
-                let nums = if args.len() == 1 {
-                    // Check if single argument is a list
-                    match &args[0] {
-                        Value::List(_) => {
-                            let borrowed_heap = heap.borrow();
-                            let list = args[0].as_list(&borrowed_heap)?;
-                            list.iter()
-                                .map(|a| a.as_number())
-                                .collect::<AnyhowResult<Vec<f64>>>()?
-                        }
-                        _ => vec![args[0].as_number()?],
-                    }
-                } else {
-                    args.iter()
-                        .map(|a| a.as_number())
-                        .collect::<AnyhowResult<Vec<f64>>>()?
-                };
-
-                if nums.is_empty() {
+                let (min, count) = fold_numbers(args, heap, f64::INFINITY, f64::min)?;
+                if count == 0 {
                     return Err(RuntimeError::from("min requires at least one number"));
                 }
 
-                Ok(Value::Number(
-                    nums.iter().copied().fold(f64::INFINITY, f64::min),
-                ))
+                Ok(Value::Number(min))
             }
 
             Self::Max => {
-                let nums = if args.len() == 1 {
-                    // Check if single argument is a list
-                    match &args[0] {
-                        Value::List(_) => {
-                            let borrowed_heap = heap.borrow();
-                            let list = args[0].as_list(&borrowed_heap)?;
-                            list.iter()
-                                .map(|a| a.as_number())
-                                .collect::<AnyhowResult<Vec<f64>>>()?
-                        }
-                        _ => vec![args[0].as_number()?],
-                    }
-                } else {
-                    args.iter()
-                        .map(|a| a.as_number())
-                        .collect::<AnyhowResult<Vec<f64>>>()?
-                };
-
-                if nums.is_empty() {
+                let (max, count) = fold_numbers(args, heap, f64::NEG_INFINITY, f64::max)?;
+                if count == 0 {
                     return Err(RuntimeError::from("max requires at least one number"));
                 }
 
-                Ok(Value::Number(
-                    nums.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-                ))
+                Ok(Value::Number(max))
             }
 
             Self::Avg => {
-                let nums = if args.len() == 1 {
-                    match &args[0] {
-                        Value::List(_) => {
-                            let borrowed_heap = heap.borrow();
-                            let list = args[0].as_list(&borrowed_heap)?;
-                            list.iter()
-                                .map(|a| a.as_number())
-                                .collect::<AnyhowResult<Vec<f64>>>()?
-                        }
-                        _ => vec![args[0].as_number()?],
-                    }
-                } else {
-                    args.iter()
-                        .map(|a| a.as_number())
-                        .collect::<AnyhowResult<Vec<f64>>>()?
-                };
-                if nums.is_empty() {
+                let (sum, count) = fold_numbers(args, heap, sum_of_nothing(), |sum, n| sum + n)?;
+                if count == 0 {
                     return Err(RuntimeError::from("avg requires at least one number"));
                 }
-                Ok(Value::Number(nums.iter().sum::<f64>() / nums.len() as f64))
+
+                Ok(Value::Number(sum / count as f64))
             }
 
             Self::Prod => {
-                let nums = if args.len() == 1 {
-                    match &args[0] {
-                        Value::List(_) => {
-                            let borrowed_heap = heap.borrow();
-                            let list = args[0].as_list(&borrowed_heap)?;
-                            list.iter()
-                                .map(|a| a.as_number())
-                                .collect::<AnyhowResult<Vec<f64>>>()?
-                        }
-                        _ => vec![args[0].as_number()?],
-                    }
-                } else {
-                    args.iter()
-                        .map(|a| a.as_number())
-                        .collect::<AnyhowResult<Vec<f64>>>()?
-                };
-                if nums.is_empty() {
+                let (product, count) =
+                    fold_numbers(args, heap, product_of_nothing(), |product, n| product * n)?;
+                if count == 0 {
                     return Err(RuntimeError::from("prod requires at least one number"));
                 }
-                Ok(Value::Number(nums.iter().product()))
+
+                Ok(Value::Number(product))
             }
 
             Self::Range => {
@@ -631,26 +566,12 @@ impl BuiltInFunction {
             }
 
             Self::Sum => {
-                let nums = if args.len() == 1 {
-                    match &args[0] {
-                        Value::List(_) => {
-                            let borrowed_heap = heap.borrow();
-                            let list = args[0].as_list(&borrowed_heap)?;
-                            list.iter()
-                                .map(|a| a.as_number())
-                                .collect::<AnyhowResult<Vec<f64>>>()?
-                        }
-                        _ => vec![args[0].as_number()?],
-                    }
-                } else {
-                    args.iter()
-                        .map(|a| a.as_number())
-                        .collect::<AnyhowResult<Vec<f64>>>()?
-                };
-                if nums.is_empty() {
+                let (sum, count) = fold_numbers(args, heap, sum_of_nothing(), |sum, n| sum + n)?;
+                if count == 0 {
                     return Err(RuntimeError::from("sum requires at least one number"));
                 }
-                Ok(Value::Number(nums.iter().sum()))
+
+                Ok(Value::Number(sum))
             }
 
             // Remaining aggregate functions
@@ -1702,6 +1623,40 @@ impl FunctionDef {
     ) -> Result<Value, RuntimeError> {
         Vm::new(heap, bindings).call_function(self, this_value, args, call_depth)
     }
+}
+
+/// Fold the numbers an aggregate function was called with, in order: the elements of its
+/// argument when that is a single list, the arguments themselves otherwise. Returns the
+/// result together with how many numbers there were.
+fn fold_numbers(
+    args: &[Value],
+    heap: &Rc<RefCell<Heap>>,
+    init: f64,
+    fold: impl Fn(f64, f64) -> f64,
+) -> AnyhowResult<(f64, usize)> {
+    let heap = heap.borrow();
+    let numbers = match args {
+        [list @ Value::List(_)] => list.as_list(&heap)?.as_slice(),
+        _ => args,
+    };
+
+    let mut result = init;
+    for number in numbers {
+        result = fold(result, number.as_number()?);
+    }
+
+    Ok((result, numbers.len()))
+}
+
+/// What the standard library takes the sum of no numbers at all to be, which is where it
+/// starts every sum from.
+pub(crate) fn sum_of_nothing() -> f64 {
+    std::iter::empty::<f64>().sum()
+}
+
+/// The same for products.
+pub(crate) fn product_of_nothing() -> f64 {
+    std::iter::empty::<f64>().product()
 }
 
 /// The name a user-defined function goes by in error messages and profiles.
