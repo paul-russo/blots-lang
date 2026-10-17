@@ -9,9 +9,9 @@
 //! up again, so everywhere else the state lives in machine registers.
 
 use super::{
-    Builder, CALLBACK_CALL_DEPTH, DEPTH_MASK, ENTRY, Frame, MAX_CALL_DEPTH, PROFILED, TAIL_SHIFT,
-    UNBOUND, Vm, copy_value, has_spread, is_unbound, less, less_eq, list_next, range_next,
-    step::Flow, store_value,
+    Builder, CALLBACK_CALL_DEPTH, DEPTH_MASK, ENTRY, Frame, MAX_CALL_DEPTH, NOT_TRUNCATED,
+    PROFILED, TAIL_SHIFT, UNBOUND, Vm, copy_value, has_spread, is_unbound, less, less_eq,
+    list_next, range_next, step::Flow, store_value, truncate,
 };
 use crate::{
     bytecode::{Instr, Op, Proto},
@@ -488,16 +488,20 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     {
                         // A negative index counts from the end; one that is still negative
                         // after that wraps around to a position no list has.
-                        let position = match *number as i64 {
+                        let index = truncate(*number);
+                        let position = match index {
                             index if index >= 0 => index as usize,
                             index => (items.len() as i64).wrapping_add(index) as usize,
                         };
 
-                        match items.get(position) {
-                            Some(item) => copy_value(reg!(instr.a), item),
-                            None => store_value(reg!(instr.a), Value::Null),
+                        if let Some(item) = items.get(position) {
+                            copy_value(reg!(instr.a), item);
+                            next!(1);
                         }
-                        next!(1);
+                        if index != NOT_TRUNCATED {
+                            store_value(reg!(instr.a), Value::Null);
+                            next!(1);
+                        }
                     }
                 }
                 Op::GetField => {
