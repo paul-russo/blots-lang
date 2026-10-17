@@ -15,6 +15,7 @@
 //! per instruction; the instruction loop itself lives in [`run`].
 
 mod run;
+mod step;
 
 use crate::{
     ast::{BinaryOp, Span},
@@ -31,7 +32,7 @@ use crate::{
     values::{CapturedScope, LambdaArg, LambdaDef, Value},
 };
 use indexmap::IndexMap;
-use std::{cell::RefCell, mem::MaybeUninit, ptr, rc::Rc};
+use std::{cell::RefCell, hint::unreachable_unchecked, mem::MaybeUninit, ptr, rc::Rc};
 
 /// A call made from a body that is itself nested this deep fails.
 const MAX_CALL_DEPTH: usize = 1000;
@@ -133,6 +134,144 @@ unsafe fn store_value(dst: *mut Value, value: Value) {
         dst.write_volatile(words.read());
         dst.add(1).write_volatile(words.add(1).read());
     }
+}
+
+/// `x < y`, or `None` when the two cannot be ordered because one of them is NaN.
+#[inline(always)]
+fn less(x: f64, y: f64) -> Option<bool> {
+    if x < y {
+        Some(true)
+    } else if x >= y {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// `x <= y`, or `None` when the two cannot be ordered because one of them is NaN.
+#[inline(always)]
+fn less_eq(x: f64, y: f64) -> Option<bool> {
+    if x <= y {
+        Some(true)
+    } else if x > y {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// The number in a register that is known to hold one.
+///
+/// # Safety
+/// `slot` must point to a register holding a `Value::Number`.
+#[inline(always)]
+unsafe fn number_in(slot: *const Value) -> f64 {
+    // SAFETY: guaranteed by the caller.
+    match unsafe { &*slot } {
+        Value::Number(number) => *number,
+        _ => unsafe { unreachable_unchecked() },
+    }
+}
+
+/// The counter or address kept in a loop state register. Loop state lives in registers the
+/// program cannot see, stored as the bit pattern of a number so that the registers stay
+/// ordinary values.
+///
+/// # Safety
+/// `slot` must point to a register written by [`set_state`].
+#[inline(always)]
+unsafe fn state(slot: *const Value) -> u64 {
+    // SAFETY: guaranteed by the caller.
+    unsafe { number_in(slot) }.to_bits()
+}
+
+/// # Safety
+/// `slot` must point to a register that is valid for writes.
+#[inline(always)]
+unsafe fn set_state(slot: *mut Value, bits: u64) {
+    // SAFETY: guaranteed by the caller.
+    unsafe { slot.write(Value::Number(f64::from_bits(bits))) }
+}
+
+/// Replace the content of a loop state register without rewriting its tag.
+///
+/// # Safety
+/// `slot` must point to a register written by [`set_state`].
+#[inline(always)]
+unsafe fn update_state(slot: *mut Value, bits: u64) {
+    // SAFETY: guaranteed by the caller.
+    match unsafe { &mut *slot } {
+        Value::Number(number) => *number = f64::from_bits(bits),
+        _ => unsafe { unreachable_unchecked() },
+    }
+}
+
+/// Advance the inlined range loop whose state starts at `slot` (see `Op::RangePrep`): when
+/// the range has another element, store it (and its index, if the loop wants one) and report
+/// `true`.
+///
+/// # Safety
+/// `slot` must point to loop state registers set up by `Op::RangePrep`.
+#[inline(always)]
+unsafe fn range_next(slot: *mut Value, with_index: bool) -> bool {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let next = state(slot);
+        if next >= state(slot.add(1)) {
+            return false;
+        }
+
+        let index = next as i64 as f64;
+        slot.add(3)
+            .write(Value::Number(number_in(slot.add(2)) + index));
+        if with_index {
+            slot.add(4).write(Value::Number(index));
+        }
+        update_state(slot, next + 1);
+    }
+
+    true
+}
+
+/// Advance the inlined list loop whose state starts at `slot` (see `Op::IterPrep`): when the
+/// list has another element, store it (and its index, if the loop wants one; `first` says
+/// whether this is the first element) and report `true`.
+///
+/// # Safety
+/// `slot` must point to loop state registers set up by `Op::IterPrep`, and the list they
+/// point into must be alive.
+#[inline(always)]
+unsafe fn list_next(slot: *mut Value, with_index: bool, first: bool) -> bool {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let cursor = state(slot) as *const Value;
+        if cursor as u64 == state(slot.add(4)) {
+            return false;
+        }
+
+        copy_value(slot.add(2), cursor);
+        if with_index {
+            let index = if first {
+                0.0
+            } else {
+                number_in(slot.add(3)) + 1.0
+            };
+            slot.add(3).write(Value::Number(index));
+        }
+        update_state(slot, cursor.add(1) as u64);
+    }
+
+    true
+}
+
+/// Whether any of the `count` values starting at `first` is a spread value.
+///
+/// # Safety
+/// `first` must point to `count` consecutive initialised values.
+#[inline(always)]
+unsafe fn has_spread(first: *const Value, count: usize) -> bool {
+    // SAFETY: guaranteed by the caller.
+    (0..count).any(|offset| matches!(unsafe { &*first.add(offset) }, Value::Spread(_)))
 }
 
 /// The position of the element a (possibly negative) index refers to.
@@ -557,22 +696,6 @@ impl Vm {
         self.finish_profile(&frame);
 
         frame.meta & ENTRY != 0
-    }
-
-    /// The heap, without the bookkeeping of a `RefCell` borrow.
-    ///
-    /// # Safety
-    /// No mutable borrow of the heap may be alive, and none may be taken while the returned
-    /// reference is in use.
-    #[inline(always)]
-    unsafe fn heap_ref(&self) -> &Heap {
-        debug_assert!(
-            self.heap.try_borrow().is_ok(),
-            "the heap is mutably borrowed"
-        );
-
-        // SAFETY: guaranteed by the caller.
-        unsafe { &*self.heap.as_ptr() }
     }
 
     /// The index of a stack slot that belongs to a frame.

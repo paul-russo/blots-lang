@@ -20,7 +20,7 @@ license = "MIT"
 blots-core = { path = "blots-core", version = "0.15.0" }
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(wasm_bindgen_unstable_test_coverage)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(wasm_bindgen_unstable_test_coverage)', 'cfg(blots_vm_step_only)'] }
 
 # The profile that 'dist' will build with
 [profile.dist]
