@@ -430,6 +430,29 @@ pub fn validate_portable_value(
     }
 }
 
+/// The remainder of `x / y` with the sign of `x` (the `%` operator).
+///
+/// Operands that are both integers small enough for doubles to represent every integer of
+/// their magnitude take an exact integer remainder, which is several times faster than the
+/// general floating-point one and by far the most common case.
+#[inline(always)]
+pub(crate) fn modulo(x: f64, y: f64) -> f64 {
+    const EXACT_INTEGERS: f64 = 9_007_199_254_740_992.0;
+
+    if x.abs() < EXACT_INTEGERS && y.abs() < EXACT_INTEGERS {
+        // SAFETY: both operands were just checked to be finite and well within `i64`.
+        let (dividend, divisor) =
+            unsafe { (x.to_int_unchecked::<i64>(), y.to_int_unchecked::<i64>()) };
+
+        if dividend as f64 == x && divisor as f64 == y && divisor != 0 {
+            // A zero remainder keeps the sign of the dividend, as it does for `fmod`.
+            return ((dividend % divisor) as f64).copysign(x);
+        }
+    }
+
+    x % y
+}
+
 /// Where a binary operation sits in the program: the span of the whole operation and the
 /// source text that span refers to. Used for error reporting.
 pub(crate) struct OpSite<'a> {
@@ -460,7 +483,7 @@ pub(crate) fn apply_binary_op(
             BinaryOp::Subtract => return Ok(Number(a - b)),
             BinaryOp::Multiply => return Ok(Number(a * b)),
             BinaryOp::Divide => return Ok(Number(a / b)),
-            BinaryOp::Modulo => return Ok(Number(a % b)),
+            BinaryOp::Modulo => return Ok(Number(modulo(a, b))),
             BinaryOp::Power => return Ok(Number(a.powf(b))),
             BinaryOp::Equal | BinaryOp::DotEqual => return Ok(Bool(a == b)),
             BinaryOp::NotEqual | BinaryOp::DotNotEqual => return Ok(Bool(a != b)),
@@ -710,7 +733,7 @@ pub(crate) fn apply_binary_op(
                         let r_list = list_r.reify(&borrowed_heap).as_list()?;
                         let mut mapped_list = Vec::with_capacity(list_len);
                         for (l, r) in l_list.iter().zip(r_list.iter()) {
-                            mapped_list.push(Number(l.as_number()? % r.as_number()?));
+                            mapped_list.push(Number(modulo(l.as_number()?, r.as_number()?)));
                         }
                         mapped_list
                     };
@@ -1035,9 +1058,9 @@ pub(crate) fn apply_binary_op(
                         let mut mapped_list = Vec::with_capacity(list_ref.len());
                         for v in list_ref.iter() {
                             let value = if is_list_first {
-                                Number(v.as_number()? % scalar.as_number()?)
+                                Number(modulo(v.as_number()?, scalar.as_number()?))
                             } else {
-                                Number(scalar.as_number()? % v.as_number()?)
+                                Number(modulo(scalar.as_number()?, v.as_number()?))
                             };
                             mapped_list.push(value);
                         }
@@ -1313,7 +1336,7 @@ pub(crate) fn apply_binary_op(
             BinaryOp::Subtract => Ok(Number(lhs.as_number()? - rhs.as_number()?)),
             BinaryOp::Multiply => Ok(Number(lhs.as_number()? * rhs.as_number()?)),
             BinaryOp::Divide => Ok(Number(lhs.as_number()? / rhs.as_number()?)),
-            BinaryOp::Modulo => Ok(Number(lhs.as_number()? % rhs.as_number()?)),
+            BinaryOp::Modulo => Ok(Number(modulo(lhs.as_number()?, rhs.as_number()?))),
             BinaryOp::Power => Ok(Number(lhs.as_number()?.powf(rhs.as_number()?))),
             BinaryOp::Coalesce => {
                 if lhs == Value::Null {
@@ -1969,6 +1992,68 @@ mod tests {
             0,
             &binding,
         )
+    }
+
+    #[test]
+    fn modulo_matches_the_floating_point_remainder_bit_for_bit() {
+        let edges = [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            2.0,
+            -2.0,
+            3.0,
+            7.0,
+            -7.0,
+            0.5,
+            -0.5,
+            2.5,
+            1e15,
+            -1e15,
+            9_007_199_254_740_991.0,
+            -9_007_199_254_740_991.0,
+            9_007_199_254_740_992.0,
+            -9_007_199_254_740_992.0,
+            9_007_199_254_740_994.0,
+            1e300,
+            -1e300,
+            5e-324,
+            f64::MAX,
+            f64::MIN,
+            f64::MIN_POSITIVE,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+        ];
+
+        for x in edges {
+            for y in edges {
+                assert_eq!(modulo(x, y).to_bits(), (x % y).to_bits(), "{x} % {y}");
+            }
+        }
+
+        // A xorshift sweep over integers of every magnitude, with some fractions mixed in.
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        for _ in 0..200_000 {
+            let (a, b, shape) = (next(), next(), next());
+            let x = (a as i64 >> (shape % 64)) as f64;
+            let y = (b as i64 >> ((shape >> 8) % 64)) as f64;
+            let (x, y) = match (shape >> 16) % 8 {
+                0 => (x / 4.0, y),
+                1 => (x, y / 4.0),
+                _ => (x, y),
+            };
+
+            assert_eq!(modulo(x, y).to_bits(), (x % y).to_bits(), "{x} % {y}");
+        }
     }
 
     #[test]

@@ -14,6 +14,7 @@ use crate::{
     ast::BinaryOp,
     bytecode::{Instr, Op, Proto},
     error::RuntimeError,
+    expressions::modulo,
     heap::HeapValue,
     values::{LambdaDef, Value},
 };
@@ -434,7 +435,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                         numeric!(rr, BinaryOp::Divide, |x, y| x / y => store_number)
                     }
                     Op::Mod => {
-                        numeric!(rr, BinaryOp::Modulo, |x, y| x % y => store_number)
+                        numeric!(rr, BinaryOp::Modulo, |x, y| modulo(x, y) => store_number)
                     }
                     Op::Pow => {
                         numeric!(rr, BinaryOp::Power, |x, y| x.powf(y) => store_number)
@@ -507,7 +508,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                         numeric!(rk, BinaryOp::Divide, |x, y| x / y => store_number)
                     }
                     Op::ModK => {
-                        numeric!(rk, BinaryOp::Modulo, |x, y| x % y => store_number)
+                        numeric!(rk, BinaryOp::Modulo, |x, y| modulo(x, y) => store_number)
                     }
                     Op::PowK => {
                         numeric!(rk, BinaryOp::Power, |x, y| x.powf(y) => store_number)
@@ -544,7 +545,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                         numeric!(kr, BinaryOp::Divide, |x, y| x / y => store_number)
                     }
                     Op::KMod => {
-                        numeric!(kr, BinaryOp::Modulo, |x, y| x % y => store_number)
+                        numeric!(kr, BinaryOp::Modulo, |x, y| modulo(x, y) => store_number)
                     }
                     Op::KPow => {
                         numeric!(kr, BinaryOp::Power, |x, y| x.powf(y) => store_number)
