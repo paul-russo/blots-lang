@@ -32,3 +32,32 @@ pub struct Args {
     #[arg(long)]
     pub profile: bool,
 }
+
+impl Args {
+    /// The arguments this process was started with.
+    ///
+    /// `blots <file>` is by far the most common invocation, and building clap's description
+    /// of the command line just to recognize it takes longer than running a short script
+    /// does. A single argument that cannot be a flag is therefore taken as the file (or
+    /// source) directly; every other shape goes through clap as usual.
+    pub fn from_env() -> Self {
+        let mut args = std::env::args_os().skip(1);
+
+        if let (Some(first), None) = (args.next(), args.next())
+            && let Some(first) = first.to_str()
+            && !first.starts_with('-')
+        {
+            return Self {
+                file_or_source: Some(first.to_string()),
+                evaluate: false,
+                input: Vec::new(),
+                output: None,
+                completions: None,
+                format: Vec::new(),
+                profile: false,
+            };
+        }
+
+        Self::parse()
+    }
+}

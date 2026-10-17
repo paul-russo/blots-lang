@@ -17,7 +17,7 @@ use blots_core::intern::Symbol;
 use blots_core::parser::{Rule, get_pairs};
 use blots_core::stats::ProfilingSummary;
 use blots_core::values::{SerializableValue, Value};
-use clap::{CommandFactory, Parser};
+use clap::CommandFactory;
 use clap_complete::{Shell, generate, shells::*};
 use cli::Args;
 use commands::{CommandResult, exec_command, is_command};
@@ -33,7 +33,7 @@ use std::sync::LazyLock;
 #[global_allocator]
 static ALLOCATOR: allocator::Allocator = allocator::Allocator;
 
-static ARGS: LazyLock<Args> = LazyLock::new(Args::parse);
+static ARGS: LazyLock<Args> = LazyLock::new(Args::from_env);
 
 /// Parse JSON string into an IndexMap of Values
 fn parse_json_inputs(
