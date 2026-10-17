@@ -108,7 +108,6 @@ dependencies = [
  "clap_complete",
  "indexmap",
  "libc",
- "regex",
  "rustyline",
  "serde_json",
  "tempfile",
