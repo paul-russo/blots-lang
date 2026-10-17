@@ -24,8 +24,8 @@ use crate::{
         BinaryOp, Commented, Expr, PostfixOp, RecordEntry, RecordKey, Span, SpannedExpr, UnaryOp,
     },
     bytecode::{
-        CaptureSource, Handler, Instr, LambdaTemplate, LocalVar, Op, Proto, Shape, Wrap,
-        binary_opcode,
+        CaptureSource, FAST_FRAME_SLOTS, Handler, Instr, LambdaTemplate, LocalVar, Op, Proto,
+        SelfRef, Shape, Wrap, binary_opcode,
     },
     error::RuntimeError,
     functions::{BuiltInFunction, is_built_in_function},
@@ -55,6 +55,10 @@ const MAX_CACHED_GLOBALS: usize = 256;
 /// How many call-depth levels separate the caller of a higher-order built-in from the body of
 /// its callback: one for the built-in itself, one for the callback call, one for its body.
 const CALLBACK_DEPTH: i32 = 3;
+
+/// The most arguments a direct self call can pass: its argument count shares an 8-bit operand
+/// with a flag.
+const MAX_SELF_CALL_ARGS: usize = 127;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ScopeKind {
@@ -427,7 +431,7 @@ fn too_complex(what: &str) -> RuntimeError {
 
 /// Compile an expression evaluated directly against an environment (a top-level statement).
 pub(crate) fn compile_chunk(expr: &SpannedExpr, inline: bool) -> CResult<Rc<Proto>> {
-    let mut compiler = FnCompiler::new(true, Vec::new(), inline);
+    let mut compiler = FnCompiler::new(true, Vec::new(), false, inline);
 
     let mut names = Vec::new();
     collect_chunk_names(expr, false, &mut names);
@@ -454,8 +458,32 @@ pub(crate) fn compile_lambda(
     body: &Rc<SpannedExpr>,
     inline: bool,
 ) -> CResult<Rc<Proto>> {
+    compile_function(args, body, inline, None)
+}
+
+/// Compile the variant of a lambda body that is specialised for a function named `name` whose
+/// capture slot `slot` is unbound: calls through that capture are calls of the function itself
+/// and are compiled as direct self calls (see [`SelfRef`]).
+pub(crate) fn compile_self_variant(
+    args: &Rc<Vec<LambdaArg>>,
+    body: &Rc<SpannedExpr>,
+    inline: bool,
+    name: Symbol,
+    slot: u16,
+) -> CResult<Rc<Proto>> {
+    compile_function(args, body, inline, Some((name, slot)))
+}
+
+fn compile_function(
+    args: &Rc<Vec<LambdaArg>>,
+    body: &Rc<SpannedExpr>,
+    inline: bool,
+    self_target: Option<(Symbol, u16)>,
+) -> CResult<Rc<Proto>> {
     let params: Vec<Symbol> = args.iter().map(LambdaArg::get_name).collect();
-    let mut compiler = FnCompiler::new(false, params, inline);
+    let simple_params = args.iter().all(LambdaArg::is_required);
+    let mut compiler = FnCompiler::new(false, params, simple_params, inline);
+    compiler.self_target = self_target;
 
     for _ in 0..args.len() {
         compiler.alloc()?;
@@ -478,20 +506,25 @@ pub(crate) fn compile_lambda(
     compiler.scopes.push(scope);
     compiler.expr_return(body)?;
 
+    // Self calls address the start of the code with a 16-bit offset.
+    if self_target.is_some() && compiler.code.len() > u16::MAX as usize {
+        return Err(too_complex("the function is too long"));
+    }
+
     Ok(Rc::new(
         compiler.finish(Some(Rc::clone(body)), Some(Rc::clone(args))),
     ))
 }
 
 struct FnCompiler {
-    code: Vec<Instr>,
+    code: Vec<u64>,
     span_index: Vec<u32>,
     spans: Vec<Span>,
     consts: Vec<Value>,
-    nums: Vec<f64>,
     strings: Vec<String>,
     names: Vec<Symbol>,
     slot_refs: Vec<(u16, Symbol)>,
+    self_refs: Vec<SelfRef>,
     lambdas: Vec<LambdaTemplate>,
     shapes: Vec<Shape>,
     fields: Vec<String>,
@@ -505,6 +538,9 @@ struct FnCompiler {
     is_chunk: bool,
     params: Vec<Symbol>,
 
+    /// Functions only: whether every parameter is required.
+    simple_params: bool,
+
     /// Chunk only: the cache register of each late-bound name.
     globals: Vec<(Symbol, u16)>,
 
@@ -513,19 +549,22 @@ struct FnCompiler {
 
     /// Whether higher-order built-in calls may be compiled as inline loops.
     inline: bool,
+
+    /// Variants only: the capture (name and slot) that is known to hold the function itself.
+    self_target: Option<(Symbol, u16)>,
 }
 
 impl FnCompiler {
-    fn new(is_chunk: bool, params: Vec<Symbol>, inline: bool) -> Self {
+    fn new(is_chunk: bool, params: Vec<Symbol>, simple_params: bool, inline: bool) -> Self {
         Self {
             code: Vec::new(),
             span_index: Vec::new(),
             spans: Vec::new(),
             consts: Vec::new(),
-            nums: Vec::new(),
             strings: Vec::new(),
             names: Vec::new(),
             slot_refs: Vec::new(),
+            self_refs: Vec::new(),
             lambdas: Vec::new(),
             shapes: Vec::new(),
             fields: Vec::new(),
@@ -536,9 +575,11 @@ impl FnCompiler {
             max_reg: 0,
             is_chunk,
             params,
+            simple_params,
             globals: Vec::new(),
             ensured: Vec::new(),
             inline,
+            self_target: None,
         }
     }
 
@@ -553,14 +594,23 @@ impl FnCompiler {
         let simple_params = args
             .as_ref()
             .is_none_or(|args| args.iter().all(LambdaArg::is_required));
+        let simple_arity = match &args {
+            Some(args) if simple_params => u32::try_from(args.len()).unwrap_or(u32::MAX),
+            _ => u32::MAX,
+        };
+        let fast_arity = if self.self_refs.is_empty() && self.max_reg as usize <= FAST_FRAME_SLOTS {
+            simple_arity
+        } else {
+            u32::MAX
+        };
 
         Proto {
             code: self.code,
             consts: self.consts,
-            nums: self.nums,
             strings: self.strings,
             names: self.names,
             slot_refs: self.slot_refs,
+            self_refs: self.self_refs,
             lambdas: self.lambdas,
             shapes: self.shapes,
             field_caches: self.fields.iter().map(|_| Cell::new(u32::MAX)).collect(),
@@ -571,6 +621,8 @@ impl FnCompiler {
             handlers: self.handlers,
             params: self.params,
             simple_params,
+            simple_arity,
+            fast_arity,
             cache_regs: self.globals.len(),
             max_stack: self.max_reg as usize,
             body,
@@ -583,9 +635,15 @@ impl FnCompiler {
     // ---------------------------------------------------------------------------------------
 
     fn emit(&mut self, instr: Instr) -> usize {
-        self.code.push(instr);
+        self.code.push(instr.encode());
         self.span_index.push(u32::MAX);
         self.code.len() - 1
+    }
+
+    /// Emit the number operand of the instruction that was just emitted.
+    fn emit_number(&mut self, number: f64) {
+        self.code.push(number.to_bits());
+        self.span_index.push(u32::MAX);
     }
 
     fn emit_spanned(&mut self, instr: Instr, span: Span) -> usize {
@@ -613,13 +671,17 @@ impl FnCompiler {
         self.emit(Instr::abx(op, a, 0))
     }
 
+    /// Point the jump at code word `jump` to `target`. Offsets are relative to the word that
+    /// follows the jump instruction.
     fn patch_jump(&mut self, jump: usize, target: usize) {
         let offset = target as i64 - (jump as i64 + 1);
-        let instr = &mut self.code[jump];
         let bits = offset as i32 as u32;
 
+        // SAFETY: `jump` is the index of an instruction word returned by an emit method.
+        let mut instr = unsafe { Instr::decode(self.code[jump]) };
         instr.b = bits as u16;
         instr.c = (bits >> 16) as u16;
+        self.code[jump] = instr.encode();
     }
 
     fn alloc(&mut self) -> CResult<u16> {
@@ -682,29 +744,15 @@ impl FnCompiler {
     }
 
     fn load_const(&mut self, dst: u16, value: Value) {
+        if let Value::Number(number) = value {
+            self.emit(Instr::abc(Op::LoadNum, dst, 0, 0));
+            self.emit_number(number);
+
+            return;
+        }
+
         let index = self.constant(value);
         self.emit(Instr::abx(Op::LoadK, dst, index));
-    }
-
-    /// The immediate-operand index for `expr` when it is a number literal.
-    fn number_operand(&mut self, expr: &SpannedExpr) -> Option<u16> {
-        let Expr::Number(n) = &expr.node else {
-            return None;
-        };
-        let existing = self
-            .nums
-            .iter()
-            .position(|existing| existing.to_bits() == n.to_bits());
-        let index = match existing {
-            Some(index) => index,
-            None if self.nums.len() <= u16::MAX as usize => {
-                self.nums.push(*n);
-                self.nums.len() - 1
-            }
-            None => return None,
-        };
-
-        u16::try_from(index).ok()
     }
 
     fn raise(&mut self, message: String, span: Span) {
@@ -819,6 +867,65 @@ impl FnCompiler {
             .any(|scope| scope.vars.iter().any(|var| var.maybe && var.name == name))
     }
 
+    /// Whether something that precedes the function's self-binding in lookup order can be
+    /// bound to `name`. The self-binding shortcut of capture references is only sound when
+    /// nothing can.
+    fn shadows_self_binding(&self, name: Symbol) -> bool {
+        self.params.contains(&name) || self.has_maybe_var(name)
+    }
+
+    /// Whether any variable of the function is visible to by-name lookups at this point.
+    fn has_visible_vars(&self) -> bool {
+        self.scopes.iter().any(|scope| !scope.vars.is_empty())
+    }
+
+    /// The number literal `expr` is, if it is one.
+    fn number_operand(expr: &SpannedExpr) -> Option<f64> {
+        match &expr.node {
+            Expr::Number(number) => Some(*number),
+            _ => None,
+        }
+    }
+
+    /// When calling `func` with `args` would be a self call if `func` turned out to be the
+    /// enclosing function, the capture (name and slot) the call goes through: `func` must be a
+    /// capture reference that nothing can shadow, and the arguments must be exactly what the
+    /// enclosing function itself takes.
+    fn self_call_candidate(
+        &self,
+        func: &SpannedExpr,
+        args: &[SpannedExpr],
+    ) -> Option<(Symbol, u16)> {
+        let Expr::CaptureSlot { name, index } = &func.node else {
+            return None;
+        };
+
+        if !matches!(self.owner(), Owner::Function)
+            || !self.simple_params
+            || args.len() != self.params.len()
+            || args.len() > MAX_SELF_CALL_ARGS
+            || args.iter().any(|arg| matches!(arg.node, Expr::Spread(_)))
+            || self.shadows_self_binding(*name)
+        {
+            return None;
+        }
+
+        Some((*name, *index))
+    }
+
+    /// Record that the function may be calling itself through capture `slot`, named `name`.
+    fn note_self_ref(&mut self, name: Symbol, slot: u16) {
+        if self.self_refs.iter().any(|existing| existing.slot == slot) {
+            return;
+        }
+
+        self.self_refs.push(SelfRef {
+            name,
+            slot,
+            variant: OnceCell::new(),
+        });
+    }
+
     /// The lambda whose parameter and capture slots a slot reference at this point refers to.
     fn owner(&self) -> Owner {
         for (index, scope) in self.scopes.iter().enumerate().rev() {
@@ -927,16 +1034,14 @@ impl FnCompiler {
                     self.emit_spanned(Instr::abx(Op::GetEnvCapture, dst, slot), expr.span);
                 }
                 Owner::Function => {
-                    // The self-binding shortcut is only sound when nothing that precedes the
-                    // self-binding in lookup order can be bound to this name.
-                    let shadowable = self.params.contains(name) || self.has_maybe_var(*name);
-                    let op = if shadowable {
-                        Op::GetCaptureDyn
-                    } else {
-                        Op::GetCapture
+                    let shadowable = self.shadows_self_binding(*name);
+                    let reference = self.slot_ref(*index, *name);
+                    let mut instr = match u16::try_from(reference) {
+                        Ok(reference) => Instr::abc(Op::GetCapture, dst, *index, reference),
+                        Err(_) => Instr::abx(Op::GetCaptureRef, dst, reference),
                     };
-                    let slot = self.slot_ref(*index, *name);
-                    self.emit_spanned(Instr::abx(op, dst, slot), expr.span);
+                    instr.x = shadowable as u8;
+                    self.emit_spanned(instr, expr.span);
                 }
                 Owner::Callback(_) => self.get_name(*name, dst, expr.span),
             },
@@ -982,6 +1087,15 @@ impl FnCompiler {
                 return_expr,
             } => self.do_block(statements, &return_expr.node, Target::Return),
             Expr::Output { expr } => self.expr_return(expr),
+            Expr::Call { func, args } => {
+                let mark = self.free_reg;
+                let reg = self.alloc()?;
+                self.call(expr.span, func, args, reg, true)?;
+                self.emit(Instr::abc(Op::Return, reg, 0, 0));
+                self.free_reg = mark;
+
+                Ok(())
+            }
             _ => {
                 let mark = self.free_reg;
                 let reg = self.expr_any(expr)?;
@@ -1030,7 +1144,7 @@ impl FnCompiler {
                 statements,
                 return_expr,
             } => self.do_block(statements, &return_expr.node, Target::Register(dst))?,
-            Expr::Call { func, args } => self.call(expr.span, func, args, dst)?,
+            Expr::Call { func, args } => self.call(expr.span, func, args, dst, false)?,
             Expr::Access {
                 expr: object,
                 index,
@@ -1102,16 +1216,25 @@ impl FnCompiler {
         let span = binary_span(left, right);
         let mark = self.free_reg;
 
-        if let Some(const_op) = const_rhs_opcode(op)
-            && let Some(constant) = self.number_operand(right)
+        if let Some(null_op) = null_compare_opcode(op)
+            && let Some((operand, null_first)) = null_operand(left, right)
+        {
+            let operand_reg = self.expr_any(operand)?;
+            let mut instr = Instr::abc(null_op, dst, operand_reg, 0);
+            instr.x = null_first as u8;
+            self.emit_spanned(instr, span);
+        } else if let Some(const_op) = const_rhs_opcode(op)
+            && let Some(constant) = Self::number_operand(right)
         {
             let left_reg = self.expr_any(left)?;
-            self.emit_spanned(Instr::abc(const_op, dst, left_reg, constant), span);
+            self.emit_spanned(Instr::abc(const_op, dst, left_reg, 0), span);
+            self.emit_number(constant);
         } else if let Some(const_op) = const_lhs_opcode(op)
-            && let Some(constant) = self.number_operand(left)
+            && let Some(constant) = Self::number_operand(left)
         {
             let right_reg = self.expr_any(right)?;
-            self.emit_spanned(Instr::abc(const_op, dst, constant, right_reg), span);
+            self.emit_spanned(Instr::abc(const_op, dst, right_reg, 0), span);
+            self.emit_number(constant);
         } else {
             let left_reg = self.expr_any(left)?;
             let right_reg = self.expr_any(right)?;
@@ -1136,15 +1259,29 @@ impl FnCompiler {
         {
             let span = binary_span(left, right);
 
-            if let Some(constant) = self.number_operand(right) {
-                let left_reg = self.expr_any(left)?;
-                self.emit_spanned(Instr::abc(jump_const_op, 0, left_reg, constant), span);
-            } else {
-                let left_reg = self.expr_any(left)?;
-                let right_reg = self.expr_any(right)?;
-                self.emit_spanned(Instr::abc(jump_op, 0, left_reg, right_reg), span);
+            if let Some(null_op) = null_jump_opcode(*op)
+                && let Some((operand, null_first)) = null_operand(left, right)
+            {
+                let operand_reg = self.expr_any(operand)?;
+                let mut instr = Instr::abx(null_op, operand_reg, 0);
+                instr.x = null_first as u8;
+                self.free_reg = mark;
+
+                return Ok(self.emit_spanned(instr, span));
             }
 
+            if let Some(constant) = Self::number_operand(right) {
+                let left_reg = self.expr_any(left)?;
+                let jump = self.emit_spanned(Instr::abx(jump_const_op, left_reg, 0), span);
+                self.emit_number(constant);
+                self.free_reg = mark;
+
+                return Ok(jump);
+            }
+
+            let left_reg = self.expr_any(left)?;
+            let right_reg = self.expr_any(right)?;
+            self.emit_spanned(Instr::abc(jump_op, 0, left_reg, right_reg), span);
             self.free_reg = mark;
 
             // The comparison skips this jump when it holds and takes it otherwise.
@@ -1317,7 +1454,9 @@ impl FnCompiler {
         }
 
         let index = self.name(ident);
-        self.emit(Instr::abx(Op::NameLambda, reg, index));
+        let mut instr = Instr::abx(Op::NameLambda, reg, index);
+        instr.x = matches!(value.node, Expr::Lambda { .. }) as u8;
+        self.emit(instr);
     }
 
     /// Compile an assignment used as an expression (or as a top-level statement): the name
@@ -1540,12 +1679,15 @@ impl FnCompiler {
         Ok(())
     }
 
+    /// Compile a call whose result goes to `dst`. `tail` is set when the call is the last
+    /// thing the function does: `dst` is then a fresh register that is returned right away.
     fn call(
         &mut self,
         span: Span,
         func: &SpannedExpr,
         args: &[SpannedExpr],
         dst: u16,
+        tail: bool,
     ) -> CResult<()> {
         if self.inline
             && let Some(inline) = inline_call(func, args)
@@ -1554,6 +1696,38 @@ impl FnCompiler {
         }
 
         let mark = self.free_reg;
+        let candidate = self.self_call_candidate(func, args);
+
+        if candidate.is_some() && candidate == self.self_target {
+            // The frame can only be replaced when nothing could tell: a callee resolves the
+            // names it does not bind through its caller's variables.
+            let replace = tail && !self.has_visible_vars();
+            let func_reg = if replace { dst } else { self.alloc()? };
+
+            for arg in args {
+                let reg = self.alloc()?;
+                self.expr_into(arg, reg)?;
+            }
+
+            // The instruction finds the start of the code by its own position. A variant too
+            // long for that is rejected as a whole (see `compile_function`), so the truncation
+            // never reaches the VM.
+            let op = if replace { Op::TailSelf } else { Op::CallSelf };
+            let no_spread = args.iter().all(never_spread);
+            let mut instr = Instr::abc(op, func_reg, (self.here() + 1) as u16, dst);
+            instr.x = args.len() as u8 | (no_spread as u8) << 7;
+            self.emit_spanned(instr, span);
+            self.free_reg = mark;
+
+            return Ok(());
+        }
+
+        if let Some((name, slot)) = candidate
+            && self.self_target.is_none()
+        {
+            self.note_self_ref(name, slot);
+        }
+
         let func_reg = self.alloc()?;
         self.expr_into(func, func_reg)?;
 
@@ -1609,15 +1783,17 @@ impl FnCompiler {
         let range_args = range_call(call.list);
 
         // Loop state registers, laid out the way the iteration instructions expect:
-        //   list:  [counter, list, element, index]
+        //   list:  [cursor, list, element, index, end]
         //   range: [next, end, start, element, index]
         let state = self.free_reg;
-        let state_len = if range_args.is_some() { 5 } else { 4 };
-        for _ in 0..state_len {
+        for _ in 0..5 {
             self.alloc()?;
         }
-        let element_reg = state + state_len - 2;
-        let index_reg = state + state_len - 1;
+        let (element_reg, index_reg) = if range_args.is_some() {
+            (state + 3, state + 4)
+        } else {
+            (state + 2, state + 3)
+        };
 
         if let Some(range_args) = range_args {
             let args_mark = self.free_reg;
@@ -1828,6 +2004,36 @@ fn binary_span(left: &SpannedExpr, right: &SpannedExpr) -> Span {
         left.span.start_line,
         left.span.start_col,
     )
+}
+
+/// The operand that is compared against a `null` literal, and whether the literal comes first.
+fn null_operand<'e>(
+    left: &'e SpannedExpr,
+    right: &'e SpannedExpr,
+) -> Option<(&'e SpannedExpr, bool)> {
+    if matches!(right.node, Expr::Null) {
+        return Some((left, false));
+    }
+
+    matches!(left.node, Expr::Null).then_some((right, true))
+}
+
+/// The opcode comparing a register against `null`, for operators that have one.
+fn null_compare_opcode(op: BinaryOp) -> Option<Op> {
+    match op {
+        BinaryOp::Equal => Some(Op::EqNull),
+        BinaryOp::NotEqual => Some(Op::NeNull),
+        _ => None,
+    }
+}
+
+/// The fused compare-and-branch opcode comparing a register against `null`.
+fn null_jump_opcode(op: BinaryOp) -> Option<Op> {
+    match op {
+        BinaryOp::Equal => Some(Op::JmpNotEqNull),
+        BinaryOp::NotEqual => Some(Op::JmpNotNeNull),
+        _ => None,
+    }
 }
 
 /// The opcode for `register <op> constant`, for operators that have one.

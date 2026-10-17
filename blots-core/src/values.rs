@@ -405,8 +405,15 @@ impl CapturedScope {
     }
 
     /// Look up a capture by its slot index; `None` if the slot was unbound at creation.
+    #[inline]
     pub fn get_slot(&self, index: usize) -> Option<Value> {
         self.values.get(index).copied().flatten()
+    }
+
+    /// Like [`CapturedScope::get_slot`], but hands out the stored value in place.
+    #[inline(always)]
+    pub(crate) fn slot_ref(&self, index: usize) -> Option<&Value> {
+        self.values.get(index).and_then(Option::as_ref)
     }
 
     /// Iterate over the bound captures as (name, value) pairs.

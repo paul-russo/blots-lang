@@ -1633,9 +1633,7 @@ impl FunctionDef {
             FunctionDef::BuiltIn(built_in) => {
                 format!("built-in function \"{}\"", built_in.name())
             }
-            FunctionDef::Lambda(def) => def.name.map_or(String::from("anonymous function"), |n| {
-                format!("function \"{}\"", n)
-            }),
+            FunctionDef::Lambda(def) => lambda_name(def),
         }
     }
 
@@ -1687,49 +1685,7 @@ impl FunctionDef {
                     }
                 }
             },
-            FunctionDef::Lambda(def) => {
-                let arity = def.get_arity();
-
-                match arity {
-                    FunctionArity::Exact(expected) => {
-                        if arg_count == expected {
-                            Ok(())
-                        } else {
-                            Err(RuntimeError::new(format!(
-                                "{} takes exactly {} arguments, but {} were given",
-                                self.get_name(),
-                                expected,
-                                arg_count
-                            )))
-                        }
-                    }
-                    FunctionArity::AtLeast(expected) => {
-                        if arg_count >= expected {
-                            Ok(())
-                        } else {
-                            Err(RuntimeError::new(format!(
-                                "{} takes at least {} arguments, but {} were given",
-                                self.get_name(),
-                                expected,
-                                arg_count
-                            )))
-                        }
-                    }
-                    FunctionArity::Between(min, max) => {
-                        if arg_count >= min && arg_count <= max {
-                            Ok(())
-                        } else {
-                            Err(RuntimeError::new(format!(
-                                "{} takes between {} and {} arguments, but {} were given",
-                                self.get_name(),
-                                min,
-                                max,
-                                arg_count
-                            )))
-                        }
-                    }
-                }
-            }
+            FunctionDef::Lambda(def) => check_lambda_arity(def, arg_count),
         }
     }
 
@@ -1745,6 +1701,57 @@ impl FunctionDef {
         _source: &str,
     ) -> Result<Value, RuntimeError> {
         Vm::new(heap, bindings).call_function(self, this_value, args, call_depth)
+    }
+}
+
+/// The name a user-defined function goes by in error messages and profiles.
+pub(crate) fn lambda_name(def: &LambdaDef) -> String {
+    match def.name {
+        Some(name) => format!("function \"{}\"", name),
+        None => String::from("anonymous function"),
+    }
+}
+
+/// Check that a user-defined function can be called with `arg_count` arguments.
+pub(crate) fn check_lambda_arity(def: &LambdaDef, arg_count: usize) -> Result<(), RuntimeError> {
+    match def.get_arity() {
+        FunctionArity::Exact(expected) => {
+            if arg_count == expected {
+                return Ok(());
+            }
+
+            Err(RuntimeError::new(format!(
+                "{} takes exactly {} arguments, but {} were given",
+                lambda_name(def),
+                expected,
+                arg_count
+            )))
+        }
+        FunctionArity::AtLeast(expected) => {
+            if arg_count >= expected {
+                return Ok(());
+            }
+
+            Err(RuntimeError::new(format!(
+                "{} takes at least {} arguments, but {} were given",
+                lambda_name(def),
+                expected,
+                arg_count
+            )))
+        }
+        FunctionArity::Between(min, max) => {
+            if arg_count >= min && arg_count <= max {
+                return Ok(());
+            }
+
+            Err(RuntimeError::new(format!(
+                "{} takes between {} and {} arguments, but {} were given",
+                lambda_name(def),
+                min,
+                max,
+                arg_count
+            )))
+        }
     }
 }
 

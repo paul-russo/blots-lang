@@ -2,9 +2,9 @@
 //!
 //! Every lambda body and every top-level statement is compiled (see [`crate::compiler`]) into a
 //! [`Proto`]: a flat instruction array plus the constant, name and debug tables the VM needs to
-//! run it. Instructions are fixed-width (8 bytes) and operate on a window of registers in the
-//! VM's value stack; parameters occupy the first registers of the window, block-local
-//! variables and temporaries follow.
+//! run it. Instructions are 8-byte words (a few are followed by a second word holding a number
+//! operand) and operate on a window of registers in the VM's value stack; parameters occupy
+//! the first registers of the window, block-local variables and temporaries follow.
 
 use crate::{
     ast::{BinaryOp, Span, SpannedExpr},
@@ -25,6 +25,8 @@ pub(crate) enum Op {
     Move,
     /// `R[a] = K[bx]`
     LoadK,
+    /// `R[a] = ` the number stored in the following code word.
+    LoadNum,
     /// `R[a] = ` a freshly allocated copy of string literal `S[bx]`
     LoadStr,
     /// `R[a] = <unbound>`: marks a not-yet-assigned block variable as invisible to name lookups.
@@ -36,12 +38,14 @@ pub(crate) enum Op {
     /// Chunk frames only: `if R[a] is unbound { R[a] = lookup of N[bx] in the boundary
     /// environment }`. The value is then read straight from `R[a]` for the rest of the chunk.
     EnsureGlobal,
-    /// `R[a] = ` the captured value of slot reference `T[bx]`, falling back to the frame's
-    /// self-binding and then to a by-name lookup when the slot was unbound at closure creation.
+    /// `R[a] = ` the value captured in slot `b`, which is that of slot reference `T[c]`. When
+    /// the slot was unbound at closure creation this falls back to the frame's self-binding
+    /// and then to a by-name lookup; `x == 1` skips the self-binding (a parameter or block
+    /// variable may shadow it).
     GetCapture,
-    /// Like `GetCapture`, but the fallback goes straight to the generic by-name lookup (used
-    /// when a parameter or block variable may shadow the self-binding).
-    GetCaptureDyn,
+    /// `GetCapture` (with the same meaning of `x`) for slot reference `T[bx]`, for references
+    /// that do not fit its operands.
+    GetCaptureRef,
     /// `R[a] = ` the parameter slot of reference `T[bx]` in the nearest call frame of the
     /// boundary environment, with a by-name fallback (slot references evaluated outside their
     /// own lambda).
@@ -81,7 +85,7 @@ pub(crate) enum Op {
     Where,
     Coalesce,
 
-    // `R[a] = R[b] <op> F[c]`
+    // `R[a] = R[b] <op> k`, where `k` is the number stored in the following code word.
     AddK,
     SubK,
     MulK,
@@ -95,7 +99,7 @@ pub(crate) enum Op {
     GtK,
     GeK,
 
-    // `R[a] = F[b] <op> R[c]`
+    // `R[a] = k <op> R[b]`, where `k` is the number stored in the following code word.
     KAdd,
     KSub,
     KMul,
@@ -112,13 +116,23 @@ pub(crate) enum Op {
     JmpNotGt,
     JmpNotGe,
 
-    // The same against a numeric constant: `R[b] <op> F[c]`.
+    // The same against the number stored in the following code word: when `R[a] <op> k`
+    // holds, execution continues after that word, otherwise `pc += sbx` (relative to it).
     JmpNotEqK,
     JmpNotNeK,
     JmpNotLtK,
     JmpNotLeK,
     JmpNotGtK,
     JmpNotGeK,
+
+    /// `R[a] = (R[b] == null)`; `x == 1` when `null` is the left-hand operand.
+    EqNull,
+    /// `R[a] = (R[b] != null)`; `x == 1` when `null` is the left-hand operand.
+    NeNull,
+    /// `if !(R[a] == null) { pc += sbx }`; `x == 1` when `null` is the left-hand operand.
+    JmpNotEqNull,
+    /// `if !(R[a] != null) { pc += sbx }`; `x == 1` when `null` is the left-hand operand.
+    JmpNotNeNull,
 
     /// `R[a] = -R[b]`
     Neg,
@@ -138,6 +152,18 @@ pub(crate) enum Op {
     /// `R[c] = R[a](...)`: call with the elements of the list being built (see `ListBegin`) as
     /// arguments, consuming it.
     CallList,
+    /// `R[c] = <the running function>(R[a+1], ..., R[a+n])`. Only emitted in the variant of a
+    /// function's code that is specialised for calls through its own name (see [`SelfRef`]),
+    /// where `n` (the low seven bits of `x`) is the function's own parameter count: the frame
+    /// calls itself without resolving anything. `R[a]` is scratch space for the callee, `b`
+    /// is the distance from the start of the code to the word after this instruction, and
+    /// the high bit of `x` promises that no argument can be a spread value.
+    CallSelf,
+    /// The tail-call form of `CallSelf` (with `c == a`), always followed by `Return a`: the
+    /// frame restarts itself with the new arguments (one call level deeper) instead of
+    /// calling. Only emitted where no variable of the frame is visible, so the frame being
+    /// replaced cannot be observed.
+    TailSelf,
     /// `return R[a]`
     Return,
 
@@ -180,7 +206,8 @@ pub(crate) enum Op {
     Raise,
     /// Raise "already defined" unless `N[bx]` is unbound in the whole scope chain.
     CheckUnbound,
-    /// If `R[a]` is a lambda, record `N[bx]` as its name.
+    /// If `R[a]` is a lambda, record `N[bx]` as its name. `x == 1` promises that the lambda was
+    /// created by the preceding instruction.
     NameLambda,
     /// Bind `N[bx] = R[a]` in the boundary environment.
     SetGlobal,
@@ -199,13 +226,14 @@ pub(crate) enum Op {
     /// value and falls through when the range is exhausted.
     ForRangeNext,
     /// Start an inlined iteration over the list `R[a+1]`: checks the call depth and that the
-    /// value is a list, then resets the element counter `R[a]`.
+    /// value is a list, then points the cursor `R[a]` at its first element and `R[a+4]` past
+    /// its last one (both are raw addresses, never visible to the program).
     IterPrep,
-    /// List iteration entry: `if R[a] >= len(R[a+1]) { pc += sbx } else { R[a+2] =
-    /// R[a+1][R[a]]; R[a+3] = R[a] (only when x == 1); R[a] += 1 }`.
+    /// List iteration entry: `if R[a] == R[a+4] { pc += sbx } else { R[a+2] = *R[a]; R[a+3] =
+    /// 0 (only when x == 1); R[a] += 1 }`.
     ForList,
-    /// List iteration back-edge: like `ForList`, but jumps (by `sbx`) when there IS a next
-    /// element and falls through when the list is exhausted.
+    /// List iteration back-edge: `if R[a] != R[a+4] { R[a+2] = *R[a]; R[a+3] += 1 (only when
+    /// x == 1); R[a] += 1; pc += sbx }`.
     ForListNext,
     /// Raise the "maximum call depth" error an out-of-line callback call would have produced
     /// when the frame is too deep. Executed once, before the first iteration.
@@ -214,8 +242,9 @@ pub(crate) enum Op {
     ListPush,
 }
 
-/// A single fixed-width instruction. `x` is a small flag/extra operand, `a`, `b` and `c` are
-/// register, constant or table indices; `b` and `c` combine into the 32-bit operand `bx`.
+/// A single instruction word. `x` is a small flag/extra operand, `a`, `b` and `c` are register,
+/// constant or table indices; `b` and `c` combine into the 32-bit operand `bx`. Some
+/// instructions are followed by a second code word holding a number operand.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub(crate) struct Instr {
@@ -225,6 +254,12 @@ pub(crate) struct Instr {
     pub b: u16,
     pub c: u16,
 }
+
+const _: () = assert!(size_of::<Instr>() == size_of::<u64>());
+
+/// The VM keeps this many registers free above the highest frame base it accepts without
+/// checking, so a call into a frame no larger than this needs a single stack check.
+pub(crate) const FAST_FRAME_SLOTS: usize = 256;
 
 impl Instr {
     pub fn abc(op: Op, a: u16, b: u16, c: u16) -> Self {
@@ -246,10 +281,57 @@ impl Instr {
         (self.b as usize) | ((self.c as usize) << 16)
     }
 
-    /// The signed jump offset stored in `bx`, relative to the following instruction.
+    /// The signed jump offset stored in `bx`, relative to the following code word.
     #[inline(always)]
     pub fn sbx(self) -> isize {
         ((self.b as u32) | ((self.c as u32) << 16)) as i32 as isize
+    }
+
+    /// The code word holding this instruction.
+    pub fn encode(self) -> u64 {
+        // SAFETY: `Instr` is eight bytes of plain data without padding.
+        unsafe { std::mem::transmute::<Instr, u64>(self) }
+    }
+
+    /// The instruction held by a code word.
+    ///
+    /// # Safety
+    /// `word` must have been produced by [`Instr::encode`].
+    pub unsafe fn decode(word: u64) -> Self {
+        // SAFETY: the caller guarantees the word holds a valid instruction.
+        unsafe { std::mem::transmute::<u64, Instr>(word) }
+    }
+
+    /// Whether the instruction is followed by a code word holding a number operand.
+    pub fn has_number_operand(self) -> bool {
+        matches!(
+            self.op,
+            Op::LoadNum
+                | Op::AddK
+                | Op::SubK
+                | Op::MulK
+                | Op::DivK
+                | Op::ModK
+                | Op::PowK
+                | Op::EqK
+                | Op::NeK
+                | Op::LtK
+                | Op::LeK
+                | Op::GtK
+                | Op::GeK
+                | Op::KAdd
+                | Op::KSub
+                | Op::KMul
+                | Op::KDiv
+                | Op::KMod
+                | Op::KPow
+                | Op::JmpNotEqK
+                | Op::JmpNotNeK
+                | Op::JmpNotLtK
+                | Op::JmpNotLeK
+                | Op::JmpNotGtK
+                | Op::JmpNotGeK
+        )
     }
 }
 
@@ -313,12 +395,24 @@ pub(crate) struct Shape {
     pub slots: Vec<u16>,
 }
 
-pub(crate) struct Proto {
-    pub code: Vec<Instr>,
-    pub consts: Vec<Value>,
+/// A capture a function calls with exactly its own (all required) parameters. When the
+/// function is named `name` and its capture slot `slot` is unbound, that capture is the
+/// function itself, and such calls can run `variant`: the same body compiled with them as
+/// direct self calls.
+#[derive(Debug)]
+pub(crate) struct SelfRef {
+    pub name: Symbol,
+    pub slot: u16,
 
-    /// Numeric constants used as immediate operands.
-    pub nums: Vec<f64>,
+    /// Compiled the first time it is needed; `None` when the variant could not be compiled.
+    pub variant: OnceCell<Option<Rc<Proto>>>,
+}
+
+pub(crate) struct Proto {
+    /// Instruction words, interleaved with the number operands of the instructions that take
+    /// one.
+    pub code: Vec<u64>,
+    pub consts: Vec<Value>,
     pub strings: Vec<String>,
     pub names: Vec<Symbol>,
 
@@ -330,7 +424,7 @@ pub(crate) struct Proto {
     /// The field name of each `GetField` access site.
     pub fields: Vec<String>,
 
-    /// Per-instruction index into `spans` (`u32::MAX` when the instruction has no span).
+    /// Per-code-word index into `spans` (`u32::MAX` when the instruction has no span).
     pub span_index: Vec<u32>,
     pub spans: Vec<Span>,
 
@@ -347,6 +441,18 @@ pub(crate) struct Proto {
     /// True when every parameter is required, so a call with exactly `params.len()` arguments
     /// needs no argument adjustment.
     pub simple_params: bool,
+
+    /// `params.len()` when `simple_params` holds, `u32::MAX` otherwise.
+    pub simple_arity: u32,
+
+    /// `simple_arity` when a call with that many arguments can skip every other check a call
+    /// may need (no self-call variant to select, frame no larger than [`FAST_FRAME_SLOTS`]),
+    /// `u32::MAX` otherwise.
+    pub fast_arity: u32,
+
+    /// The captures this function may be calling itself through (always empty in a variant
+    /// that is already specialised for one).
+    pub self_refs: Vec<SelfRef>,
 
     /// Chunks only: the first `cache_regs` registers cache late-bound names and start unbound.
     pub cache_regs: usize,
@@ -366,6 +472,13 @@ impl Proto {
         let index = *self.span_index.get(pc)?;
         self.spans.get(index as usize).copied()
     }
+
+    /// Whether this proto was compiled from exactly this body and parameter list.
+    #[inline(always)]
+    pub fn belongs_to(&self, body: &Rc<SpannedExpr>, args: &Rc<Vec<LambdaArg>>) -> bool {
+        self.body.as_ref().is_some_and(|own| Rc::ptr_eq(own, body))
+            && self.args.as_ref().is_some_and(|own| Rc::ptr_eq(own, args))
+    }
 }
 
 impl fmt::Debug for Proto {
@@ -376,8 +489,11 @@ impl fmt::Debug for Proto {
             self.params, self.max_stack
         )?;
 
-        for (pc, instr) in self.code.iter().enumerate() {
-            writeln!(
+        let mut pc = 0;
+        while pc < self.code.len() {
+            // SAFETY: `pc` only ever lands on instruction words; number operands are skipped.
+            let instr = unsafe { Instr::decode(self.code[pc]) };
+            write!(
                 f,
                 "  {:4}  {:<14} x={} a={} b={} c={}",
                 pc,
@@ -387,6 +503,14 @@ impl fmt::Debug for Proto {
                 instr.b,
                 instr.c
             )?;
+            pc += 1;
+
+            if instr.has_number_operand() {
+                write!(f, " k={}", f64::from_bits(self.code[pc]))?;
+                pc += 1;
+            }
+
+            writeln!(f)?;
         }
 
         for (index, lambda) in self.lambdas.iter().enumerate() {

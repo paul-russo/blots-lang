@@ -187,10 +187,12 @@ impl Heap {
         ))
     }
 
+    #[inline]
     pub fn get(&self, id: usize) -> Option<&HeapValue> {
         self.values.get(id)
     }
 
+    #[inline]
     pub fn get_mut(&mut self, id: usize) -> Option<&mut HeapValue> {
         self.values.get_mut(id)
     }

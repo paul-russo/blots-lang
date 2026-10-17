@@ -10,21 +10,28 @@
 //! the function that called it, and so on down to the environment the VM was created with. The
 //! frame stack is that scope chain. Each frame knows, through its proto's local table, which
 //! of its registers hold which variables at the instruction it is currently executing.
+//!
+//! This module holds the VM's state, its entry points and everything that does not run once
+//! per instruction; the instruction loop itself lives in [`run`].
+
+mod run;
 
 use crate::{
     ast::{BinaryOp, Span},
-    bytecode::{CaptureSource, Instr, Op, Proto, Wrap},
-    compiler::compile_lambda,
+    bytecode::{CaptureSource, FAST_FRAME_SLOTS, Proto, Wrap},
+    compiler::{compile_lambda, compile_self_variant},
     environment::Environment,
     error::RuntimeError,
     expressions::{OpSite, apply_binary_op, flatten_spread_value},
-    functions::{BuiltInFunction, FunctionDef},
-    heap::{CONSTANTS, Heap, HeapPointer, HeapValue, IterablePointer, StringPointer},
+    functions::{BuiltInFunction, FunctionDef, check_lambda_arity, lambda_name},
+    heap::{
+        CONSTANTS, Heap, HeapPointer, HeapValue, IterablePointer, LambdaPointer, StringPointer,
+    },
     intern::{Symbol, inputs_symbol},
     values::{CapturedScope, LambdaArg, LambdaDef, Value},
 };
 use indexmap::IndexMap;
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, mem::MaybeUninit, ptr, rc::Rc};
 
 /// A call made from a body that is itself nested this deep fails.
 const MAX_CALL_DEPTH: usize = 1000;
@@ -34,52 +41,102 @@ const MAX_CALL_DEPTH: usize = 1000;
 const CALLBACK_CALL_DEPTH: usize = 2;
 
 /// The smallest value stack worth allocating.
-const MIN_STACK: usize = 256;
+const MIN_STACK: usize = 1024;
+
+/// The smallest frame stack worth allocating.
+const MIN_FRAMES: usize = 32;
+
+/// The call depth a frame's body runs at lives in these bits of [`Frame::meta`].
+const DEPTH_MASK: u64 = 0x7fff_ffff;
+
+/// Set on a frame whose function was redefined in the heap while it was running: calls the
+/// frame makes to "itself" have to go through the heap again.
+const DEOPT: u64 = 1 << 31;
+
+/// The number of times the frame replaced itself with a tail call lives above this bit.
+const TAIL_SHIFT: u32 = 32;
+const TAIL_MASK: u64 = 0x00ff_ffff;
+
+/// Set on a frame that was entered from native code, which gets the result instead of a
+/// calling frame.
+const ENTRY: u64 = 1 << 56;
+
+/// Set on a frame whose call is being timed for the profiler.
+const PROFILED: u64 = 1 << 57;
 
 /// The content of a register whose variable has not been assigned (yet). No expression can
 /// produce this value, so it never escapes into the program.
 const UNBOUND: Value = Value::Spread(IterablePointer::String(StringPointer::new(usize::MAX)));
 
+/// Whether a value occupies exactly two machine words, which lets the VM move it as two
+/// word-sized loads and stores.
+const WORD_PAIR: bool =
+    size_of::<Value>() == 2 * size_of::<u64>() && align_of::<Value>() >= align_of::<u64>();
+
 #[inline(always)]
-fn is_unbound(value: Value) -> bool {
+fn is_unbound(value: &Value) -> bool {
     matches!(value, Value::Spread(IterablePointer::String(pointer)) if pointer.index() == usize::MAX)
 }
 
-/// The number held by a register the compiler reserved for loop state.
+/// Copy a value from one slot to another.
+///
+/// Registers are written one word at a time (a tag and a payload), and a CPU cannot forward
+/// two separate pending stores into one wide load: copying a freshly written register with a
+/// single 16-byte move stalls until both stores have retired. Reading the two words
+/// separately keeps such copies on the fast path.
+///
+/// # Safety
+/// `src` must point to an initialised value and `dst` to a slot that is valid for writes.
 #[inline(always)]
-fn loop_number(value: Value) -> f64 {
-    match value {
-        Value::Number(number) => number,
-        _ => {
-            debug_assert!(false, "loop state register does not hold a number");
-            f64::NAN
-        }
+unsafe fn copy_value(dst: *mut Value, src: *const Value) {
+    if !WORD_PAIR {
+        // SAFETY: guaranteed by the caller.
+        unsafe { dst.write(src.read()) };
+        return;
+    }
+
+    let (src, dst) = (
+        src.cast::<MaybeUninit<u64>>(),
+        dst.cast::<MaybeUninit<u64>>(),
+    );
+
+    // SAFETY: a value spans exactly two words (`WORD_PAIR`), which are moved as opaque,
+    // possibly uninitialised bytes. The volatile reads only keep the two loads from being
+    // merged into one.
+    unsafe {
+        let low = src.read_volatile();
+        let high = src.add(1).read_volatile();
+        dst.write(low);
+        dst.add(1).write(high);
     }
 }
 
+/// Store a value into a slot as two full words, so that it can be copied onwards right away
+/// (see [`copy_value`]) whatever the width of its payload.
+///
+/// # Safety
+/// `dst` must point to a slot that is valid for writes.
 #[inline(always)]
-fn less(x: f64, y: f64) -> Option<bool> {
-    if x < y {
-        Some(true)
-    } else if x >= y {
-        Some(false)
-    } else {
-        None
+unsafe fn store_value(dst: *mut Value, value: Value) {
+    if !WORD_PAIR {
+        // SAFETY: guaranteed by the caller.
+        unsafe { dst.write(value) };
+        return;
     }
-}
 
-#[inline(always)]
-fn less_eq(x: f64, y: f64) -> Option<bool> {
-    if x <= y {
-        Some(true)
-    } else if x > y {
-        Some(false)
-    } else {
-        None
+    let words = (&raw const value).cast::<MaybeUninit<u64>>();
+    let dst = dst.cast::<MaybeUninit<u64>>();
+
+    // SAFETY: as in `copy_value`; the volatile writes keep the stores from being narrowed to
+    // the bytes of the payload that are actually defined.
+    unsafe {
+        dst.write_volatile(words.read());
+        dst.add(1).write_volatile(words.add(1).read());
     }
 }
 
 /// The position of the element a (possibly negative) index refers to.
+#[inline(always)]
 fn element_position(index: i64, len: usize) -> Option<usize> {
     if index >= 0 {
         return Some(index as usize);
@@ -87,13 +144,6 @@ fn element_position(index: i64, len: usize) -> Option<usize> {
 
     let adjusted = len as i64 + index;
     (adjusted >= 0).then_some(adjusted as usize)
-}
-
-fn lambda_name(def: &LambdaDef) -> String {
-    match def.name {
-        Some(name) => format!("function \"{}\"", name),
-        None => String::from("anonymous function"),
-    }
 }
 
 fn built_in_name(built_in: BuiltInFunction) -> String {
@@ -157,37 +207,78 @@ struct CallProfile {
     end_var_env: std::time::Instant,
 }
 
+/// The record of an active call. Frames are plain data: what they point to is kept alive by
+/// the heap (function definitions and, through them, their code) or by the VM itself.
+#[derive(Clone, Copy)]
 struct Frame {
-    proto: Rc<Proto>,
+    /// The code word after the instruction being executed. Only kept up to date while the
+    /// frame is suspended in a call or when something is about to inspect the frame stack.
+    ip: *const u64,
 
-    /// The function being run; chunks have none.
-    def: Option<Rc<LambdaDef>>,
+    /// The frame's first register. The slot below it holds the value the function was called
+    /// through, which its own name is bound to inside the body.
+    base: *mut Value,
 
-    /// The value the function was called through, which its own name is bound to inside the
-    /// body.
-    this_value: Value,
+    proto: *const Proto,
 
-    /// Index of the frame's first register in the value stack.
-    base: usize,
+    /// The function being run; null for chunks.
+    def: *const LambdaDef,
 
-    /// The instruction being executed. Only kept up to date while the frame is suspended in a
-    /// call or when something is about to inspect the frame stack.
-    pc: usize,
+    /// The call depth the body runs at, the tail-call count and the frame flags.
+    meta: u64,
 
-    /// The call depth the body runs at.
-    depth: usize,
+    /// The saved `ip` of the tail call that last restarted the frame (only meaningful when
+    /// the tail-call count is not zero).
+    tail_ip: *const u64,
+}
 
-    /// Number of literals under construction when the frame was entered.
-    builders: usize,
+const NO_FRAME: Frame = Frame {
+    ip: ptr::null(),
+    base: ptr::null_mut(),
+    proto: ptr::null(),
+    def: ptr::null(),
+    meta: 0,
+    tail_ip: ptr::null(),
+};
 
-    /// The caller's register that receives the result.
-    ret: u16,
+impl Frame {
+    #[inline(always)]
+    fn depth(&self) -> usize {
+        (self.meta & DEPTH_MASK) as usize
+    }
 
-    /// Whether the frame was entered from native code, which gets the result instead.
-    entry: bool,
+    fn tail_calls(&self) -> usize {
+        ((self.meta >> TAIL_SHIFT) & TAIL_MASK) as usize
+    }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    profile: Option<Box<CallProfile>>,
+    fn proto(&self) -> &Proto {
+        // SAFETY: the code of an active frame outlives it (see `Vm::proto_for`).
+        unsafe { &*self.proto }
+    }
+
+    fn def(&self) -> Option<&LambdaDef> {
+        // SAFETY: the definition of an active frame is kept alive by the heap, by the native
+        // caller that entered the frame, or by `Vm::retired`.
+        unsafe { self.def.as_ref() }
+    }
+
+    /// The index of the code word `ip` was saved after.
+    fn pc_of(&self, ip: *const u64) -> usize {
+        // SAFETY: a saved `ip` points into (or one past) the frame's code.
+        let offset = unsafe { ip.offset_from(self.proto().code.as_ptr()) };
+        (offset as usize).wrapping_sub(1)
+    }
+
+    /// The index of the instruction the frame is executing (or suspended in).
+    fn pc(&self) -> usize {
+        self.pc_of(self.ip)
+    }
+
+    /// The value the function was called through.
+    fn this_value(&self) -> Value {
+        // SAFETY: every function frame is laid out right above its callee value.
+        unsafe { *self.base.sub(1) }
+    }
 }
 
 pub struct Vm {
@@ -197,14 +288,40 @@ pub struct Vm {
     env: Rc<Environment>,
 
     stack: Vec<Value>,
+
+    /// The highest frame base that leaves [`FAST_FRAME_SLOTS`] registers free: calls into
+    /// small frames at or below it need no further stack check. Null while profiling, which
+    /// sends every call down the slow path where it is timed.
+    stack_limit: *mut Value,
+
+    /// Frame records, always fully initialised. The first one is a placeholder that never
+    /// runs, so that `top` has somewhere to point when no frame is active.
     frames: Vec<Frame>,
+
+    /// The innermost active frame (or the placeholder). While the instruction loop runs it
+    /// tracks the frame stack itself and only writes this back before calling out of the loop.
+    top: *mut Frame,
+
+    /// The last frame record: pushing a frame above it needs the frame stack to grow first.
+    frame_limit: *mut Frame,
+
     builders: Vec<Builder>,
 
     /// The source text of the chunk at the bottom of the frame stack.
     chunk_source: Option<Rc<str>>,
 
+    /// Definitions that were replaced in the heap while a frame was still running them.
+    retired: Vec<Rc<LambdaDef>>,
+
+    /// Code compiled for definitions that carry the code of another definition.
+    orphans: Vec<Rc<Proto>>,
+
     #[cfg(not(target_arch = "wasm32"))]
     profiling: bool,
+
+    /// The timings of the active frames flagged [`PROFILED`], innermost last.
+    #[cfg(not(target_arch = "wasm32"))]
+    profiles: Vec<CallProfile>,
 }
 
 impl Vm {
@@ -213,23 +330,35 @@ impl Vm {
             heap,
             env: bindings,
             stack: Vec::new(),
+            stack_limit: ptr::null_mut(),
             frames: Vec::new(),
+            top: ptr::null_mut(),
+            frame_limit: ptr::null_mut(),
             builders: Vec::new(),
             chunk_source: None,
+            retired: Vec::new(),
+            orphans: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             profiling: crate::functions::is_profiling_enabled(),
+            #[cfg(not(target_arch = "wasm32"))]
+            profiles: Vec::new(),
         }
+    }
+
+    #[inline(always)]
+    fn is_profiling(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        let profiling = self.profiling;
+        #[cfg(target_arch = "wasm32")]
+        let profiling = false;
+
+        profiling
     }
 
     /// Whether calls to higher-order built-ins may be compiled into inline loops. Profiling
     /// reports every call, so it needs the callbacks to stay real calls.
     pub fn inlines_callbacks(&self) -> bool {
-        #[cfg(not(target_arch = "wasm32"))]
-        let inline = !self.profiling;
-        #[cfg(target_arch = "wasm32")]
-        let inline = true;
-
-        inline
+        !self.is_profiling()
     }
 
     /// Run a compiled top-level expression whose spans refer to `source`.
@@ -240,18 +369,25 @@ impl Vm {
         call_depth: usize,
     ) -> Result<Value, RuntimeError> {
         debug_assert!(
-            self.frames.is_empty(),
+            self.frame_count() == 0,
             "chunks run at the bottom of the stack"
         );
 
-        let base = self.stack_top();
+        let base = 1;
         self.ensure_stack(base + chunk.max_stack);
         self.stack[base..base + chunk.cache_regs].fill(UNBOUND);
         self.chunk_source = Some(source);
 
-        let mut frame = self.new_frame(Rc::clone(chunk), None, Value::Null, base, call_depth);
-        frame.entry = true;
-        self.frames.push(frame);
+        // SAFETY: the stack was just sized to hold the chunk's registers from `base` on.
+        let base = unsafe { self.stack.as_mut_ptr().add(base) };
+        self.push_frame(Frame {
+            ip: chunk.code.as_ptr(),
+            base,
+            proto: Rc::as_ptr(chunk),
+            def: ptr::null(),
+            meta: call_depth.min(DEPTH_MASK as usize / 2) as u64 | ENTRY,
+            tail_ip: ptr::null(),
+        });
 
         self.run()
     }
@@ -271,166 +407,244 @@ impl Vm {
             return Err(depth_exceeded(&def.get_name()));
         }
 
-        match def {
-            FunctionDef::Lambda(lambda) => {
-                #[cfg(not(target_arch = "wasm32"))]
-                let start = self.profiling.then(std::time::Instant::now);
-
-                let proto = self.proto_for(lambda)?;
-                let base = self.stack_top();
-                self.ensure_stack(base + proto.max_stack.max(args.len()));
-                self.stack[base..base + args.len()].copy_from_slice(args);
-                self.bind_params(&proto, base, args.len());
-
-                let mut frame = self.new_frame(
-                    proto,
-                    Some(Rc::clone(lambda)),
-                    this_value,
-                    base,
-                    call_depth + 1,
-                );
-                frame.entry = true;
-                #[cfg(not(target_arch = "wasm32"))]
-                if let Some(start) = start {
-                    frame.profile = Some(Self::call_profile(start));
-                }
-                self.frames.push(frame);
-
-                self.run()
+        let lambda = match def {
+            FunctionDef::Lambda(lambda) => lambda,
+            FunctionDef::BuiltIn(built_in) => {
+                return self
+                    .run_built_in(*built_in, args.to_vec(), call_depth + 1)
+                    .map_err(|error| error.with_function_context(&built_in_name(*built_in)));
             }
-            FunctionDef::BuiltIn(built_in) => self
-                .run_built_in(*built_in, args.to_vec(), call_depth + 1)
-                .map_err(|error| error.with_function_context(&built_in_name(*built_in))),
-        }
-    }
+        };
 
-    fn new_frame(
-        &self,
-        proto: Rc<Proto>,
-        def: Option<Rc<LambdaDef>>,
-        this_value: Value,
-        base: usize,
-        depth: usize,
-    ) -> Frame {
-        Frame {
-            proto,
-            def,
-            this_value,
-            base,
-            pc: 0,
-            depth,
-            builders: self.builders.len(),
-            ret: 0,
-            entry: false,
-            #[cfg(not(target_arch = "wasm32"))]
-            profile: None,
-        }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn call_profile(start: std::time::Instant) -> Box<CallProfile> {
-        let now = std::time::Instant::now();
-
-        Box::new(CallProfile {
-            start,
-            start_var_env: start,
-            end_var_env: now,
-        })
-    }
-
-    /// Report a finished call to the profiler, if it was being timed.
-    #[inline(always)]
-    fn finish_profile(&self, frame: &Frame) {
         #[cfg(not(target_arch = "wasm32"))]
-        if let (Some(profile), Some(def)) = (&frame.profile, &frame.def) {
-            crate::functions::FUNCTION_CALLS.lock().unwrap().push(
-                crate::stats::FunctionCallStats {
-                    name: lambda_name(def),
-                    start: profile.start,
-                    end: std::time::Instant::now(),
-                    start_var_env: Some(profile.start_var_env),
-                    end_var_env: Some(profile.end_var_env),
-                },
-            );
+        let start = self.profiling.then(std::time::Instant::now);
+
+        let generic = self.proto_for(lambda)?;
+        let proto = self.select_variant(generic, lambda, this_value);
+
+        // SAFETY: `proto_for` and `select_variant` return code that outlives the call.
+        let max_stack = unsafe { (*proto).max_stack };
+        let base = self.entry_base();
+        self.ensure_stack(base + max_stack.max(args.len()));
+        self.stack[base - 1] = this_value;
+        self.stack[base..base + args.len()].copy_from_slice(args);
+        self.bind_params(proto, base, args.len());
+
+        #[allow(unused_mut)]
+        let mut meta = (call_depth + 1) as u64 | ENTRY;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(start) = start {
+            self.profiles.push(CallProfile {
+                start,
+                start_var_env: start,
+                end_var_env: std::time::Instant::now(),
+            });
+            meta |= PROFILED;
         }
 
-        #[cfg(target_arch = "wasm32")]
-        let _ = frame;
+        // SAFETY: the stack was just sized to hold the frame's registers from `base` on.
+        let base = unsafe { self.stack.as_mut_ptr().add(base) };
+        self.push_frame(Frame {
+            // SAFETY: as above.
+            ip: unsafe { (*proto).code.as_ptr() },
+            base,
+            proto,
+            def: Rc::as_ptr(lambda),
+            meta,
+            tail_ip: ptr::null(),
+        });
+
+        self.run()
+    }
+
+    /// Run the innermost frame, and every frame it calls, until it returns.
+    fn run(&mut self) -> Result<Value, RuntimeError> {
+        let builders = self.builders.len();
+
+        // SAFETY: the innermost frame was set up by `run_chunk` or `call_function`: its code
+        // is alive, its registers lie within the value stack and its parameters are bound.
+        let result = unsafe { run::execute(self) };
+
+        if result.is_err() {
+            self.builders.truncate(builders);
+        }
+        if self.frame_count() == 0 {
+            self.retired.clear();
+        }
+
+        result
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Frames and the value stack
+    // ---------------------------------------------------------------------------------------
+
+    /// The number of active frames; they are `frames[1..=frame_count]`.
+    fn frame_count(&self) -> usize {
+        if self.top.is_null() {
+            return 0;
+        }
+
+        // SAFETY: `top` points into the frame records whenever there are any.
+        unsafe { self.top.offset_from(self.frames.as_ptr()) as usize }
     }
 
     #[inline(always)]
     fn top(&self) -> &Frame {
-        self.frames.last().expect("the VM has no active frame")
+        debug_assert!(self.frame_count() > 0, "the VM has no active frame");
+
+        // SAFETY: `top` points at the innermost active frame.
+        unsafe { &*self.top }
     }
 
+    fn active_frames(&self) -> &[Frame] {
+        match self.frame_count() {
+            0 => &[],
+            count => &self.frames[1..=count],
+        }
+    }
+
+    fn active_frames_mut(&mut self) -> &mut [Frame] {
+        match self.frame_count() {
+            0 => &mut [],
+            count => &mut self.frames[1..=count],
+        }
+    }
+
+    fn push_frame(&mut self, frame: Frame) {
+        if self.top == self.frame_limit {
+            self.grow_frames();
+        }
+
+        // SAFETY: `top` is below the last frame record, so the record above it exists.
+        unsafe {
+            self.top = self.top.add(1);
+            self.top.write(frame);
+        }
+    }
+
+    fn pop_frame(&mut self) -> Frame {
+        debug_assert!(self.frame_count() > 0, "the VM has no active frame");
+
+        // SAFETY: `top` points at the innermost active frame, which sits above the placeholder.
+        unsafe {
+            let frame = *self.top;
+            self.top = self.top.sub(1);
+
+            frame
+        }
+    }
+
+    #[cold]
+    fn grow_frames(&mut self) {
+        let count = self.frame_count();
+        let len = (self.frames.len() * 2).max(MIN_FRAMES);
+        self.frames.resize(len, NO_FRAME);
+
+        // SAFETY: the records hold at least the placeholder and every active frame.
+        unsafe {
+            let start = self.frames.as_mut_ptr();
+            self.top = start.add(count);
+            self.frame_limit = start.add(len - 1);
+        }
+    }
+
+    /// Drop the innermost frame because its function returned, reporting whether it was
+    /// entered from native code (which then gets the result).
+    #[inline(never)]
+    fn finish_frame(&mut self) -> bool {
+        let frame = self.pop_frame();
+        self.finish_profile(&frame);
+
+        frame.meta & ENTRY != 0
+    }
+
+    /// The heap, without the bookkeeping of a `RefCell` borrow.
+    ///
+    /// # Safety
+    /// No mutable borrow of the heap may be alive, and none may be taken while the returned
+    /// reference is in use.
     #[inline(always)]
-    fn top_mut(&mut self) -> &mut Frame {
-        self.frames.last_mut().expect("the VM has no active frame")
+    unsafe fn heap_ref(&self) -> &Heap {
+        debug_assert!(
+            self.heap.try_borrow().is_ok(),
+            "the heap is mutably borrowed"
+        );
+
+        // SAFETY: guaranteed by the caller.
+        unsafe { &*self.heap.as_ptr() }
     }
 
-    /// The first stack slot above every active frame.
-    fn stack_top(&self) -> usize {
-        self.frames
-            .last()
-            .map_or(0, |frame| frame.base + frame.proto.max_stack)
+    /// The index of a stack slot that belongs to a frame.
+    fn slot_index(&self, slot: *const Value) -> usize {
+        // SAFETY: frame registers always point into the value stack.
+        unsafe { slot.offset_from(self.stack.as_ptr()) as usize }
     }
 
+    /// The base of a frame entered from native code: above every active frame, leaving one
+    /// slot for the value the function is called through.
+    fn entry_base(&self) -> usize {
+        match self.active_frames().last() {
+            Some(frame) => self.slot_index(frame.base) + frame.proto().max_stack + 1,
+            None => 1,
+        }
+    }
+
+    /// Make sure the stack holds `needed` slots plus the headroom small frames rely on.
     #[inline(always)]
     fn ensure_stack(&mut self, needed: usize) {
-        if needed > self.stack.len() {
-            self.grow_stack(needed);
+        if needed + FAST_FRAME_SLOTS > self.stack.len() {
+            self.grow_stack(needed + FAST_FRAME_SLOTS);
         }
     }
 
     #[cold]
     fn grow_stack(&mut self, needed: usize) {
         let len = needed.max(self.stack.len() * 2).max(MIN_STACK);
-        self.stack.resize(len, Value::Null);
-    }
+        let bases: Vec<usize> = self
+            .active_frames()
+            .iter()
+            .map(|frame| self.slot_index(frame.base))
+            .collect();
 
-    /// The register window of the innermost frame.
-    #[inline(always)]
-    fn regs(&mut self) -> *mut Value {
-        let base = self.top().base;
+        let mut stack = Vec::with_capacity(len);
+        stack.extend_from_slice(&self.stack);
+        stack.resize(len, Value::Null);
+        self.stack = stack;
 
-        // SAFETY: the stack covers the whole window of every active frame.
-        unsafe { self.stack.as_mut_ptr().add(base) }
-    }
+        let start = self.stack.as_mut_ptr();
+        for (frame, base) in self.active_frames_mut().iter_mut().zip(bases) {
+            // SAFETY: the new stack is at least as long as the old one.
+            frame.base = unsafe { start.add(base) };
+        }
 
-    /// The interpreter state of the innermost frame: its proto, its code, its register window
-    /// and its saved pc.
-    #[inline(always)]
-    fn frame_state(&mut self) -> (*const Proto, *const Instr, *mut Value, usize) {
-        let frame = self.top();
-        let proto = Rc::as_ptr(&frame.proto);
-        let code = frame.proto.code.as_ptr();
-        let (base, pc) = (frame.base, frame.pc);
-
-        // SAFETY: the stack covers the whole window of every active frame.
-        let regs = unsafe { self.stack.as_mut_ptr().add(base) };
-
-        (proto, code, regs, pc)
+        self.stack_limit = if self.is_profiling() {
+            ptr::null_mut()
+        } else {
+            // SAFETY: the stack is longer than the headroom.
+            unsafe { start.add(len - FAST_FRAME_SLOTS) }
+        };
     }
 
     fn source_of(&self, frame: &Frame) -> Rc<str> {
-        match (&frame.def, &self.chunk_source) {
+        match (frame.def(), &self.chunk_source) {
             (Some(def), _) => Rc::clone(&def.source),
             (None, Some(source)) => Rc::clone(source),
             (None, None) => Rc::from(""),
         }
     }
 
-    /// An error located at the instruction `pc` of the innermost frame.
-    fn span_error(&self, message: String, pc: usize) -> RuntimeError {
+    /// An error located at the instruction the innermost frame is executing.
+    fn span_error(&self, message: String) -> RuntimeError {
         let frame = self.top();
 
-        match frame.proto.span_at(pc) {
+        match frame.proto().span_at(frame.pc()) {
             Some(span) => RuntimeError::with_span(message, span, self.source_of(frame)),
             None => RuntimeError::new(message),
         }
     }
 
-    fn unknown_identifier(&self, name: Symbol, pc: usize) -> RuntimeError {
+    fn unknown_identifier(&self, name: Symbol) -> RuntimeError {
         let message = if CONSTANTS.contains_key(name.as_str()) {
             format!(
                 "unknown identifier: {}. Did you mean constants.{}?",
@@ -440,7 +654,7 @@ impl Vm {
             format!("unknown identifier: {}", name)
         };
 
-        self.span_error(message, pc)
+        self.span_error(message)
     }
 
     /// Point an error raised by the call the innermost frame is executing at that call, unless
@@ -448,7 +662,7 @@ impl Vm {
     fn at_call_site(&self, error: RuntimeError) -> RuntimeError {
         let frame = self.top();
 
-        match frame.proto.span_at(frame.pc) {
+        match frame.proto().span_at(frame.pc()) {
             Some(span) => error.with_call_site(span, self.source_of(frame)),
             None => error,
         }
@@ -458,30 +672,32 @@ impl Vm {
     /// boundary environment. Within a frame, block variables shadow parameters, which shadow
     /// the function's own name, which shadows its captures.
     fn lookup(&self, name: Symbol) -> Option<Value> {
-        for frame in self.frames.iter().rev() {
-            let proto = &*frame.proto;
-            let pc = frame.pc as u32;
+        for frame in self.active_frames().iter().rev() {
+            let proto = frame.proto();
+            let pc = frame.pc() as u32;
 
             for local in proto.locals.iter().rev() {
                 if local.name != name || pc < local.start || pc >= local.end {
                     continue;
                 }
 
-                let value = self.stack[frame.base + local.reg as usize];
-                if !is_unbound(value) {
+                // SAFETY: the registers of the proto's locals lie within the frame.
+                let value = unsafe { *frame.base.add(local.reg as usize) };
+                if !is_unbound(&value) {
                     return Some(value);
                 }
             }
 
             if let Some(position) = proto.params.iter().position(|param| *param == name) {
-                return Some(self.stack[frame.base + position]);
+                // SAFETY: parameters occupy the first registers of the frame.
+                return Some(unsafe { *frame.base.add(position) });
             }
 
-            let Some(def) = &frame.def else {
+            let Some(def) = frame.def() else {
                 continue;
             };
             if def.name == Some(name) {
-                return Some(frame.this_value);
+                return Some(frame.this_value());
             }
             if let Some(value) = def.scope.get(name) {
                 return Some(value);
@@ -491,35 +707,107 @@ impl Vm {
         self.env.get(name)
     }
 
+    /// Resolve a name the way an identifier expression does, failing with the usual error.
+    fn lookup_or_unknown(&self, name: Symbol) -> Result<Value, RuntimeError> {
+        self.lookup(name)
+            .ok_or_else(|| self.unknown_identifier(name))
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Calls
+    // ---------------------------------------------------------------------------------------
+
     /// The compiled body of a function, compiling it first if this is the first time the
-    /// definition is called.
-    fn proto_for(&self, def: &LambdaDef) -> Result<Rc<Proto>, RuntimeError> {
+    /// definition is called. The code lives as long as the definition (or, for the rare
+    /// definition that carries another one's code, as long as the VM).
+    fn proto_for(&mut self, def: &LambdaDef) -> Result<*const Proto, RuntimeError> {
         let Some(code) = def.scope.code.get() else {
             let code = compile_lambda(&def.args, &def.body, self.inlines_callbacks())?;
-            let _ = def.scope.code.set(Rc::clone(&code));
+            let pointer = Rc::as_ptr(&code);
+            let _ = def.scope.code.set(code);
 
-            return Ok(code);
+            return Ok(pointer);
         };
 
-        // A definition assembled from the parts of another one can carry that one's code.
-        let current = code
-            .body
-            .as_ref()
-            .is_some_and(|body| Rc::ptr_eq(body, &def.body))
-            && code
-                .args
-                .as_ref()
-                .is_some_and(|args| Rc::ptr_eq(args, &def.args));
-        if !current {
-            return compile_lambda(&def.args, &def.body, self.inlines_callbacks());
+        if code.belongs_to(&def.body, &def.args) {
+            return Ok(Rc::as_ptr(code));
         }
 
-        Ok(Rc::clone(code))
+        // A definition assembled from the parts of another one can carry that one's code.
+        let known = self
+            .orphans
+            .iter()
+            .find(|orphan| orphan.belongs_to(&def.body, &def.args));
+        if let Some(orphan) = known {
+            return Ok(Rc::as_ptr(orphan));
+        }
+
+        let code = compile_lambda(&def.args, &def.body, self.inlines_callbacks())?;
+        let pointer = Rc::as_ptr(&code);
+        self.orphans.push(code);
+
+        Ok(pointer)
+    }
+
+    /// The code to run for a call of `def` through `this_value`: the variant of `generic` in
+    /// which the function calls itself directly when the function's own name is known to
+    /// resolve to the function (see [`crate::bytecode::SelfRef`]), `generic` otherwise.
+    fn select_variant(
+        &self,
+        generic: *const Proto,
+        def: &LambdaDef,
+        this_value: Value,
+    ) -> *const Proto {
+        // SAFETY: `generic` comes from `proto_for`.
+        let proto = unsafe { &*generic };
+        if proto.self_refs.is_empty() || self.is_profiling() {
+            return generic;
+        }
+
+        let (Some(name), Value::Lambda(pointer)) = (def.name, this_value) else {
+            return generic;
+        };
+
+        // The self-binding has to be the definition being called, so that a call through it
+        // is a call of the running function.
+        let is_current = matches!(
+            self.heap.borrow().get(pointer.index()),
+            Some(HeapValue::Lambda(current)) if ptr::eq(Rc::as_ptr(current), def)
+        );
+        if !is_current {
+            return generic;
+        }
+
+        let self_ref = proto.self_refs.iter().find(|self_ref| {
+            self_ref.name == name && def.scope.slot_ref(self_ref.slot as usize).is_none()
+        });
+        let Some(self_ref) = self_ref else {
+            return generic;
+        };
+
+        let variant = self_ref.variant.get_or_init(|| {
+            compile_self_variant(
+                &def.args,
+                &def.body,
+                self.inlines_callbacks(),
+                name,
+                self_ref.slot,
+            )
+            .ok()
+            .filter(|variant| variant.max_stack <= FAST_FRAME_SLOTS)
+        });
+
+        match variant {
+            Some(variant) => Rc::as_ptr(variant),
+            None => generic,
+        }
     }
 
     /// Turn the `argc` arguments at `base` into the parameter registers the body expects:
     /// missing optional parameters become null and a rest parameter collects what is left.
-    fn bind_params(&mut self, proto: &Proto, base: usize, argc: usize) {
+    fn bind_params(&mut self, proto: *const Proto, base: usize, argc: usize) {
+        // SAFETY: the caller passes code that is alive.
+        let proto = unsafe { &*proto };
         if proto.simple_params && argc == proto.params.len() {
             return;
         }
@@ -550,61 +838,93 @@ impl Vm {
     /// Copy call arguments that were gathered at runtime into the registers a call expects
     /// them in: the ones following register `a` of the innermost frame.
     fn place_args(&mut self, a: usize, args: &[Value]) {
-        let base = self.top().base + a + 1;
+        let base = self.slot_index(self.top().base) + a + 1;
         self.ensure_stack(base + args.len());
         self.stack[base..base + args.len()].copy_from_slice(args);
     }
 
-    /// Call `func` with the `argc` arguments that follow register `a` of the innermost frame.
-    /// A built-in runs to completion and its result is returned; for a user function a frame
-    /// is pushed, to be run by the caller, and `None` is returned.
-    fn call(
-        &mut self,
-        func: Value,
-        a: usize,
-        argc: usize,
-        ret: u16,
-    ) -> Result<Option<Value>, RuntimeError> {
-        let (base, depth, pc) = {
-            let frame = self.top();
-            (frame.base + a + 1, frame.depth, frame.pc)
+    /// Hand the list being built to the call at register `a` of the innermost frame as its
+    /// arguments, returning how many there are.
+    fn place_list_args(&mut self, a: usize) -> usize {
+        let Some(Builder::List(args)) = self.builders.pop() else {
+            unreachable!("no argument list is being built");
         };
+        self.place_args(a, &args);
 
-        match func {
+        args.len()
+    }
+
+    /// Call the value in register `a` of the innermost frame (whose `ip` is saved) with the
+    /// `argc` arguments that follow it. A built-in runs to completion and its result is
+    /// stored in register `dst`; for a user function a frame is pushed, to be run by the
+    /// caller. Either way the caller continues with the innermost frame.
+    #[inline(never)]
+    fn call_slow(&mut self, a: usize, argc: usize, dst: u16) -> Result<(), RuntimeError> {
+        let argc = self.flatten_args(a, argc)?;
+        let frame = *self.top();
+        let depth = frame.depth();
+        let base = self.slot_index(frame.base) + a + 1;
+        let callee = self.stack[base - 1];
+
+        match callee {
             Value::Lambda(pointer) => {
-                let def = match self.heap.borrow().get(pointer.index()) {
-                    Some(HeapValue::Lambda(def)) => Rc::clone(def),
+                let def: *const LambdaDef = match self.heap.borrow().get(pointer.index()) {
+                    Some(HeapValue::Lambda(def)) => Rc::as_ptr(def),
                     _ => panic!("Dangling pointer!"),
                 };
-                let proto = self
-                    .proto_for(&def)
+
+                // SAFETY: the heap keeps the definition alive for as long as the VM runs; a
+                // definition that is replaced while it is in use is retired, not dropped.
+                let lambda = unsafe { &*def };
+                let generic = self
+                    .proto_for(lambda)
                     .map_err(|error| self.at_call_site(error))?;
 
-                if !(proto.simple_params && argc == proto.params.len()) {
-                    FunctionDef::Lambda(Rc::clone(&def))
-                        .check_arity(argc)
-                        .map_err(|error| self.at_call_site(error))?;
+                // SAFETY: `proto_for` returns code that is alive.
+                let simple = unsafe { (*generic).simple_arity } as usize == argc;
+                if !simple {
+                    check_lambda_arity(lambda, argc).map_err(|error| self.at_call_site(error))?;
                 }
 
                 if depth > MAX_CALL_DEPTH {
-                    return Err(self.at_call_site(depth_exceeded(&lambda_name(&def))));
+                    return Err(self.at_call_site(depth_exceeded(&lambda_name(lambda))));
                 }
 
                 #[cfg(not(target_arch = "wasm32"))]
                 let start = self.profiling.then(std::time::Instant::now);
 
-                self.ensure_stack(base + proto.max_stack.max(argc));
-                self.bind_params(&proto, base, argc);
+                let proto = self.select_variant(generic, lambda, callee);
 
-                let mut frame = self.new_frame(proto, Some(def), func, base, depth + 1);
-                frame.ret = ret;
+                // SAFETY: as above.
+                let max_stack = unsafe { (*proto).max_stack };
+                self.ensure_stack(base + max_stack.max(argc));
+                self.bind_params(proto, base, argc);
+
+                #[allow(unused_mut)]
+                let mut meta = (depth + 1) as u64;
                 #[cfg(not(target_arch = "wasm32"))]
                 if let Some(start) = start {
-                    frame.profile = Some(Self::call_profile(start));
+                    self.profiles.push(CallProfile {
+                        start,
+                        start_var_env: start,
+                        end_var_env: std::time::Instant::now(),
+                    });
+                    meta |= PROFILED;
                 }
-                self.frames.push(frame);
 
-                Ok(None)
+                // SAFETY: the stack was just sized to hold the frame's registers.
+                let base = unsafe { self.stack.as_mut_ptr().add(base) };
+                self.push_frame(Frame {
+                    // SAFETY: as above.
+                    ip: unsafe { (*proto).code.as_ptr() },
+                    base,
+                    proto,
+                    def,
+                    meta,
+                    tail_ip: ptr::null(),
+                });
+
+                Ok(())
             }
             Value::BuiltIn(built_in) => {
                 FunctionDef::BuiltIn(built_in)
@@ -623,7 +943,12 @@ impl Vm {
                 };
 
                 match result {
-                    Ok(value) => Ok(Some(value)),
+                    Ok(value) => {
+                        let target = self.slot_index(self.top().base) + dst as usize;
+                        self.stack[target] = value;
+
+                        Ok(())
+                    }
                     Err(error) => {
                         let error = error.with_function_context(&built_in_name(built_in));
                         Err(self.at_call_site(error))
@@ -633,11 +958,35 @@ impl Vm {
             _ => {
                 let message = format!(
                     "can't call a non-function: {}",
-                    func.stringify_internal(&self.heap.borrow())
+                    callee.stringify_internal(&self.heap.borrow())
                 );
-                Err(self.span_error(message, pc))
+                Err(self.span_error(message))
             }
         }
+    }
+
+    /// Expand the spread values among the `argc` arguments that follow register `a` of the
+    /// innermost frame, returning the resulting argument count.
+    fn flatten_args(&mut self, a: usize, argc: usize) -> Result<usize, RuntimeError> {
+        let base = self.slot_index(self.top().base) + a + 1;
+        let given = &self.stack[base..base + argc];
+        if !given.iter().any(|arg| matches!(arg, Value::Spread(_))) {
+            return Ok(argc);
+        }
+
+        let mut args = Vec::with_capacity(argc);
+        for arg in given {
+            match arg {
+                Value::Spread(pointer) => {
+                    let values = flatten_spread_value(pointer, &self.heap)?;
+                    args.extend(values.iter().copied());
+                }
+                value => args.push(*value),
+            }
+        }
+        self.place_args(a, &args);
+
+        Ok(args.len())
     }
 
     /// Run a built-in that may call back into the VM. The arguments are owned because the
@@ -706,13 +1055,96 @@ impl Vm {
             });
     }
 
+    /// Report the call of a frame that is going away to the profiler, if it was being timed.
+    fn finish_profile(&mut self, frame: &Frame) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if frame.meta & PROFILED != 0
+            && let (Some(profile), Some(def)) = (self.profiles.pop(), frame.def())
+        {
+            crate::functions::FUNCTION_CALLS.lock().unwrap().push(
+                crate::stats::FunctionCallStats {
+                    name: lambda_name(def),
+                    start: profile.start,
+                    end: std::time::Instant::now(),
+                    start_var_env: Some(profile.start_var_env),
+                    end_var_env: Some(profile.end_var_env),
+                },
+            );
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        let _ = frame;
+    }
+
+    /// Abandon every frame down to (and including) the one the current `run` was entered
+    /// through, decorating `error` (raised by the instruction the innermost frame is
+    /// executing) with the context each level adds on the way out.
+    #[cold]
+    #[inline(never)]
+    fn unwind(&mut self, mut error: RuntimeError) -> RuntimeError {
+        loop {
+            let frame = self.pop_frame();
+            let proto = frame.proto();
+            let pc = frame.pc();
+            let source = self.source_of(&frame);
+
+            // Handlers are recorded innermost first.
+            for handler in &proto.handlers {
+                if pc < handler.start as usize || pc >= handler.end as usize {
+                    continue;
+                }
+
+                for wrap in &handler.wraps {
+                    error = match wrap {
+                        Wrap::FunctionContext(name) => error.with_function_context(name),
+                        Wrap::CallSite(span) => error.with_call_site(*span, Rc::clone(&source)),
+                    };
+                }
+            }
+
+            if let Some(def) = frame.def() {
+                let name = lambda_name(def);
+                error = error.with_function_context(&name);
+
+                // Each tail call replaced a frame that would have added its own context: the
+                // innermost of them points the error at the call, and every one of them names
+                // the function again.
+                let tail_calls = frame.tail_calls();
+                if tail_calls > 0 {
+                    if let Some(span) = proto.span_at(frame.pc_of(frame.tail_ip)) {
+                        error = error.with_call_site(span, Rc::clone(&source));
+                    }
+
+                    let context = format!("in {}: ", name).repeat(tail_calls);
+                    error.message.insert_str(0, &context);
+                }
+            }
+
+            self.finish_profile(&frame);
+
+            if frame.meta & ENTRY != 0 {
+                return error;
+            }
+
+            error = self.at_call_site(error);
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Instructions that are not worth inlining into the loop
+    // ---------------------------------------------------------------------------------------
+
     /// Apply a binary operator the instruction's fast path does not cover: broadcasting,
     /// strings, the callback operators, and every error case.
+    #[inline(never)]
     fn binary_slow(&mut self, op: BinaryOp, lhs: Value, rhs: Value) -> Result<Value, RuntimeError> {
         let frame = self.top();
-        let span = frame.proto.span_at(frame.pc).unwrap_or_else(Span::dummy);
+        let span = frame
+            .proto()
+            .span_at(frame.pc())
+            .unwrap_or_else(Span::dummy);
         let source = self.source_of(frame);
-        let depth = frame.depth;
+        let depth = frame.depth();
         let heap = Rc::clone(&self.heap);
 
         apply_binary_op(
@@ -729,19 +1161,123 @@ impl Vm {
         )
     }
 
+    /// Evaluate a comparison a fused compare-and-branch could not decide by itself.
+    #[inline(never)]
+    fn compare_slow(&mut self, op: BinaryOp, lhs: Value, rhs: Value) -> Result<bool, RuntimeError> {
+        let value = self.binary_slow(op, lhs, rhs)?;
+
+        Ok(value.as_bool()?)
+    }
+
+    /// Look up name `index` of the innermost frame's proto for an identifier expression, or
+    /// for a record shorthand (which reports failure without a location or a hint).
+    #[inline(never)]
+    fn get_name(&self, index: usize, shorthand: bool) -> Result<Value, RuntimeError> {
+        let name = self.top().proto().names[index];
+
+        match self.lookup(name) {
+            Some(value) => Ok(value),
+            None if shorthand => Err(RuntimeError::new(format!("unknown identifier: {}", name))),
+            None => Err(self.unknown_identifier(name)),
+        }
+    }
+
+    /// Look up name `index` of the innermost frame's proto in the boundary environment.
+    #[inline(never)]
+    fn get_global(&self, index: usize) -> Result<Value, RuntimeError> {
+        let name = self.top().proto().names[index];
+
+        self.env
+            .get(name)
+            .ok_or_else(|| self.unknown_identifier(name))
+    }
+
+    /// Resolve slot reference `index` of the innermost frame's proto, whose capture slot
+    /// turned out to be unbound: through the function's own name (unless something may
+    /// shadow it), then by name.
+    #[inline(never)]
+    fn capture_fallback(&self, index: usize, shadowable: bool) -> Result<Value, RuntimeError> {
+        let frame = self.top();
+        let (_, name) = frame.proto().slot_refs[index];
+
+        if !shadowable && frame.def().is_some_and(|def| def.name == Some(name)) {
+            return Ok(frame.this_value());
+        }
+
+        self.lookup_or_unknown(name)
+    }
+
+    /// Read slot reference `index` of the innermost frame's proto from the nearest call
+    /// frame of the boundary environment, falling back to a lookup by name.
+    #[inline(never)]
+    fn env_slot(&self, index: usize, param: bool) -> Result<Value, RuntimeError> {
+        let (slot, name) = self.top().proto().slot_refs[index];
+        let value = if param {
+            self.env.get_param_slot(slot as usize)
+        } else {
+            self.env.get_capture_slot(slot as usize)
+        };
+
+        match value {
+            Some(value) => Ok(value),
+            None => self.lookup_or_unknown(name),
+        }
+    }
+
+    #[inline(never)]
+    fn input(&self, index: usize) -> Result<Value, RuntimeError> {
+        let field = &self.top().proto().strings[index];
+        let inputs = self
+            .lookup(inputs_symbol())
+            .ok_or_else(|| format!("inputs not found (required for #{} syntax)", field))?;
+
+        let Value::Record(record) = inputs else {
+            return Err(
+                self.span_error(format!("inputs must be a record to use #{} syntax", field))
+            );
+        };
+
+        let heap = self.heap.borrow();
+        let record = record.reify(&heap).as_record()?;
+
+        Ok(record.get(field).copied().unwrap_or(Value::Null))
+    }
+
+    #[inline(never)]
+    fn factorial(&self, value: Value) -> Result<Value, RuntimeError> {
+        let n = value.as_number()?;
+
+        if n >= 0.0 && n == (n as u64) as f64 {
+            return Ok(Value::Number(
+                (1..(n as u64) + 1).map(|x| x as f64).product::<f64>(),
+            ));
+        }
+
+        Err(self.span_error("factorial only works on non-negative integers".to_string()))
+    }
+
+    #[inline(never)]
+    fn load_string(&mut self, index: usize) -> Value {
+        let text = self.top().proto().strings[index].clone();
+
+        self.heap.borrow_mut().insert_string(text)
+    }
+
     /// Create a function value from lambda template `index` of the innermost frame's proto,
     /// capturing the current values of its free variables.
+    #[inline(never)]
     fn make_closure(&mut self, index: usize) -> Result<Value, RuntimeError> {
         let frame = self.top();
-        let template = &frame.proto.lambdas[index];
+        let template = &frame.proto().lambdas[index];
         let mut values = Vec::with_capacity(template.captures.len());
         let mut any_bound = false;
 
         for (name, source) in template.captures.iter().zip(&template.capture_sources) {
             let value = match source {
                 CaptureSource::Register(reg) => {
-                    let value = self.stack[frame.base + *reg as usize];
-                    (!is_unbound(value)).then_some(value)
+                    // SAFETY: capture sources are registers of the creating frame.
+                    let value = unsafe { *frame.base.add(*reg as usize) };
+                    (!is_unbound(&value)).then_some(value)
                 }
                 CaptureSource::Dynamic => self.lookup(*name),
             };
@@ -777,7 +1313,180 @@ impl Vm {
         Ok(self.heap.borrow_mut().insert_lambda(lambda))
     }
 
-    fn index(&self, object: Value, index: Value, pc: usize) -> Result<Value, RuntimeError> {
+    /// Record `name` as the name of a function value that is being assigned. A definition
+    /// that is in use keeps the name it was called with: the heap gets a renamed copy.
+    #[inline(never)]
+    fn name_lambda(&mut self, pointer: LambdaPointer, index: usize, fresh: bool) {
+        let name = self.top().proto().names[index];
+        let heap = Rc::clone(&self.heap);
+        let mut heap = heap.borrow_mut();
+        let Some(HeapValue::Lambda(def)) = heap.get_mut(pointer.index()) else {
+            return;
+        };
+
+        if !fresh {
+            let current = Rc::as_ptr(def);
+            let mut running = false;
+
+            for frame in self.active_frames_mut() {
+                if ptr::eq(frame.def, current) {
+                    frame.meta |= DEOPT;
+                    running = true;
+                }
+            }
+
+            if running {
+                self.retired.push(Rc::clone(def));
+            }
+        }
+
+        Rc::make_mut(def).name = Some(name);
+    }
+
+    #[inline(never)]
+    fn new_list(&mut self, first: *const Value, count: usize) -> Value {
+        let mut items: Vec<Value> = Vec::with_capacity(count);
+
+        // SAFETY: the elements are `count` consecutive registers of the innermost frame.
+        unsafe {
+            for offset in 0..count {
+                copy_value(items.as_mut_ptr().add(offset), first.add(offset));
+            }
+            items.set_len(count);
+        }
+
+        self.heap.borrow_mut().insert_list(items)
+    }
+
+    /// Start building a list. `hint` selects the capacity: 1 = the length of the list in
+    /// `source`, 2 = the element count of an inlined range in `source` (stored as the bit
+    /// pattern of a number, like all loop counters).
+    #[inline(never)]
+    fn list_begin(&mut self, hint: u8, source: *const Value) {
+        // SAFETY: with a hint, `source` is a loop state register of the innermost frame.
+        let capacity = match hint {
+            1 => match unsafe { *source } {
+                Value::List(pointer) => match self.heap.borrow().get(pointer.index()) {
+                    Some(HeapValue::List(items)) => items.len(),
+                    _ => 0,
+                },
+                _ => 0,
+            },
+            2 => match unsafe { *source } {
+                Value::Number(count) => count.to_bits() as usize,
+                _ => 0,
+            },
+            _ => 0,
+        };
+
+        self.builders
+            .push(Builder::List(Vec::with_capacity(capacity)));
+    }
+
+    /// Append `count` registers starting at `first` to the list being built, flattening
+    /// spread values.
+    #[inline(never)]
+    fn list_append(&mut self, first: *const Value, count: usize) -> Result<(), RuntimeError> {
+        let Some(Builder::List(list)) = self.builders.last_mut() else {
+            unreachable!("no list is being built");
+        };
+
+        for offset in 0..count {
+            // SAFETY: the values are `count` consecutive registers of the innermost frame.
+            match unsafe { *first.add(offset) } {
+                Value::Spread(pointer) => {
+                    let values = flatten_spread_value(&pointer, &self.heap)?;
+                    list.extend(values.iter().copied());
+                }
+                value => list.push(value),
+            }
+        }
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn list_end(&mut self) -> Value {
+        let Some(Builder::List(list)) = self.builders.pop() else {
+            unreachable!("no list is being built");
+        };
+
+        self.heap.borrow_mut().insert_list(list)
+    }
+
+    /// Build a record of shape `index` of the innermost frame's proto from the consecutive
+    /// registers starting at `first`.
+    #[inline(never)]
+    fn new_record(&mut self, index: usize, first: *const Value) -> Value {
+        let shape = &self.top().proto().shapes[index];
+        let mut entries = shape.template.clone();
+
+        for (offset, slot) in shape.slots.iter().enumerate() {
+            // SAFETY: the values are consecutive registers of the innermost frame, one per
+            // entry of the shape.
+            unsafe { copy_value(&mut entries[*slot as usize], first.add(offset)) };
+        }
+
+        self.heap.borrow_mut().insert_record(entries)
+    }
+
+    fn record_builder(&mut self) -> (&mut IndexMap<String, Value>, &mut Option<String>) {
+        match self.builders.last_mut() {
+            Some(Builder::Record { entries, key }) => (entries, key),
+            _ => unreachable!("no record is being built"),
+        }
+    }
+
+    #[inline(never)]
+    fn record_begin(&mut self) {
+        self.builders.push(Builder::Record {
+            entries: IndexMap::new(),
+            key: None,
+        });
+    }
+
+    #[inline(never)]
+    fn record_set(&mut self, index: usize, value: Value) {
+        let key = self.top().proto().strings[index].clone();
+        self.record_builder().0.insert(key, value);
+    }
+
+    #[inline(never)]
+    fn record_key(&mut self, value: Value) -> Result<(), RuntimeError> {
+        let text = value.as_string(&self.heap.borrow())?.to_string();
+        *self.record_builder().1 = Some(text);
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn record_value(&mut self, value: Value) {
+        let (entries, key) = self.record_builder();
+        let key = key.take().expect("no record key was staged");
+        entries.insert(key, value);
+    }
+
+    #[inline(never)]
+    fn record_spread(&mut self, value: Value) -> Result<(), RuntimeError> {
+        let Value::Spread(iterable) = value else {
+            return Ok(());
+        };
+
+        let heap = Rc::clone(&self.heap);
+        spread_into_record(&heap, self.record_builder().0, iterable)
+    }
+
+    #[inline(never)]
+    fn record_end(&mut self) -> Value {
+        let Some(Builder::Record { entries, .. }) = self.builders.pop() else {
+            unreachable!("no record is being built");
+        };
+
+        self.heap.borrow_mut().insert_record(entries)
+    }
+
+    #[inline(never)]
+    fn index(&self, object: Value, index: Value) -> Result<Value, RuntimeError> {
         match object {
             Value::Record(record) => {
                 let heap = self.heap.borrow();
@@ -805,94 +1514,103 @@ impl Vm {
                     .map(|character| self.heap.borrow_mut().insert_string(character.to_string()))
                     .unwrap_or(Value::Null))
             }
-            _ => Err(self.span_error(
-                format!(
-                    "expected a record, list, or string, but got a {}",
-                    object.get_type()
-                ),
-                pc,
-            )),
+            _ => Err(self.span_error(format!(
+                "expected a record, list, or string, but got a {}",
+                object.get_type()
+            ))),
         }
     }
 
-    /// Read the field of access site `site`, trying the position the field was found at last
-    /// time before hashing its name.
-    fn field(
-        &self,
-        object: Value,
-        proto: &Proto,
-        site: usize,
-        pc: usize,
-    ) -> Result<Value, RuntimeError> {
+    /// Read the field of access site `site` of the innermost frame's proto, remembering the
+    /// position the field was found at for the next read.
+    #[inline(never)]
+    fn field(&self, object: Value, site: usize) -> Result<Value, RuntimeError> {
         let Value::Record(record) = object else {
-            return Err(self.span_error(
-                format!("expected a record, but got a {}", object.get_type()),
-                pc,
-            ));
+            return Err(self.span_error(format!(
+                "expected a record, but got a {}",
+                object.get_type()
+            )));
         };
 
+        let proto = self.top().proto();
         let heap = self.heap.borrow();
         let record = record.reify(&heap).as_record()?;
-        let name = &proto.fields[site];
-        let cache = &proto.field_caches[site];
 
-        if let Some((key, value)) = record.get_index(cache.get() as usize)
-            && key == name
-        {
-            return Ok(*value);
-        }
-
-        let Some((position, _, value)) = record.get_full(name) else {
+        let Some((position, _, value)) = record.get_full(&proto.fields[site]) else {
             return Ok(Value::Null);
         };
-        cache.set(position as u32);
+        proto.field_caches[site].set(position as u32);
 
         Ok(*value)
     }
 
-    fn input(&self, field: &str, pc: usize) -> Result<Value, RuntimeError> {
-        let inputs = self
-            .lookup(inputs_symbol())
-            .ok_or_else(|| format!("inputs not found (required for #{} syntax)", field))?;
-
-        let Value::Record(record) = inputs else {
-            return Err(self.span_error(
-                format!("inputs must be a record to use #{} syntax", field),
-                pc,
-            ));
-        };
-
-        let heap = self.heap.borrow();
-        let record = record.reify(&heap).as_record()?;
-
-        Ok(record.get(field).copied().unwrap_or(Value::Null))
+    /// The spread form of a value.
+    #[inline(never)]
+    fn spread(&self, value: Value) -> Result<Value, RuntimeError> {
+        match value {
+            Value::List(pointer) => Ok(Value::Spread(IterablePointer::List(pointer))),
+            Value::String(pointer) => Ok(Value::Spread(IterablePointer::String(pointer))),
+            Value::Record(pointer) => Ok(Value::Spread(IterablePointer::Record(pointer))),
+            _ => Err(self.span_error("expected a list, record, or string".to_string())),
+        }
     }
 
-    fn factorial(&self, value: Value, pc: usize) -> Result<Value, RuntimeError> {
-        let n = value.as_number()?;
+    /// Raise the static error message `index` of the innermost frame's proto.
+    #[inline(never)]
+    fn raise(&self, index: usize) -> RuntimeError {
+        self.span_error(self.top().proto().strings[index].clone())
+    }
 
-        if n >= 0.0 && n == (n as u64) as f64 {
-            return Ok(Value::Number(
-                (1..(n as u64) + 1).map(|x| x as f64).product::<f64>(),
-            ));
+    /// Fail if name `index` of the innermost frame's proto is bound anywhere in scope.
+    #[inline(never)]
+    fn check_unbound(&self, index: usize) -> Result<(), RuntimeError> {
+        let name = self.top().proto().names[index];
+        if self.lookup(name).is_none() {
+            return Ok(());
         }
 
-        Err(self.span_error(
-            "factorial only works on non-negative integers".to_string(),
-            pc,
-        ))
+        Err(self.span_error(format!(
+            "{} is already defined, and cannot be reassigned",
+            name
+        )))
     }
 
-    /// Check the arguments of an inlined `range` call the way the built-in does, returning the
-    /// first element and the number of elements.
-    fn range_bounds(&self, args: &[Value]) -> Result<(f64, f64), RuntimeError> {
-        if self.top().depth > MAX_CALL_DEPTH {
+    #[inline(never)]
+    fn set_global(&self, index: usize, value: Value) {
+        self.env.insert(self.top().proto().names[index], value);
+    }
+
+    /// Check that an inlined iteration over `list` may start, the way the built-in it replaces
+    /// would, and locate the elements: the first one and the end of the last one.
+    #[inline(never)]
+    fn iter_bounds(&self, list: Value) -> Result<(*const Value, *const Value), RuntimeError> {
+        if self.top().depth() > MAX_CALL_DEPTH {
             return Err(RuntimeError::new(format!(
                 "maximum call depth of {} exceeded",
                 MAX_CALL_DEPTH
             )));
         }
 
+        let pointer = list.as_list_pointer()?;
+        let heap = self.heap.borrow();
+        let items = pointer.reify(&heap).as_list()?.as_ptr_range();
+
+        Ok((items.start, items.end))
+    }
+
+    /// Check the arguments of an inlined `range` call the way the built-in does, returning the
+    /// first element and the number of elements.
+    #[inline(never)]
+    fn range_bounds(&self, first: *const Value, count: usize) -> Result<(f64, u64), RuntimeError> {
+        if self.top().depth() > MAX_CALL_DEPTH {
+            return Err(RuntimeError::new(format!(
+                "maximum call depth of {} exceeded",
+                MAX_CALL_DEPTH
+            )));
+        }
+
+        // SAFETY: the arguments are `count` consecutive registers of the innermost frame.
+        let args = unsafe { std::slice::from_raw_parts(first, count) };
         let (start, end) = match args[..] {
             [Value::Number(start)] => (0.0, start),
             [Value::Number(start), Value::Number(end)] => (start, end),
@@ -913,943 +1631,11 @@ impl Vm {
         let length = (end as i64).checked_sub(first);
 
         match length {
-            Some(length) if length <= u32::MAX as i64 => Ok((first as f64, length as f64)),
+            Some(length) if length <= u32::MAX as i64 => Ok((first as f64, length as u64)),
             _ => Err(RuntimeError::new(format!(
                 "list would be longer than the maximum length of {}",
                 u32::MAX
             ))),
-        }
-    }
-
-    /// The element at `position` of a list being iterated, if there is one left.
-    #[inline(always)]
-    fn list_item(&self, list: Value, position: usize) -> Option<Value> {
-        let Value::List(pointer) = list else {
-            return None;
-        };
-
-        match self.heap.borrow().get(pointer.index()) {
-            Some(HeapValue::List(items)) => items.get(position).copied(),
-            _ => None,
-        }
-    }
-
-    /// Abandon every frame down to (and including) the one the current `run` was entered
-    /// through, decorating `error` (raised by instruction `pc` of the innermost frame) with
-    /// the context each level adds on the way out.
-    #[cold]
-    fn unwind(&mut self, mut error: RuntimeError, mut pc: usize) -> RuntimeError {
-        loop {
-            let frame = self.frames.pop().expect("unwinding without a frame");
-            let source = self.source_of(&frame);
-
-            // Handlers are recorded innermost first.
-            for handler in &frame.proto.handlers {
-                if pc < handler.start as usize || pc >= handler.end as usize {
-                    continue;
-                }
-
-                for wrap in &handler.wraps {
-                    error = match wrap {
-                        Wrap::FunctionContext(name) => error.with_function_context(name),
-                        Wrap::CallSite(span) => error.with_call_site(*span, Rc::clone(&source)),
-                    };
-                }
-            }
-
-            if let Some(def) = &frame.def {
-                error = error.with_function_context(&lambda_name(def));
-            }
-
-            self.builders.truncate(frame.builders);
-            self.finish_profile(&frame);
-
-            if frame.entry {
-                return error;
-            }
-
-            error = self.at_call_site(error);
-            pc = self.top().pc;
-        }
-    }
-
-    /// Run the innermost frame, and every frame it calls, until it returns.
-    fn run(&mut self) -> Result<Value, RuntimeError> {
-        let (mut proto, mut code, mut regs, mut pc) = self.frame_state();
-        let mut instr: Instr;
-
-        // SAFETY (for all of the register accesses below): the compiler only emits register
-        // indices below the proto's `max_stack`, and the stack covers `max_stack` registers
-        // from the base of every active frame. `regs` is re-derived whenever the frame
-        // changes or the stack may have been reallocated.
-        macro_rules! reg {
-            ($index:expr) => {
-                *unsafe { &mut *regs.add($index as usize) }
-            };
-        }
-
-        // SAFETY: `proto` points into the `Rc` held by the innermost frame.
-        macro_rules! proto {
-            () => {
-                unsafe { &*proto }
-            };
-        }
-
-        macro_rules! sync {
-            () => {
-                self.top_mut().pc = pc - 1
-            };
-        }
-
-        macro_rules! throw {
-            ($error:expr) => {{
-                let error = RuntimeError::from($error);
-                return Err(self.unwind(error, pc - 1));
-            }};
-        }
-
-        macro_rules! check {
-            ($result:expr) => {
-                match $result {
-                    Ok(value) => value,
-                    Err(error) => throw!(error),
-                }
-            };
-        }
-
-        macro_rules! jump {
-            ($offset:expr) => {
-                pc = (pc as isize + $offset) as usize
-            };
-        }
-
-        macro_rules! slow {
-            ($op:expr, $lhs:expr, $rhs:expr) => {{
-                sync!();
-                let value = check!(self.binary_slow($op, $lhs, $rhs));
-                regs = self.regs();
-                value
-            }};
-        }
-
-        macro_rules! arithmetic {
-            ($op:expr, $lhs:expr, $rhs:expr, |$x:ident, $y:ident| $fast:expr) => {{
-                let (lhs, rhs): (Value, Value) = ($lhs, $rhs);
-                let value = match (lhs, rhs) {
-                    (Value::Number($x), Value::Number($y)) => Value::Number($fast),
-                    _ => slow!($op, lhs, rhs),
-                };
-                reg!(instr.a) = value;
-            }};
-        }
-
-        macro_rules! equality {
-            ($op:expr, $lhs:expr, $rhs:expr, |$x:ident, $y:ident| $fast:expr) => {{
-                let (lhs, rhs): (Value, Value) = ($lhs, $rhs);
-                let value = match (lhs, rhs) {
-                    (Value::Number($x), Value::Number($y)) => Value::Bool($fast),
-                    _ => slow!($op, lhs, rhs),
-                };
-                reg!(instr.a) = value;
-            }};
-        }
-
-        // Ordering comparisons involving NaN fall through to the slow path for its error.
-        macro_rules! ordering {
-            ($op:expr, $lhs:expr, $rhs:expr, |$x:ident, $y:ident| $fast:expr) => {{
-                let (lhs, rhs): (Value, Value) = ($lhs, $rhs);
-                let fast = match (lhs, rhs) {
-                    (Value::Number($x), Value::Number($y)) => $fast,
-                    _ => None,
-                };
-                let value = match fast {
-                    Some(holds) => Value::Bool(holds),
-                    None => slow!($op, lhs, rhs),
-                };
-                reg!(instr.a) = value;
-            }};
-        }
-
-        macro_rules! logical {
-            ($op:expr, |$x:ident, $y:ident| $fast:expr) => {{
-                let (lhs, rhs) = (reg!(instr.b), reg!(instr.c));
-                let value = match (lhs, rhs) {
-                    (Value::Bool($x), Value::Bool($y)) => Value::Bool($fast),
-                    _ => slow!($op, lhs, rhs),
-                };
-                reg!(instr.a) = value;
-            }};
-        }
-
-        // A fused comparison is followed by the jump to take when it does not hold.
-        macro_rules! branch {
-            ($op:expr, $lhs:expr, $rhs:expr, |$x:ident, $y:ident| $fast:expr) => {{
-                let (lhs, rhs): (Value, Value) = ($lhs, $rhs);
-                let fast = match (lhs, rhs) {
-                    (Value::Number($x), Value::Number($y)) => $fast,
-                    _ => None,
-                };
-                let holds = match fast {
-                    Some(holds) => holds,
-                    None => {
-                        let value = slow!($op, lhs, rhs);
-                        check!(value.as_bool())
-                    }
-                };
-
-                if holds {
-                    pc += 1;
-                } else {
-                    // SAFETY: the compiler always emits the jump right after the comparison.
-                    let target = unsafe { *code.add(pc) };
-                    pc = (pc as isize + 1 + target.sbx()) as usize;
-                }
-            }};
-        }
-
-        macro_rules! number_k {
-            ($index:expr) => {
-                Value::Number(proto!().nums[$index as usize])
-            };
-        }
-
-        macro_rules! finish_call {
-            ($called:expr, $dst:expr) => {
-                match $called {
-                    Some(value) => {
-                        regs = self.regs();
-                        reg!($dst) = value;
-                    }
-                    None => (proto, code, regs, pc) = self.frame_state(),
-                }
-            };
-        }
-
-        loop {
-            // SAFETY: every path through a proto ends in a return or an error, so `pc` never
-            // runs past the end of the code.
-            instr = unsafe { *code.add(pc) };
-            pc += 1;
-
-            match instr.op {
-                Op::Move => reg!(instr.a) = reg!(instr.b),
-                Op::LoadK => reg!(instr.a) = proto!().consts[instr.bx()],
-                Op::LoadStr => {
-                    let text = proto!().strings[instr.bx()].clone();
-                    reg!(instr.a) = self.heap.borrow_mut().insert_string(text);
-                }
-                Op::LoadUnbound => reg!(instr.a) = UNBOUND,
-
-                Op::GetName => {
-                    sync!();
-                    let name = proto!().names[instr.bx()];
-
-                    match self.lookup(name) {
-                        Some(value) => reg!(instr.a) = value,
-                        None if instr.x == 1 => throw!(format!("unknown identifier: {}", name)),
-                        None => throw!(self.unknown_identifier(name, pc - 1)),
-                    }
-                }
-                Op::EnsureGlobal => {
-                    if is_unbound(reg!(instr.a)) {
-                        let name = proto!().names[instr.bx()];
-
-                        match self.env.get(name) {
-                            Some(value) => reg!(instr.a) = value,
-                            None => throw!(self.unknown_identifier(name, pc - 1)),
-                        }
-                    }
-                }
-                Op::GetCapture | Op::GetCaptureDyn => {
-                    let (slot, name) = proto!().slot_refs[instr.bx()];
-                    let frame = self.top();
-                    let captured = frame.def.as_ref().and_then(|def| {
-                        def.scope.get_slot(slot as usize).or_else(|| {
-                            (instr.op == Op::GetCapture && def.name == Some(name))
-                                .then_some(frame.this_value)
-                        })
-                    });
-
-                    match captured {
-                        Some(value) => reg!(instr.a) = value,
-                        None => {
-                            sync!();
-
-                            match self.lookup(name) {
-                                Some(value) => reg!(instr.a) = value,
-                                None => throw!(self.unknown_identifier(name, pc - 1)),
-                            }
-                        }
-                    }
-                }
-                Op::GetEnvParam | Op::GetEnvCapture => {
-                    let (slot, name) = proto!().slot_refs[instr.bx()];
-                    let slot_value = if instr.op == Op::GetEnvParam {
-                        self.env.get_param_slot(slot as usize)
-                    } else {
-                        self.env.get_capture_slot(slot as usize)
-                    };
-
-                    match slot_value {
-                        Some(value) => reg!(instr.a) = value,
-                        None => {
-                            sync!();
-
-                            match self.lookup(name) {
-                                Some(value) => reg!(instr.a) = value,
-                                None => throw!(self.unknown_identifier(name, pc - 1)),
-                            }
-                        }
-                    }
-                }
-                Op::GetInput => {
-                    sync!();
-                    let value = check!(self.input(&proto!().strings[instr.bx()], pc - 1));
-                    reg!(instr.a) = value;
-                }
-
-                Op::Add => {
-                    arithmetic!(BinaryOp::Add, reg!(instr.b), reg!(instr.c), |x, y| x + y)
-                }
-                Op::Sub => {
-                    arithmetic!(BinaryOp::Subtract, reg!(instr.b), reg!(instr.c), |x, y| x
-                        - y)
-                }
-                Op::Mul => {
-                    arithmetic!(BinaryOp::Multiply, reg!(instr.b), reg!(instr.c), |x, y| x
-                        * y)
-                }
-                Op::Div => {
-                    arithmetic!(BinaryOp::Divide, reg!(instr.b), reg!(instr.c), |x, y| x / y)
-                }
-                Op::Mod => {
-                    arithmetic!(BinaryOp::Modulo, reg!(instr.b), reg!(instr.c), |x, y| x % y)
-                }
-                Op::Pow => {
-                    arithmetic!(BinaryOp::Power, reg!(instr.b), reg!(instr.c), |x, y| x
-                        .powf(y))
-                }
-                Op::Eq => {
-                    equality!(BinaryOp::Equal, reg!(instr.b), reg!(instr.c), |x, y| x == y)
-                }
-                Op::Ne => {
-                    equality!(BinaryOp::NotEqual, reg!(instr.b), reg!(instr.c), |x, y| x
-                        != y)
-                }
-                Op::Lt => {
-                    ordering!(BinaryOp::Less, reg!(instr.b), reg!(instr.c), |x, y| less(
-                        x, y
-                    ))
-                }
-                Op::Le => {
-                    ordering!(BinaryOp::LessEq, reg!(instr.b), reg!(instr.c), |x, y| {
-                        less_eq(x, y)
-                    })
-                }
-                Op::Gt => {
-                    ordering!(
-                        BinaryOp::Greater,
-                        reg!(instr.b),
-                        reg!(instr.c),
-                        |x, y| less(y, x)
-                    )
-                }
-                Op::Ge => {
-                    ordering!(BinaryOp::GreaterEq, reg!(instr.b), reg!(instr.c), |x, y| {
-                        less_eq(y, x)
-                    })
-                }
-                Op::DotEq => {
-                    equality!(BinaryOp::DotEqual, reg!(instr.b), reg!(instr.c), |x, y| x
-                        == y)
-                }
-                Op::DotNe => {
-                    equality!(
-                        BinaryOp::DotNotEqual,
-                        reg!(instr.b),
-                        reg!(instr.c),
-                        |x, y| x != y
-                    )
-                }
-                Op::DotLt => {
-                    ordering!(
-                        BinaryOp::DotLess,
-                        reg!(instr.b),
-                        reg!(instr.c),
-                        |x, y| less(x, y)
-                    )
-                }
-                Op::DotLe => {
-                    ordering!(BinaryOp::DotLessEq, reg!(instr.b), reg!(instr.c), |x, y| {
-                        less_eq(x, y)
-                    })
-                }
-                Op::DotGt => {
-                    ordering!(
-                        BinaryOp::DotGreater,
-                        reg!(instr.b),
-                        reg!(instr.c),
-                        |x, y| less(y, x)
-                    )
-                }
-                Op::DotGe => {
-                    ordering!(
-                        BinaryOp::DotGreaterEq,
-                        reg!(instr.b),
-                        reg!(instr.c),
-                        |x, y| less_eq(y, x)
-                    )
-                }
-                Op::And => logical!(BinaryOp::And, |x, y| x && y),
-                Op::NaturalAnd => logical!(BinaryOp::NaturalAnd, |x, y| x && y),
-                Op::Or => logical!(BinaryOp::Or, |x, y| x || y),
-                Op::NaturalOr => logical!(BinaryOp::NaturalOr, |x, y| x || y),
-                Op::Via => {
-                    let value = slow!(BinaryOp::Via, reg!(instr.b), reg!(instr.c));
-                    reg!(instr.a) = value;
-                }
-                Op::Into => {
-                    let value = slow!(BinaryOp::Into, reg!(instr.b), reg!(instr.c));
-                    reg!(instr.a) = value;
-                }
-                Op::Where => {
-                    let value = slow!(BinaryOp::Where, reg!(instr.b), reg!(instr.c));
-                    reg!(instr.a) = value;
-                }
-                Op::Coalesce => {
-                    let (lhs, rhs) = (reg!(instr.b), reg!(instr.c));
-                    let value = match (lhs, rhs) {
-                        (Value::List(_), _) | (_, Value::List(_)) => {
-                            slow!(BinaryOp::Coalesce, lhs, rhs)
-                        }
-                        (Value::Null, _) => rhs,
-                        _ => lhs,
-                    };
-                    reg!(instr.a) = value;
-                }
-
-                Op::AddK => {
-                    arithmetic!(BinaryOp::Add, reg!(instr.b), number_k!(instr.c), |x, y| x
-                        + y)
-                }
-                Op::SubK => {
-                    arithmetic!(
-                        BinaryOp::Subtract,
-                        reg!(instr.b),
-                        number_k!(instr.c),
-                        |x, y| x - y
-                    )
-                }
-                Op::MulK => {
-                    arithmetic!(
-                        BinaryOp::Multiply,
-                        reg!(instr.b),
-                        number_k!(instr.c),
-                        |x, y| x * y
-                    )
-                }
-                Op::DivK => {
-                    arithmetic!(
-                        BinaryOp::Divide,
-                        reg!(instr.b),
-                        number_k!(instr.c),
-                        |x, y| x / y
-                    )
-                }
-                Op::ModK => {
-                    arithmetic!(
-                        BinaryOp::Modulo,
-                        reg!(instr.b),
-                        number_k!(instr.c),
-                        |x, y| x % y
-                    )
-                }
-                Op::PowK => {
-                    arithmetic!(
-                        BinaryOp::Power,
-                        reg!(instr.b),
-                        number_k!(instr.c),
-                        |x, y| x.powf(y)
-                    )
-                }
-                Op::EqK => {
-                    equality!(
-                        BinaryOp::Equal,
-                        reg!(instr.b),
-                        number_k!(instr.c),
-                        |x, y| x == y
-                    )
-                }
-                Op::NeK => {
-                    equality!(
-                        BinaryOp::NotEqual,
-                        reg!(instr.b),
-                        number_k!(instr.c),
-                        |x, y| x != y
-                    )
-                }
-                Op::LtK => {
-                    ordering!(BinaryOp::Less, reg!(instr.b), number_k!(instr.c), |x, y| {
-                        less(x, y)
-                    })
-                }
-                Op::LeK => {
-                    ordering!(
-                        BinaryOp::LessEq,
-                        reg!(instr.b),
-                        number_k!(instr.c),
-                        |x, y| less_eq(x, y)
-                    )
-                }
-                Op::GtK => {
-                    ordering!(
-                        BinaryOp::Greater,
-                        reg!(instr.b),
-                        number_k!(instr.c),
-                        |x, y| less(y, x)
-                    )
-                }
-                Op::GeK => {
-                    ordering!(
-                        BinaryOp::GreaterEq,
-                        reg!(instr.b),
-                        number_k!(instr.c),
-                        |x, y| { less_eq(y, x) }
-                    )
-                }
-
-                Op::KAdd => {
-                    arithmetic!(BinaryOp::Add, number_k!(instr.b), reg!(instr.c), |x, y| x
-                        + y)
-                }
-                Op::KSub => {
-                    arithmetic!(
-                        BinaryOp::Subtract,
-                        number_k!(instr.b),
-                        reg!(instr.c),
-                        |x, y| x - y
-                    )
-                }
-                Op::KMul => {
-                    arithmetic!(
-                        BinaryOp::Multiply,
-                        number_k!(instr.b),
-                        reg!(instr.c),
-                        |x, y| x * y
-                    )
-                }
-                Op::KDiv => {
-                    arithmetic!(
-                        BinaryOp::Divide,
-                        number_k!(instr.b),
-                        reg!(instr.c),
-                        |x, y| x / y
-                    )
-                }
-                Op::KMod => {
-                    arithmetic!(
-                        BinaryOp::Modulo,
-                        number_k!(instr.b),
-                        reg!(instr.c),
-                        |x, y| x % y
-                    )
-                }
-                Op::KPow => {
-                    arithmetic!(
-                        BinaryOp::Power,
-                        number_k!(instr.b),
-                        reg!(instr.c),
-                        |x, y| x.powf(y)
-                    )
-                }
-
-                Op::JmpNotEq => {
-                    branch!(BinaryOp::Equal, reg!(instr.b), reg!(instr.c), |x, y| Some(
-                        x == y
-                    ))
-                }
-                Op::JmpNotNe => {
-                    branch!(BinaryOp::NotEqual, reg!(instr.b), reg!(instr.c), |x, y| {
-                        Some(x != y)
-                    })
-                }
-                Op::JmpNotLt => {
-                    branch!(BinaryOp::Less, reg!(instr.b), reg!(instr.c), |x, y| less(
-                        x, y
-                    ))
-                }
-                Op::JmpNotLe => {
-                    branch!(BinaryOp::LessEq, reg!(instr.b), reg!(instr.c), |x, y| {
-                        less_eq(x, y)
-                    })
-                }
-                Op::JmpNotGt => {
-                    branch!(
-                        BinaryOp::Greater,
-                        reg!(instr.b),
-                        reg!(instr.c),
-                        |x, y| less(y, x)
-                    )
-                }
-                Op::JmpNotGe => {
-                    branch!(BinaryOp::GreaterEq, reg!(instr.b), reg!(instr.c), |x, y| {
-                        less_eq(y, x)
-                    })
-                }
-                Op::JmpNotEqK => {
-                    branch!(
-                        BinaryOp::Equal,
-                        reg!(instr.b),
-                        number_k!(instr.c),
-                        |x, y| Some(x == y)
-                    )
-                }
-                Op::JmpNotNeK => {
-                    branch!(
-                        BinaryOp::NotEqual,
-                        reg!(instr.b),
-                        number_k!(instr.c),
-                        |x, y| Some(x != y)
-                    )
-                }
-                Op::JmpNotLtK => {
-                    branch!(BinaryOp::Less, reg!(instr.b), number_k!(instr.c), |x, y| {
-                        less(x, y)
-                    })
-                }
-                Op::JmpNotLeK => {
-                    branch!(
-                        BinaryOp::LessEq,
-                        reg!(instr.b),
-                        number_k!(instr.c),
-                        |x, y| less_eq(x, y)
-                    )
-                }
-                Op::JmpNotGtK => {
-                    branch!(
-                        BinaryOp::Greater,
-                        reg!(instr.b),
-                        number_k!(instr.c),
-                        |x, y| less(y, x)
-                    )
-                }
-                Op::JmpNotGeK => {
-                    branch!(
-                        BinaryOp::GreaterEq,
-                        reg!(instr.b),
-                        number_k!(instr.c),
-                        |x, y| less_eq(y, x)
-                    )
-                }
-
-                Op::Neg => match reg!(instr.b) {
-                    Value::Number(number) => reg!(instr.a) = Value::Number(-number),
-                    other => throw!(other.as_number().unwrap_err()),
-                },
-                Op::Not => match reg!(instr.b) {
-                    Value::Bool(boolean) => reg!(instr.a) = Value::Bool(!boolean),
-                    other => throw!(other.as_bool().unwrap_err()),
-                },
-                Op::Factorial => {
-                    let value = check!(self.factorial(reg!(instr.b), pc - 1));
-                    reg!(instr.a) = value;
-                }
-
-                Op::Jmp => jump!(instr.sbx()),
-                Op::JmpIfFalse => match reg!(instr.a) {
-                    Value::Bool(true) => {}
-                    Value::Bool(false) => jump!(instr.sbx()),
-                    other => throw!(other.as_bool().unwrap_err()),
-                },
-
-                Op::Call => {
-                    let a = instr.a as usize;
-                    let mut argc = instr.b as usize;
-                    sync!();
-
-                    let spread = instr.x == 0
-                        && (1..=argc).any(|offset| matches!(reg!(a + offset), Value::Spread(_)));
-                    if spread {
-                        let mut args = Vec::with_capacity(argc);
-
-                        for offset in 1..=argc {
-                            match reg!(a + offset) {
-                                Value::Spread(pointer) => {
-                                    let values = check!(flatten_spread_value(&pointer, &self.heap));
-                                    args.extend(values.iter().copied());
-                                }
-                                value => args.push(value),
-                            }
-                        }
-
-                        self.place_args(a, &args);
-                        regs = self.regs();
-                        argc = args.len();
-                    }
-
-                    let called = check!(self.call(reg!(a), a, argc, instr.c));
-                    finish_call!(called, instr.c);
-                }
-                Op::CallList => {
-                    let a = instr.a as usize;
-                    sync!();
-
-                    let Some(Builder::List(args)) = self.builders.pop() else {
-                        unreachable!("no argument list is being built");
-                    };
-                    self.place_args(a, &args);
-                    regs = self.regs();
-
-                    let called = check!(self.call(reg!(a), a, args.len(), instr.c));
-                    finish_call!(called, instr.c);
-                }
-                Op::Return => {
-                    let value = reg!(instr.a);
-                    let frame = self.frames.pop().expect("returning without a frame");
-                    self.finish_profile(&frame);
-
-                    if frame.entry {
-                        return Ok(value);
-                    }
-
-                    (proto, code, regs, pc) = self.frame_state();
-                    pc += 1;
-                    reg!(frame.ret) = value;
-                }
-
-                Op::Closure => {
-                    sync!();
-                    let value = check!(self.make_closure(instr.bx()));
-                    reg!(instr.a) = value;
-                }
-
-                Op::NewList => {
-                    // SAFETY: the elements are `c` consecutive registers of this frame.
-                    let items = unsafe {
-                        std::slice::from_raw_parts(regs.add(instr.b as usize), instr.c as usize)
-                    };
-                    reg!(instr.a) = self.heap.borrow_mut().insert_list(items.to_vec());
-                }
-                Op::ListBegin => {
-                    let capacity = match instr.x {
-                        1 => match reg!(instr.a + 1) {
-                            Value::List(pointer) => match self.heap.borrow().get(pointer.index()) {
-                                Some(HeapValue::List(items)) => items.len(),
-                                _ => 0,
-                            },
-                            _ => 0,
-                        },
-                        2 => loop_number(reg!(instr.a + 1)) as usize,
-                        _ => 0,
-                    };
-                    self.builders
-                        .push(Builder::List(Vec::with_capacity(capacity)));
-                }
-                Op::ListAppend => {
-                    let Some(Builder::List(list)) = self.builders.last_mut() else {
-                        unreachable!("no list is being built");
-                    };
-
-                    for offset in 0..instr.b {
-                        match reg!(instr.a + offset) {
-                            Value::Spread(pointer) => {
-                                match flatten_spread_value(&pointer, &self.heap) {
-                                    Ok(values) => list.extend(values.iter().copied()),
-                                    Err(error) => throw!(error),
-                                }
-                            }
-                            value => list.push(value),
-                        }
-                    }
-                }
-                Op::ListPush => {
-                    let Some(Builder::List(list)) = self.builders.last_mut() else {
-                        unreachable!("no list is being built");
-                    };
-                    list.push(reg!(instr.a));
-                }
-                Op::ListEnd => {
-                    let Some(Builder::List(list)) = self.builders.pop() else {
-                        unreachable!("no list is being built");
-                    };
-                    reg!(instr.a) = self.heap.borrow_mut().insert_list(list);
-                }
-
-                Op::NewRecord => {
-                    let shape = &proto!().shapes[instr.c as usize];
-                    let mut entries = shape.template.clone();
-
-                    for (offset, slot) in shape.slots.iter().enumerate() {
-                        entries[*slot as usize] = reg!(instr.b as usize + offset);
-                    }
-
-                    reg!(instr.a) = self.heap.borrow_mut().insert_record(entries);
-                }
-                Op::RecordBegin => self.builders.push(Builder::Record {
-                    entries: IndexMap::new(),
-                    key: None,
-                }),
-                Op::RecordSet => {
-                    let Some(Builder::Record { entries, .. }) = self.builders.last_mut() else {
-                        unreachable!("no record is being built");
-                    };
-                    entries.insert(proto!().strings[instr.bx()].clone(), reg!(instr.a));
-                }
-                Op::RecordKey => {
-                    let text = reg!(instr.a)
-                        .as_string(&self.heap.borrow())
-                        .map(str::to_string);
-                    let text = check!(text);
-
-                    let Some(Builder::Record { key, .. }) = self.builders.last_mut() else {
-                        unreachable!("no record is being built");
-                    };
-                    *key = Some(text);
-                }
-                Op::RecordValue => {
-                    let Some(Builder::Record { entries, key }) = self.builders.last_mut() else {
-                        unreachable!("no record is being built");
-                    };
-                    let key = key.take().expect("no record key was staged");
-                    entries.insert(key, reg!(instr.a));
-                }
-                Op::RecordSpread => {
-                    let Some(Builder::Record { entries, .. }) = self.builders.last_mut() else {
-                        unreachable!("no record is being built");
-                    };
-
-                    if let Value::Spread(iterable) = reg!(instr.a)
-                        && let Err(error) = spread_into_record(&self.heap, entries, iterable)
-                    {
-                        throw!(error);
-                    }
-                }
-                Op::RecordEnd => {
-                    let Some(Builder::Record { entries, .. }) = self.builders.pop() else {
-                        unreachable!("no record is being built");
-                    };
-                    reg!(instr.a) = self.heap.borrow_mut().insert_record(entries);
-                }
-
-                Op::Index => {
-                    let value = check!(self.index(reg!(instr.b), reg!(instr.c), pc - 1));
-                    reg!(instr.a) = value;
-                }
-                Op::GetField => {
-                    let site = instr.c as usize | (instr.x as usize) << 16;
-                    let value = check!(self.field(reg!(instr.b), proto!(), site, pc - 1));
-                    reg!(instr.a) = value;
-                }
-                Op::Spread => {
-                    reg!(instr.a) = match reg!(instr.b) {
-                        Value::List(pointer) => Value::Spread(IterablePointer::List(pointer)),
-                        Value::String(pointer) => Value::Spread(IterablePointer::String(pointer)),
-                        Value::Record(pointer) => Value::Spread(IterablePointer::Record(pointer)),
-                        _ => {
-                            throw!(self.span_error(
-                                "expected a list, record, or string".to_string(),
-                                pc - 1
-                            ))
-                        }
-                    };
-                }
-
-                Op::Raise => {
-                    let message = proto!().strings[instr.bx()].clone();
-                    throw!(self.span_error(message, pc - 1));
-                }
-                Op::CheckUnbound => {
-                    sync!();
-                    let name = proto!().names[instr.bx()];
-
-                    if self.lookup(name).is_some() {
-                        throw!(self.span_error(
-                            format!("{} is already defined, and cannot be reassigned", name),
-                            pc - 1
-                        ));
-                    }
-                }
-                Op::NameLambda => {
-                    if let Value::Lambda(pointer) = reg!(instr.a) {
-                        let name = proto!().names[instr.bx()];
-                        let mut heap = self.heap.borrow_mut();
-
-                        // A function that is running right now keeps the definition (and name)
-                        // it was called with: `make_mut` leaves shared definitions untouched.
-                        if let Some(HeapValue::Lambda(def)) = heap.get_mut(pointer.index()) {
-                            Rc::make_mut(def).name = Some(name);
-                        }
-                    }
-                }
-                Op::SetGlobal => self.env.insert(proto!().names[instr.bx()], reg!(instr.a)),
-
-                Op::AddDepth => {
-                    let frame = self.top_mut();
-                    frame.depth = (frame.depth as isize + instr.sbx()) as usize;
-                }
-
-                Op::RangePrep => {
-                    // SAFETY: the arguments are `c` consecutive registers of this frame.
-                    let args = unsafe {
-                        std::slice::from_raw_parts(regs.add(instr.b as usize), instr.c as usize)
-                    };
-                    let (first, count) = check!(self.range_bounds(args));
-
-                    reg!(instr.a) = Value::Number(0.0);
-                    reg!(instr.a + 1) = Value::Number(count);
-                    reg!(instr.a + 2) = Value::Number(first);
-                }
-                Op::ForRange | Op::ForRangeNext => {
-                    let a = instr.a as usize;
-                    let next = loop_number(reg!(a));
-                    let has_next = next < loop_number(reg!(a + 1));
-
-                    if has_next {
-                        reg!(a + 3) = Value::Number(loop_number(reg!(a + 2)) + next);
-                        if instr.x == 1 {
-                            reg!(a + 4) = Value::Number(next);
-                        }
-                        reg!(a) = Value::Number(next + 1.0);
-                    }
-
-                    if has_next == (instr.op == Op::ForRangeNext) {
-                        jump!(instr.sbx());
-                    }
-                }
-                Op::IterPrep => {
-                    if self.top().depth > MAX_CALL_DEPTH {
-                        throw!(format!("maximum call depth of {} exceeded", MAX_CALL_DEPTH));
-                    }
-
-                    if let Err(error) = reg!(instr.a + 1).as_list_pointer() {
-                        throw!(error);
-                    }
-
-                    reg!(instr.a) = Value::Number(0.0);
-                }
-                Op::ForList | Op::ForListNext => {
-                    let a = instr.a as usize;
-                    let position = loop_number(reg!(a));
-                    let item = self.list_item(reg!(a + 1), position as usize);
-
-                    if let Some(item) = item {
-                        reg!(a + 2) = item;
-                        if instr.x == 1 {
-                            reg!(a + 3) = Value::Number(position);
-                        }
-                        reg!(a) = Value::Number(position + 1.0);
-                    }
-
-                    if item.is_some() == (instr.op == Op::ForListNext) {
-                        jump!(instr.sbx());
-                    }
-                }
-                Op::CallbackDepth => {
-                    if self.top().depth + CALLBACK_CALL_DEPTH > MAX_CALL_DEPTH {
-                        throw!(depth_exceeded("anonymous function"));
-                    }
-                }
-            }
         }
     }
 }
