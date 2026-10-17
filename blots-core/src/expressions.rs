@@ -361,6 +361,41 @@ fn resolve_lambda_expr(
     }
 }
 
+/// Build the node for a lambda from its parsed parameters and body.
+///
+/// The lambda's free variables (its captures) are computed here, once, so that creating a
+/// closure at runtime doesn't have to re-walk the body: parameters are bound and built-ins are
+/// resolved statically, so neither needs capturing. References to parameters and captures in
+/// the body are then resolved to slot indices, so calls read them by position instead of by
+/// hashed name lookup.
+pub(crate) fn lambda_expr(args: Vec<LambdaArg>, mut body: SpannedExpr, span: Span) -> SpannedExpr {
+    let mut bound = HashSet::new();
+    for arg in &args {
+        bound.insert(arg.get_name());
+    }
+
+    let mut free_vars = Vec::new();
+    collect_free_variables(&body, &mut free_vars, &mut bound);
+
+    let mut captures = Vec::new();
+    for var in free_vars {
+        if !is_built_in_function(var.as_str()) && !captures.contains(&var) {
+            captures.push(var);
+        }
+    }
+
+    resolve_lambda_body(&mut body, &args, &captures);
+
+    Spanned::new(
+        Expr::Lambda {
+            args,
+            body: Rc::new(body),
+            captures,
+        },
+        span,
+    )
+}
+
 // Validate that a value (especially lambdas) is portable for output
 pub fn validate_portable_value(
     value: &Value,
@@ -1721,38 +1756,9 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                         }
                     }
 
-                    let mut body = pairs_to_expr_inner(body_pairs.into_inner(), preserve_comments)?;
+                    let body = pairs_to_expr_inner(body_pairs.into_inner(), preserve_comments)?;
 
-                    // Precompute the lambda's free variables (its captures) so that closure
-                    // creation at runtime doesn't have to re-walk the body. Parameters are bound,
-                    // and built-ins are resolved statically, so neither needs capturing.
-                    let mut bound = HashSet::new();
-                    for arg in &args {
-                        bound.insert(arg.get_name());
-                    }
-
-                    let mut free_vars = Vec::new();
-                    collect_free_variables(&body, &mut free_vars, &mut bound);
-
-                    let mut captures = Vec::new();
-                    for var in free_vars {
-                        if !is_built_in_function(var.as_str()) && !captures.contains(&var) {
-                            captures.push(var);
-                        }
-                    }
-
-                    // Resolve parameter and capture references in the body to slot indices so
-                    // that calls read them by position instead of by hashed name lookup.
-                    resolve_lambda_body(&mut body, &args, &captures);
-
-                    Ok(Spanned::new(
-                        Expr::Lambda {
-                            args,
-                            body: Rc::new(body),
-                            captures,
-                        },
-                        span,
-                    ))
+                    Ok(lambda_expr(args, body, span))
                 }
                 Rule::conditional => {
                     let mut inner_pairs = primary.into_inner();
