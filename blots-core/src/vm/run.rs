@@ -14,7 +14,7 @@ use super::{
     list_next, load_value, range_next, register, step::Flow, store_value, truncate, whole,
 };
 use crate::{
-    bytecode::{Instr, Op, Proto, RemainderTest, register_index},
+    bytecode::{Instr, Op, Proto, REGISTER_SCALE, RemainderTest, register_index},
     error::RuntimeError,
     expressions::modulo,
     heap::{Heap, HeapValue},
@@ -43,6 +43,24 @@ unsafe fn jump_target(at: *const u64) -> *const u64 {
 
         at.add(1).offset(offset)
     }
+}
+
+/// The parameter that an argument of a tail call of a function to itself is waiting to be
+/// moved into: `arg` is the register the argument is in, which is where an ordinary call
+/// whose scratch register is the one `window` names would take it from. An argument is as
+/// far from its parameter as the first argument register of that call is from the first
+/// register of the frame.
+///
+/// # Safety
+/// `arg` must be an argument register of such a call in a frame of that function.
+#[inline(always)]
+unsafe fn waiting_param(arg: *mut Value, window: u16) -> *mut Value {
+    // The arguments of the call start one register above its scratch register.
+    let first_argument =
+        window as usize * (size_of::<Value>() / REGISTER_SCALE) + size_of::<Value>();
+
+    // SAFETY: the parameter lies that far below the argument, which is within the frame.
+    unsafe { arg.byte_sub(first_argument) }
 }
 
 /// Marks the path it is called on as one that is rarely taken, which keeps the code for it
@@ -106,6 +124,18 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
             macro_rules! jump {
                 ($at:expr) => {{
                     ip = jump_target($at);
+                    continue 'run;
+                }};
+            }
+
+            // The frame starts over with the arguments that are now in its parameters: one
+            // level deeper than `$meta` says it was, and remembering where it did so for
+            // error reports.
+            macro_rules! restart {
+                ($meta:expr) => {{
+                    (*frame).meta = $meta + 1 + (1 << TAIL_SHIFT);
+                    (*frame).tail_ip = ip.add(1);
+                    ip = ip.add(1).sub(instr.b as usize);
                     continue 'run;
                 }};
             }
@@ -472,31 +502,33 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                         continue 'run;
                     }
                 }
+                Op::TailSelf0 => {
+                    let meta = (*frame).meta;
+
+                    if meta as u32 <= MAX_CALL_DEPTH as u32 {
+                        restart!(meta);
+                    }
+                }
+                Op::TailSelf1 => {
+                    let meta = (*frame).meta;
+
+                    if meta as u32 <= MAX_CALL_DEPTH as u32 {
+                        let arg = reg!(instr.a);
+                        copy_value(waiting_param(arg, instr.c), arg);
+                        restart!(meta);
+                    }
+                }
                 Op::TailSelf => {
                     let meta = (*frame).meta;
 
                     if meta as u32 <= MAX_CALL_DEPTH as u32 {
-                        let count = instr.x as usize;
+                        let args = reg!(instr.a);
+                        let params = waiting_param(args, instr.c);
 
-                        // The arguments that were not computed right into their parameters
-                        // are as far from them as the first argument register of a call is
-                        // from the first parameter.
-                        if count != 0 {
-                            let args = reg!(instr.a);
-                            let window = reg!(instr.c).add(1);
-                            let params = base.byte_offset(args.byte_offset_from(window));
-
-                            for offset in 0..count {
-                                copy_value(params.add(offset), args.add(offset));
-                            }
+                        for offset in 0..instr.x as usize {
+                            copy_value(params.add(offset), args.add(offset));
                         }
-
-                        // The frame starts over with the new arguments, one level deeper, and
-                        // remembers where it did so for error reports.
-                        (*frame).meta = meta + 1 + (1 << TAIL_SHIFT);
-                        (*frame).tail_ip = ip.add(1);
-                        ip = ip.add(1).sub(instr.b as usize);
-                        continue 'run;
+                        restart!(meta);
                     }
                 }
                 Op::Return => {

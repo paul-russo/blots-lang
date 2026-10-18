@@ -1955,7 +1955,12 @@ impl FnCompiler {
         }
 
         let first = mark + waiting.start as u16;
-        let mut instr = Instr::abc(Op::TailSelf, first, self.restart_distance(), dst);
+        let op = match waiting.len() {
+            0 => Op::TailSelf0,
+            1 => Op::TailSelf1,
+            _ => Op::TailSelf,
+        };
+        let mut instr = Instr::abc(op, first, self.restart_distance(), dst);
         instr.x = waiting.len() as u8;
         self.emit_spanned(instr, span);
         self.free_reg = mark;

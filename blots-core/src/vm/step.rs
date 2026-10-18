@@ -359,7 +359,7 @@ impl Vm {
                 self.set_reg(a, callee);
                 self.call_slow(register_index(a), instr.x as usize, c)?;
             }
-            Op::TailSelf => {
+            Op::TailSelf | Op::TailSelf0 | Op::TailSelf1 => {
                 // A tail call that cannot replace the frame is an ordinary call, whose result
                 // the following instruction returns. Of its arguments, only those that were
                 // waiting to be moved into their parameters are where a call wants them; the

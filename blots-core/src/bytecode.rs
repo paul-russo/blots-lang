@@ -178,6 +178,10 @@ pub(crate) enum Op {
     /// whose scratch space is `R[c]` takes the same arguments from, and still have to be
     /// moved. `b` is as for `CallSelf`.
     TailSelf,
+    /// `TailSelf` with no argument left to move (`x == 0`).
+    TailSelf0,
+    /// `TailSelf` with one argument left to move (`x == 1`).
+    TailSelf1,
     /// `return R[a]`
     Return,
 
@@ -332,7 +336,12 @@ impl Op {
             | Op::Spread
             | Op::RangePrep => A | B,
 
-            Op::Call | Op::CallList | Op::CallSelf | Op::TailSelf => A | C,
+            Op::Call
+            | Op::CallList
+            | Op::CallSelf
+            | Op::TailSelf
+            | Op::TailSelf0
+            | Op::TailSelf1 => A | C,
 
             Op::JmpNotEq
             | Op::JmpNotNe
