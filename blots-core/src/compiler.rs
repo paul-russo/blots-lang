@@ -56,9 +56,8 @@ const MAX_CACHED_GLOBALS: usize = 256;
 /// its callback: one for the built-in itself, one for the callback call, one for its body.
 const CALLBACK_DEPTH: i32 = 3;
 
-/// The most arguments a direct self call can pass: its argument count shares an 8-bit operand
-/// with a flag.
-const MAX_SELF_CALL_ARGS: usize = 127;
+/// The most arguments a direct self call can pass: its argument count is an 8-bit operand.
+const MAX_SELF_CALL_ARGS: usize = u8::MAX as usize;
 
 /// A call with at most this many arguments evaluates them into consecutive registers; one
 /// with more gathers them in a list, so that the size of a call is not bounded by the number
@@ -463,27 +462,6 @@ fn may_be_lambda(expr: &SpannedExpr) -> bool {
         ),
         Expr::Output { expr } => may_be_lambda(expr),
         _ => true,
-    }
-}
-
-/// Whether `expr` can never evaluate to a spread value, whatever its variables hold.
-fn never_spread(expr: &SpannedExpr) -> bool {
-    match &expr.node {
-        Expr::Number(_)
-        | Expr::String(_)
-        | Expr::Bool(_)
-        | Expr::Null
-        | Expr::BuiltIn(_)
-        | Expr::List(_)
-        | Expr::Record(_)
-        | Expr::Lambda { .. }
-        | Expr::UnaryOp { .. }
-        | Expr::PostfixOp { .. } => true,
-        Expr::BinaryOp { op, .. } => !matches!(
-            op,
-            BinaryOp::Via | BinaryOp::Into | BinaryOp::Where | BinaryOp::Coalesce
-        ),
-        _ => false,
     }
 }
 
@@ -1798,9 +1776,8 @@ impl FnCompiler {
             // long for that is rejected as a whole (see `compile_function`), so the truncation
             // never reaches the VM.
             let op = if replace { Op::TailSelf } else { Op::CallSelf };
-            let no_spread = args.iter().all(never_spread);
             let mut instr = Instr::abc(op, func_reg, (self.here() + 1) as u16, dst);
-            instr.x = args.len() as u8 | (no_spread as u8) << 7;
+            instr.x = args.len() as u8;
             self.emit_spanned(instr, span);
             self.free_reg = mark;
 
@@ -1847,9 +1824,7 @@ impl FnCompiler {
             self.expr_into(arg, reg)?;
         }
 
-        let mut instr = Instr::abc(Op::Call, func_reg, args.len() as u16, dst);
-        instr.x = args.iter().all(never_spread) as u8;
-        self.emit_spanned(instr, span);
+        self.emit_spanned(Instr::abc(Op::Call, func_reg, args.len() as u16, dst), span);
         self.free_reg = mark;
 
         Ok(())

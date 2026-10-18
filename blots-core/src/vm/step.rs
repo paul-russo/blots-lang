@@ -333,7 +333,7 @@ impl Vm {
                 // an ordinary call, whose result the following instruction returns.
                 let callee = self.top().this_value();
                 self.set_reg(a, callee);
-                self.call_slow(register_index(a), (instr.x & 0x7f) as usize, c)?;
+                self.call_slow(register_index(a), instr.x as usize, c)?;
             }
             Op::Return => {
                 let value = self.reg(a);

@@ -302,16 +302,6 @@ unsafe fn list_next(slot: *mut Value, with_index: bool, first: bool) -> bool {
     true
 }
 
-/// Whether any of the `count` values starting at `first` is a spread value.
-///
-/// # Safety
-/// `first` must point to `count` consecutive initialised values.
-#[inline(always)]
-unsafe fn has_spread(first: *const Value, count: usize) -> bool {
-    // SAFETY: guaranteed by the caller.
-    (0..count).any(|offset| matches!(unsafe { &*first.add(offset) }, Value::Spread(_)))
-}
-
 /// What [`truncate`] returns for a number it cannot convert the way `as i64` would.
 const NOT_TRUNCATED: i64 = i64::MIN;
 
@@ -1081,21 +1071,17 @@ impl Vm {
         }
     }
 
-    /// Copy call arguments that were gathered at runtime into the registers a call expects
-    /// them in: the ones following register `a` of the innermost frame.
-    fn place_args(&mut self, a: usize, args: &[Value]) {
-        let base = self.slot_index(self.top().base) + a + 1;
-        self.ensure_stack(base + args.len());
-        self.stack[base..base + args.len()].copy_from_slice(args);
-    }
-
     /// Hand the list being built to the call at register `a` of the innermost frame as its
-    /// arguments, returning how many there are.
+    /// arguments, returning how many there are: they go where a call expects them, into the
+    /// registers that follow `a`.
     fn place_list_args(&mut self, a: usize) -> usize {
         let Some(Builder::List(args)) = self.builders.pop() else {
             unreachable!("no argument list is being built");
         };
-        self.place_args(a, &args);
+
+        let base = self.slot_index(self.top().base) + a + 1;
+        self.ensure_stack(base + args.len());
+        self.stack[base..base + args.len()].copy_from_slice(&args);
 
         args.len()
     }
@@ -1107,7 +1093,6 @@ impl Vm {
     /// frame.
     #[inline(never)]
     fn call_slow(&mut self, a: usize, argc: usize, dst: u16) -> Result<(), RuntimeError> {
-        let argc = self.flatten_args(a, argc)?;
         let frame = *self.top();
         let depth = frame.depth();
         let base = self.slot_index(frame.base) + a + 1;
@@ -1210,30 +1195,6 @@ impl Vm {
                 Err(self.span_error(message))
             }
         }
-    }
-
-    /// Expand the spread values among the `argc` arguments that follow register `a` of the
-    /// innermost frame, returning the resulting argument count.
-    fn flatten_args(&mut self, a: usize, argc: usize) -> Result<usize, RuntimeError> {
-        let base = self.slot_index(self.top().base) + a + 1;
-        let given = &self.stack[base..base + argc];
-        if !given.iter().any(|arg| matches!(arg, Value::Spread(_))) {
-            return Ok(argc);
-        }
-
-        let mut args = Vec::with_capacity(argc);
-        for arg in given {
-            match arg {
-                Value::Spread(pointer) => {
-                    let values = flatten_spread_value(pointer, &self.heap)?;
-                    args.extend(values.iter().copied());
-                }
-                value => args.push(*value),
-            }
-        }
-        self.place_args(a, &args);
-
-        Ok(args.len())
     }
 
     /// Run a built-in that may call back into the VM. The arguments are owned because the

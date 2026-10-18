@@ -10,8 +10,8 @@
 
 use super::{
     Builder, CALLBACK_CALL_DEPTH, DEPTH_MASK, ENTRY, Frame, MAX_CALL_DEPTH, NOT_TRUNCATED,
-    PROFILED, TAIL_SHIFT, UNBOUND, Vm, copy_value, has_spread, is_unbound, less, less_eq,
-    list_next, load_value, range_next, register, step::Flow, store_value, truncate,
+    PROFILED, TAIL_SHIFT, UNBOUND, Vm, copy_value, is_unbound, less, less_eq, list_next,
+    load_value, range_next, register, step::Flow, store_value, truncate,
 };
 use crate::{
     bytecode::{Instr, Op, Proto, register_index},
@@ -410,7 +410,6 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                             && callee_base <= (*vm).stack_limit
                             && frame != (*vm).frame_limit
                             && (meta & DEPTH_MASK) as usize <= MAX_CALL_DEPTH
-                            && (instr.x == 1 || !has_spread(callee_base, argc))
                         {
                             (*frame).ip = ip.add(1);
                             frame = frame.add(1);
@@ -425,7 +424,6 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     }
                 }
                 Op::CallSelf => {
-                    let argc = (instr.x & 0x7f) as usize;
                     let callee_base = reg!(instr.a).add(1);
                     let meta = (*frame).meta;
 
@@ -434,7 +432,6 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     if meta as u32 <= MAX_CALL_DEPTH as u32
                         && callee_base <= (*vm).stack_limit
                         && frame != (*vm).frame_limit
-                        && (instr.x & 0x80 != 0 || !has_spread(callee_base, argc))
                     {
                         // The function calls itself through its own name: the value the frame
                         // was called through is the callee.
@@ -453,16 +450,13 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     }
                 }
                 Op::TailSelf => {
-                    let argc = (instr.x & 0x7f) as usize;
                     let args = reg!(instr.a).add(1);
                     let meta = (*frame).meta;
 
-                    if meta as u32 <= MAX_CALL_DEPTH as u32
-                        && (instr.x & 0x80 != 0 || !has_spread(args, argc))
-                    {
+                    if meta as u32 <= MAX_CALL_DEPTH as u32 {
                         // The frame starts over with the new arguments, one level deeper, and
                         // remembers where it did so for error reports.
-                        for offset in 0..argc {
+                        for offset in 0..instr.x as usize {
                             copy_value(base.add(offset), args.add(offset));
                         }
                         (*frame).meta = meta + 1 + (1 << TAIL_SHIFT);

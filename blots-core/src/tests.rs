@@ -2633,6 +2633,47 @@ mod slot_frame_tests {
     }
 
     #[test]
+    fn test_self_call_with_spread_arguments() {
+        // A function that calls itself knows how many arguments it passes, unless one of them
+        // is a spread: those are only counted once they are spread.
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        for definition in [
+            "last = (n, acc) => if n == 0 then acc else last(...[n - 1, acc + n])",
+            "inner = (n, acc) => if n == 0 then acc else 1 + inner(n - 1, ...[acc])",
+            "surplus = (n, acc) => if n == 0 then acc else surplus(...[n - 1, acc, 1])",
+        ] {
+            parse_and_evaluate(
+                definition,
+                Some(Rc::clone(&heap)),
+                Some(Rc::clone(&bindings)),
+            )
+            .unwrap();
+        }
+
+        let result = parse_and_evaluate(
+            "last(...[100, 0]) + 10000 * inner(10, 5)",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        assert_eq!(result, Value::Number(5050.0 + 150000.0));
+
+        let error = parse_and_evaluate(
+            "surplus(1, 0)",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("takes exactly 2 arguments, but 3 were given"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn test_deserialized_function_with_unresolved_body_is_callable() {
         // Deserialized lambdas re-parse their body outside any lambda parse arm, so their
         // identifiers stay unresolved and must keep working through the dynamic name lookup.
@@ -2921,6 +2962,32 @@ mod large_program_tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("can't call a non-function: 5"), "{error}");
+    }
+
+    #[test]
+    fn a_function_with_many_parameters_calls_itself() {
+        for count in [2, 3, 64, 65, 66, 127, 128, 129, 255, 256, 257, 300] {
+            // Every call passes the parameters after the first on rotated by one place.
+            let rest = count - 1;
+            let turns = 5;
+            let params = joined(rest, |i| format!("p{i}"));
+            let rotated = joined(rest, |i| format!("p{}", (i + 1) % rest));
+            let args = joined(rest, |i| i.to_string());
+            let expected = format!("[{}]", joined(rest, |i| ((i + turns) % rest).to_string()));
+
+            // In tail position the call replaces the frame; as an operand it cannot.
+            for call in [
+                format!("f(n - 1, {rotated})"),
+                format!("f(n - 1, {rotated}) + 0"),
+            ] {
+                assert_evaluates_to(
+                    &format!(
+                        "f = (n, {params}) => if n == 0 then [{params}] else {call}\nf({turns}, {args})"
+                    ),
+                    &expected,
+                );
+            }
+        }
     }
 
     #[test]

@@ -150,18 +150,17 @@ pub(crate) enum Op {
     /// `if R[a] == false { pc += sbx }`; errors unless `R[a]` is a boolean.
     JmpIfFalse,
 
-    /// `R[c] = R[a](R[a+1], ..., R[a+b])`. `x == 1` promises that no argument can be a spread
-    /// value, so the arguments need no flattening check.
+    /// `R[c] = R[a](R[a+1], ..., R[a+b])`. The arguments are passed as they are: a call with a
+    /// spread among its arguments gathers them in a list instead (see `CallList`).
     Call,
     /// `R[c] = R[a](...)`: call with the elements of the list being built (see `ListBegin`) as
     /// arguments, consuming it.
     CallList,
     /// `R[c] = <the running function>(R[a+1], ..., R[a+n])`. Only emitted in the variant of a
     /// function's code that is specialised for calls through its own name (see [`SelfRef`]),
-    /// where `n` (the low seven bits of `x`) is the function's own parameter count: the frame
-    /// calls itself without resolving anything. `R[a]` is scratch space for the callee, `b`
-    /// is the distance from the start of the code to the word after this instruction, and
-    /// the high bit of `x` promises that no argument can be a spread value.
+    /// where `n` (operand `x`) is the function's own parameter count: the frame calls itself
+    /// without resolving anything. `R[a]` is scratch space for the callee, and `b` is the
+    /// distance from the start of the code to the word after this instruction.
     CallSelf,
     /// The tail-call form of `CallSelf` (with `c == a`), always followed by `Return a`: the
     /// frame restarts itself with the new arguments (one call level deeper) instead of
