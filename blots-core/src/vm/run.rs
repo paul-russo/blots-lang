@@ -45,6 +45,12 @@ unsafe fn jump_target(at: *const u64) -> *const u64 {
     }
 }
 
+/// Marks the path it is called on as one that is rarely taken, which keeps the code for it
+/// out of the way of the common path.
+#[cold]
+#[inline(always)]
+fn rare() {}
+
 /// Run the innermost frame of `vm`, and every frame it calls, until it returns or fails.
 ///
 /// # Safety
@@ -492,27 +498,35 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     }
                 }
 
-                Op::Index => {
+                Op::Index => 'index: {
                     if let (Value::List(pointer), Value::Number(number)) =
                         (&*reg!(instr.b), &*reg!(instr.c))
                         && let Some(HeapValue::List(items)) = heap_value!(pointer)
                     {
-                        // A negative index counts from the end; one that is still negative
-                        // after that wraps around to a position no list has.
+                        // Read as an unsigned position, a negative index lies beyond the end
+                        // of every list, so one comparison finds the indices that count from
+                        // the start and are in range.
                         let index = truncate(*number);
-                        let position = match index {
-                            index if index >= 0 => index as usize,
-                            index => (items.len() as i64).wrapping_add(index) as usize,
-                        };
+                        let mut position = index as usize;
 
-                        if let Some(item) = items.get(position) {
-                            load_value(reg!(instr.a), item);
-                            next!(1);
+                        if position >= items.len() {
+                            rare();
+                            if index == NOT_TRUNCATED {
+                                break 'index;
+                            }
+
+                            // A negative index counts from the end; one that is still
+                            // negative after that wraps around to a position no list has,
+                            // which is also where an index beyond the end stays.
+                            position = (items.len() as i64).wrapping_add(index) as usize;
+                            if position >= items.len() {
+                                store_value(reg!(instr.a), Value::Null);
+                                next!(1);
+                            }
                         }
-                        if index != NOT_TRUNCATED {
-                            store_value(reg!(instr.a), Value::Null);
-                            next!(1);
-                        }
+
+                        load_value(reg!(instr.a), items.as_ptr().add(position));
+                        next!(1);
                     }
                 }
                 Op::GetField => {
