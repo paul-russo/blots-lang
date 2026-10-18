@@ -11,7 +11,7 @@
 use super::{
     Builder, CALLBACK_CALL_DEPTH, DEPTH_MASK, ENTRY, Frame, MAX_CALL_DEPTH, NOT_TRUNCATED,
     PROFILED, TAIL_SHIFT, UNBOUND, Vm, copy_value, has_spread, is_unbound, less, less_eq,
-    list_next, range_next, register, step::Flow, store_value, truncate,
+    list_next, load_value, range_next, register, step::Flow, store_value, truncate,
 };
 use crate::{
     bytecode::{Instr, Op, Proto, register_index},
@@ -259,7 +259,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 Op::LoadK => {
                     let consts = &(*(*frame).proto).consts;
                     debug_assert!(instr.bx() < consts.len());
-                    copy_value(reg!(instr.a), consts.as_ptr().add(instr.bx()));
+                    load_value(reg!(instr.a), consts.as_ptr().add(instr.bx()));
                     next!(1);
                 }
                 Op::LoadNum => {
@@ -279,7 +279,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     debug_assert!(!(*frame).def.is_null());
 
                     if let Some(value) = (*(*frame).def).scope.slot_ref(instr.b as usize) {
-                        copy_value(reg!(instr.a), value);
+                        load_value(reg!(instr.a), value);
                         next!(1);
                     }
                 }
@@ -288,7 +288,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     let (slot, _) = (&(*(*frame).proto).slot_refs)[instr.bx()];
 
                     if let Some(value) = (*(*frame).def).scope.slot_ref(slot as usize) {
-                        copy_value(reg!(instr.a), value);
+                        load_value(reg!(instr.a), value);
                         next!(1);
                     }
                 }
@@ -506,7 +506,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                         };
 
                         if let Some(item) = items.get(position) {
-                            copy_value(reg!(instr.a), item);
+                            load_value(reg!(instr.a), item);
                             next!(1);
                         }
                         if index != NOT_TRUNCATED {
@@ -530,14 +530,14 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                         // place. Shapes that are not canonical are told apart by the key.
                         if Rc::as_ptr(record.shape()) == cache.shape.get() {
                             debug_assert!(position < record.len());
-                            copy_value(reg!(instr.a), record.as_slice().as_ptr().add(position));
+                            load_value(reg!(instr.a), record.as_slice().as_ptr().add(position));
                             next!(1);
                         }
 
                         if let Some((key, value)) = record.get_index(position)
                             && *key == proto.fields[site]
                         {
-                            copy_value(reg!(instr.a), value);
+                            load_value(reg!(instr.a), value);
                             next!(1);
                         }
                     }

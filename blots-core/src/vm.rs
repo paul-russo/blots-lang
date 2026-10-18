@@ -123,6 +123,21 @@ unsafe fn copy_value(dst: *mut Value, src: *const Value) {
     }
 }
 
+/// Copy a value that was written a while ago (an element of a list, a field of a record, a
+/// constant) into a register.
+///
+/// No store to such a value is still pending, so unlike in [`copy_value`] it can be read in
+/// one piece. The register is then written by a single store, which the CPU can forward to
+/// whatever reads its tag or its payload next.
+///
+/// # Safety
+/// `src` must point to an initialised value and `dst` to a slot that is valid for writes.
+#[inline(always)]
+unsafe fn load_value(dst: *mut Value, src: *const Value) {
+    // SAFETY: guaranteed by the caller.
+    unsafe { dst.write(src.read()) }
+}
+
 /// Store a value into a slot as two full words, so that it can be copied onwards right away
 /// (see [`copy_value`]) whatever the width of its payload.
 ///
@@ -272,7 +287,7 @@ unsafe fn list_next(slot: *mut Value, with_index: bool, first: bool) -> bool {
             return false;
         }
 
-        copy_value(slot.add(2), cursor);
+        load_value(slot.add(2), cursor);
         if with_index {
             let index = if first {
                 0.0
