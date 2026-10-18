@@ -726,16 +726,10 @@ impl BuiltInFunction {
                             list.extend(values.iter().copied());
                         }
                         Value::Spread(IterablePointer::String(p)) => {
-                            let string = {
-                                let borrowed_heap = &heap.borrow();
-                                p.reify(borrowed_heap).as_string()?.to_string()
-                            };
+                            let mut heap = heap.borrow_mut();
+                            let text = p.reify(&heap).as_text()?.clone();
 
-                            list.extend(
-                                string
-                                    .chars()
-                                    .map(|c| heap.borrow_mut().insert_string(c.to_string())),
-                            );
+                            list.extend(text.chars().map(|c| heap.insert_string(c)));
                         }
                         _ => list.push(arg),
                     }
@@ -848,10 +842,10 @@ impl BuiltInFunction {
             Self::Replace => {
                 let string = {
                     let borrowed_heap = heap.borrow();
-                    let old = args[1].as_string(&borrowed_heap)?.to_string();
-                    let new = args[2].as_string(&borrowed_heap)?.to_string();
-                    let s = args[0].as_string(&borrowed_heap)?.to_string();
-                    s.replace(&old, &new)
+                    let old = args[1].as_string(&borrowed_heap)?;
+                    let new = args[2].as_string(&borrowed_heap)?;
+                    let s = args[0].as_string(&borrowed_heap)?;
+                    s.replace(old, new)
                 };
 
                 Ok(heap.borrow_mut().insert_string(string))
@@ -889,16 +883,12 @@ impl BuiltInFunction {
                     }
                     // If haystack is a string, require needle to be a string and do substring search
                     ReifiedValue::String(s, _) => {
-                        let needle = {
-                            let borrowed_heap = &heap.borrow();
-                            args[1]
-                                .as_string(borrowed_heap)
-                                .map_err(|_| {
-                                    RuntimeError::from("second argument must be a string")
-                                })?
-                                .to_string()
-                        };
-                        Ok(Value::Bool(s.contains(&needle)))
+                        let borrowed_heap = heap.borrow();
+                        let needle = args[1]
+                            .as_string(&borrowed_heap)
+                            .map_err(|_| RuntimeError::from("second argument must be a string"))?;
+
+                        Ok(Value::Bool(s.contains(needle)))
                     }
                     _ => Err(RuntimeError::from(
                         "first argument must be a list or string",
@@ -907,31 +897,25 @@ impl BuiltInFunction {
             }
 
             Self::Format => {
-                let format_str = {
+                let formatted = {
                     let borrowed_heap = &heap.borrow();
-                    args[0]
+                    let format_str = args[0]
                         .as_string(borrowed_heap)
-                        .map_err(|_| RuntimeError::from("first argument must be a string"))?
-                        .to_string()
-                };
+                        .map_err(|_| RuntimeError::from("first argument must be a string"))?;
 
-                let format_args = {
-                    let borrowed_heap = &heap.borrow();
-                    &args[1..]
+                    let format_args = &args[1..]
                         .iter()
                         .map(|v| v.stringify_for_display(borrowed_heap))
-                        .collect::<Vec<String>>()
+                        .collect::<Vec<String>>();
+
+                    format_str.format(format_args)
                 };
 
-                Ok(heap
-                    .borrow_mut()
-                    .insert_string(format_str.format(format_args)))
+                Ok(heap.borrow_mut().insert_string(formatted))
             }
 
             // Type functions
-            Self::Typeof => Ok(heap
-                .borrow_mut()
-                .insert_string(args[0].get_type().to_string())),
+            Self::Typeof => Ok(heap.borrow_mut().insert_string(args[0].get_type().name())),
 
             Self::Arity => {
                 let arity = match args[0] {
@@ -953,18 +937,11 @@ impl BuiltInFunction {
 
             // Record functions
             Self::Keys => {
-                let key_strings = {
-                    let borrowed_heap = heap.borrow();
-                    args[0]
-                        .as_record(&borrowed_heap)?
-                        .keys()
-                        .cloned()
-                        .collect::<Vec<String>>()
-                };
                 let mut borrowed_heap = heap.borrow_mut();
-                let keys = key_strings
-                    .into_iter()
-                    .map(|k| borrowed_heap.insert_string(k))
+                let shape = Rc::clone(args[0].as_record(&borrowed_heap)?.shape());
+                let keys = shape
+                    .keys()
+                    .map(|k| borrowed_heap.insert_string(k.as_str()))
                     .collect();
 
                 Ok(borrowed_heap.insert_list(keys))
@@ -984,19 +961,14 @@ impl BuiltInFunction {
             }
 
             Self::Entries => {
-                let entries = {
-                    let borrowed_heap = heap.borrow();
-                    args[0]
-                        .as_record(&borrowed_heap)?
-                        .iter()
-                        .map(|(k, v)| (k.clone(), *v))
-                        .collect::<Vec<(String, Value)>>()
-                };
                 let mut borrowed_heap = heap.borrow_mut();
-                let entry_values = entries
-                    .into_iter()
+                let record = args[0].as_record(&borrowed_heap)?;
+                let (shape, values) = (Rc::clone(record.shape()), record.as_slice().to_vec());
+                let entry_values = shape
+                    .keys()
+                    .zip(values)
                     .map(|(k, v)| {
-                        let key = borrowed_heap.insert_string(k);
+                        let key = borrowed_heap.insert_string(k.as_str());
                         borrowed_heap.insert_list(vec![key, v])
                     })
                     .collect();

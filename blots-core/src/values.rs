@@ -644,14 +644,14 @@ impl<'h> IntoIterator for WithHeap<'h, ReifiedIterableValue<'h>> {
             // Yields an iterator over the characters in the string.
             ReifiedIterableValue::String(s) => s
                 .chars()
-                .map(|c| self.heap.borrow_mut().insert_string(c.to_string()))
+                .map(|c| self.heap.borrow_mut().insert_string(c))
                 .collect::<Vec<Value>>()
                 .into_iter(),
             // Yields an iterator over the [key, value] pairs of the record.
             ReifiedIterableValue::Record(r) => r
                 .into_iter()
                 .map(|(k, v)| {
-                    let list = vec![self.heap.borrow_mut().insert_string(k.to_string()), *v];
+                    let list = vec![self.heap.borrow_mut().insert_string(k.as_str()), *v];
                     self.heap.borrow_mut().insert_list(list)
                 })
                 .collect::<Vec<Value>>()
@@ -685,19 +685,26 @@ pub enum ValueType {
     Null,
 }
 
+impl ValueType {
+    /// What the type is called.
+    pub fn name(&self) -> &'static str {
+        match self {
+            ValueType::Number => "number",
+            ValueType::List => "list",
+            ValueType::Spread => "spread",
+            ValueType::Bool => "boolean",
+            ValueType::Lambda => "function",
+            ValueType::BuiltIn => "built-in function",
+            ValueType::String => "string",
+            ValueType::Record => "record",
+            ValueType::Null => "null",
+        }
+    }
+}
+
 impl Display for ValueType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ValueType::Number => write!(f, "number"),
-            ValueType::List => write!(f, "list"),
-            ValueType::Spread => write!(f, "spread"),
-            ValueType::Bool => write!(f, "boolean"),
-            ValueType::Lambda => write!(f, "function"),
-            ValueType::BuiltIn => write!(f, "built-in function"),
-            ValueType::String => write!(f, "string"),
-            ValueType::Record => write!(f, "record"),
-            ValueType::Null => write!(f, "null"),
-        }
+        f.write_str(self.name())
     }
 }
 
@@ -960,7 +967,7 @@ impl SerializableValue {
 
                 Ok(heap.insert_list(deserialized_list))
             }
-            SerializableValue::String(s) => Ok(heap.insert_string(s.to_string())),
+            SerializableValue::String(s) => Ok(heap.insert_string(s.as_str())),
             SerializableValue::Record(record) => {
                 let deserialized_record = record
                     .iter()

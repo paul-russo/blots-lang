@@ -392,9 +392,10 @@ fn spread_into_record(
             }
         }
         IterablePointer::String(pointer) => {
-            let text = pointer.reify(&heap.borrow()).as_string()?.to_string();
+            let mut heap = heap.borrow_mut();
+            let text = pointer.reify(&heap).as_text()?.clone();
             for (position, character) in text.chars().enumerate() {
-                let value = heap.borrow_mut().insert_string(character.to_string());
+                let value = heap.insert_string(character);
                 entries.insert(position.to_string(), value);
             }
         }
@@ -1532,7 +1533,7 @@ impl Vm {
 
     #[inline(never)]
     fn load_string(&mut self, index: usize) -> Value {
-        let text = self.top().proto().strings[index].clone();
+        let text = self.top().proto().strings[index].as_str();
 
         self.heap.borrow_mut().insert_string(text)
     }

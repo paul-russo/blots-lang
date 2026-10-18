@@ -75,32 +75,24 @@ pub(crate) fn flatten_spread_value(
             list_ptr.reify(&borrowed_heap).as_list().cloned()
         }
         IterablePointer::String(string_ptr) => {
-            let string = {
-                let borrowed_heap = heap.borrow();
-                string_ptr.reify(&borrowed_heap).as_string()?.to_string()
-            };
+            let mut heap = heap.borrow_mut();
+            let text = string_ptr.reify(&heap).as_text()?.clone();
+
             // Convert string to list of character values
-            Ok(string
-                .chars()
-                .map(|c| heap.borrow_mut().insert_string(c.to_string()))
-                .collect())
+            Ok(text.chars().map(|c| heap.insert_string(c)).collect())
         }
         IterablePointer::Record(record_ptr) => {
-            let entries = {
-                let borrowed_heap = heap.borrow();
-                record_ptr
-                    .reify(&borrowed_heap)
-                    .as_record()?
-                    .iter()
-                    .map(|(k, v)| (k.clone(), *v))
-                    .collect::<Vec<(String, Value)>>()
-            };
+            let mut heap = heap.borrow_mut();
+            let record = record_ptr.reify(&heap).as_record()?;
+            let (shape, values) = (Rc::clone(record.shape()), record.as_slice().to_vec());
+
             // Convert record to list of [key, value] pairs
-            Ok(entries
-                .into_iter()
+            Ok(shape
+                .keys()
+                .zip(values)
                 .map(|(k, v)| {
-                    let key = heap.borrow_mut().insert_string(k);
-                    heap.borrow_mut().insert_list(vec![key, v])
+                    let key = heap.insert_string(k.as_str());
+                    heap.insert_list(vec![key, v])
                 })
                 .collect())
         }

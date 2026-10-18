@@ -6159,4 +6159,48 @@ mod shared_string_tests {
             format!("[{grown}, {}]", &grown[1..])
         );
     }
+
+    #[test]
+    fn strings_are_keys_and_values_whatever_they_were_made_from() {
+        let session = Session::new();
+        session
+            .evaluate(&format!(
+                "long = {}\npart = slice(long + \"!\", 0, 52)\nbuilt = reduce(range(52), (acc, i) => acc + long[i], \"\")\nshort = slice(long, 3, 6)",
+                letters(2)
+            ))
+            .unwrap();
+
+        for (code, expected) in [
+            (
+                "[long == part, part == built, built == long]",
+                "[true, true, true]",
+            ),
+            (
+                "[long != part, long < part, long <= built, part >= built]",
+                "[false, false, true, true]",
+            ),
+            ("{[long]: 1}[part]", "1"),
+            (
+                "{[part]: 1, [built]: 2, [long]: 3}",
+                &format!("{{{}: 3}}", "abcdefghijklmnopqrstuvwxyz".repeat(2)),
+            ),
+            ("len(unique([long, part, built, short, \"def\"]))", "2"),
+            ("includes([long], built)", "true"),
+            ("includes(long, short)", "true"),
+            ("short == \"def\"", "true"),
+            ("{def: 1}[short]", "1"),
+            (
+                "sort([part, \"b\", short, \"a\"])[1]",
+                "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz",
+            ),
+            ("uppercase(short) + lowercase(\"ABC\")", "DEFabc"),
+            ("replace(part, long, \"x\")", "x"),
+            ("join([short, part], \"-\") == \"def-\" + built", "true"),
+            ("to_string(part) == part", "true"),
+            ("typeof(part)", "string"),
+            ("format(\"{}/{}\", short, 1)", "def/1"),
+        ] {
+            assert_eq!(session.outcome(code), expected, "{code}");
+        }
+    }
 }
