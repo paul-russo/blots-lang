@@ -5,6 +5,7 @@ pub mod ast;
 pub mod ast_to_source;
 mod bytecode;
 mod compiler;
+mod distinct;
 pub mod do_block_tests;
 pub mod environment;
 pub mod error;

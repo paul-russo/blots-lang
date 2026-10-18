@@ -1,4 +1,5 @@
 use crate::{
+    distinct::distinct,
     environment::Environment,
     error::RuntimeError,
     heap::{Heap, HeapPointer, IterablePointer},
@@ -776,24 +777,13 @@ impl BuiltInFunction {
             }
 
             Self::Unique => {
-                let mut unique_list = vec![];
-                let borrowed_heap = heap.borrow();
-                let list = args[0].as_list(&borrowed_heap)?;
+                let unique_list = {
+                    let borrowed_heap = heap.borrow();
+                    let list = args[0].as_list(&borrowed_heap)?;
 
-                for item in list.iter() {
-                    let mut is_duplicate = false;
-                    for existing in &unique_list {
-                        if item.equals(existing, &borrowed_heap)? {
-                            is_duplicate = true;
-                            break;
-                        }
-                    }
-                    if !is_duplicate {
-                        unique_list.push(*item);
-                    }
-                }
+                    distinct(list, &borrowed_heap)?
+                };
 
-                drop(borrowed_heap);
                 Ok(heap.borrow_mut().insert_list(unique_list))
             }
 

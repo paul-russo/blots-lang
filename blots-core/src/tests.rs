@@ -4982,3 +4982,169 @@ mod shared_list_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod unique_tests {
+    use crate::environment::Environment;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// What the last statement of `code` comes to, rendered: the value, or the error.
+    fn outcome(code: &str) -> String {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = String::new();
+        for statement in parse_program(code).expect("a program the fast parser reads") {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+
+            result = match evaluate_ast(
+                &expr,
+                Rc::clone(&heap),
+                Rc::clone(&bindings),
+                0,
+                Rc::clone(&source),
+            ) {
+                Ok(value) => value.stringify_internal(&heap.borrow()),
+                Err(error) => error.message,
+            };
+        }
+
+        result
+    }
+
+    #[test]
+    fn the_first_of_the_values_that_are_equal_is_kept_in_its_place() {
+        assert_eq!(outcome("unique([3, 1, 3, 2, 1])"), "[3, 1, 2]");
+        assert_eq!(outcome("unique([])"), "[]");
+        assert_eq!(
+            outcome("unique(map(range(100), i => (i * 7) % 13))"),
+            "[0, 7, 1, 8, 2, 9, 3, 10, 4, 11, 5, 12, 6]"
+        );
+        assert_eq!(
+            outcome("unique(map(range(100), i => to_string(i % 11)))"),
+            "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]"
+        );
+    }
+
+    #[test]
+    fn many_distinct_values_are_all_kept() {
+        assert_eq!(
+            outcome("unique(map(range(20000), i => (i * 7919) % 5003)) into len"),
+            "5003"
+        );
+        assert_eq!(
+            outcome(
+                "xs = map(range(20000), i => (i * 7919) % 5003)\nunique(xs) == unique([...xs, ...xs]) into all"
+            ),
+            "true"
+        );
+        assert_eq!(
+            outcome("unique(map(range(6000), i => \"k\" + to_string(i % 1500))) into len"),
+            "1500"
+        );
+        assert_eq!(
+            outcome("unique(map(range(6000), i => [i % 30, {k: i % 7}])) into len"),
+            "210"
+        );
+    }
+
+    #[test]
+    fn values_of_different_kinds_are_never_equal() {
+        assert_eq!(
+            outcome(
+                "unique([0, \"0\", false, null, [], {}, [0], {a: 0}, \"\", 0, \"0\", false, null, [], {}, [0], {a: 0}, \"\"]) into len"
+            ),
+            "9"
+        );
+        assert_eq!(
+            outcome(
+                "unique(map(range(60), i => if i % 2 == 0 then i % 10 else to_string(i % 10))) into len"
+            ),
+            "10"
+        );
+    }
+
+    #[test]
+    fn zero_is_equal_to_its_negative_and_the_first_of_them_is_kept() {
+        assert_eq!(outcome("unique([0, -0, 0]) via x => 1 / x"), "[inf]");
+        assert_eq!(outcome("unique([-0, 0, -0]) via x => 1 / x"), "[-inf]");
+        assert_eq!(
+            outcome("unique([...range(1, 20), -0, 0, [-0], [0], {z: 0}, {z: -0}]) into len"),
+            "22"
+        );
+    }
+
+    #[test]
+    fn a_number_that_is_not_a_number_is_equal_to_nothing() {
+        assert_eq!(outcome("unique([0/0, 0/0, 1, 0/0]) into len"), "4");
+        assert_eq!(
+            outcome("unique(map(range(40), i => if i % 2 == 0 then 0/0 else i % 6)) into len"),
+            "23"
+        );
+        assert_eq!(
+            outcome(
+                "unique(map(range(40), i => if i % 2 == 0 then [1, {a: 0/0}] else [1, {a: i % 6}])) into len"
+            ),
+            "23"
+        );
+    }
+
+    #[test]
+    fn records_are_equal_whatever_order_their_keys_were_written_in() {
+        assert_eq!(
+            outcome("unique([{a: 1, b: 2}, {b: 2, a: 1}, {a: 2, b: 1}]) into len"),
+            "2"
+        );
+        assert_eq!(
+            outcome(
+                "unique(map(range(90), i => if i % 2 == 0 then {a: i % 9, b: \"x\"} else {b: \"x\", a: i % 9})) into len"
+            ),
+            "9"
+        );
+    }
+
+    #[test]
+    fn functions_are_equal_when_they_are_written_the_same_way() {
+        assert_eq!(
+            outcome(
+                "unique([x => x + 1, x => x + 1, y => y + 1, x => x + 2, sqrt, sqrt, sin, 1, 2, 3, 4, 5, 6, 7, 8, x => x + 1, sqrt, y => y + 1, (x, y) => x, (x, y) => x]) into len"
+            ),
+            "14"
+        );
+    }
+
+    #[test]
+    fn values_that_differ_deep_inside_are_told_apart() {
+        assert_eq!(
+            outcome(
+                "deepen = (v, n) => if n == 0 then v else deepen([v], n - 1)\nunique(map(range(300), i => deepen(i % 25, 20))) into len"
+            ),
+            "25"
+        );
+        assert_eq!(
+            outcome(
+                "deepen = (v, n) => if n == 0 then v else deepen({in: v}, n - 1)\nunique(map(range(300), i => deepen(i % 25, 20))) into len"
+            ),
+            "25"
+        );
+    }
+
+    #[test]
+    fn only_a_list_has_distinct_values() {
+        assert_eq!(
+            outcome("unique(\"aab\")"),
+            "in built-in function \"unique\": expected a list, but got a string"
+        );
+        assert_eq!(
+            outcome("unique(3)"),
+            "in built-in function \"unique\": expected a list, but got a number"
+        );
+    }
+}
