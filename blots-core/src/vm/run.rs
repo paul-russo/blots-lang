@@ -63,6 +63,9 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
     // `frame`, `ip` and `base` are re-derived after it.
     unsafe {
         let heap: *const Heap = (*vm).heap.as_ptr();
+
+        // The slots of the heap, looked up again whenever `Vm::step` may have added to them.
+        let mut slots: *const [HeapValue] = (*heap).slots();
         let mut frame: *mut Frame = (*vm).top;
         let mut ip: *const u64 = (*frame).ip;
         let mut base: *mut Value = (*frame).base;
@@ -76,6 +79,13 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     debug_assert!(register_index($operand) < (*(*frame).proto).max_stack);
                     register(base, $operand)
                 }};
+            }
+
+            // What a pointer refers to in the heap, if it is in the heap at all.
+            macro_rules! heap_value {
+                ($pointer:expr) => {
+                    (&*slots).get($pointer.index())
+                };
             }
 
             // The instruction is done: carry on `$words` code words further on.
@@ -381,7 +391,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     let argc = instr.b as usize;
 
                     if let Value::Lambda(pointer) = &*callee
-                        && let Some(HeapValue::Lambda(def)) = (*heap).get(pointer.index())
+                        && let Some(HeapValue::Lambda(def)) = heap_value!(pointer)
                         && let Some(code) = def.scope.code.get()
                     {
                         let def: *const LambdaDef = Rc::as_ptr(def);
@@ -485,7 +495,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 Op::Index => {
                     if let (Value::List(pointer), Value::Number(number)) =
                         (&*reg!(instr.b), &*reg!(instr.c))
-                        && let Some(HeapValue::List(items)) = (*heap).get(pointer.index())
+                        && let Some(HeapValue::List(items)) = heap_value!(pointer)
                     {
                         // A negative index counts from the end; one that is still negative
                         // after that wraps around to a position no list has.
@@ -508,7 +518,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 Op::GetField => {
                     // The field usually sits where this access site found it last time.
                     if let Value::Record(pointer) = &*reg!(instr.b)
-                        && let Some(HeapValue::Record(record)) = (*heap).get(pointer.index())
+                        && let Some(HeapValue::Record(record)) = heap_value!(pointer)
                     {
                         let site = instr.c as usize | (instr.x as usize) << 16;
                         let proto = &*(*frame).proto;
@@ -615,6 +625,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
             frame = (*vm).top;
             ip = (*frame).ip;
             base = (*frame).base;
+            slots = (*heap).slots();
         }
     }
 }

@@ -199,6 +199,12 @@ impl Heap {
         self.values.get_mut(id)
     }
 
+    /// Every slot of the heap, in the order [`Heap::get`] numbers them.
+    #[inline]
+    pub(crate) fn slots(&self) -> &[HeapValue] {
+        &self.values
+    }
+
     /// Number of slots currently in the heap: live values plus garbage not yet compacted away.
     pub fn len(&self) -> usize {
         self.values.len()
