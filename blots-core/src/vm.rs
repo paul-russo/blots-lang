@@ -166,26 +166,31 @@ unsafe fn store_value(dst: *mut Value, value: Value) {
 }
 
 /// `x < y`, or `None` when the two cannot be ordered because one of them is NaN.
+///
+/// Whether the two can be ordered is asked of them in the order they are compared in, so
+/// that a single comparison instruction answers both questions: its flags say which of the
+/// numbers is the larger one and whether there is such a thing.
 #[inline(always)]
 fn less(x: f64, y: f64) -> Option<bool> {
-    if x < y {
+    if y > x {
         Some(true)
-    } else if x >= y {
-        Some(false)
-    } else {
+    } else if y.is_nan() | x.is_nan() {
         None
+    } else {
+        Some(false)
     }
 }
 
-/// `x <= y`, or `None` when the two cannot be ordered because one of them is NaN.
+/// `x <= y`, or `None` when the two cannot be ordered because one of them is NaN (see
+/// [`less`] for the way it is written).
 #[inline(always)]
 fn less_eq(x: f64, y: f64) -> Option<bool> {
-    if x <= y {
+    if y >= x {
         Some(true)
-    } else if x > y {
-        Some(false)
-    } else {
+    } else if y.is_nan() | x.is_nan() {
         None
+    } else {
+        Some(false)
     }
 }
 
