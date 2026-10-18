@@ -5830,6 +5830,74 @@ mod shared_string_tests {
     }
 
     #[test]
+    fn the_characters_of_a_string_are_found_by_their_position() {
+        let session = Session::new();
+        session
+            .evaluate(&format!(
+                "short = \"abc\"\nwide = \"aé😀b\"\nlong = {}\nmixed = long + \"é\" + long",
+                letters(2)
+            ))
+            .unwrap();
+
+        for (code, expected) in [
+            ("short[0]", "a"),
+            ("short[2]", "c"),
+            ("short[3]", "null"),
+            ("short[-1]", "c"),
+            ("short[-3]", "a"),
+            ("short[-4]", "null"),
+            ("short[1.9]", "b"),
+            ("short[-0.5]", "a"),
+            ("short[0/0]", "a"),
+            ("short[1e300]", "null"),
+            ("short[-1e300]", "null"),
+            ("wide[0]", "a"),
+            ("wide[1]", "é"),
+            ("wide[2]", "😀"),
+            ("wide[3]", "b"),
+            ("wide[4]", "null"),
+            ("wide[-1]", "b"),
+            ("wide[-3]", "é"),
+            ("wide[-4]", "a"),
+            ("wide[-5]", "null"),
+            ("\"\"[0]", "null"),
+            ("\"\"[-1]", "null"),
+            ("long[0]", "a"),
+            ("long[27]", "b"),
+            ("long[51]", "z"),
+            ("long[52]", "null"),
+            ("long[-1]", "z"),
+            ("long[-52]", "a"),
+            ("long[-53]", "null"),
+            ("mixed[51]", "z"),
+            ("mixed[52]", "é"),
+            ("mixed[53]", "a"),
+            ("mixed[104]", "z"),
+            ("mixed[105]", "null"),
+            ("mixed[-1]", "z"),
+            ("mixed[-53]", "é"),
+            ("mixed[-105]", "a"),
+            ("mixed[-106]", "null"),
+            ("slice(mixed, 26, 80)[26]", "é"),
+            ("slice(mixed, 26, 80)[27]", "a"),
+            ("slice(mixed, 54, 106)[51]", "z"),
+            ("tail(long)[0]", "b"),
+            ("(long + \"!\")[52]", "!"),
+            ("typeof(long[3])", "string"),
+            ("map(range(3), i => wide[i + 1])", "[é, 😀, b]"),
+            ("[...wide]", "[a, é, 😀, b]"),
+            ("{...wide}", "{0: a, 1: é, 2: 😀, 3: b}"),
+        ] {
+            assert_eq!(session.outcome(code), expected, "{code}");
+        }
+
+        assert_eq!(
+            session.outcome("short[\"a\"]"),
+            "expected a number, but got a string"
+        );
+    }
+
+    #[test]
     fn strings_that_share_their_characters_survive_compaction() {
         let session = Session::new();
         let alphabet = "abcdefghijklmnopqrstuvwxyz";

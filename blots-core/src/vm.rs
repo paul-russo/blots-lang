@@ -1857,13 +1857,21 @@ impl Vm {
                     .unwrap_or(Value::Null))
             }
             Value::String(string) => {
-                let string = string.reify(&self.heap.borrow()).as_string()?.to_string();
-                let char_count = string.chars().count();
-                let position = element_position(index.as_number()? as i64, char_count);
+                let mut heap = self.heap.borrow_mut();
+                let text = string.reify(&heap).as_text()?;
+                let index = index.as_number()? as i64;
 
-                Ok(position
-                    .and_then(|position| string.chars().nth(position))
-                    .map(|character| self.heap.borrow_mut().insert_string(character.to_string()))
+                // An index that counts from the start is looked up as it is: no character
+                // is at a position that the string does not have. Only one that counts from
+                // the end takes the number of characters to find its position.
+                let character = match usize::try_from(index) {
+                    Ok(position) => text.char(position),
+                    Err(_) => element_position(index, text.char_count())
+                        .and_then(|position| text.char(position)),
+                };
+
+                Ok(character
+                    .map(|character| heap.insert_string(character))
                     .unwrap_or(Value::Null))
             }
             _ => Err(self.span_error(format!(
