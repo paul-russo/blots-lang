@@ -72,6 +72,14 @@ const MAX_DIRECT_ARGS: usize = 255;
 /// The number of record layouts an instruction can tell apart.
 const MAX_LAYOUTS: usize = u16::MAX as usize + 1;
 
+/// The most expressions of an inlined callback that are computed ahead of its loop, each of
+/// which keeps a register for as long as the loop runs.
+const MAX_HOISTED: usize = 8;
+
+/// An expression of more nodes than this is not checked for being the same on every pass
+/// through a loop; the expressions it is made of still are.
+const MAX_INVARIANT_NODES: usize = 32;
+
 /// A table of up to this many entries is searched from the start for an entry.
 const MAX_SCANNED_ENTRIES: usize = 16;
 
@@ -164,7 +172,7 @@ enum Resolved {
     Register(u16),
     /// The name is not bound by any enclosing scope of the chunk, so it resolves through the
     /// boundary environment and is cached in this register.
-    Global(u16),
+    Global(Symbol, u16),
     /// The name has to be looked up at runtime.
     Dynamic,
 }
@@ -616,6 +624,10 @@ struct FnCompiler {
 
     /// Variants only: the capture (name and slot) that is known to hold the function itself.
     self_target: Option<(Symbol, u16)>,
+
+    /// The expressions of the inlined callbacks being compiled whose values were computed
+    /// ahead of their loops, and the registers holding them (see [`Self::hoist`]).
+    hoisted: Vec<(*const SpannedExpr, u16)>,
 }
 
 impl FnCompiler {
@@ -645,6 +657,7 @@ impl FnCompiler {
             ensured: Vec::new(),
             inline,
             self_target: None,
+            hoisted: Vec::new(),
         }
     }
 
@@ -908,7 +921,7 @@ impl FnCompiler {
             }
 
             return match self.globals.iter().find(|(global, _)| *global == name) {
-                Some((_, reg)) => Resolved::Global(*reg),
+                Some((_, reg)) => Resolved::Global(name, *reg),
                 None => Resolved::Dynamic,
             };
         }
@@ -1011,53 +1024,45 @@ impl FnCompiler {
         self.ensured.push(name);
     }
 
-    /// Resolve a by-name reference to a register that already holds its value, if there is one.
-    fn name_reg(&mut self, name: Symbol, span: Span) -> Option<u16> {
-        match self.resolve(name) {
-            Resolved::Register(reg) => Some(reg),
-            Resolved::Global(reg) => {
-                self.ensure_global(name, reg, span);
-                Some(reg)
-            }
-            Resolved::Dynamic => None,
-        }
+    /// Where a variable reference finds its value, when that is known at this point of the
+    /// program. `Dynamic` stands for a reference that has to be looked up when the code runs,
+    /// and for anything that is not a reference to a variable.
+    fn place(&self, expr: &SpannedExpr) -> Resolved {
+        let name = match &expr.node {
+            Expr::Identifier(name) if !is_constant_name(*name) => *name,
+            Expr::ParamSlot { name, index } => match self.owner() {
+                Owner::Callback(scope) => {
+                    match self.scopes[scope].param_regs.get(*index as usize) {
+                        Some(reg) => return Resolved::Register(*reg),
+                        None => *name,
+                    }
+                }
+                Owner::Function if (*index as usize) < self.params.len() => {
+                    return Resolved::Register(*index);
+                }
+                Owner::Function => *name,
+                Owner::Chunk => return Resolved::Dynamic,
+            },
+            // An inlined callback never materialises its captured scope: a capture bound at
+            // closure creation holds exactly the value a by-name lookup from the callback
+            // body finds, and an unbound one falls back to that same lookup.
+            Expr::CaptureSlot { name, .. } if matches!(self.owner(), Owner::Callback(_)) => *name,
+            _ => return Resolved::Dynamic,
+        };
+
+        self.resolve(name)
     }
 
     /// If `expr` is a variable reference whose value already sits in a register, return that
     /// register (emitting at most a cache check).
     fn direct_reg(&mut self, expr: &SpannedExpr) -> Option<u16> {
-        match &expr.node {
-            Expr::Identifier(name) => {
-                if is_constant_name(*name) {
-                    return None;
-                }
-
-                self.name_reg(*name, expr.span)
+        match self.place(expr) {
+            Resolved::Register(reg) => Some(reg),
+            Resolved::Global(name, reg) => {
+                self.ensure_global(name, reg, expr.span);
+                Some(reg)
             }
-            Expr::ParamSlot { name, index } => match self.owner() {
-                Owner::Callback(scope) => {
-                    match self.scopes[scope].param_regs.get(*index as usize) {
-                        Some(reg) => Some(*reg),
-                        None => self.name_reg(*name, expr.span),
-                    }
-                }
-                Owner::Function => {
-                    if (*index as usize) < self.params.len() {
-                        return Some(*index);
-                    }
-
-                    self.name_reg(*name, expr.span)
-                }
-                Owner::Chunk => None,
-            },
-            Expr::CaptureSlot { name, .. } => match self.owner() {
-                // An inlined callback never materialises its captured scope: a capture bound at
-                // closure creation holds exactly the value a by-name lookup from the callback
-                // body finds, and an unbound one falls back to that same lookup.
-                Owner::Callback(_) => self.name_reg(*name, expr.span),
-                Owner::Function | Owner::Chunk => None,
-            },
-            _ => None,
+            Resolved::Dynamic => None,
         }
     }
 
@@ -1124,6 +1129,10 @@ impl FnCompiler {
             return Ok(reg);
         }
 
+        if let Some(reg) = self.hoisted_reg(expr) {
+            return Ok(reg);
+        }
+
         let reg = self.alloc()?;
         self.expr_into(expr, reg)?;
 
@@ -1166,6 +1175,12 @@ impl FnCompiler {
     /// Compile `expr` so that its value ends up in `dst`. `dst` is only ever written by the
     /// final instruction of the expression, so it may alias a variable the expression reads.
     fn expr_into(&mut self, expr: &SpannedExpr, dst: u16) -> CResult<()> {
+        if let Some(reg) = self.hoisted_reg(expr) {
+            self.emit(Instr::abc(Op::Move, dst, reg, 0));
+
+            return Ok(());
+        }
+
         match &expr.node {
             Expr::Number(n) => self.load_const(dst, Value::Number(*n)),
             Expr::Bool(b) => self.load_const(dst, Value::Bool(*b)),
@@ -1689,8 +1704,8 @@ impl FnCompiler {
                     let name = Symbol::intern(ident);
                     let value = match self.resolve(name) {
                         Resolved::Register(reg) => reg,
-                        Resolved::Global(reg) if self.ensured.contains(&name) => reg,
-                        Resolved::Global(_) | Resolved::Dynamic => {
+                        Resolved::Global(_, reg) if self.ensured.contains(&name) => reg,
+                        Resolved::Global(..) | Resolved::Dynamic => {
                             let reg = self.alloc()?;
                             let index = self.name(name);
                             let mut instr = Instr::abx(Op::GetName, reg, index);
@@ -1727,10 +1742,10 @@ impl FnCompiler {
             .iter()
             .map(|name| match self.resolve(*name) {
                 Resolved::Register(reg) => CaptureSource::Register(reg),
-                Resolved::Global(reg) if self.ensured.contains(name) => {
+                Resolved::Global(_, reg) if self.ensured.contains(name) => {
                     CaptureSource::Register(reg)
                 }
-                Resolved::Global(_) | Resolved::Dynamic => CaptureSource::Dynamic,
+                Resolved::Global(..) | Resolved::Dynamic => CaptureSource::Dynamic,
             })
             .collect();
 
@@ -1895,22 +1910,12 @@ impl FnCompiler {
         Ok(())
     }
 
-    /// The register that a variable reference in the body of a function, outside of any
-    /// inlined callback, reads its value from: `None` for anything that is not a reference to
-    /// a variable that is known to be bound.
+    /// The register that a variable reference in the body of a function reads its value from:
+    /// `None` for anything that is not a reference to a variable that is known to be bound.
     fn frame_reg(&self, expr: &SpannedExpr) -> Option<u16> {
-        let name = match &expr.node {
-            Expr::Identifier(name) if !is_constant_name(*name) => *name,
-            Expr::ParamSlot { index, .. } if (*index as usize) < self.params.len() => {
-                return Some(*index);
-            }
-            Expr::ParamSlot { name, .. } => *name,
-            _ => return None,
-        };
-
-        match self.resolve(name) {
+        match self.place(expr) {
             Resolved::Register(reg) => Some(reg),
-            Resolved::Global(_) | Resolved::Dynamic => None,
+            Resolved::Global(..) | Resolved::Dynamic => None,
         }
     }
 
@@ -1960,6 +1965,170 @@ impl FnCompiler {
             },
             _ => u64::MAX,
         }
+    }
+
+    /// The register holding the value of `expr`, when it was computed ahead of the loop that
+    /// is being compiled.
+    fn hoisted_reg(&self, expr: &SpannedExpr) -> Option<u16> {
+        self.hoisted
+            .iter()
+            .find(|(hoisted, _)| std::ptr::eq(*hoisted, expr))
+            .map(|(_, reg)| *reg)
+    }
+
+    /// Whether `expr` comes to the same value on every pass through the inlined loop whose
+    /// state registers start at `state`, and gets there without running anything but its own
+    /// operators: it reads elements and fields and applies operators that call no function,
+    /// to constants and to variables that were bound before the loop. `budget` is the number
+    /// of nodes that are still looked at.
+    fn is_invariant(&self, expr: &SpannedExpr, state: u16, budget: &mut usize) -> bool {
+        if *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+
+        match &expr.node {
+            Expr::Number(_) | Expr::Bool(_) | Expr::Null | Expr::String(_) => true,
+            Expr::Identifier(name) if is_constant_name(*name) => true,
+            Expr::Identifier(_) | Expr::ParamSlot { .. } | Expr::CaptureSlot { .. } => {
+                match self.place(expr) {
+                    Resolved::Register(reg) | Resolved::Global(_, reg) => reg < state,
+                    Resolved::Dynamic => false,
+                }
+            }
+            Expr::Access {
+                expr: object,
+                index,
+            } => {
+                self.is_invariant(object, state, budget) && self.is_invariant(index, state, budget)
+            }
+            Expr::DotAccess { expr: operand, .. }
+            | Expr::UnaryOp { expr: operand, .. }
+            | Expr::PostfixOp { expr: operand, .. } => self.is_invariant(operand, state, budget),
+            Expr::BinaryOp { op, left, right } => {
+                !matches!(op, BinaryOp::Via | BinaryOp::Into | BinaryOp::Where)
+                    && self.is_invariant(left, state, budget)
+                    && self.is_invariant(right, state, budget)
+            }
+            _ => false,
+        }
+    }
+
+    /// Compute what the body of an inlined callback starts with ahead of its loop, where that
+    /// is the same on every pass (see [`Self::is_invariant`]). `expr` is the next expression
+    /// the body evaluates, and `state` the first state register of the loop.
+    ///
+    /// This is called where the first pass is about to begin, so the code it emits runs as
+    /// the start of that pass, and the passes after it start behind that code. Nothing can
+    /// tell that from computing the same values again: an expression is only moved when the
+    /// pass has done nothing before it that could fail or be observed, so an error it raises
+    /// is the first thing the pass does either way.
+    ///
+    /// Returns whether that still holds after `expr`: whether everything it evaluates was
+    /// moved or cannot fail.
+    fn hoist(&mut self, expr: &SpannedExpr, state: u16, room: &mut usize) -> CResult<bool> {
+        match &expr.node {
+            Expr::Number(_) | Expr::Bool(_) | Expr::Null | Expr::String(_) | Expr::BuiltIn(_) => {
+                return Ok(true);
+            }
+            Expr::Identifier(name) if is_constant_name(*name) => return Ok(true),
+            Expr::Identifier(_) | Expr::ParamSlot { .. } | Expr::CaptureSlot { .. } => {
+                // A name of the chunk that is first read here has its cache checked here.
+                return Ok(self.direct_reg(expr).is_some());
+            }
+            _ => {}
+        }
+
+        if *room == 0 {
+            return Ok(false);
+        }
+
+        if self.is_invariant(expr, state, &mut MAX_INVARIANT_NODES.clone()) {
+            let reg = self.alloc()?;
+            self.expr_into(expr, reg)?;
+            self.hoisted.push((expr, reg));
+            *room -= 1;
+
+            return Ok(true);
+        }
+
+        // What is left evaluates its operands in this order and then does something that may
+        // fail, or that differs from one pass to the next.
+        match &expr.node {
+            Expr::BinaryOp { left, right, .. } => {
+                let _ = self.hoist(left, state, room)? && self.hoist(right, state, room)?;
+            }
+            Expr::Access {
+                expr: object,
+                index,
+            } => {
+                let _ = self.hoist(object, state, room)? && self.hoist(index, state, room)?;
+            }
+            Expr::DotAccess { expr: operand, .. }
+            | Expr::UnaryOp { expr: operand, .. }
+            | Expr::PostfixOp { expr: operand, .. } => {
+                self.hoist(operand, state, room)?;
+            }
+            Expr::Conditional { condition, .. } => match &condition.node {
+                // A comparison that decides a branch is compiled together with the branch.
+                Expr::BinaryOp { op, left, right } if compare_jump_opcodes(*op).is_some() => {
+                    let _ = self.hoist(left, state, room)? && self.hoist(right, state, room)?;
+                }
+                _ => {
+                    self.hoist(condition, state, room)?;
+                }
+            },
+            Expr::Call { func, args } => self.hoist_call(func, args, state, room)?,
+            _ => {}
+        }
+
+        Ok(false)
+    }
+
+    /// [`Self::hoist`] for what a call evaluates before it calls.
+    fn hoist_call(
+        &mut self,
+        func: &SpannedExpr,
+        args: &[SpannedExpr],
+        state: u16,
+        room: &mut usize,
+    ) -> CResult<()> {
+        if self.inline
+            && let Some(inline) = inline_call(func, args)
+        {
+            // A loop of its own: its range has to be checked once its bounds are known, and
+            // a list is followed by the initial value before anything is checked.
+            if let Some(range_args) = range_call(inline.list) {
+                for arg in range_args {
+                    if !self.hoist(arg, state, room)? {
+                        break;
+                    }
+                }
+            } else if self.hoist(inline.list, state, room)?
+                && let Some(init) = inline.init
+            {
+                self.hoist(init, state, room)?;
+            }
+
+            return Ok(());
+        }
+
+        // The arguments of the other calls follow the function, unless they are gathered in
+        // a list. (A call of the enclosing function to itself evaluates no function, but a
+        // callback never makes one: see `self_call_candidate`.)
+        let gathered = args.len() > MAX_DIRECT_ARGS
+            || args.iter().any(|arg| matches!(arg.node, Expr::Spread(_)));
+        if gathered || !self.hoist(func, state, room)? {
+            return Ok(());
+        }
+
+        for arg in args {
+            if !self.hoist(arg, state, room)? {
+                break;
+            }
+        }
+
+        Ok(())
     }
 
     /// Compile `map`/`filter`/`reduce`/`every`/`some` over a literal lambda as an inline loop.
@@ -2052,7 +2221,6 @@ impl FnCompiler {
         self.emit(Instr::abc(Op::CallbackDepth, 0, 0, 0));
         self.emit(Instr::abx(Op::AddDepth, 0, CALLBACK_DEPTH as u32));
 
-        let loop_start = self.here();
         let ensured = self.ensured.len();
 
         self.push_scope(ScopeKind::Callback);
@@ -2078,7 +2246,13 @@ impl FnCompiler {
         }
         self.scopes.last_mut().expect("callback scope").param_regs = param_regs;
 
+        // The first pass through the body starts here. It begins by computing what every pass
+        // would compute the same way, and the passes after it start behind that.
         let body_start = self.here();
+        let hoisted = self.hoisted.len();
+        self.hoist(call.body, state, &mut MAX_HOISTED.clone())?;
+
+        let loop_start = self.here();
         let body_mark = self.free_reg;
 
         // After the body: the instructions that consume its result, then the exits that leave
@@ -2131,6 +2305,7 @@ impl FnCompiler {
         }
         self.free_reg = body_mark;
         self.ensured.truncate(ensured);
+        self.hoisted.truncate(hoisted);
 
         let mut next = Instr::abx(next_op, state, 0);
         next.x = wants_index as u8;
