@@ -653,8 +653,10 @@ impl Vm {
         profiling
     }
 
-    /// Whether calls to higher-order built-ins may be compiled into inline loops. Profiling
-    /// reports every call, so it needs the callbacks to stay real calls.
+    /// Whether calls that name a built-in function may be compiled into something other than
+    /// calls of the function's value: inline loops for the higher-order ones, an instruction
+    /// that calls the function for the others. Profiling reports every call, so it needs
+    /// the callbacks to stay real calls.
     pub fn inlines_callbacks(&self) -> bool {
         !self.is_profiling()
     }
@@ -1228,29 +1230,7 @@ impl Vm {
                     .check_arity(argc)
                     .map_err(|error| self.at_call_site(error))?;
 
-                if depth > MAX_CALL_DEPTH {
-                    return Err(self.at_call_site(depth_exceeded(&built_in_name(built_in))));
-                }
-
-                let result = if built_in.takes_callback() {
-                    let args = self.stack[base..base + argc].to_vec();
-                    self.run_built_in(built_in, args, depth + 1)
-                } else {
-                    self.run_plain_built_in(built_in, base, argc, depth + 1)
-                };
-
-                match result {
-                    Ok(value) => {
-                        let target = self.slot_index(self.top().base) + register_index(dst);
-                        self.stack[target] = value;
-
-                        Ok(())
-                    }
-                    Err(error) => {
-                        let error = error.with_function_context(&built_in_name(built_in));
-                        Err(self.at_call_site(error))
-                    }
-                }
+                self.call_built_in(built_in, base, argc, dst)
             }
             _ => {
                 let message = format!(
@@ -1258,6 +1238,43 @@ impl Vm {
                     callee.stringify_internal(&self.heap.borrow())
                 );
                 Err(self.span_error(message))
+            }
+        }
+    }
+
+    /// Call a built-in function with the `argc` arguments from slot `base` of the value stack
+    /// on, which is a number of arguments that it takes, and store its result in the register
+    /// of the innermost frame that operand `dst` names. That frame is executing the call (and
+    /// its `ip` is saved).
+    fn call_built_in(
+        &mut self,
+        built_in: BuiltInFunction,
+        base: usize,
+        argc: usize,
+        dst: u16,
+    ) -> Result<(), RuntimeError> {
+        let depth = self.top().depth();
+        if depth > MAX_CALL_DEPTH {
+            return Err(self.at_call_site(depth_exceeded(&built_in_name(built_in))));
+        }
+
+        let result = if built_in.takes_callback() {
+            let args = self.stack[base..base + argc].to_vec();
+            self.run_built_in(built_in, args, depth + 1)
+        } else {
+            self.run_plain_built_in(built_in, base, argc, depth + 1)
+        };
+
+        match result {
+            Ok(value) => {
+                let target = self.slot_index(self.top().base) + register_index(dst);
+                self.stack[target] = value;
+
+                Ok(())
+            }
+            Err(error) => {
+                let error = error.with_function_context(&built_in_name(built_in));
+                Err(self.at_call_site(error))
             }
         }
     }

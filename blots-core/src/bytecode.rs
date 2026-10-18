@@ -185,6 +185,12 @@ pub(crate) enum Op {
     /// `return R[a]`
     Return,
 
+    /// `R[c] = F(R[a], ..., R[a+x-1])`, where `F` is the built-in function `K[b]`, which
+    /// takes that many arguments. This is what a call that names a built-in function is
+    /// compiled to: it does everything that calling the function through its value does,
+    /// except for finding out what is being called.
+    CallBuiltIn,
+
     /// `R[a] = ` closure of lambda template `L[bx]`
     Closure,
 
@@ -340,6 +346,7 @@ impl Op {
             | Op::RangePrep => A | B,
 
             Op::Call
+            | Op::CallBuiltIn
             | Op::CallList
             | Op::CallSelf
             | Op::TailSelf

@@ -4242,8 +4242,8 @@ mod kept_value_tests {
             ),
             (
                 "(xs, g) => if sum(xs via g) > 3 then xs via g else xs",
-                Op::Call,
-                1,
+                Op::Via,
+                2,
             ),
             (
                 "(x, g) => if (x into g) + 1 > 3 then (x into g) + 1 else 0",
@@ -6698,5 +6698,349 @@ mod shared_record_tests {
             session.outcome("[base, grown]"),
             "[{a: 1, b: 2}, {a: 1, b: 2, c: 3}]"
         );
+    }
+}
+
+// A call that names a built-in function is compiled to an instruction that calls that
+// function. Nothing may tell that from calling the function through its value.
+#[cfg(test)]
+mod built_in_call_tests {
+    use crate::ast::Expr;
+    use crate::bytecode::{Instr, Op};
+    use crate::compiler::{compile_chunk, compile_lambda};
+    use crate::environment::Environment;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::vm::Vm;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Values of every kind, and the numbers that functions tell apart.
+    const VALUES: [&str; 30] = [
+        "0",
+        "0 * -1",
+        "0.5",
+        "-0.5",
+        "1.5",
+        "2.5",
+        "-1.5",
+        "-2.5",
+        "3",
+        "-7",
+        "1e308",
+        "1e-320",
+        "0.49999999999999994",
+        "4503599627370497",
+        "-4503599627370497.5",
+        "nan",
+        "inf",
+        "-inf",
+        "\"héllo\"",
+        "\"\"",
+        "[1, 2, 3]",
+        "[]",
+        "[4, 9]",
+        "[\"a\"]",
+        "{a: 1}",
+        "null",
+        "true",
+        "x => x",
+        "sqrt",
+        "missing",
+    ];
+
+    /// A heap and the variables of the statements that were evaluated against it.
+    struct Session {
+        heap: Rc<RefCell<Heap>>,
+        bindings: Rc<Environment>,
+    }
+
+    impl Session {
+        fn new() -> Self {
+            let session = Self {
+                heap: Rc::new(RefCell::new(Heap::new())),
+                bindings: Rc::new(Environment::new()),
+            };
+            for definition in ["nan = sqrt(-1)", "inf = 1 / 0"] {
+                let bound = session.outcome(definition, true);
+                assert!(!bound.contains(" at "), "{definition}: {bound}");
+            }
+
+            session
+        }
+
+        /// Evaluate the statement `code`, with the calls that name a built-in function
+        /// compiled to the instructions they have (`direct`) or to calls of the function's
+        /// value, and render what comes of it: the value, or the error with the place it
+        /// points at.
+        fn outcome(&self, code: &str, direct: bool) -> String {
+            let statements = parse_program(code).expect("a program the fast parser reads");
+            let [Statement::Expression(expr)] = &statements[..] else {
+                panic!("{code} is not a single expression");
+            };
+
+            let result = compile_chunk(expr, direct, &self.bindings).and_then(|chunk| {
+                Vm::new(Rc::clone(&self.heap), Rc::clone(&self.bindings)).run_chunk(
+                    &chunk,
+                    code.into(),
+                    0,
+                )
+            });
+
+            match result {
+                Ok(value) => value.stringify_internal(&self.heap.borrow()),
+                Err(error) => format!("{} at {:?}", error.message, error.span),
+            }
+        }
+
+        /// Evaluate the statements of `code` one after the other, and render what comes of
+        /// the last one.
+        fn run(&self, code: &str) -> String {
+            let mut last = String::new();
+            for statement in code.lines() {
+                last = self.outcome(statement, true);
+            }
+
+            last
+        }
+    }
+
+    /// How many instructions with the operation `op` the function `code` compiles to.
+    fn count(code: &str, op: Op) -> usize {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let [Statement::Expression(expr)] = &statements[..] else {
+            panic!("{code} is not a single expression");
+        };
+        let Expr::Lambda { args, body, .. } = &expr.node else {
+            panic!("{code} is not a function");
+        };
+        let proto = compile_lambda(&Rc::new(args.clone()), body, true).unwrap();
+
+        let mut count = 0;
+        let mut pc = 0;
+        while pc < proto.code.len() {
+            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
+            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            count += usize::from(instr.op == op);
+            pc += 1 + instr.operand_words();
+        }
+
+        count
+    }
+
+    /// How many instructions that call a value the function `code` compiles to.
+    fn calls_of_values(code: &str) -> usize {
+        count(code, Op::Call) + count(code, Op::CallList)
+    }
+
+    #[test]
+    fn a_call_that_names_a_function_is_an_instruction() {
+        for code in [
+            "x => typeof(x)",
+            "x => to_string(x)",
+            "x => keys(x)",
+            "x => sqrt(x)",
+            "x => len(x)",
+            "x => round(x)",
+            "x => round(x, 2)",
+            "x => min(x)",
+            "(a, b) => min(a, b)",
+            "(a, b, c) => max(a, b, c)",
+            "(a, b) => sum(a, b)",
+            "(a, b) => concat(a, b)",
+            "(a, b, c) => slice(a, b, c)",
+            "(xs, f) => map(xs, f)",
+            "(xs, f) => reduce(xs, f, 0)",
+            "(xs, f) => sort_by(xs, f)",
+        ] {
+            assert_eq!(count(code, Op::CallBuiltIn), 1, "{code}");
+            assert_eq!(calls_of_values(code), 0, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_call_that_only_shows_what_it_passes_when_it_is_made_calls_the_value() {
+        for (code, op) in [
+            // A number of arguments that the function does not take.
+            ("x => sqrt()", Op::Call),
+            ("x => sqrt(x, x)", Op::Call),
+            ("x => len(x, x)", Op::Call),
+            ("x => min()", Op::Call),
+            ("x => slice(x, 1)", Op::Call),
+            ("x => typeof()", Op::Call),
+            // Arguments that are spread.
+            ("x => sqrt(...x)", Op::CallList),
+            ("x => min(...x)", Op::CallList),
+            ("x => max(1, ...x)", Op::CallList),
+            ("x => typeof(...x)", Op::CallList),
+        ] {
+            assert_eq!(count(code, op), 1, "{code}");
+            assert_eq!(count(code, Op::CallBuiltIn), 0, "{code}");
+        }
+    }
+
+    #[test]
+    fn an_instruction_comes_to_what_calling_the_function_comes_to() {
+        let session = Session::new();
+        let mut outcomes = std::collections::HashSet::new();
+
+        let mut check = |code: String| {
+            let direct = session.outcome(&code, true);
+            assert_eq!(direct, session.outcome(&code, false), "{code}");
+            outcomes.insert(direct);
+        };
+
+        for call in [
+            "typeof(V)",
+            "to_string(V)",
+            "to_number(V)",
+            "to_bool(V)",
+            "keys(V)",
+            "values(V)",
+            "entries(V)",
+            "arity(V)",
+            "sum(V)",
+            "sum(V, 1)",
+            "sum(1, V, 2)",
+            "min(V)",
+            "max(1, 2, V)",
+            "avg(V, 3)",
+            "range(V)",
+            "range(1, V)",
+            "head(V)",
+            "tail(V)",
+            "reverse(V)",
+            "sort(V)",
+            "unique(V)",
+            "concat(V, V)",
+            "slice(V, 0, 1)",
+            "round(V, 1)",
+            "includes(V, 1)",
+            "join(V, \"-\")",
+            "format(\"{}\", V)",
+            "flatten(V)",
+            "map(V, sqrt)",
+            "map([4, 9], V)",
+            "filter([4, 9], V)",
+            "reduce([4, 9], V, 0)",
+            "sort_by([4, 9], V)",
+            "ugt(V, 1)",
+            "sqrt(V)",
+            "abs(V)",
+            "floor(V)",
+            "round(V)",
+            "len(V)",
+            "min(V, 1)",
+            "max(0 * -1, V)",
+        ] {
+            for value in VALUES {
+                check(call.replace('V', value));
+                check(format!("1 / {}", call.replace('V', value)));
+            }
+        }
+
+        // The calls come to enough different things to tell the functions and their
+        // arguments apart.
+        assert!(outcomes.len() > 400, "{} outcomes", outcomes.len());
+    }
+
+    #[test]
+    fn the_arguments_of_a_call_are_evaluated_before_it_fails() {
+        let session = Session::new();
+        for (code, expected) in [
+            // The first thing that fails is an argument, from left to right.
+            ("min(missing, other)", "unknown identifier: missing"),
+            ("min(1, other)", "unknown identifier: other"),
+            ("sum(1, other, missing)", "unknown identifier: other"),
+            ("sqrt(missing)", "unknown identifier: missing"),
+            ("len(missing)", "unknown identifier: missing"),
+            // What a function cannot take only shows after that.
+            ("min(\"a\", missing)", "unknown identifier: missing"),
+            ("slice(null, missing, 1)", "unknown identifier: missing"),
+        ] {
+            for direct in [true, false] {
+                let outcome = session.outcome(code, direct);
+                assert!(outcome.starts_with(expected), "{code}: {outcome}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_function_that_is_called_too_deep_fails_as_its_call_does() {
+        let calls = [
+            "typeof(4)",
+            "sum(4, 3)",
+            "round(0.25, 1)",
+            "sqrt(0.5)",
+            "len([4])",
+            "min(4, 3)",
+        ];
+
+        for call in calls {
+            let function = call.split('(').next().unwrap();
+
+            // The function calls itself `n` times before it makes the call, which puts the
+            // call at the last depth to call from and then one deeper.
+            let session = Session::new();
+            let defined = session.run(&format!(
+                "f = n => if n == 0 then {call} else [f(n - 1)][0]"
+            ));
+            assert!(!defined.contains(" at "), "{call}: {defined}");
+
+            assert_eq!(
+                session.outcome("f(999)", true),
+                session.outcome(call, true),
+                "{call}"
+            );
+
+            let deeper = session.outcome("f(1000)", true);
+            let expected =
+                format!("in built-in function \"{function}\": maximum call depth of 1000 exceeded");
+            assert!(deeper.contains(&expected), "{call}: {deeper}");
+        }
+    }
+
+    #[test]
+    fn a_call_in_a_loop_that_is_compiled_in_place_is_an_instruction_too() {
+        let session = Session::new();
+        for (code, expected) in [
+            ("map([1, 4, 9], x => sqrt(x))", "[1, 2, 3]"),
+            ("map([\"a\", \"bcd\", \"\"], s => len(s))", "[1, 3, 0]"),
+            ("map([[], [1], [1, 2]], xs => len(xs) * 2)", "[0, 2, 4]"),
+            ("reduce(range(10), (acc, i) => max(acc, i * 7 % 5), 0)", "4"),
+            ("reduce(range(10), (acc, i) => min(acc, i - 4), 0)", "-4"),
+            (
+                "filter(range(9), i => floor(i / 2) == i / 2)",
+                "[0, 2, 4, 6, 8]",
+            ),
+            (
+                "map([1.5, -1.5], x => [floor(x), ceil(x), round(x), trunc(x), abs(x)])",
+                "[[1, 2, 2, 1, 1.5], [-2, -1, -2, -1, 1.5]]",
+            ),
+            ("map([1, 2], x => typeof(x))", "[number, number]"),
+        ] {
+            for direct in [true, false] {
+                assert_eq!(session.outcome(code, direct), expected, "{code}");
+            }
+        }
+
+        for (code, expected) in [
+            (
+                "map([4, \"4\"], x => sqrt(x))",
+                "in built-in function \"sqrt\": expected a number, but got a string",
+            ),
+            (
+                "map([[1], 1], x => len(x))",
+                "in built-in function \"len\": argument must be a list or string",
+            ),
+            (
+                "map([1, null], x => max(x, 0))",
+                "in built-in function \"max\": expected a number, but got a null",
+            ),
+        ] {
+            let direct = session.outcome(code, true);
+            assert!(direct.contains(expected), "{code}: {direct}");
+            assert_eq!(direct, session.outcome(code, false), "{code}");
+        }
     }
 }

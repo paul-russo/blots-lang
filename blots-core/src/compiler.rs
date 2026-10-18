@@ -797,7 +797,9 @@ struct FnCompiler {
     /// The preloaded ones come first and stay for good.
     ensured: Vec<Symbol>,
 
-    /// Whether higher-order built-in calls may be compiled as inline loops.
+    /// Whether a call that names a built-in function may be compiled into something other
+    /// than a call of the function's value: an inline loop for the higher-order ones, an
+    /// instruction that calls the function for the others.
     inline: bool,
 
     /// Variants only: the capture (name and slot) that is known to hold the function itself.
@@ -2303,6 +2305,13 @@ impl FnCompiler {
             return self.inline_loop(span, &inline, dst);
         }
 
+        if self.inline
+            && let Expr::BuiltIn(built_in) = &func.node
+            && self.built_in_call(span, *built_in, args, dst)?
+        {
+            return Ok(());
+        }
+
         let mark = self.free_reg;
         let candidate = self.self_call_candidate(func, args);
 
@@ -2371,6 +2380,50 @@ impl FnCompiler {
         self.free_reg = mark;
 
         Ok(())
+    }
+
+    /// Compile a call that names a built-in function as an instruction that calls that
+    /// function, which leaves nothing to find out about what is called. Returns whether the
+    /// call has such an instruction: one that passes a number of arguments the function does
+    /// not take is left to fail the way any call does, and so is one whose number of
+    /// arguments only shows when it is made.
+    ///
+    /// Either way the arguments are evaluated from left to right before anything is checked.
+    fn built_in_call(
+        &mut self,
+        span: Span,
+        built_in: BuiltInFunction,
+        args: &[SpannedExpr],
+        dst: u16,
+    ) -> CResult<bool> {
+        let spelled_out = args.len() <= MAX_DIRECT_ARGS
+            && !args.iter().any(|arg| matches!(arg.node, Expr::Spread(_)));
+        if !spelled_out || !built_in.arity().can_accept(args.len()) {
+            return Ok(false);
+        }
+
+        let function = self.constant(Value::BuiltIn(built_in));
+        let Ok(function) = u16::try_from(function) else {
+            return Ok(false);
+        };
+
+        // The arguments occupy consecutive registers.
+        let mark = self.free_reg;
+        let first = match args.is_empty() {
+            true => 0,
+            false => self.free_reg,
+        };
+        for arg in args {
+            let reg = self.alloc()?;
+            self.expr_into(arg, reg)?;
+        }
+
+        let mut instr = Instr::abc(Op::CallBuiltIn, first, function, dst);
+        instr.x = args.len() as u8;
+        self.emit_spanned(instr, span);
+        self.free_reg = mark;
+
+        Ok(true)
     }
 
     /// What a self call takes for the way back to the start of the code: the distance from

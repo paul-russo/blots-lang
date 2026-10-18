@@ -356,6 +356,14 @@ impl Vm {
             }
 
             Op::Call => self.call_slow(register_index(a), b as usize, c)?,
+            Op::CallBuiltIn => {
+                let Value::BuiltIn(built_in) = self.top().proto().consts[b as usize] else {
+                    unreachable!("the instruction names a built-in function");
+                };
+                let base = self.slot_index(self.top().base) + register_index(a);
+
+                self.call_built_in(built_in, base, instr.x as usize, c)?;
+            }
             Op::CallList => {
                 let argc = self.place_list_args(register_index(a));
                 self.call_slow(register_index(a), argc, c)?;
