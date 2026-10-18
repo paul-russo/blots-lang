@@ -3,14 +3,19 @@
 
 Each benchmark exists as `<name>.blots` plus an equivalent `<name>.lua` and `<name>.py`,
 written the way a programmer in that language would naturally write it (loops where the
-language has loops). Every program prints a single checksum, which is compared across
-implementations so a benchmark can never silently measure different work.
+language has loops). Where that takes something Lua 5.1 and LuaJIT do not have (integer
+division), `<name>.lua51.lua` is what those two run instead. Every program prints a single
+checksum, which is compared across implementations so a benchmark can never silently
+measure different work.
 
 Usage:
-    benches/compare/run.py [--runs N] [--blots PATH] [--baseline PATH] [--only a,b] [--json FILE]
+    benches/compare/run.py [--runs N] [--min-time S] [--blots PATH] [--baseline PATH]
+                           [--only a,b] [--skip a,b] [--json FILE]
 
 Timing is best-of-N wall clock for the whole process (so it includes startup, parsing and
-teardown), measured with a monotonic clock around a plain fork/exec.
+teardown), measured with a monotonic clock around a plain fork/exec. A program that takes
+less than a millisecond is at the mercy of the scheduler in five runs, so each one is also
+run again until `--min-time` seconds have gone into it.
 """
 
 import argparse
@@ -43,31 +48,44 @@ BENCHMARKS = [
 ]
 
 
+# The most runs that a program is given, however short it is.
+MAX_RUNS = 1000
+
+
 def implementations(args):
-    """(label, argv prefix, file extension, stream carrying the checksum)."""
+    """(label, argv prefix, file extensions by preference, stream carrying the checksum)."""
     impls = []
 
     if args.baseline:
-        impls.append(("blots-base", [args.baseline], "blots", "stderr"))
+        impls.append(("blots-base", [args.baseline], ["blots"], "stderr"))
 
-    impls.append(("blots", [args.blots], "blots", "stderr"))
+    impls.append(("blots", [args.blots], ["blots"], "stderr"))
 
-    for label, binary, extra in [
-        ("lua5.4", "lua5.4", []),
-        ("lua5.1", "lua5.1", []),
-        ("luajit-int", "luajit", ["-joff"]),
-        ("luajit", "luajit", []),
-        ("python3", "python3", []),
+    for label, binary, extra, exts in [
+        ("lua5.4", "lua5.4", [], ["lua"]),
+        ("lua5.1", "lua5.1", [], ["lua51.lua", "lua"]),
+        ("luajit-int", "luajit", ["-joff"], ["lua51.lua", "lua"]),
+        ("luajit", "luajit", [], ["lua51.lua", "lua"]),
+        ("python3", "python3", [], ["py"]),
     ]:
         if label in args.skip:
             continue
 
         path = shutil.which(binary)
         if path:
-            ext = "py" if binary == "python3" else "lua"
-            impls.append((label, [path, *extra], ext, "stdout"))
+            impls.append((label, [path, *extra], exts, "stdout"))
 
     return impls
+
+
+def program(name, exts):
+    """The path of the first of the benchmark's files that exists, or None."""
+    for ext in exts:
+        path = os.path.join(HERE, f"{name}.{ext}")
+        if os.path.exists(path):
+            return path
+
+    return None
 
 
 def run_once(argv):
@@ -113,6 +131,7 @@ def fmt_ms(seconds):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument("--runs", type=int, default=5)
+    parser.add_argument("--min-time", type=float, default=0.25, help="seconds to keep rerunning a short program for")
     parser.add_argument("--blots", default=os.path.join(ROOT, "target", "release", "blots"))
     parser.add_argument("--baseline", default=None, help="an older blots binary to compare against")
     parser.add_argument("--only", default=None, help="comma-separated benchmark names")
@@ -131,15 +150,17 @@ def main():
         results[name] = {}
         reference = None
 
-        for label, prefix, ext, stream in impls:
-            path = os.path.join(HERE, f"{name}.{ext}")
-            if not os.path.exists(path):
+        for label, prefix, exts, stream in impls:
+            path = program(name, exts)
+            if path is None:
                 continue
 
             best = None
             value = None
+            runs = 0
+            spent = 0.0
 
-            for _ in range(args.runs):
+            while runs < args.runs or (spent < args.min_time and runs < MAX_RUNS):
                 elapsed, proc = run_once([*prefix, path])
 
                 if proc.returncode != 0:
@@ -150,6 +171,8 @@ def main():
 
                 value = checksum(getattr(proc, stream))
                 best = elapsed if best is None else min(best, elapsed)
+                runs += 1
+                spent += elapsed
 
             if best is None:
                 continue
@@ -205,7 +228,7 @@ def main():
         print(row)
 
     print("-" * len(header))
-    print("times in milliseconds, best of", args.runs)
+    print(f"times in milliseconds, best of {args.runs} or of as many as fit in {args.min_time:g} s")
 
     if ratios:
         geomean = math.exp(sum(math.log(r) for r in ratios) / len(ratios))
