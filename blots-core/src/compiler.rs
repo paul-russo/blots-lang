@@ -1574,7 +1574,10 @@ impl FnCompiler {
             self.emit_number(constant);
         } else {
             let left_reg = self.expr_any(left)?;
-            let right_reg = self.expr_any(right)?;
+            let right_reg = match self.repeats(left, right) {
+                true => left_reg,
+                false => self.expr_any(right)?,
+            };
             let mut instr = Instr::abc(binary_opcode(op), dst, left_reg, right_reg);
             instr.x = last_use_flags(op, left_reg >= mark, right_reg >= mark);
             self.emit_spanned(instr, span);
@@ -1583,6 +1586,25 @@ impl FnCompiler {
         self.free_reg = mark;
 
         Ok(())
+    }
+
+    /// Whether `right`, which is evaluated right after `left` and with the same variables in
+    /// sight, is bound to come to the value that `left` just came to: the two are the same
+    /// expression, and one that does nothing but come to a value (see [`Self::is_plain`]).
+    fn repeats(&self, left: &SpannedExpr, right: &SpannedExpr) -> bool {
+        if plain_operands(left).is_none()
+            || !same_shape(left, right)
+            || !self.is_plain(left, u16::MAX, &mut MAX_INVARIANT_NODES.clone())
+        {
+            return false;
+        }
+
+        // The two name the same variables wherever a name means in one what it means in the
+        // other.
+        let mut variables = Vec::new();
+        self.variable_regs(left, &mut variables);
+
+        self.same_value(left, &mut variables.iter(), right)
     }
 
     /// Compile a condition and emit a jump (returned for patching) that is taken when the

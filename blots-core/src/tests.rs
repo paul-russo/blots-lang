@@ -4065,10 +4065,10 @@ mod power_of_two_tests {
     }
 }
 
-// A condition computes on the way to its answer what its branches often compute again. The
-// value is kept for them and taken where the expression is repeated, as long as its names
-// still mean the same variables there. Nothing may tell a value that was taken from one that
-// was computed.
+// A condition computes on the way to its answer what its branches often compute again, and
+// the two operands of an operator can be one expression twice. The first value is kept and
+// taken where the expression is repeated, as long as its names still mean the same variables
+// there. Nothing may tell a value that was taken from one that was computed.
 #[cfg(test)]
 mod kept_value_tests {
     use crate::ast::Expr;
@@ -4211,6 +4211,24 @@ mod kept_value_tests {
                 Op::Mul,
                 1,
             ),
+        ] {
+            assert_eq!(count(code, op), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn an_operand_that_repeats_the_other_is_computed_once() {
+        for (code, op, expected) in [
+            ("(a, b) => (a - b) * (a - b)", Op::Sub, 1),
+            ("(a, i) => a[i] + a[i]", Op::Index, 1),
+            (
+                "(a, b) => (a.x * b.y + 1) / (a.x * b.y + 1)",
+                Op::GetField,
+                2,
+            ),
+            // Operands that only look alike in part are two computations.
+            ("(a, b) => (a - b) * (b - a)", Op::Sub, 2),
+            ("(a, b) => (a - b) * (a - b + 1)", Op::Sub, 2),
         ] {
             assert_eq!(count(code, op), expected, "{code}");
         }
