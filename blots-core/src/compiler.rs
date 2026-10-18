@@ -2200,7 +2200,13 @@ impl FnCompiler {
             return Ok(());
         }
 
-        self.emit(Instr::abc(Op::RecordBegin, 0, 0, 0));
+        // How many entries the literal spells out tells the record how much room to make
+        // for them when it starts with the entries of a spread.
+        let spelled_out = entries
+            .iter()
+            .filter(|entry| !matches!(entry.node.key, RecordKey::Spread(_)))
+            .count();
+        self.emit(Instr::abx(Op::RecordBegin, 0, spelled_out as u32));
 
         for entry in entries {
             let entry = &entry.node;

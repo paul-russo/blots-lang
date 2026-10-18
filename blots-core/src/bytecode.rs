@@ -202,7 +202,7 @@ pub(crate) enum Op {
 
     /// `R[a] = ` record of layout `H[c]` with the values `R[b], R[b+1], ...`
     NewRecord,
-    /// Start building a record.
+    /// Start building a record that `bx` entries are inserted into one by one.
     RecordBegin,
     /// Insert `S[bx] => R[a]` into the record being built.
     RecordSet,

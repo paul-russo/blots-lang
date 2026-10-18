@@ -1,6 +1,6 @@
 use crate::environment::Environment;
 use crate::list::{List, SharedBuffers};
-use crate::record::Record;
+use crate::record::{Record, RecordBuilder, SharedValues};
 use crate::text::Text;
 use crate::values::{LambdaDef, PrimitiveValue, ReifiedIterableValue, Value};
 use anyhow::{Result, anyhow};
@@ -167,8 +167,10 @@ impl Heap {
 
     pub fn insert(&mut self, value: HeapValue) -> usize {
         self.approx_bytes += approx_heap_value_bytes(&value);
-        if let HeapValue::List(list) = &value {
-            self.approx_bytes += list.len() * size_of::<Value>();
+        match &value {
+            HeapValue::List(list) => self.approx_bytes += list.len() * size_of::<Value>(),
+            HeapValue::Record(record) => self.approx_bytes += record.len() * size_of::<Value>(),
+            HeapValue::String(_) | HeapValue::Lambda(_) => {}
         }
         self.values.push(value);
 
@@ -251,6 +253,21 @@ impl Heap {
         ))
     }
 
+    /// Add the record that `builder` assembled. It takes time in proportion to the number
+    /// of its entries that the builder was given one by one when it started with the
+    /// entries of a record and the others are under new keys (see [`RecordBuilder`]).
+    pub fn insert_built_record(&mut self, builder: RecordBuilder) -> Value {
+        // Only the values that the builder wrote are not also the values of a record that
+        // is in the heap already.
+        let added = builder.written();
+        let record = HeapValue::Record(builder.finish());
+
+        self.approx_bytes += approx_heap_value_bytes(&record) + added * size_of::<Value>();
+        self.values.push(record);
+
+        Value::Record(RecordPointer::new(self.values.len() - 1))
+    }
+
     pub fn insert_lambda(&mut self, lambda: LambdaDef) -> Value {
         Value::Lambda(LambdaPointer::new(
             self.insert(HeapValue::Lambda(Rc::new(lambda))),
@@ -306,6 +323,7 @@ impl Heap {
         let mut reachable = vec![false; old_len];
         let mut worklist: Vec<usize> = Vec::new();
         let mut shared = SharedBuffers::default();
+        let mut shared_values = SharedValues::default();
 
         fn mark(slot: usize, reachable: &mut [bool], worklist: &mut Vec<usize>) {
             if !reachable[slot] {
@@ -345,7 +363,8 @@ impl Heap {
                     }
                 }
                 HeapValue::Record(record) => {
-                    for item in record.values() {
+                    // Records that share their values only have them looked at once.
+                    for item in record.unmarked(&mut shared_values) {
                         if let Some(child) = value_slot(item) {
                             mark(child, &mut reachable, &mut worklist);
                         }
@@ -405,9 +424,18 @@ impl Heap {
                     live_bytes += rewritten * size_of::<Value>();
                 }
                 HeapValue::Record(record) => {
-                    for item in record.values_mut() {
-                        *item = remap_value(*item, &remap);
-                    }
+                    // SAFETY: as for lists: this loop rewrites every record that is left.
+                    let rewritten = unsafe {
+                        record.rewrite(
+                            &mut shared_values,
+                            // Most records have their values to themselves and rewrite
+                            // them right here, where a call per value would cost as much
+                            // as the rewriting.
+                            #[inline(always)]
+                            |item| remap_value(item, &remap),
+                        )
+                    };
+                    live_bytes += rewritten * size_of::<Value>();
                 }
                 HeapValue::Lambda(def) => {
                     // The heap is the only holder of this Rc during compaction (callers do not
@@ -483,15 +511,15 @@ impl Heap {
 /// Rough estimate of the memory a heap value holds (slot struct plus payload). Only used to
 /// decide when compaction is worthwhile, so it favors being cheap over being exact: record
 /// keys are approximated, and a string that shares its characters counts its share of them.
-/// The elements of a list are not part of it: lists can share them, so they are counted
-/// where it is known how many of them are new.
+/// The elements of a list and the values of a record are not part of it: lists and records
+/// can share them, so they are counted where it is known how many of them are new.
 fn approx_heap_value_bytes(value: &HeapValue) -> usize {
     use std::mem::size_of;
 
     let payload = match value {
         HeapValue::List(_) => 0,
         HeapValue::String(text) => text.held_bytes(),
-        HeapValue::Record(record) => record.len() * size_of::<Value>() + 16,
+        HeapValue::Record(_) => 16,
         HeapValue::Lambda(def) => 64 + def.scope.len() * (size_of::<Value>() + size_of::<usize>()),
     };
 
@@ -514,6 +542,7 @@ fn value_slot(value: &Value) -> Option<usize> {
 
 /// The same value with its heap pointer (if any) remapped through `remap`, which maps old slot
 /// indices to post-compaction indices.
+#[inline(always)]
 fn remap_value(value: Value, remap: &[usize]) -> Value {
     match value {
         Value::List(p) => Value::List(ListPointer::new(remap[p.index()])),
@@ -540,7 +569,8 @@ impl Default for Heap {
 }
 
 /// A copy of a heap has lists of its own: a compaction pass rewrites the elements of the
-/// lists in its heap where they are, which a list of another heap must not see.
+/// lists in its heap where they are, which a list of another heap must not see. The same
+/// goes for the values of records, which a copy of a record has to itself anyway.
 impl Clone for Heap {
     fn clone(&self) -> Self {
         let values = self

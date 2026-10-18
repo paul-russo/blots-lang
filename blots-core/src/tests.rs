@@ -6204,3 +6204,499 @@ mod shared_string_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod shared_record_tests {
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::{Heap, HeapValue};
+    use crate::record::Record;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// A program that is evaluated a few statements at a time.
+    struct Session {
+        heap: Rc<RefCell<Heap>>,
+        bindings: Rc<Environment>,
+    }
+
+    impl Session {
+        fn new() -> Self {
+            Self {
+                heap: Rc::new(RefCell::new(Heap::new())),
+                bindings: Rc::new(Environment::new()),
+            }
+        }
+
+        /// Evaluate the statements of `code`, up to the value of the last one.
+        fn evaluate(&self, code: &str) -> Result<Value, RuntimeError> {
+            let statements = parse_program(code).expect("a program the fast parser reads");
+            let source: Rc<str> = code.into();
+
+            let mut result = Value::Null;
+            for statement in statements {
+                let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement
+                else {
+                    continue;
+                };
+                result = evaluate_ast(
+                    &expr,
+                    Rc::clone(&self.heap),
+                    Rc::clone(&self.bindings),
+                    0,
+                    Rc::clone(&source),
+                )?;
+            }
+
+            Ok(result)
+        }
+
+        /// What the statements of `code` come to, rendered: the value, or the error.
+        fn outcome(&self, code: &str) -> String {
+            match self.evaluate(code) {
+                Ok(value) => value.stringify_internal(&self.heap.borrow()),
+                Err(error) => error.message,
+            }
+        }
+
+        /// What `look` makes of the record that `code` comes to and of the heap it is in.
+        fn inspect<T>(&self, code: &str, look: impl FnOnce(&Record, &Heap) -> T) -> T {
+            let value = self.evaluate(code).unwrap();
+            let heap = self.heap.borrow();
+
+            look(value.as_record(&heap).unwrap(), &heap)
+        }
+
+        /// Whether the records that `one` and `other` come to read their values from the
+        /// same block.
+        fn share(&self, one: &str, other: &str) -> bool {
+            let one = self.evaluate(one).unwrap();
+            let other = self.evaluate(other).unwrap();
+            let heap = self.heap.borrow();
+
+            one.as_record(&heap)
+                .unwrap()
+                .shares_values_with(other.as_record(&heap).unwrap())
+        }
+
+        /// Drop everything that the variables of the program do not lead to.
+        fn compact(&self) {
+            self.heap.borrow_mut().compact(&self.bindings, &mut []);
+        }
+
+        /// The number of blocks that the records of at least `len` entries in the heap read
+        /// their values from.
+        fn blocks(&self, len: usize) -> usize {
+            let heap = self.heap.borrow();
+            let mut distinct: Vec<&Record> = Vec::new();
+
+            for slot in 0..heap.len() {
+                if let Some(HeapValue::Record(record)) = heap.get(slot)
+                    && record.len() >= len
+                    && !distinct
+                        .iter()
+                        .any(|known| known.shares_values_with(record))
+                {
+                    distinct.push(record);
+                }
+            }
+
+            distinct.len()
+        }
+
+        /// The number of records in the heap that read their values where the record that
+        /// `code` comes to does.
+        fn sharing(&self, code: &str) -> usize {
+            self.inspect(code, |record, heap| {
+                (0..heap.len())
+                    .filter(|slot| match heap.get(*slot) {
+                        Some(HeapValue::Record(other)) => other.shares_values_with(record),
+                        _ => false,
+                    })
+                    .count()
+            })
+        }
+    }
+
+    fn outcome(code: &str) -> String {
+        Session::new().outcome(code)
+    }
+
+    #[test]
+    fn a_record_that_starts_with_a_spread_holds_what_it_is_made_of() {
+        for (code, expected) in [
+            ("{...{a: 1, b: 2}, c: 3}", "{a: 1, b: 2, c: 3}"),
+            ("{...{a: 1, b: 2}}", "{a: 1, b: 2}"),
+            ("{...{}}", "{}"),
+            ("{...{}, a: 1}", "{a: 1}"),
+            ("{...{a: 1, b: 2}, a: 10}", "{a: 10, b: 2}"),
+            ("{...{a: 1, b: 2}, b: 10, a: 20}", "{a: 20, b: 10}"),
+            ("{...{a: 1, b: 2}, c: 3, c: 4, a: 5}", "{a: 5, b: 2, c: 4}"),
+            (
+                "{...{a: 1, b: 2}, ...{c: 3, a: 0}, d: 4}",
+                "{a: 0, b: 2, c: 3, d: 4}",
+            ),
+            ("{...{a: 1}, ...{b: 2}, ...{c: 3}}", "{a: 1, b: 2, c: 3}"),
+            ("{a: 0, ...{a: 1, b: 2}}", "{a: 1, b: 2}"),
+            ("{a: 0, ...{a: 1, b: 2}, c: 1}", "{a: 1, b: 2, c: 1}"),
+            ("{z: 0, ...{a: 1, b: 2}}", "{z: 0, a: 1, b: 2}"),
+            ("{...[7, 8], a: 1}", "{0: 7, 1: 8, a: 1}"),
+            ("{...\"hi\", a: 1}", "{0: h, 1: i, a: 1}"),
+            ("{...{a: 1}, [\"b\"]: 2}", "{a: 1, b: 2}"),
+            ("{...{a: 1}, [\"a\"]: 2}", "{a: 2}"),
+            ("r = {a: 1, b: 2}\n{...r, ...r}", "{a: 1, b: 2}"),
+            (
+                "r = {a: 1, b: 2}\n{...r, r: r}",
+                "{a: 1, b: 2, r: {a: 1, b: 2}}",
+            ),
+            (
+                "r = {a: 1, b: 2}\n{...r, x: {...r, y: 1}, z: 2}",
+                "{a: 1, b: 2, x: {a: 1, b: 2, y: 1}, z: 2}",
+            ),
+            (
+                "r = {a: 1, b: 2}\n{...r, x: 1, y: {...r, z: 2}}",
+                "{a: 1, b: 2, x: 1, y: {a: 1, b: 2, z: 2}}",
+            ),
+            (
+                "r = {...{a: 1}, b: 2}\ns = {...r, c: 3}\n{...s, x: 1, y: {...s, z: 2}, w: {...s, x: 3}}",
+                "{a: 1, b: 2, c: 3, x: 1, y: {a: 1, b: 2, c: 3, z: 2}, w: {a: 1, b: 2, c: 3, x: 3}}",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+
+        for code in [
+            "{...1, a: 2}",
+            "{...null}",
+            "{a: 1, ...true}",
+            "{...(x => x)}",
+        ] {
+            assert_eq!(
+                outcome(code),
+                "expected a list, record, or string",
+                "{code}"
+            );
+        }
+        assert_eq!(
+            outcome("{...{a: 1}, [1]: 2}"),
+            "expected a string, but got a number"
+        );
+    }
+
+    #[test]
+    fn records_that_add_to_the_same_record_do_not_show_up_in_each_other() {
+        let session = Session::new();
+
+        session
+            .evaluate(
+                "base = {a: 1, b: 2}\n\
+                 c = {...base, c: 3}\n\
+                 d = {...base, c: 4}\n\
+                 e = {...c, d: 5}\n\
+                 f = {...c, d: 6}\n\
+                 g = {...e, e: 7}\n\
+                 h = {...e, e: 8, f: 9}\n\
+                 i = {...e, d: 10}\n\
+                 j = {...g, f: 11}\n\
+                 k = {...g, g: 12}",
+            )
+            .unwrap();
+
+        assert_eq!(
+            session.outcome("[base, c, d, e, f, g, h, i, j, k]"),
+            "[{a: 1, b: 2}, {a: 1, b: 2, c: 3}, {a: 1, b: 2, c: 4}, {a: 1, b: 2, c: 3, d: 5}, \
+             {a: 1, b: 2, c: 3, d: 6}, {a: 1, b: 2, c: 3, d: 5, e: 7}, \
+             {a: 1, b: 2, c: 3, d: 5, e: 8, f: 9}, {a: 1, b: 2, c: 3, d: 10}, \
+             {a: 1, b: 2, c: 3, d: 5, e: 7, f: 11}, {a: 1, b: 2, c: 3, d: 5, e: 7, g: 12}]"
+        );
+
+        // A record that is added to once or twice just fits its values, and so do the
+        // records that are made from it apart from the first one, which is taken to keep
+        // growing: the record that is made from that one first has its entry right behind
+        // the values of that one.
+        assert_eq!(session.sharing("c"), 0);
+        assert_eq!(session.sharing("e"), 1);
+        assert_eq!(session.sharing("g"), 2);
+        assert!(session.share("j", "g"));
+        assert!(!session.share("k", "g"));
+        assert!(!session.share("g", "e"));
+        assert!(!session.share("h", "e"));
+        assert!(!session.share("f", "e"));
+        assert!(!session.share("i", "e"));
+    }
+
+    #[test]
+    fn every_step_of_a_fold_keeps_the_record_it_made() {
+        assert_eq!(
+            outcome(
+                "reduce(range(5), (state, i) => {now: {...state.now, [\"k\" + to_string(i)]: i}, before: [...state.before, state.now]}, {now: {}, before: []}).before"
+            ),
+            "[{}, {k0: 0}, {k0: 0, k1: 1}, {k0: 0, k1: 1, k2: 2}, {k0: 0, k1: 1, k2: 2, k3: 3}]"
+        );
+
+        assert_eq!(
+            outcome(
+                "reduce(range(4), (state, i) => {now: {...state.now, n: i, [\"k\" + to_string(i)]: i}, before: [...state.before, state.now]}, {now: {n: -1}, before: []}).before"
+            ),
+            "[{n: -1}, {n: 0, k0: 0}, {n: 1, k0: 0, k1: 1}, {n: 2, k0: 0, k1: 1, k2: 2}]"
+        );
+
+        assert_eq!(
+            outcome("map(range(3), i => {...{a: 1, b: 2}, [\"k\" + to_string(i)]: i})"),
+            "[{a: 1, b: 2, k0: 0}, {a: 1, b: 2, k1: 1}, {a: 1, b: 2, k2: 2}]"
+        );
+
+        assert_eq!(
+            outcome(
+                "grown = reduce(range(6), (acc, i) => {...acc, [\"k\" + to_string(i)]: i}, {})\nmap(range(3), i => {...grown, x: i})"
+            ),
+            "[{k0: 0, k1: 1, k2: 2, k3: 3, k4: 4, k5: 5, x: 0}, \
+             {k0: 0, k1: 1, k2: 2, k3: 3, k4: 4, k5: 5, x: 1}, \
+             {k0: 0, k1: 1, k2: 2, k3: 3, k4: 4, k5: 5, x: 2}]"
+        );
+    }
+
+    #[test]
+    fn a_record_that_grows_in_a_fold_is_not_copied_at_every_step() {
+        for (code, len, first, last) in [
+            (
+                "grown = reduce(range(3000), (acc, i) => {...acc, [\"k\" + to_string(i)]: i}, {})",
+                3000,
+                0.0,
+                2999.0,
+            ),
+            (
+                "grown = reduce(range(3000), (acc, i) => {...acc, [\"k\" + to_string(i)]: i, [\"n\" + to_string(i)]: -i}, {})",
+                6000,
+                0.0,
+                -2999.0,
+            ),
+            (
+                "grown = reduce(range(3000), (acc, i) => {...acc, ...{[\"k\" + to_string(i)]: i}}, {})",
+                3000,
+                0.0,
+                2999.0,
+            ),
+            (
+                "grown = reduce(range(3000), (acc, i) => if i % 2 == 0 then {...acc, [\"k\" + to_string(i)]: i} else acc, {})",
+                1500,
+                0.0,
+                2998.0,
+            ),
+            (
+                "grown = reduce(range(3000), (acc, i) => {...acc, [\"k\" + to_string(i)]: i}, {start: -1})",
+                3001,
+                -1.0,
+                2999.0,
+            ),
+            (
+                "grow = (n, acc) => if n == 0 then acc else grow(n - 1, {...acc, [\"k\" + to_string(n)]: n})\ngrown = grow(900, {})",
+                900,
+                900.0,
+                1.0,
+            ),
+        ] {
+            let session = Session::new();
+            session.evaluate(code).unwrap();
+
+            let values = session.inspect("grown", |record, _| record.as_slice().to_vec());
+            assert_eq!(values.len(), len, "{code}");
+            assert_eq!(values[0], Value::Number(first), "{code}");
+            assert_eq!(values[len - 1], Value::Number(last), "{code}");
+
+            // A block for every time that the record outgrows the one before, which is twice
+            // as large every time, rather than one for each of the steps.
+            let blocks = session.blocks(3);
+            assert!(blocks <= 16, "{code}: {blocks} blocks");
+
+            let sharing = session.sharing("grown");
+            assert!(
+                sharing > len / 8,
+                "{code}: {sharing} records share the last block"
+            );
+
+            // What the heap holds is in proportion to the number of steps.
+            let bytes = session.heap.borrow().approx_bytes();
+            assert!(bytes < 2_000_000, "{code}: {bytes} bytes");
+        }
+    }
+
+    #[test]
+    fn records_are_what_they_were_before_records_shared_their_values() {
+        let session = Session::new();
+        session
+            .evaluate(
+                "r = {...{a: 1, b: 2}, c: 3}\n\
+                 grown = reduce(range(20), (acc, i) => {...acc, [\"k\" + to_string(i)]: i}, {})\n\
+                 longer = {...grown, more: true}",
+            )
+            .unwrap();
+
+        for (code, expected) in [
+            ("keys(r)", "[a, b, c]"),
+            ("values(r)", "[1, 2, 3]"),
+            ("entries(r)", "[[a, 1], [b, 2], [c, 3]]"),
+            ("r == {c: 3, b: 2, a: 1}", "true"),
+            ("r != {c: 3, b: 2, a: 1}", "false"),
+            ("[r.c, r[\"c\"], r.d, r[\"d\"]]", "[3, 3, null, null]"),
+            ("keys({...{a: 1, b: 2}, a: 3})", "[a, b]"),
+            ("typeof(r)", "record"),
+            ("to_string(r)", "{a: 1, b: 2, c: 3}"),
+            (
+                "unique([r, {a: 1, b: 2, c: 3}, {...r}, {...r, c: 4}])",
+                "[{a: 1, b: 2, c: 3}, {a: 1, b: 2, c: 4}]",
+            ),
+            ("r.a + r.b + r.c", "6"),
+            ("{...r, a: r.a + 1}.a", "2"),
+            (
+                "sort_by([{...r, a: 3}, {...r, a: 2}], x => x.a)",
+                "[{a: 2, b: 2, c: 3}, {a: 3, b: 2, c: 3}]",
+            ),
+            ("includes([r], {a: 1, b: 2, c: 3})", "true"),
+            ("len(keys(grown))", "20"),
+            (
+                "[grown.k0, grown.k19, grown.k20, grown.more]",
+                "[0, 19, null, null]",
+            ),
+            ("[longer.k0, longer.k19, longer.more]", "[0, 19, true]"),
+            ("grown == longer", "false"),
+            ("{...grown, more: true} == longer", "true"),
+            ("{...longer} == longer", "true"),
+            ("sum(...values(grown))", "190"),
+            ("len(entries(longer))", "21"),
+            ("keys(longer)[20]", "more"),
+            ("{...grown, k3: 30}.k3 + grown.k3", "33"),
+        ] {
+            assert_eq!(session.outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn records_that_share_their_values_survive_compaction() {
+        let session = Session::new();
+
+        session
+            .evaluate(
+                "grown = reduce(range(100), (acc, i) => {...acc, [\"k\" + to_string(i)]: [i, to_string(i)]}, {})\n\
+                 more = {...grown, extra: \"x\"}\n\
+                 other = {...grown, other: \"y\"}\n\
+                 updated = {...grown, k5: \"five\"}\n\
+                 kept = (steps => [steps[10], steps[12]])(reduce(range(50), (state, i) => {now: {...state.now, [\"s\" + to_string(i)]: {n: i}}, all: [...state.all, state.now]}, {now: {}, all: []}).all)",
+            )
+            .unwrap();
+
+        let rendered = |session: &Session| {
+            session.outcome(
+                "[len(keys(grown)), grown.k99, grown.k0, grown.extra, more.extra, more.k50, \
+                 other.other, other.extra, updated.k5, updated.k6, grown.k5, kept[0].s9, \
+                 kept[0].s10, len(keys(kept[0])), len(keys(kept[1])), kept[1].s11, kept[1].s12]",
+            )
+        };
+        let expected = "[100, [99, 99], [0, 0], null, x, [50, 50], y, null, five, [6, 6], [5, 5], \
+                        {n: 9}, null, 10, 12, {n: 11}, null]";
+        assert_eq!(rendered(&session), expected);
+
+        let slots = session.heap.borrow().len();
+        session.compact();
+        assert!(session.heap.borrow().len() < slots);
+        assert_eq!(rendered(&session), expected);
+
+        // The records can be added to and read like before.
+        session
+            .evaluate(
+                "again = {...more, y: 1}\n\
+                 further = {...grown, z: [100, \"100\"]}\n\
+                 inner = {...kept[1], t: {n: 0}}",
+            )
+            .unwrap();
+        session.compact();
+
+        assert_eq!(rendered(&session), expected);
+        assert_eq!(
+            session.outcome(
+                "[again.extra, again.y, len(keys(again)), further.z, further.k99, len(keys(further)), \
+                 grown.z, inner.t, inner.s11, len(keys(inner)), kept[1].t]"
+            ),
+            "[x, 1, 102, [100, 100], [99, 99], 101, null, {n: 0}, {n: 11}, 13, null]"
+        );
+    }
+
+    #[test]
+    fn compaction_gives_up_the_values_that_no_record_reads_any_more() {
+        let session = Session::new();
+
+        session
+            .evaluate(
+                "part = (steps => steps[12])(reduce(range(20000), (state, i) => {now: {...state.now, [\"k\" + to_string(i)]: [i]}, all: [...state.all, state.now]}, {now: {}, all: []}).all)",
+            )
+            .unwrap();
+        assert!(session.heap.borrow().len() > 20_000);
+
+        // Other records have their values behind those of the record.
+        assert!(session.sharing("part") > 2);
+        session.evaluate("aside = {...part, more: [12]}").unwrap();
+        assert!(!session.share("aside", "part"));
+
+        session.compact();
+
+        // The lists that the dropped values were are gone with them.
+        let slots = session.heap.borrow().len();
+        assert!(slots < 100, "{slots} slots");
+        let bytes = session.heap.borrow().approx_bytes();
+        assert!(bytes < 10_000, "{bytes} bytes");
+        assert_eq!(
+            session.outcome("part"),
+            "{k0: [0], k1: [1], k2: [2], k3: [3], k4: [4], k5: [5], k6: [6], k7: [7], k8: [8], k9: [9], k10: [10], k11: [11]}"
+        );
+        assert_eq!(
+            session.outcome("[aside.more, aside.k11, len(keys(aside))]"),
+            "[[12], [11], 13]"
+        );
+
+        // The record that is left is added to where its values are.
+        session.evaluate("longer = {...part, more: [10]}").unwrap();
+        assert_eq!(session.sharing("part"), 2);
+        assert_eq!(
+            session.outcome("[longer.more, longer.k11, part.more, aside.more]"),
+            "[[10], [11], null, [12]]"
+        );
+    }
+
+    #[test]
+    fn a_copy_of_a_heap_has_records_of_its_own() {
+        let session = Session::new();
+        session
+            .evaluate("base = {...{a: 1}, b: 2}\ngrown = {...base, c: 3}")
+            .unwrap();
+
+        let copy = Session {
+            heap: Rc::new(RefCell::new(session.heap.borrow().clone())),
+            bindings: Rc::clone(&session.bindings),
+        };
+
+        let shared = session.inspect("grown", |original, _| {
+            copy.inspect("grown", |copied, _| {
+                assert!(original == copied);
+                original.shares_values_with(copied)
+            })
+        });
+        assert!(!shared);
+
+        assert_eq!(copy.outcome("{...grown, d: 4}"), "{a: 1, b: 2, c: 3, d: 4}");
+        assert_eq!(
+            session.outcome("{...grown, d: 5}"),
+            "{a: 1, b: 2, c: 3, d: 5}"
+        );
+        assert_eq!(
+            copy.outcome("[base, grown]"),
+            "[{a: 1, b: 2}, {a: 1, b: 2, c: 3}]"
+        );
+        assert_eq!(
+            session.outcome("[base, grown]"),
+            "[{a: 1, b: 2}, {a: 1, b: 2, c: 3}]"
+        );
+    }
+}

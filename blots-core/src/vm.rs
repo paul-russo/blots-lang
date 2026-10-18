@@ -1788,10 +1788,12 @@ impl Vm {
         }
     }
 
+    /// Start a record that is going to be given `entries` entries one by one, apart from
+    /// what is spread into it.
     #[inline(never)]
-    fn record_begin(&mut self) {
+    fn record_begin(&mut self, entries: usize) {
         self.builders.push(Builder::Record {
-            entries: RecordBuilder::default(),
+            entries: RecordBuilder::with_capacity(entries),
             key: None,
         });
     }
@@ -1844,7 +1846,7 @@ impl Vm {
             unreachable!("no record is being built");
         };
 
-        self.heap.borrow_mut().insert_record(entries.finish())
+        self.heap.borrow_mut().insert_built_record(entries)
     }
 
     #[inline(never)]

@@ -358,11 +358,12 @@ pub(crate) struct SharedBuffers {
     buffers: HashMap<*const Buffer, Shared, BuildHasherDefault<AddressHasher>>,
 }
 
-/// Hashes the address of a buffer, which is all a pass looks buffers up by. Addresses differ
-/// in their middle bits, which one multiplication spreads over the upper half of the hash;
-/// folding that half down makes the lower bits, which pick the bucket, depend on them too.
+/// Hashes the address of a buffer, which is all a pass looks buffers up by (the buffers of
+/// lists here, the blocks of values for records). Addresses differ in their middle bits,
+/// which one multiplication spreads over the upper half of the hash; folding that half down
+/// makes the lower bits, which pick the bucket, depend on them too.
 #[derive(Default)]
-struct AddressHasher(u64);
+pub(crate) struct AddressHasher(u64);
 
 impl Hasher for AddressHasher {
     fn finish(&self) -> u64 {
