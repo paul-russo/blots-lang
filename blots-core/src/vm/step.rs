@@ -297,7 +297,8 @@ impl Vm {
 
                 // The remainder is taken at the instruction, and it is compared one code word
                 // further on: that is where an error of each of the two is located.
-                let value = self.binary_slow(BinaryOp::Modulo, self.reg(a), Value::Number(divisor))?;
+                let value =
+                    self.binary_slow(BinaryOp::Modulo, self.reg(a), Value::Number(divisor))?;
                 self.skip(1);
                 let holds = self.compare_slow(comparison, value, Value::Number(remainder))?;
                 self.skip(if holds { 1 } else { instr.sbx() - 1 });

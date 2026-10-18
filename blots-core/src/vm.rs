@@ -21,8 +21,7 @@ mod step;
 use crate::{
     ast::{BinaryOp, Span},
     bytecode::{
-        CaptureSource, FAST_FRAME_SLOTS, Proto, REGISTER_SCALE, RemainderTest, Wrap,
-        register_index,
+        CaptureSource, FAST_FRAME_SLOTS, Proto, REGISTER_SCALE, RemainderTest, Wrap, register_index,
     },
     compiler::{compile_lambda, compile_self_variant},
     environment::Environment,
@@ -335,8 +334,8 @@ fn whole(number: f64) -> Option<i64> {
 
     // Where the conversion saturates, a number at or beyond 2^63 comes out as the largest
     // `i64`, which converts back to 2^63. No number is that `i64`.
-    let exact = truncated as f64 == number
-        && (cfg!(target_arch = "x86_64") || truncated != i64::MAX);
+    let exact =
+        truncated as f64 == number && (cfg!(target_arch = "x86_64") || truncated != i64::MAX);
 
     exact.then_some(truncated)
 }

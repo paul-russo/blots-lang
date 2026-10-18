@@ -3650,8 +3650,8 @@ mod power_of_two_tests {
         heap: &Rc<RefCell<Heap>>,
         bindings: &Rc<Environment>,
     ) -> Result<Value, RuntimeError> {
-        let statements = parse_program(code)
-            .unwrap_or_else(|| panic!("the fast parser does not read {code}"));
+        let statements =
+            parse_program(code).unwrap_or_else(|| panic!("the fast parser does not read {code}"));
         let source: Rc<str> = code.into();
 
         let mut result = Value::Null;
