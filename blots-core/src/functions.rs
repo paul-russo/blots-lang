@@ -938,10 +938,12 @@ impl BuiltInFunction {
             // Record functions
             Self::Keys => {
                 let mut borrowed_heap = heap.borrow_mut();
-                let shape = Rc::clone(args[0].as_record(&borrowed_heap)?.shape());
-                let keys = shape
-                    .keys()
-                    .map(|k| borrowed_heap.insert_string(k.as_str()))
+                let record = args[0].as_record(&borrowed_heap)?;
+                let (table, count) = (Rc::clone(record.table()), record.len());
+                let keys = table
+                    .first(count)
+                    .iter()
+                    .map(|k| borrowed_heap.insert_string(&**k))
                     .collect();
 
                 Ok(borrowed_heap.insert_list(keys))
@@ -963,12 +965,13 @@ impl BuiltInFunction {
             Self::Entries => {
                 let mut borrowed_heap = heap.borrow_mut();
                 let record = args[0].as_record(&borrowed_heap)?;
-                let (shape, values) = (Rc::clone(record.shape()), record.as_slice().to_vec());
-                let entry_values = shape
-                    .keys()
+                let (table, values) = (Rc::clone(record.table()), record.as_slice().to_vec());
+                let entry_values = table
+                    .first(values.len())
+                    .iter()
                     .zip(values)
                     .map(|(k, v)| {
-                        let key = borrowed_heap.insert_string(k.as_str());
+                        let key = borrowed_heap.insert_string(&**k);
                         borrowed_heap.insert_list(vec![key, v])
                     })
                     .collect();

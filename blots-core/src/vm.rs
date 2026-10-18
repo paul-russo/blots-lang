@@ -388,7 +388,7 @@ fn spread_into_record(
         IterablePointer::List(pointer) => {
             let heap = heap.borrow();
             for (position, value) in pointer.reify(&heap).as_list()?.iter().enumerate() {
-                entries.insert(position.to_string(), *value);
+                entries.insert(&position.to_string(), *value);
             }
         }
         IterablePointer::String(pointer) => {
@@ -396,14 +396,12 @@ fn spread_into_record(
             let text = pointer.reify(&heap).as_text()?.clone();
             for (position, character) in text.chars().enumerate() {
                 let value = heap.insert_string(character);
-                entries.insert(position.to_string(), value);
+                entries.insert(&position.to_string(), value);
             }
         }
         IterablePointer::Record(pointer) => {
             let heap = heap.borrow();
-            for (key, value) in pointer.reify(&heap).as_record()? {
-                entries.insert(key.clone(), *value);
-            }
+            entries.extend(pointer.reify(&heap).as_record()?);
         }
     }
 
@@ -417,7 +415,7 @@ enum Builder {
         entries: RecordBuilder,
 
         /// The evaluated key of a `[key]: value` entry whose value is being computed.
-        key: Option<String>,
+        key: Option<StringPointer>,
     },
 }
 
@@ -1760,7 +1758,7 @@ impl Vm {
     #[inline(never)]
     fn new_record(&mut self, index: usize, first: *const Value) -> Value {
         let layout = &self.top().proto().layouts[index];
-        let count = layout.shape.len();
+        let count = layout.keys.len();
         let mut values: Vec<Value> = Vec::with_capacity(count);
 
         // SAFETY: the values are consecutive registers of the innermost frame, one per entry
@@ -1778,12 +1776,12 @@ impl Vm {
             values.set_len(count);
         }
 
-        let record = Record::new(Rc::clone(&layout.shape), values.into_boxed_slice());
+        let record = Record::new(Rc::clone(&layout.keys), values.into_boxed_slice());
 
         self.heap.borrow_mut().insert_record(record)
     }
 
-    fn record_builder(&mut self) -> (&mut RecordBuilder, &mut Option<String>) {
+    fn record_builder(&mut self) -> (&mut RecordBuilder, &mut Option<StringPointer>) {
         match self.builders.last_mut() {
             Some(Builder::Record { entries, key }) => (entries, key),
             _ => unreachable!("no record is being built"),
@@ -1800,22 +1798,33 @@ impl Vm {
 
     #[inline(never)]
     fn record_set(&mut self, index: usize, value: Value) {
-        let key = self.top().proto().strings[index].clone();
+        let proto = self.top().proto;
+        // SAFETY: the code of an active frame outlives it (see `Vm::proto_for`).
+        let key = unsafe { &(&(*proto).strings)[index] };
+
         self.record_builder().0.insert(key, value);
     }
 
     #[inline(never)]
     fn record_key(&mut self, value: Value) -> Result<(), RuntimeError> {
-        let text = value.as_string(&self.heap.borrow())?.to_string();
-        *self.record_builder().1 = Some(text);
+        *self.record_builder().1 = Some(value.as_string_pointer()?);
 
         Ok(())
     }
 
     #[inline(never)]
     fn record_value(&mut self, value: Value) {
-        let (entries, key) = self.record_builder();
+        let Some(Builder::Record { entries, key }) = self.builders.last_mut() else {
+            unreachable!("no record is being built");
+        };
+
         let key = key.take().expect("no record key was staged");
+        let heap = self.heap.borrow();
+        let key = key
+            .reify(&heap)
+            .as_string()
+            .expect("a staged key is a string");
+
         entries.insert(key, value);
     }
 
@@ -1901,13 +1910,7 @@ impl Vm {
             return Ok(Value::Null);
         };
 
-        let cache = &proto.field_caches[site];
-        let shape = record.shape();
-        cache.position.set(position as u32);
-        cache.shape.set(match shape.is_interned() {
-            true => Rc::as_ptr(shape),
-            false => ptr::null(),
-        });
+        proto.field_caches[site].remember(record.table(), position);
 
         Ok(*value)
     }

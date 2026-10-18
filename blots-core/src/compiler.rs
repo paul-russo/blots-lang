@@ -33,7 +33,7 @@ use crate::{
     functions::{BuiltInFunction, is_built_in_function},
     heap::RecordPointer,
     intern::Symbol,
-    record::Shape,
+    record::Keys,
     values::{LambdaArg, Value},
 };
 use indexmap::IndexSet;
@@ -2184,7 +2184,7 @@ impl FnCompiler {
             let layout = self.layouts.len() as u16;
             self.layouts.push(RecordLayout {
                 distinct: keys.len() == slots.len(),
-                shape: Shape::interned(keys),
+                keys: Keys::interned(keys.iter().map(String::as_str)),
                 slots,
             });
 

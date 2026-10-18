@@ -84,14 +84,15 @@ pub(crate) fn flatten_spread_value(
         IterablePointer::Record(record_ptr) => {
             let mut heap = heap.borrow_mut();
             let record = record_ptr.reify(&heap).as_record()?;
-            let (shape, values) = (Rc::clone(record.shape()), record.as_slice().to_vec());
+            let (table, values) = (Rc::clone(record.table()), record.as_slice().to_vec());
 
             // Convert record to list of [key, value] pairs
-            Ok(shape
-                .keys()
+            Ok(table
+                .first(values.len())
+                .iter()
                 .zip(values)
                 .map(|(k, v)| {
-                    let key = heap.insert_string(k.as_str());
+                    let key = heap.insert_string(&**k);
                     heap.insert_list(vec![key, v])
                 })
                 .collect())

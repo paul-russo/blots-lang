@@ -9,7 +9,7 @@
 use crate::{
     ast::{BinaryOp, Span, SpannedExpr},
     intern::Symbol,
-    record::Shape,
+    record::Keys,
     values::{LambdaArg, Value},
 };
 use std::{
@@ -709,11 +709,11 @@ pub(crate) struct LambdaTemplate {
 /// The layout of a record literal whose keys are all static.
 #[derive(Debug)]
 pub(crate) struct RecordLayout {
-    /// Every distinct key in first-occurrence order. This is the canonical shape of those
+    /// Every distinct key in first-occurrence order. This is the canonical table of those
     /// keys, so every record built from literals with the same keys shares it.
-    pub shape: Rc<Shape>,
+    pub keys: Rc<Keys>,
 
-    /// For each entry of the literal, the position of its key in `shape` (a repeated key
+    /// For each entry of the literal, the position of its key in `keys` (a repeated key
     /// maps to the position of its first occurrence, which later entries overwrite).
     pub slots: Vec<u16>,
 
@@ -725,19 +725,53 @@ pub(crate) struct RecordLayout {
 /// What a `GetField` access site remembers about the last record it found its field in.
 #[derive(Debug)]
 pub(crate) struct FieldCache {
-    /// The shape of that record if it is a canonical one, null otherwise. Canonical shapes
-    /// are never freed, so the address is enough to recognise the shape again.
-    pub shape: Cell<*const Shape>,
+    /// The table of that record, or null. The site holds on to the table, so that nothing
+    /// else can be at its address: a record with a table at that address has that table.
+    keys: Cell<*const Keys>,
 
     /// The position the field was found at.
-    pub position: Cell<u32>,
+    position: Cell<u32>,
 }
 
 impl FieldCache {
     pub fn new() -> Self {
         Self {
-            shape: Cell::new(ptr::null()),
+            keys: Cell::new(ptr::null()),
             position: Cell::new(0),
+        }
+    }
+
+    /// The table of the record that the field was found in last, or null.
+    #[inline(always)]
+    pub fn keys(&self) -> *const Keys {
+        self.keys.get()
+    }
+
+    /// The position that the field was found at last.
+    #[inline(always)]
+    pub fn position(&self) -> usize {
+        self.position.get() as usize
+    }
+
+    /// Remember that the field is at `position` of the records whose keys are in `keys`.
+    pub fn remember(&self, keys: &Rc<Keys>, position: usize) {
+        let before = self.keys.replace(Rc::into_raw(Rc::clone(keys)));
+        self.position.set(position as u32);
+
+        if !before.is_null() {
+            // SAFETY: the site held on to the table it remembered.
+            drop(unsafe { Rc::from_raw(before) });
+        }
+    }
+}
+
+impl Drop for FieldCache {
+    fn drop(&mut self) {
+        let keys = self.keys.get();
+
+        if !keys.is_null() {
+            // SAFETY: the site held on to the table it remembered.
+            drop(unsafe { Rc::from_raw(keys) });
         }
     }
 }

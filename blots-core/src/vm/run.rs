@@ -600,18 +600,27 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                         let proto = &*(*frame).proto;
                         debug_assert!(site < proto.field_caches.len());
                         let cache = proto.field_caches.get_unchecked(site);
-                        let position = cache.position.get() as usize;
+                        let position = cache.position();
+                        let values = record.as_slice();
 
-                        // A record of the shape seen last time has the field in the same
-                        // place. Shapes that are not canonical are told apart by the key.
-                        if Rc::as_ptr(record.shape()) == cache.shape.get() {
-                            debug_assert!(position < record.len());
-                            load_value(reg!(instr.a), record.as_slice().as_ptr().add(position));
+                        // A record with the table seen last time has the field in the same
+                        // place, when it has that many of the table's keys.
+                        if Rc::as_ptr(record.table()) == cache.keys() {
+                            if position < values.len() {
+                                load_value(reg!(instr.a), values.as_ptr().add(position));
+                                next!(1);
+                            }
+
+                            // The field is a key that the table has behind those of the
+                            // record.
+                            rare();
+                            store_value(reg!(instr.a), Value::Null);
                             next!(1);
                         }
 
+                        // A record with another table may have the field in the same place.
                         if let Some((key, value)) = record.get_index(position)
-                            && *key == proto.fields[site]
+                            && **key == *proto.fields[site]
                         {
                             load_value(reg!(instr.a), value);
                             next!(1);

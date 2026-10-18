@@ -651,7 +651,7 @@ impl<'h> IntoIterator for WithHeap<'h, ReifiedIterableValue<'h>> {
             ReifiedIterableValue::Record(r) => r
                 .into_iter()
                 .map(|(k, v)| {
-                    let list = vec![self.heap.borrow_mut().insert_string(k.as_str()), *v];
+                    let list = vec![self.heap.borrow_mut().insert_string(&**k), *v];
                     self.heap.borrow_mut().insert_list(list)
                 })
                 .collect::<Vec<Value>>()
