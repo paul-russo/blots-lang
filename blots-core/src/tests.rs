@@ -3626,3 +3626,285 @@ mod loop_invariant_tests {
         );
     }
 }
+
+// Dividing by a power of two is compiled to a multiplication by its reciprocal, which comes to
+// the same number in a fraction of the time. Nothing may tell the two apart.
+#[cfg(test)]
+mod power_of_two_tests {
+    use crate::bytecode::{Instr, Op};
+    use crate::compiler::compile_chunk;
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::intern::Symbol;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code` against `bindings`, up to the value of the last one.
+    fn evaluate(
+        code: &str,
+        heap: &Rc<RefCell<Heap>>,
+        bindings: &Rc<Environment>,
+    ) -> Result<Value, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+            result = evaluate_ast(
+                &expr,
+                Rc::clone(heap),
+                Rc::clone(bindings),
+                0,
+                Rc::clone(&source),
+            )?;
+        }
+
+        Ok(result)
+    }
+
+    /// What the statements of `code` come to, rendered: the value, or the error with the
+    /// place it points at.
+    fn outcome(code: &str) -> String {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        match evaluate(code, &heap, &bindings) {
+            Ok(value) => value.stringify_internal(&heap.borrow()),
+            Err(error) => format!("{} at {:?}", error.message, error.span),
+        }
+    }
+
+    /// The operations of the instructions that the expression `code` compiles to.
+    fn operations(code: &str) -> Vec<Op> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let [Statement::Expression(expr)] = &statements[..] else {
+            panic!("{code} is not a single expression");
+        };
+        let chunk = compile_chunk(expr, true, &Environment::new()).unwrap();
+
+        let mut operations = Vec::new();
+        let mut pc = 0;
+        while pc < chunk.code.len() {
+            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
+            let instr = unsafe { Instr::decode(chunk.code[pc]) };
+            operations.push(instr.op);
+            pc += 1 + instr.has_number_operand() as usize;
+        }
+
+        operations
+    }
+
+    /// Numbers of every kind: the ones at the edges, and a couple of thousand whose bits are
+    /// picked at random, which covers every sign and every exponent there is.
+    fn numbers() -> Vec<f64> {
+        let mut numbers = vec![
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            2.0,
+            3.0,
+            -7.0,
+            0.1,
+            0.5,
+            1.0 / 3.0,
+            1e15,
+            1e16,
+            9_007_199_254_740_991.0,
+            9_007_199_254_740_992.0,
+            9_007_199_254_740_994.0,
+            f64::EPSILON,
+            f64::MIN_POSITIVE,
+            f64::MIN_POSITIVE / 2.0,
+            f64::MIN_POSITIVE * 1.5,
+            f64::from_bits(1),
+            f64::from_bits(2),
+            f64::from_bits(3),
+            f64::MAX,
+            f64::MAX / 2.0,
+            f64::MIN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+        ];
+
+        let mut bits = 0x9E37_79B9_7F4A_7C15_u64;
+        for _ in 0..2000 {
+            bits ^= bits << 13;
+            bits ^= bits >> 7;
+            bits ^= bits << 17;
+            numbers.push(f64::from_bits(bits));
+        }
+
+        numbers
+    }
+
+    /// Whether nothing can tell `actual` from `expected`: they are the same number down to
+    /// the sign of a zero, or neither of them is a number.
+    fn same(actual: f64, expected: f64) -> bool {
+        actual.to_bits() == expected.to_bits() || (actual.is_nan() && expected.is_nan())
+    }
+
+    /// The numbers in the list that `code` comes to, with `xs` bound to `numbers`.
+    fn over(numbers: &[f64], code: &str) -> Vec<f64> {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+        let list = numbers.iter().copied().map(Value::Number).collect();
+        let xs = heap.borrow_mut().insert_list(list);
+        bindings.insert(Symbol::intern("xs"), xs);
+
+        let value = evaluate(code, &heap, &bindings).unwrap();
+        let heap = heap.borrow();
+
+        value
+            .as_list(&heap)
+            .unwrap()
+            .iter()
+            .map(|value| value.as_number().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn a_division_by_a_power_of_two_is_a_multiplication() {
+        let divides = |code: &str| {
+            let operations = operations(code);
+
+            (
+                operations.contains(&Op::DivK),
+                operations.contains(&Op::MulK),
+            )
+        };
+
+        for divisor in [
+            "2",
+            "4",
+            "8",
+            "0.5",
+            "0.25",
+            "1",
+            "1024",
+            "4503599627370496",
+            "2.2250738585072014e-308",
+            "4.49423283715579e307",
+        ] {
+            assert_eq!(
+                divides(&format!("x / {divisor}")),
+                (false, true),
+                "{divisor}"
+            );
+        }
+
+        // A number that is no power of two, and a power of two whose reciprocal is not one
+        // that multiplying by gets the same out of: these are still divided by.
+        for divisor in [
+            "3",
+            "10",
+            "0.1",
+            "6",
+            "0",
+            "1e308",
+            "5e-324",
+            "1.1125369292536007e-308",
+            "8.98846567431158e307",
+        ] {
+            assert_eq!(
+                divides(&format!("x / {divisor}")),
+                (true, false),
+                "{divisor}"
+            );
+        }
+    }
+
+    #[test]
+    fn it_comes_to_the_number_that_dividing_comes_to() {
+        let numbers = numbers();
+
+        for exponent in [
+            -1074, -1073, -1023, -1022, -1021, -52, -3, -2, -1, 0, 1, 2, 3, 10, 31, 32, 52, 53, 63,
+            64, 1021, 1022, 1023,
+        ] {
+            let divisor = 2f64.powi(exponent);
+            let expected = numbers.iter().map(|number| number / divisor);
+
+            for code in [
+                // One number at a time, in a function and in a callback compiled in place.
+                format!("halve = x => x / {divisor:e}\nmap(xs, halve)"),
+                format!("map(xs, x => x / {divisor:e})"),
+                // A whole list at once, by itself and in a run of operators.
+                format!("xs / {divisor:e}"),
+                format!("(xs * 1 / {divisor:e}) + 0"),
+            ] {
+                let actual = over(&numbers, &code);
+                assert_eq!(actual.len(), numbers.len(), "{code}");
+
+                for ((actual, expected), number) in
+                    actual.into_iter().zip(expected.clone()).zip(&numbers)
+                {
+                    // Adding zero in the last of the programs turns a negative zero around.
+                    let expected = if code.ends_with("+ 0") {
+                        expected * 1.0 + 0.0
+                    } else {
+                        expected
+                    };
+
+                    assert!(
+                        same(actual, expected),
+                        "{number:e} / {divisor:e} is {expected:e}, not {actual:e} ({code})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn what_is_not_a_number_is_divided() {
+        assert_eq!(outcome("[6, 8, 1] / 2"), "[3, 4, 0.5]");
+        assert_eq!(outcome("sum([6, 8, 1] / 4)"), "3.75");
+        assert_eq!(outcome("xs = [6, 8, 1]\n(xs + 2) / 2 - 1"), "[3, 4, 0.5]");
+
+        // What cannot be divided fails the way it does for any other divisor.
+        for dividend in [
+            "\"a\"",
+            "null",
+            "true",
+            "[1, \"a\"]",
+            "[1, null, 3]",
+            "{a: 1}",
+            "(x => x)",
+            "[[1, 2], [3, \"a\"]]",
+        ] {
+            for shape in [
+                "x = {dividend}\nx / {divisor}",
+                "f = x => x / {divisor}\nf({dividend})",
+                "x = {dividend}\n1 + x / {divisor} * 3",
+                "x = {dividend}\nsum(x / {divisor})",
+                "map([{dividend}], x => x / {divisor})",
+            ] {
+                let program = |divisor: &str| {
+                    shape
+                        .replace("{dividend}", dividend)
+                        .replace("{divisor}", divisor)
+                };
+
+                // A divisor of the same length, as the error points at the whole division.
+                for (power_of_two, other) in [("2", "3"), ("8", "7"), ("0.5", "0.3")] {
+                    let (expected, actual) =
+                        (outcome(&program(other)), outcome(&program(power_of_two)));
+
+                    assert!(
+                        expected.contains("expected a number"),
+                        "{shape}: {expected}"
+                    );
+                    assert_eq!(actual, expected, "{shape} of {dividend} by {power_of_two}");
+                }
+            }
+        }
+    }
+}

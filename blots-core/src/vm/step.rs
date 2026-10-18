@@ -12,7 +12,7 @@ use super::{
 };
 use crate::{
     ast::BinaryOp,
-    bytecode::{Instr, Op, register_index},
+    bytecode::{Instr, Op, RECIPROCAL, register_index},
     error::RuntimeError,
     values::Value,
 };
@@ -237,8 +237,16 @@ impl Vm {
                     return Ok(Flow::Continue);
                 }
 
-                let rhs = Value::Number(self.operand());
-                let value = self.binary_slow(operator_of(instr.op), lhs, rhs)?;
+                // A multiplication that stands for a division by a power of two is that
+                // division for everything but numbers.
+                let (operator, operand) = match instr.op {
+                    Op::MulK if instr.x & RECIPROCAL != 0 => {
+                        (BinaryOp::Divide, 1.0 / self.operand())
+                    }
+                    op => (operator_of(op), self.operand()),
+                };
+
+                let value = self.binary_slow(operator, lhs, Value::Number(operand))?;
                 self.set_reg(a, value);
                 self.skip(1);
             }

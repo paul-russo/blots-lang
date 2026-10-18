@@ -435,6 +435,24 @@ pub(crate) const LAST_USE_B: u8 = 1;
 /// The same for operand register `c`.
 pub(crate) const LAST_USE_C: u8 = 2;
 
+/// Set in `x` of a `MulK` that stands for a division: the program divides by the reciprocal
+/// of the number operand, which is a power of two. Dividing by a power of two and
+/// multiplying by its reciprocal round the same exact result, so they agree on every number,
+/// and the multiplication takes a fraction of the time. Anything other than a number is
+/// still divided.
+pub(crate) const RECIPROCAL: u8 = 4;
+
+/// The number that dividing by `divisor` is the same as multiplying by, when there is one:
+/// `divisor` is a power of two whose reciprocal is one as well.
+pub(crate) fn exact_reciprocal(divisor: f64) -> Option<f64> {
+    const FRACTION: u64 = (1 << 52) - 1;
+
+    let reciprocal = 1.0 / divisor;
+    let exact = divisor.is_normal() && reciprocal.is_normal() && divisor.to_bits() & FRACTION == 0;
+
+    exact.then_some(reciprocal)
+}
+
 impl Instr {
     /// An instruction with the operands `a`, `b` and `c`, where those that name a register
     /// are given as its index.

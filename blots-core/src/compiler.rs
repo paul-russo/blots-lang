@@ -25,8 +25,8 @@ use crate::{
     },
     bytecode::{
         CaptureSource, FAST_FRAME_SLOTS, FieldCache, Handler, Instr, LAST_USE_B, LAST_USE_C,
-        LambdaTemplate, LocalVar, MAX_REGISTERS, Op, Proto, RecordLayout, SelfRef, Wrap,
-        binary_opcode,
+        LambdaTemplate, LocalVar, MAX_REGISTERS, Op, Proto, RECIPROCAL, RecordLayout, SelfRef,
+        Wrap, binary_opcode, exact_reciprocal,
     },
     environment::Environment,
     error::RuntimeError,
@@ -1298,8 +1298,20 @@ impl FnCompiler {
             && let Some(constant) = Self::number_operand(right)
         {
             let left_reg = self.expr_any(left)?;
+            let flags = last_use_flags(op, left_reg >= mark, false);
+
+            // Halving, and dividing by any other power of two, is a multiplication.
+            let reciprocal = match op {
+                BinaryOp::Divide => exact_reciprocal(constant),
+                _ => None,
+            };
+            let (const_op, constant, flags) = match reciprocal {
+                Some(reciprocal) => (Op::MulK, reciprocal, flags | RECIPROCAL),
+                None => (const_op, constant, flags),
+            };
+
             let mut instr = Instr::abc(const_op, dst, left_reg, 0);
-            instr.x = last_use_flags(op, left_reg >= mark, false);
+            instr.x = flags;
             self.emit_spanned(instr, span);
             self.emit_number(constant);
         } else if let Some(const_op) = const_lhs_opcode(op)
