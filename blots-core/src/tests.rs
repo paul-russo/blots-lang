@@ -3985,12 +3985,7 @@ mod power_of_two_tests {
                 .filter(|remainder| *remainder < divisor && remainder.fract() == 0.0);
 
             for remainder in remainders {
-                let cases: [(&str, fn(f64, f64) -> bool); 2] = [
-                    ("==", |left, right| left == right),
-                    ("!=", |left, right| left != right),
-                ];
-
-                for (operator, holds) in cases {
+                for (operator, equal) in [("==", true), ("!=", false)] {
                     let condition = format!("x % {divisor} {operator} {remainder}");
 
                     for code in [
@@ -4008,7 +4003,7 @@ mod power_of_two_tests {
 
                             assert_eq!(
                                 actual == 1.0,
-                                holds(left, remainder),
+                                (left == remainder) == equal,
                                 "{number:e} % {divisor} is {left}, to be {operator} {remainder} ({code})"
                             );
                         }
