@@ -1,6 +1,23 @@
+#![cfg_attr(
+    all(
+        not(test),
+        target_os = "linux",
+        target_env = "gnu",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    no_main
+)]
+
 mod allocator;
 mod cli;
 mod commands;
+#[cfg(all(
+    not(test),
+    target_os = "linux",
+    target_env = "gnu",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod entry;
 mod highlighter;
 
 use blots_core::ast::{Expr, Spanned};
