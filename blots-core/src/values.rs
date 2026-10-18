@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::{
-    cell::{OnceCell, RefCell},
+    cell::{Cell, OnceCell, RefCell},
     fmt::Display,
     rc::Rc,
 };
@@ -321,6 +321,80 @@ pub struct CapturedScope {
     /// is filled in on the first call when the closure was not created by the VM itself, and
     /// it never takes part in comparisons.
     pub(crate) code: OnceCell<Rc<Proto>>,
+
+    /// What a call of the function through its own value runs (see [`Entry`]).
+    pub(crate) entry: Entry,
+}
+
+/// The code that a call of a function through its own value runs, once a VM has found that
+/// out: the compiled body of the function, or the variant of it in which the function calls
+/// itself directly (see [`crate::bytecode::SelfRef`]).
+///
+/// Which of the two it is depends on the name of the function, on what it captured and on
+/// what it was compiled from, and whoever holds the definition can change those. So it only
+/// counts during the run of the VM that found it out (see `Vm::run_number`), when nothing
+/// but that VM gets at the definition, and the VM takes it back when it renames the
+/// function. A copy of the definition starts without one.
+pub(crate) struct Entry {
+    /// Owned by the `code` next to the entry; not null when `run` is the number of a run.
+    code: Cell<*const Proto>,
+
+    /// The number of the run that found the code out, [`Entry::NO_RUN`] when none did.
+    run: Cell<u64>,
+}
+
+impl Entry {
+    /// Not the number of any run.
+    pub(crate) const NO_RUN: u64 = 0;
+
+    /// The entry of a closure that a VM just made from `code` in run `run`: the code itself
+    /// when it has no variant that could take its place.
+    fn of(code: &Rc<Proto>, run: u64) -> Self {
+        match code.self_refs.is_empty() {
+            true => Self {
+                code: Cell::new(Rc::as_ptr(code)),
+                run: Cell::new(run),
+            },
+            false => Self::default(),
+        }
+    }
+
+    /// The number of the run in which [`Entry::code`] is the code to run.
+    #[inline(always)]
+    pub(crate) fn run(&self) -> u64 {
+        self.run.get()
+    }
+
+    #[inline(always)]
+    pub(crate) fn code(&self) -> *const Proto {
+        self.code.get()
+    }
+
+    /// Record that run `run` found `code`, which the `code` next to the entry owns, to be
+    /// what a call of the function through its own value runs.
+    pub(crate) fn set(&self, code: *const Proto, run: u64) {
+        self.code.set(code);
+        self.run.set(run);
+    }
+
+    fn clear(&self) {
+        self.run.set(Self::NO_RUN);
+    }
+}
+
+impl Default for Entry {
+    fn default() -> Self {
+        Self {
+            code: Cell::new(std::ptr::null()),
+            run: Cell::new(Self::NO_RUN),
+        }
+    }
+}
+
+impl Clone for Entry {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
 }
 
 impl PartialEq for CapturedScope {
@@ -347,30 +421,47 @@ impl CapturedScope {
             names: Rc::new(names),
             values: Rc::new(values),
             code: OnceCell::new(),
+            entry: Entry::default(),
         }
     }
 
-    /// Build the scope of a closure created by the VM: the capture names are shared with the
-    /// lambda expression the closure came from, and the compiled body is attached up front.
+    /// Build the scope of a closure created by a VM in run `run`: the capture names are
+    /// shared with the lambda expression the closure came from, and the compiled body is
+    /// attached up front.
     pub(crate) fn compiled(
         names: Rc<Vec<Symbol>>,
         values: Vec<Option<Value>>,
         code: Rc<Proto>,
+        run: u64,
     ) -> Self {
         debug_assert_eq!(names.len(), values.len());
         Self {
             names,
             values: Rc::new(values),
+            entry: Entry::of(&code, run),
             code: OnceCell::from(code),
         }
     }
 
-    /// The scope of a closure created by the VM when none of its captures were bound: like
-    /// [`CapturedScope::default`], but with the compiled body attached.
-    pub(crate) fn unbound(code: Rc<Proto>) -> Self {
+    /// The scope of a closure created by a VM in run `run` when none of its captures were
+    /// bound: like [`CapturedScope::default`], but with the compiled body attached.
+    pub(crate) fn unbound(code: Rc<Proto>, run: u64) -> Self {
         Self {
+            entry: Entry::of(&code, run),
             code: OnceCell::from(code),
             ..Self::default()
+        }
+    }
+
+    /// The function this scope belongs to got another name, which the code that a call of
+    /// it runs depends on when the function may be calling itself by name.
+    pub(crate) fn renamed(&self) {
+        if self
+            .code
+            .get()
+            .is_none_or(|code| !code.self_refs.is_empty())
+        {
+            self.entry.clear();
         }
     }
 
@@ -454,6 +545,23 @@ pub struct LambdaDef {
 impl LambdaDef {
     pub fn set_name(&mut self, name: Symbol, _value: Value) {
         self.name = Some(name);
+        self.scope.renamed();
+    }
+
+    /// Find out for run `run` what a call of the function through its own value runs, when
+    /// that takes no more than a look at the code the function already has: code that was
+    /// compiled from this body and these parameters and that has no variant. Returns whether
+    /// the [`Entry`] now says so.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn enters_own_code(&self, run: u64) -> bool {
+        match self.scope.code.get() {
+            Some(code) if code.self_refs.is_empty() && code.belongs_to(&self.body, &self.args) => {
+                self.scope.entry.set(Rc::as_ptr(code), run);
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn get_arity(&self) -> FunctionArity {

@@ -791,8 +791,8 @@ pub(crate) struct Proto {
     /// `params.len()` when `simple_params` holds, `u32::MAX` otherwise.
     pub simple_arity: u32,
 
-    /// `simple_arity` when a call with that many arguments can skip every other check a call
-    /// may need (no self-call variant to select, frame no larger than [`FAST_FRAME_SLOTS`]),
+    /// `simple_arity` when a frame of the code is no larger than [`FAST_FRAME_SLOTS`], so
+    /// that a call with that many arguments has nothing to check about the code or to adjust,
     /// `u32::MAX` otherwise.
     pub fast_arity: u32,
 

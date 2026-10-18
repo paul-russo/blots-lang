@@ -451,15 +451,17 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
 
                     if let Value::Lambda(pointer) = &*callee
                         && let Some(HeapValue::Lambda(def)) = heap_value!(pointer)
-                        && let Some(code) = def.scope.code.get()
+                        && (def.scope.entry.run() == (*vm).run_number
+                            || def.enters_own_code((*vm).run_number))
                     {
+                        // The function is called through its own value, which is what the
+                        // entry that this run found for it is the code for.
+                        let proto: *const Proto = def.scope.entry.code();
                         let def: *const LambdaDef = Rc::as_ptr(def);
-                        let proto: *const Proto = Rc::as_ptr(code);
                         let callee_base = callee.add(1);
                         let meta = (*frame).meta;
 
                         if (*proto).fast_arity as usize == argc
-                            && (*proto).belongs_to(&(*def).body, &(*def).args)
                             && callee_base <= (*vm).stack_limit
                             && frame != (*vm).frame_limit
                             && (meta & DEPTH_MASK) as usize <= MAX_CALL_DEPTH

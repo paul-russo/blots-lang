@@ -886,7 +886,7 @@ impl FnCompiler {
             Some(args) if simple_params => u32::try_from(args.len()).unwrap_or(u32::MAX),
             _ => u32::MAX,
         };
-        let fast_arity = if self.self_refs.is_empty() && self.max_reg as usize <= FAST_FRAME_SLOTS {
+        let fast_arity = if self.max_reg as usize <= FAST_FRAME_SLOTS {
             simple_arity
         } else {
             u32::MAX

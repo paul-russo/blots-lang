@@ -5148,3 +5148,384 @@ mod unique_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod call_entry_tests {
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::{Heap, HeapValue};
+    use crate::intern::Symbol;
+    use crate::values::{Entry, LambdaDef, Value};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// A function that calls itself by its name once for every level it is given.
+    const COUNT: &str = "count = n => if n <= 0 then 0 else count(n - 1) + 1";
+
+    /// What a definition has for the code that a call of it runs.
+    #[derive(Debug, PartialEq)]
+    enum Entered {
+        /// Nothing that any run found out.
+        Nowhere,
+
+        /// The code that the function was compiled to.
+        Body,
+
+        /// The code in which the function calls itself directly.
+        Variant,
+    }
+
+    /// A program that is evaluated a statement at a time, each in a run of its own.
+    struct Session {
+        heap: Rc<RefCell<Heap>>,
+        bindings: Rc<Environment>,
+    }
+
+    impl Session {
+        fn new() -> Self {
+            Self {
+                heap: Rc::new(RefCell::new(Heap::new())),
+                bindings: Rc::new(Environment::new()),
+            }
+        }
+
+        /// A program that has the values of this one, and no variables yet.
+        fn elsewhere(&self) -> Self {
+            Self {
+                heap: Rc::clone(&self.heap),
+                bindings: Rc::new(Environment::new()),
+            }
+        }
+
+        /// Evaluate the statements of `code`, up to the value of the last one.
+        fn evaluate(&self, code: &str) -> Result<Value, RuntimeError> {
+            let statements = parse_program(code).expect("a program the fast parser reads");
+            let source: Rc<str> = code.into();
+
+            let mut result = Value::Null;
+            for statement in statements {
+                let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement
+                else {
+                    continue;
+                };
+                result = evaluate_ast(
+                    &expr,
+                    Rc::clone(&self.heap),
+                    Rc::clone(&self.bindings),
+                    0,
+                    Rc::clone(&source),
+                )?;
+            }
+
+            Ok(result)
+        }
+
+        /// What the statements of `code` come to, rendered: the value, or the error.
+        fn outcome(&self, code: &str) -> String {
+            match self.evaluate(code) {
+                Ok(value) => value.stringify_internal(&self.heap.borrow()),
+                Err(error) => error.message,
+            }
+        }
+
+        /// The value of variable `name`.
+        fn variable(&self, name: &str) -> Value {
+            self.bindings
+                .get(Symbol::intern(name))
+                .expect("a variable of the program")
+        }
+
+        /// Look at the definition of the function that variable `name` is bound to.
+        fn definition<T>(&self, name: &str, look: impl FnOnce(&LambdaDef) -> T) -> T {
+            let Value::Lambda(pointer) = self.variable(name) else {
+                panic!("{name} is not a function");
+            };
+
+            match self.heap.borrow().get(pointer.index()) {
+                Some(HeapValue::Lambda(def)) => look(def),
+                _ => panic!("{name} is not a function"),
+            }
+        }
+
+        /// Change the definition of the function that variable `name` is bound to where it
+        /// is, the way whoever holds the heap can between two runs.
+        fn redefine(&self, name: &str, change: impl FnOnce(&mut LambdaDef)) {
+            let Value::Lambda(pointer) = self.variable(name) else {
+                panic!("{name} is not a function");
+            };
+
+            match self.heap.borrow_mut().get_mut(pointer.index()) {
+                Some(HeapValue::Lambda(def)) => {
+                    change(Rc::get_mut(def).expect("a definition that only the heap holds"))
+                }
+                _ => panic!("{name} is not a function"),
+            }
+        }
+
+        /// The number of the run that found out what a call of the function runs that
+        /// variable `name` is bound to.
+        fn found_in(&self, name: &str) -> u64 {
+            self.definition(name, |def| def.scope.entry.run())
+        }
+
+        /// What a run found a call of the function to run that variable `name` is bound to.
+        fn entered(&self, name: &str) -> Entered {
+            self.definition(name, |def| {
+                let entry = &def.scope.entry;
+                let body = def.scope.code.get().map(Rc::as_ptr);
+
+                if entry.run() == Entry::NO_RUN {
+                    Entered::Nowhere
+                } else if body == Some(entry.code()) {
+                    Entered::Body
+                } else {
+                    Entered::Variant
+                }
+            })
+        }
+    }
+
+    #[test]
+    fn a_function_that_can_only_run_its_body_is_entered_there_from_the_start() {
+        let session = Session::new();
+
+        session.evaluate("inc = x => x + 1").unwrap();
+        assert_eq!(session.entered("inc"), Entered::Body);
+
+        assert_eq!(
+            session.outcome("map(range(3), i => inc(inc(i)))"),
+            "[2, 3, 4]"
+        );
+        assert_eq!(session.entered("inc"), Entered::Body);
+    }
+
+    #[test]
+    fn every_run_that_calls_a_function_finds_out_for_itself_what_the_call_runs() {
+        let session = Session::new();
+
+        session.evaluate("inc = x => x + 1").unwrap();
+        let made = session.found_in("inc");
+        assert_ne!(made, Entry::NO_RUN);
+
+        assert_eq!(session.outcome("inc(1)"), "2");
+        let called = session.found_in("inc");
+        assert!(called > made);
+
+        assert_eq!(session.outcome("2 + 2"), "4");
+        assert_eq!(session.found_in("inc"), called);
+
+        assert_eq!(session.outcome("inc(inc(1))"), "3");
+        assert!(session.found_in("inc") > called);
+    }
+
+    #[test]
+    fn a_function_that_calls_itself_by_name_is_entered_where_it_calls_itself_directly() {
+        let session = Session::new();
+
+        session.evaluate(COUNT).unwrap();
+        assert_eq!(session.entered("count"), Entered::Nowhere);
+
+        assert_eq!(session.outcome("count(5)"), "5");
+        assert_eq!(session.entered("count"), Entered::Variant);
+
+        assert_eq!(
+            session.outcome("twice = n => count(n) + count(n)\n[twice(7), twice(0), twice(30)]"),
+            "[14, 0, 60]"
+        );
+        assert_eq!(session.entered("count"), Entered::Variant);
+    }
+
+    #[test]
+    fn functions_that_call_each_other_by_name_are_entered_at_their_bodies() {
+        let session = Session::new();
+
+        session
+            .evaluate(
+                "even = n => if n == 0 then true else odd(n - 1)\nodd = n => if n == 0 then false else even(n - 1)",
+            )
+            .unwrap();
+        assert_eq!(session.entered("even"), Entered::Nowhere);
+        assert_eq!(session.entered("odd"), Entered::Nowhere);
+
+        assert_eq!(
+            session.outcome("[even(10), odd(10), even(7), odd(7)]"),
+            "[true, false, false, true]"
+        );
+        assert_eq!(session.entered("even"), Entered::Body);
+        assert_eq!(session.entered("odd"), Entered::Body);
+    }
+
+    #[test]
+    fn calls_that_enter_a_function_directly_are_counted_towards_the_depth_limit() {
+        let session = Session::new();
+
+        session
+            .evaluate(
+                "f = n => if n <= 0 then 0 else g(n - 1) + 1\ng = n => if n <= 0 then 0 else f(n - 1) + 1",
+            )
+            .unwrap();
+
+        assert_eq!(session.outcome("f(1000)"), "1000");
+        assert!(
+            session
+                .outcome("f(1001)")
+                .ends_with("maximum call depth of 1000 exceeded")
+        );
+        assert_eq!(session.outcome("f(1000)"), "1000");
+    }
+
+    #[test]
+    fn a_function_that_gets_another_name_is_found_out_about_again() {
+        let session = Session::new();
+
+        session.evaluate(COUNT).unwrap();
+        assert_eq!(session.outcome("count(5)"), "5");
+        assert_eq!(session.entered("count"), Entered::Variant);
+
+        // Under another name, the function no longer knows a call of `count` to be a call of
+        // itself.
+        session.evaluate("tally = count").unwrap();
+        assert_eq!(session.entered("tally"), Entered::Nowhere);
+
+        assert_eq!(session.outcome("tally(5)"), "5");
+        assert_eq!(session.entered("tally"), Entered::Body);
+        assert_eq!(session.outcome("count(6)"), "6");
+        assert_eq!(session.entered("count"), Entered::Body);
+    }
+
+    #[test]
+    fn a_function_that_gets_another_name_in_the_run_that_calls_it_is_found_out_about_again() {
+        let session = Session::new();
+
+        session.evaluate(COUNT).unwrap();
+        assert_eq!(
+            session.outcome(
+                "do { before = count(3); tally = count; return [before, tally(4), count(5)] }"
+            ),
+            "[3, 4, 5]"
+        );
+        assert_eq!(session.entered("count"), Entered::Body);
+
+        assert_eq!(
+            session.outcome(
+                "(fn => do { before = fn(3); count = fn; return [before, count(4), fn(5)] })(count)"
+            ),
+            "[3, 4, 5]"
+        );
+        assert_eq!(session.entered("count"), Entered::Variant);
+    }
+
+    #[test]
+    fn a_function_that_gets_a_name_while_it_runs_goes_on_under_the_name_it_was_called_by() {
+        let session = Session::new();
+
+        session
+            .evaluate("h = n => if n <= 0 then missing else do { k = h; return k(n - 1) + 1 }")
+            .unwrap();
+        assert_eq!(
+            session.outcome("h(2)"),
+            "in function \"h\": in function \"k\": in function \"k\": unknown identifier: missing"
+        );
+        assert_eq!(
+            session.outcome("h(1)"),
+            "in function \"k\": in function \"k\": unknown identifier: missing"
+        );
+    }
+
+    #[test]
+    fn an_error_is_put_down_to_the_name_that_the_function_has_by_then() {
+        let session = Session::new();
+
+        session
+            .evaluate("f = n => if n <= 0 then missing else f(n - 1) + 1")
+            .unwrap();
+        assert_eq!(
+            session.outcome("f(1)"),
+            "in function \"f\": in function \"f\": unknown identifier: missing"
+        );
+
+        session.evaluate("g = f").unwrap();
+        assert_eq!(
+            session.outcome("g(1)"),
+            "in function \"g\": in function \"g\": unknown identifier: missing"
+        );
+        assert_eq!(
+            session.outcome("f(1)"),
+            "in function \"g\": in function \"g\": unknown identifier: missing"
+        );
+    }
+
+    #[test]
+    fn a_function_that_its_holder_renames_between_runs_is_found_out_about_again() {
+        let session = Session::new();
+
+        session.evaluate(COUNT).unwrap();
+        assert_eq!(session.outcome("count(3)"), "3");
+        assert_eq!(session.entered("count"), Entered::Variant);
+
+        // Where the function is `tally` and `count` is another function, it calls that one.
+        let other = session.elsewhere();
+        other.evaluate("count = n => 100").unwrap();
+        other
+            .bindings
+            .insert(Symbol::intern("tally"), session.variable("count"));
+        session.redefine("count", |def| def.name = Some(Symbol::intern("tally")));
+
+        assert_eq!(other.outcome("tally(3)"), "101");
+        assert_eq!(other.entered("tally"), Entered::Body);
+        assert_eq!(
+            other.outcome("[tally(0), tally(1), tally(9)]"),
+            "[0, 101, 101]"
+        );
+    }
+
+    #[test]
+    fn a_function_that_its_holder_names_through_the_definition_is_entered_nowhere_yet() {
+        let session = Session::new();
+
+        session.evaluate(COUNT).unwrap();
+        assert_eq!(session.outcome("count(3)"), "3");
+        assert_eq!(session.entered("count"), Entered::Variant);
+
+        let value = session.variable("count");
+        session.redefine("count", |def| def.set_name(Symbol::intern("tally"), value));
+        assert_eq!(session.entered("count"), Entered::Nowhere);
+
+        assert_eq!(session.outcome("count(3)"), "3");
+        assert_eq!(session.entered("count"), Entered::Body);
+    }
+
+    #[test]
+    fn a_function_that_its_holder_gives_another_body_between_runs_runs_that_body() {
+        let session = Session::new();
+
+        session.evaluate("f = x => x + 1\ng = x => x * 10").unwrap();
+        assert_eq!(session.outcome("f(1)"), "2");
+        assert_eq!(session.entered("f"), Entered::Body);
+
+        let (args, body) =
+            session.definition("g", |def| (Rc::clone(&def.args), Rc::clone(&def.body)));
+        session.redefine("f", |def| {
+            def.args = args;
+            def.body = body;
+        });
+
+        assert_eq!(session.outcome("f(1)"), "10");
+        assert_eq!(session.outcome("[f(2), f(f(2))]"), "[20, 200]");
+        assert_eq!(session.outcome("map([1, 2], f)"), "[10, 20]");
+    }
+
+    #[test]
+    fn a_copy_of_a_definition_is_entered_nowhere_yet() {
+        let session = Session::new();
+
+        session.evaluate("inc = x => x + 1").unwrap();
+        assert_eq!(session.entered("inc"), Entered::Body);
+
+        let copy = session.definition("inc", LambdaDef::clone);
+        assert_eq!(copy.scope.entry.run(), Entry::NO_RUN);
+        assert!(copy.scope.entry.code().is_null());
+    }
+}

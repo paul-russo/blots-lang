@@ -514,7 +514,14 @@ thread_local! {
     /// takes less time to run than a value stack takes to allocate and clear. What the stacks
     /// still hold is of no consequence: a register is always written before it is read.
     static SPARE: Cell<Option<Stacks>> = const { Cell::new(None) };
+
+    /// The number of the run that started last on this thread (see [`Vm::run_number`]).
+    static RUNS: Cell<u64> = const { Cell::new(0) };
 }
+
+/// The [`Vm::run_number`] of a VM that has not run anything yet: not the number of any run,
+/// and not what a definition that no run looked at has for one either.
+const NOT_RUNNING: u64 = u64::MAX;
 
 pub struct Vm {
     heap: Rc<RefCell<Heap>>,
@@ -551,6 +558,13 @@ pub struct Vm {
     /// Code compiled for definitions that carry the code of another definition.
     orphans: Vec<Rc<Proto>>,
 
+    /// The number of the run in progress, or of the last one. A run lasts from where code
+    /// outside of the VM calls into it to where the VM returns there, and no two runs on a
+    /// thread have the same number. So what a definition holds for the run in progress (see
+    /// [`crate::values::Entry`]) was found out during it, and nothing but this VM could
+    /// have changed the definition since.
+    run_number: u64,
+
     #[cfg(not(target_arch = "wasm32"))]
     profiling: bool,
 
@@ -586,6 +600,7 @@ impl Vm {
             chunk_source: None,
             retired: Vec::new(),
             orphans: Vec::new(),
+            run_number: NOT_RUNNING,
             #[cfg(not(target_arch = "wasm32"))]
             profiling: crate::functions::is_profiling_enabled(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -753,6 +768,15 @@ impl Vm {
     /// Run the innermost frame, and every frame it calls, until it returns.
     fn run(&mut self) -> Result<Value, RuntimeError> {
         let builders = self.builders.len();
+
+        // The frame to run is the only one when the caller is not this VM: a run starts.
+        if self.frame_count() == 1 {
+            self.run_number = RUNS.with(|runs| {
+                let number = runs.get() + 1;
+                runs.set(number);
+                number
+            });
+        }
 
         // SAFETY: the innermost frame was set up by `run_chunk` or `call_function`: its code
         // is alive, its registers lie within the value stack and its parameters are bound.
@@ -1157,6 +1181,18 @@ impl Vm {
 
                 let proto = self.select_variant(generic, lambda, callee);
 
+                // The next call of the function through its value in this run finds the code
+                // that was selected with the definition, as long as the definition keeps the
+                // code alive.
+                let owned = lambda
+                    .scope
+                    .code
+                    .get()
+                    .is_some_and(|code| ptr::eq(Rc::as_ptr(code), generic));
+                if owned {
+                    lambda.scope.entry.set(proto, self.run_number);
+                }
+
                 // SAFETY: as above.
                 let max_stack = unsafe { (*proto).max_stack };
                 self.ensure_stack(base + max_stack.max(argc));
@@ -1535,9 +1571,9 @@ impl Vm {
 
         // When nothing was bound, an empty scope spares every call the captures layer.
         let scope = if any_bound {
-            CapturedScope::compiled(Rc::clone(&template.captures), values, code)
+            CapturedScope::compiled(Rc::clone(&template.captures), values, code, self.run_number)
         } else {
-            CapturedScope::unbound(code)
+            CapturedScope::unbound(code, self.run_number)
         };
 
         let lambda = LambdaDef {
@@ -1578,7 +1614,9 @@ impl Vm {
             }
         }
 
-        Rc::make_mut(def).name = Some(name);
+        let def = Rc::make_mut(def);
+        def.name = Some(name);
+        def.scope.renamed();
     }
 
     #[inline(never)]
