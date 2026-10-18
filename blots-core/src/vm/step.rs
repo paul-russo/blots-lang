@@ -327,13 +327,32 @@ impl Vm {
                 let argc = self.place_list_args(register_index(a));
                 self.call_slow(register_index(a), argc, c)?;
             }
-            Op::CallSelf | Op::TailSelf => {
+            Op::CallSelf => {
                 // The function calls itself through its own name: the value the frame was
-                // called through is the callee. A tail call that cannot replace the frame is
-                // an ordinary call, whose result the following instruction returns.
+                // called through is the callee.
                 let callee = self.top().this_value();
                 self.set_reg(a, callee);
                 self.call_slow(register_index(a), instr.x as usize, c)?;
+            }
+            Op::TailSelf => {
+                // A tail call that cannot replace the frame is an ordinary call, whose result
+                // the following instruction returns. Of its arguments, only those that were
+                // waiting to be moved into their parameters are where a call wants them; the
+                // parameters themselves hold the others.
+                let func = register_index(c);
+                let first = register_index(a) - func - 1;
+                let waiting = first..first + instr.x as usize;
+                let frame = *self.top();
+                let argc = frame.proto().params.len();
+
+                for index in (0..argc).filter(|index| !waiting.contains(index)) {
+                    // SAFETY: the parameters and the argument registers of the call lie
+                    // within the frame.
+                    unsafe { *frame.base.add(func + 1 + index) = *frame.base.add(index) };
+                }
+
+                self.set_reg(c, frame.this_value());
+                self.call_slow(func, argc, c)?;
             }
             Op::Return => {
                 let value = self.reg(a);

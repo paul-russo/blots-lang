@@ -450,15 +450,26 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     }
                 }
                 Op::TailSelf => {
-                    let args = reg!(instr.a).add(1);
                     let meta = (*frame).meta;
 
                     if meta as u32 <= MAX_CALL_DEPTH as u32 {
+                        let count = instr.x as usize;
+
+                        // The arguments that were not computed right into their parameters
+                        // are as far from them as the first argument register of a call is
+                        // from the first parameter.
+                        if count != 0 {
+                            let args = reg!(instr.a);
+                            let window = reg!(instr.c).add(1);
+                            let params = base.byte_offset(args.byte_offset_from(window));
+
+                            for offset in 0..count {
+                                copy_value(params.add(offset), args.add(offset));
+                            }
+                        }
+
                         // The frame starts over with the new arguments, one level deeper, and
                         // remembers where it did so for error reports.
-                        for offset in 0..instr.x as usize {
-                            copy_value(base.add(offset), args.add(offset));
-                        }
                         (*frame).meta = meta + 1 + (1 << TAIL_SHIFT);
                         (*frame).tail_ip = ip.add(1);
                         ip = ip.add(1).sub(instr.b as usize);

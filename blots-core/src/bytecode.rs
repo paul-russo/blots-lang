@@ -162,10 +162,13 @@ pub(crate) enum Op {
     /// without resolving anything. `R[a]` is scratch space for the callee, and `b` is the
     /// distance from the start of the code to the word after this instruction.
     CallSelf,
-    /// The tail-call form of `CallSelf` (with `c == a`), always followed by `Return a`: the
-    /// frame restarts itself with the new arguments (one call level deeper) instead of
-    /// calling. Only emitted where no variable of the frame is visible, so the frame being
-    /// replaced cannot be observed.
+    /// The tail-call form of `CallSelf`, always followed by `Return c`: the frame restarts
+    /// itself with the new arguments (one call level deeper) instead of calling. Only emitted
+    /// where no variable of the frame is visible, so the frame being replaced cannot be
+    /// observed. The arguments are in the parameter registers already, except for a run of
+    /// `x` of them: these are in `R[a]` and the registers after it, which is where a call
+    /// whose scratch space is `R[c]` takes the same arguments from, and still have to be
+    /// moved. `b` is as for `CallSelf`.
     TailSelf,
     /// `return R[a]`
     Return,

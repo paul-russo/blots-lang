@@ -59,6 +59,11 @@ const CALLBACK_DEPTH: i32 = 3;
 /// The most arguments a direct self call can pass: its argument count is an 8-bit operand.
 const MAX_SELF_CALL_ARGS: usize = u8::MAX as usize;
 
+/// A tail call of a function to itself tracks which parameters each of its arguments reads,
+/// for this many of the function's first parameters. A later parameter is taken to be read by
+/// every argument.
+const TRACKED_PARAMS: usize = u64::BITS as usize;
+
 /// A call with at most this many arguments evaluates them into consecutive registers; one
 /// with more gathers them in a list, so that the size of a call is not bounded by the number
 /// of registers a function has.
@@ -1764,19 +1769,17 @@ impl FnCompiler {
         if candidate.is_some() && candidate == self.self_target {
             // The frame can only be replaced when nothing could tell: a callee resolves the
             // names it does not bind through its caller's variables.
-            let replace = tail && !self.has_visible_vars();
-            let func_reg = if replace { dst } else { self.alloc()? };
+            if tail && !self.has_visible_vars() {
+                return self.tail_self(span, args, dst);
+            }
 
+            let func_reg = self.alloc()?;
             for arg in args {
                 let reg = self.alloc()?;
                 self.expr_into(arg, reg)?;
             }
 
-            // The instruction finds the start of the code by its own position. A variant too
-            // long for that is rejected as a whole (see `compile_function`), so the truncation
-            // never reaches the VM.
-            let op = if replace { Op::TailSelf } else { Op::CallSelf };
-            let mut instr = Instr::abc(op, func_reg, (self.here() + 1) as u16, dst);
+            let mut instr = Instr::abc(Op::CallSelf, func_reg, self.restart_distance(), dst);
             instr.x = args.len() as u8;
             self.emit_spanned(instr, span);
             self.free_reg = mark;
@@ -1828,6 +1831,135 @@ impl FnCompiler {
         self.free_reg = mark;
 
         Ok(())
+    }
+
+    /// What a self call takes for the way back to the start of the code: the distance from
+    /// there to the word after the call, which is the next one to be emitted. A variant too
+    /// long for the operand is rejected as a whole (see `compile_function`), so the truncation
+    /// never reaches the VM.
+    fn restart_distance(&self) -> u16 {
+        (self.here() + 1) as u16
+    }
+
+    /// Compile a call of the function to itself that replaces the frame: the arguments become
+    /// the parameters and the code starts over. `dst` is the register an ordinary call would
+    /// leave its result in, and the registers after it are where such a call takes its
+    /// arguments from.
+    ///
+    /// An argument is computed right into its parameter when nothing that is evaluated after
+    /// it can see that parameter, and one that passes its own parameter on takes no code at
+    /// all. The others wait where an ordinary call wants them, as does whatever lies between
+    /// the first and the last of them, and the instruction moves that run into place.
+    fn tail_self(&mut self, span: Span, args: &[SpannedExpr], dst: u16) -> CResult<()> {
+        let mark = self.free_reg;
+        debug_assert_eq!(mark, dst + 1);
+
+        for _ in args {
+            self.alloc()?;
+        }
+
+        // Going backwards, `observed` holds the parameters that the arguments after the
+        // current one can see.
+        let mut observed = 0;
+        let mut waiting = 0..0;
+
+        for (index, arg) in args.iter().enumerate().rev() {
+            let passed_on = self.frame_reg(arg) == Some(index as u16);
+            let seen = index >= TRACKED_PARAMS || observed & (1 << index) != 0;
+
+            if seen && !passed_on {
+                if waiting.is_empty() {
+                    waiting.end = index + 1;
+                }
+                waiting.start = index;
+            }
+
+            observed |= self.observed_params(arg);
+        }
+
+        for (index, arg) in args.iter().enumerate() {
+            let reg = if waiting.contains(&index) {
+                mark + index as u16
+            } else {
+                index as u16
+            };
+            self.expr_into(arg, reg)?;
+        }
+
+        let first = mark + waiting.start as u16;
+        let mut instr = Instr::abc(Op::TailSelf, first, self.restart_distance(), dst);
+        instr.x = waiting.len() as u8;
+        self.emit_spanned(instr, span);
+        self.free_reg = mark;
+
+        Ok(())
+    }
+
+    /// The register that a variable reference in the body of a function, outside of any
+    /// inlined callback, reads its value from: `None` for anything that is not a reference to
+    /// a variable that is known to be bound.
+    fn frame_reg(&self, expr: &SpannedExpr) -> Option<u16> {
+        let name = match &expr.node {
+            Expr::Identifier(name) if !is_constant_name(*name) => *name,
+            Expr::ParamSlot { index, .. } if (*index as usize) < self.params.len() => {
+                return Some(*index);
+            }
+            Expr::ParamSlot { name, .. } => *name,
+            _ => return None,
+        };
+
+        match self.resolve(name) {
+            Resolved::Register(reg) => Some(reg),
+            Resolved::Global(_) | Resolved::Dynamic => None,
+        }
+    }
+
+    /// The parameters of the function that evaluating `expr` can see, as a bit set over the
+    /// registers of the first [`TRACKED_PARAMS`] of them. This is for a point where no other
+    /// variable of the function is visible, so a name that is looked up when the code runs is
+    /// not that of a parameter. An expression that may run code from outside of the function
+    /// sees every parameter, as that code can look each of them up by name.
+    fn observed_params(&self, expr: &SpannedExpr) -> u64 {
+        match &expr.node {
+            Expr::Number(_) | Expr::Bool(_) | Expr::Null | Expr::String(_) | Expr::BuiltIn(_) => 0,
+            Expr::Identifier(_) | Expr::ParamSlot { .. } => match self.frame_reg(expr) {
+                Some(reg) if (reg as usize) < TRACKED_PARAMS => 1 << reg,
+                _ => 0,
+            },
+            Expr::CaptureSlot { name, .. } if !self.params.contains(name) => 0,
+            Expr::UnaryOp { expr: operand, .. }
+            | Expr::PostfixOp { expr: operand, .. }
+            | Expr::DotAccess { expr: operand, .. }
+            | Expr::Spread(operand) => self.observed_params(operand),
+            Expr::BinaryOp { op, left, right }
+                if !matches!(op, BinaryOp::Via | BinaryOp::Into | BinaryOp::Where) =>
+            {
+                self.observed_params(left) | self.observed_params(right)
+            }
+            Expr::Access {
+                expr: object,
+                index,
+            } => self.observed_params(object) | self.observed_params(index),
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                self.observed_params(condition)
+                    | self.observed_params(then_expr)
+                    | self.observed_params(else_expr)
+            }
+            Expr::List(items) => items
+                .iter()
+                .fold(0, |seen, item| seen | self.observed_params(&item.node)),
+            Expr::Call { func, args } => match &func.node {
+                Expr::BuiltIn(built_in) if !built_in.takes_callback() => args
+                    .iter()
+                    .fold(0, |seen, arg| seen | self.observed_params(arg)),
+                _ => u64::MAX,
+            },
+            _ => u64::MAX,
+        }
     }
 
     /// Compile `map`/`filter`/`reduce`/`every`/`some` over a literal lambda as an inline loop.

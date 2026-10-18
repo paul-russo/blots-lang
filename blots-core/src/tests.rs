@@ -3056,3 +3056,151 @@ mod large_program_tests {
         );
     }
 }
+
+// A function that ends in a call to itself starts over in the frame it has, and computes the
+// arguments of that call right into its parameters where it can. Every argument still has to
+// see the parameters as they were when the call began.
+#[cfg(test)]
+mod tail_call_tests {
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code` and render the value of the last one.
+    fn evaluate(code: &str) -> Result<String, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+            result = evaluate_ast(
+                &expr,
+                Rc::clone(&heap),
+                Rc::clone(&bindings),
+                0,
+                Rc::clone(&source),
+            )?;
+        }
+
+        Ok(result.stringify_internal(&heap.borrow()))
+    }
+
+    fn assert_evaluates_to(code: &str, expected: &str) {
+        assert_eq!(evaluate(code).unwrap(), expected, "{code}");
+    }
+
+    #[test]
+    fn arguments_read_the_parameters_of_the_call_they_are_in() {
+        for (call, expected) in [
+            // Parameters trade places, in pairs and in a circle.
+            ("f(n - 1, b, a, c)", "[2, 1, 3]"),
+            ("f(n - 1, c, a, b)", "[1, 2, 3]"),
+            ("f(n - 1, b, c, a)", "[1, 2, 3]"),
+            ("f(n - 1, c, b, a)", "[3, 2, 1]"),
+            // An argument reads a parameter that an earlier argument replaces.
+            ("f(n - 1, a + 1, a * 10, c)", "[4, 30, 3]"),
+            ("f(n - 1, a + 1, b, a + c)", "[4, 2, 9]"),
+            ("f(n - 1, b, a + b, c)", "[5, 8, 3]"),
+            ("f(n - 1, a + b, a, c)", "[7, 4, 3]"),
+            ("f(n - 1, a + b + c, a - b, b - c)", "[11, -3, 7]"),
+            ("f(n - 1, a, a, a)", "[1, 1, 1]"),
+            ("f(n - 1, c, c, c)", "[3, 3, 3]"),
+            // An argument reads its own parameter more than once.
+            ("f(n - 1, (a + 1) * a, b, c)", "[42, 2, 3]"),
+            ("f(n - 1, a, [b, b + 1][b - b], c * c - c)", "[1, 2, 870]"),
+            (
+                "f(n - 1, if a > b then a - b else b - a, max(a, b), c)",
+                "[1, 2, 3]",
+            ),
+            // The count itself moves on before the others have read it.
+            ("f(n - 1, a + n, b * n, c - n)", "[7, 12, -3]"),
+        ] {
+            assert_evaluates_to(
+                &format!("f = (n, a, b, c) => if n == 0 then [a, b, c] else {call}\nf(3, 1, 2, 3)"),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn code_that_runs_for_an_argument_reads_the_parameters_of_the_call() {
+        for (argument, expected) in [
+            // A callee looks the caller's parameter up by name.
+            ("peek()", "[3, 2]"),
+            ("peek() + peek()", "[3, 4]"),
+            ("twice(1)", "[3, 5]"),
+            // A callback and a closure read the parameter where they are written.
+            ("sum(map([1, 2], x => x + a))", "[3, 7]"),
+            ("reduce([1, 2], (total, x) => total + x * a, b)", "[3, 9]"),
+            ("(() => a)()", "[3, 2]"),
+            ("a into (x => x + a)", "[3, 4]"),
+            ("sum([1, 2] via (x => x * a))", "[3, 6]"),
+            ("do { twice_a = a + a; return twice_a + 1 }", "[3, 5]"),
+        ] {
+            assert_evaluates_to(
+                &format!(
+                    "peek = () => a\ntwice = x => x + a * 2\nf = (n, a, b) => if n == 0 then [a, b] else f(n - 1, a + 1, {argument})\nf(3, 0, 0)"
+                ),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn every_parameter_of_a_wide_function_is_replaced_at_once() {
+        for count in [1, 2, 3, 63, 64, 65, 66, 70, 130, 254] {
+            // Each parameter takes on the sum of itself and its neighbour, and the last one
+            // that of itself and the first.
+            let turns = 3;
+            let params = (0..count).map(|i| format!("p{i}")).collect::<Vec<_>>();
+            let sums = (0..count)
+                .map(|i| format!("p{i} + p{}", (i + 1) % count))
+                .collect::<Vec<_>>();
+            let start = (0..count).map(|i| i.to_string()).collect::<Vec<_>>();
+
+            let mut values = (0..count).collect::<Vec<_>>();
+            for _ in 0..turns {
+                values = (0..count)
+                    .map(|i| values[i] + values[(i + 1) % count])
+                    .collect();
+            }
+
+            let expected = values.iter().map(usize::to_string).collect::<Vec<_>>();
+            assert_evaluates_to(
+                &format!(
+                    "f = (n, {params}) => if n == 0 then [{params}] else f(n - 1, {sums})\nf({turns}, {start})",
+                    params = params.join(", "),
+                    sums = sums.join(", "),
+                    start = start.join(", "),
+                ),
+                &format!("[{}]", expected.join(", ")),
+            );
+        }
+    }
+
+    #[test]
+    fn a_call_that_is_too_deep_fails_with_the_arguments_in_place() {
+        // The call that goes beyond the depth limit is an ordinary one, whichever way its
+        // arguments were computed.
+        for call in ["f(n - 1, a + 1, b)", "f(n - 1, b, a)", "f(n - 1, a + b, a)"] {
+            let definition = format!("f = (n, a, b) => if n == 0 then [a, b] else {call}");
+
+            assert!(evaluate(&format!("{definition}\nf(999, 0, 1)")).is_ok());
+
+            let error = evaluate(&format!("{definition}\nf(1001, 0, 1)"))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("maximum call depth"), "{error}");
+        }
+    }
+}
