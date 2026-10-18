@@ -5529,3 +5529,393 @@ mod call_entry_tests {
         assert!(copy.scope.entry.code().is_null());
     }
 }
+
+#[cfg(test)]
+mod shared_string_tests {
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::{Heap, HeapValue};
+    use crate::text::Text;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// A program that is evaluated a few statements at a time.
+    struct Session {
+        heap: Rc<RefCell<Heap>>,
+        bindings: Rc<Environment>,
+    }
+
+    impl Session {
+        fn new() -> Self {
+            Self {
+                heap: Rc::new(RefCell::new(Heap::new())),
+                bindings: Rc::new(Environment::new()),
+            }
+        }
+
+        /// Evaluate the statements of `code`, up to the value of the last one.
+        fn evaluate(&self, code: &str) -> Result<Value, RuntimeError> {
+            let statements = parse_program(code).expect("a program the fast parser reads");
+            let source: Rc<str> = code.into();
+
+            let mut result = Value::Null;
+            for statement in statements {
+                let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement
+                else {
+                    continue;
+                };
+                result = evaluate_ast(
+                    &expr,
+                    Rc::clone(&self.heap),
+                    Rc::clone(&self.bindings),
+                    0,
+                    Rc::clone(&source),
+                )?;
+            }
+
+            Ok(result)
+        }
+
+        /// What the statements of `code` come to, rendered: the value, or the error.
+        fn outcome(&self, code: &str) -> String {
+            match self.evaluate(code) {
+                Ok(value) => value.stringify_internal(&self.heap.borrow()),
+                Err(error) => error.message,
+            }
+        }
+
+        /// The text of the string that `code` comes to.
+        fn text(&self, code: &str) -> Text {
+            let value = self.evaluate(code).unwrap();
+
+            value.as_text(&self.heap.borrow()).unwrap().clone()
+        }
+
+        /// Drop everything that the variables of the program do not lead to.
+        fn compact(&self) {
+            self.heap.borrow_mut().compact(&self.bindings, &mut []);
+        }
+
+        /// The number of buffers that the strings of at least `len` bytes in the heap read
+        /// their characters from.
+        fn buffers(&self, len: usize) -> usize {
+            let heap = self.heap.borrow();
+            let mut distinct: Vec<&Text> = Vec::new();
+
+            for slot in 0..heap.len() {
+                if let Some(HeapValue::String(text)) = heap.get(slot)
+                    && text.len() >= len
+                    && !distinct.iter().any(|known| known.shares_buffer_with(text))
+                {
+                    distinct.push(text);
+                }
+            }
+
+            distinct.len()
+        }
+
+        /// The number of strings in the heap that read their characters where `text` does.
+        fn sharing(&self, text: &Text) -> usize {
+            let heap = self.heap.borrow();
+
+            (0..heap.len())
+                .filter(|slot| match heap.get(*slot) {
+                    Some(HeapValue::String(other)) => other.shares_buffer_with(text),
+                    _ => false,
+                })
+                .count()
+        }
+    }
+
+    fn outcome(code: &str) -> String {
+        Session::new().outcome(code)
+    }
+
+    /// The letters of the alphabet `times` times over, as a program spells them.
+    fn letters(times: usize) -> String {
+        format!("\"{}\"", "abcdefghijklmnopqrstuvwxyz".repeat(times))
+    }
+
+    #[test]
+    fn strings_that_are_added_hold_the_characters_of_both() {
+        for (code, expected) in [
+            ("\"ab\" + \"cd\"", "abcd"),
+            ("\"\" + \"cd\"", "cd"),
+            ("\"ab\" + \"\"", "ab"),
+            ("\"\" + \"\"", ""),
+            ("\"é\" + \"日本\" + \"😀\"", "é日本😀"),
+            ("s = \"ab\"\ns + s", "abab"),
+            ("s = \"ab\"\ns + s + s", "ababab"),
+            ("[\"a\", \"b\"] + \"c\"", "[ac, bc]"),
+            ("\"c\" + [\"a\", \"b\"]", "[ca, cb]"),
+            ("[\"a\", \"b\"] + [\"c\", \"\"]", "[ac, b]"),
+            ("[\"\", \"\"] + \"\"", "[, ]"),
+            ("len(\"abcdefghijklmnopqrstuv\" + \"w\")", "23"),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+
+        for (code, expected) in [
+            ("\"a\" + 1", "expected a string, but got a number"),
+            ("1 + \"a\"", "expected a number, but got a string"),
+            ("\"a\" + null", "expected a string, but got a null"),
+            ("\"\" + 1", "expected a string, but got a number"),
+            ("\"a\" + [1]", "can't add string and number"),
+            ("[1] + \"a\"", "can't add number and string"),
+            ("[\"a\", 1] + [\"b\", \"c\"]", "can't add number and string"),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_string_that_nothing_is_added_to_is_the_string_that_results() {
+        let session = Session::new();
+        session
+            .evaluate(&format!("long = {}\nshort = \"ab\"", letters(3)))
+            .unwrap();
+
+        let slots = session.heap.borrow().len();
+        assert_eq!(session.outcome("long + \"\" == long"), "true");
+        assert_eq!(session.outcome("len(\"\" + long + \"\")"), "78");
+        assert_eq!(session.outcome("short + \"\""), "ab");
+
+        // Only the empty strings that the program spells out were made.
+        assert_eq!(session.heap.borrow().len(), slots + 4);
+    }
+
+    #[test]
+    fn strings_that_follow_the_same_string_do_not_show_up_in_each_other() {
+        let session = Session::new();
+
+        // A string that keeps being added to has room for more behind it, so the first
+        // string that follows it is written there. Every other one is a copy.
+        session
+            .evaluate(&format!(
+                "base = reduce(range(8), (acc, i) => acc + to_string(i), {})\n\
+                 a = base + \"A\"\n\
+                 b = base + \"B\"\n\
+                 c = a + \"C\"\n\
+                 d = a + \"D\"\n\
+                 e = c + \"E\"\n\
+                 f = a + \"F\" + \"G\"\n\
+                 g = base + base\n\
+                 h = e + e",
+                letters(1)
+            ))
+            .unwrap();
+
+        let base = "abcdefghijklmnopqrstuvwxyz01234567";
+        assert_eq!(
+            session.outcome("[base, a, b, c, d, e, f]"),
+            format!("[{base}, {base}A, {base}B, {base}AC, {base}AD, {base}ACE, {base}AFG]")
+        );
+        assert_eq!(session.outcome("g"), format!("{base}{base}"));
+        assert_eq!(session.outcome("h"), format!("{base}ACE{base}ACE"));
+        assert!(session.text("a").shares_buffer_with(&session.text("base")));
+        assert!(!session.text("b").shares_buffer_with(&session.text("base")));
+    }
+
+    #[test]
+    fn every_step_of_a_fold_keeps_the_string_it_made() {
+        assert_eq!(
+            outcome(
+                "reduce(range(5), (state, i) => {now: state.now + to_string(i), before: [...state.before, state.now]}, {now: \"\", before: []}).before"
+            ),
+            "[, 0, 01, 012, 0123]"
+        );
+
+        let long = letters(2);
+        let text = "abcdefghijklmnopqrstuvwxyz".repeat(2);
+        assert_eq!(
+            outcome(&format!(
+                "reduce(range(4), (state, i) => {{now: state.now + to_string(i), before: [...state.before, state.now]}}, {{now: {long}, before: []}}).before"
+            )),
+            format!("[{text}, {text}0, {text}01, {text}012]")
+        );
+        assert_eq!(
+            outcome(&format!(
+                "reduce(range(4), (state, i) => {{now: tail(state.now) + to_string(i), before: [...state.before, state.now]}}, {{now: {long}, before: []}}).before"
+            )),
+            format!(
+                "[{}, {}0, {}01, {}012]",
+                text,
+                &text[1..],
+                &text[2..],
+                &text[3..]
+            )
+        );
+        assert_eq!(
+            outcome(&format!("map(range(3), i => {long} + to_string(i))")),
+            format!("[{text}0, {text}1, {text}2]")
+        );
+    }
+
+    #[test]
+    fn a_string_that_grows_in_a_fold_is_not_copied_at_every_step() {
+        for (code, len, start, end) in [
+            (
+                "reduce(range(3000), (acc, i) => acc + \"ab\", \"\")",
+                6000,
+                "abab",
+                "abab",
+            ),
+            (
+                "reduce(range(3000), (acc, i) => acc + to_string(i % 10), \"\")",
+                3000,
+                "0123",
+                "6789",
+            ),
+            (
+                "reduce(range(3000), (acc, i) => acc + \"a\" + \"b\", \"\")",
+                6000,
+                "abab",
+                "abab",
+            ),
+            (
+                "reduce(range(3000), (acc, i) => if i % 2 == 0 then acc + \"xy\" else acc, \"\")",
+                3000,
+                "xyxy",
+                "xyxy",
+            ),
+            (
+                "grow = (n, acc) => if n == 0 then acc else grow(n - 1, acc + \"ab\")\ngrow(900, \"\")",
+                1800,
+                "abab",
+                "abab",
+            ),
+            (
+                "reduce(range(3000), (acc, i) => acc + \"é\", \"\")",
+                6000,
+                "éé",
+                "éé",
+            ),
+        ] {
+            let session = Session::new();
+            let text = session.text(code);
+
+            assert_eq!(text.len(), len, "{code}");
+            assert!(text.starts_with(start), "{code}");
+            assert!(text.ends_with(end), "{code}");
+
+            // A buffer for every time that the string outgrows the one before, which is
+            // twice as large every time, rather than one for each of the steps.
+            let buffers = session.buffers(30);
+            assert!(buffers <= 12, "{code}: {buffers} buffers");
+
+            let sharing = session.sharing(&text);
+            assert!(
+                sharing > len / 8,
+                "{code}: {sharing} strings share the last buffer"
+            );
+        }
+    }
+
+    #[test]
+    fn a_string_that_is_added_to_once_takes_the_room_of_its_characters() {
+        let session = Session::new();
+        let text = session.text(&format!("{} + \"!\"", letters(2)));
+
+        assert_eq!(text.len(), 53);
+        assert_eq!(session.sharing(&text), 1);
+        // Its share of the buffer is all of it: the characters and what a buffer starts with.
+        assert!(
+            session.heap.borrow().approx_bytes() < 400,
+            "{} bytes",
+            session.heap.borrow().approx_bytes()
+        );
+    }
+
+    #[test]
+    fn strings_that_share_their_characters_survive_compaction() {
+        let session = Session::new();
+        let alphabet = "abcdefghijklmnopqrstuvwxyz";
+
+        session
+            .evaluate(&format!(
+                "grown = reduce(range(200), (acc, i) => acc + to_string(i % 10), {})\n\
+                 part = slice(grown, 100, 160)\n\
+                 more = part + \"x\"\n\
+                 rest = tail(part)\n\
+                 words = split(reduce(range(50), (acc, i) => acc + \"word number \" + to_string(i) + \" of fifty,\", \"\"), \",\")\n\
+                 kept = (whole => [slice(whole, 5000, 5040), slice(whole, 5010, 5060) + \"!\"])(reduce(range(10000), (acc, i) => acc + to_string(i % 10), \"\"))",
+                letters(1)
+            ))
+            .unwrap();
+
+        let digits = "0123456789";
+        let grown = format!("{alphabet}{}", digits.repeat(20));
+        let rendered = |session: &Session| {
+            session
+                .outcome("[part, more, rest, kept, len(grown), grown[225], len(words), words[49]]")
+        };
+        let expected = format!(
+            "[{}, {}x, {}, [{}, {}!], 226, 9, 51, word number 49 of fifty]",
+            &grown[100..160],
+            &grown[100..160],
+            &grown[101..160],
+            digits.repeat(4),
+            digits.repeat(5),
+        );
+        assert_eq!(rendered(&session), expected);
+
+        let slots = session.heap.borrow().len();
+        session.compact();
+        assert!(session.heap.borrow().len() < slots);
+        assert_eq!(rendered(&session), expected);
+
+        // The strings can be followed and taken apart like before.
+        session
+            .evaluate(
+                "again = more + \"y\"\n\
+                 further = grown + \"!\"\n\
+                 inner = kept[1] + \"?\"",
+            )
+            .unwrap();
+        session.compact();
+
+        assert_eq!(rendered(&session), expected);
+        assert_eq!(
+            session.outcome("[again, len(further), further[226], grown[226], inner, tail(rest)]"),
+            format!(
+                "[{}xy, 227, !, null, {}!?, {}]",
+                &grown[100..160],
+                digits.repeat(5),
+                &grown[102..160]
+            )
+        );
+    }
+
+    #[test]
+    fn a_copy_of_a_heap_keeps_its_strings_when_the_other_adds_to_them() {
+        let session = Session::new();
+        session
+            .evaluate(&format!(
+                "grown = reduce(range(8), (acc, i) => acc + to_string(i), {})\npart = tail(grown)",
+                letters(1)
+            ))
+            .unwrap();
+
+        let copy = Session {
+            heap: Rc::new(RefCell::new(session.heap.borrow().clone())),
+            bindings: Rc::clone(&session.bindings),
+        };
+
+        let grown = "abcdefghijklmnopqrstuvwxyz01234567";
+        assert_eq!(copy.outcome("grown + \"A\""), format!("{grown}A"));
+        assert_eq!(session.outcome("grown + \"B\""), format!("{grown}B"));
+        assert_eq!(copy.outcome("part + \"C\""), format!("{}C", &grown[1..]));
+        assert_eq!(session.outcome("part + \"D\""), format!("{}D", &grown[1..]));
+        assert_eq!(
+            copy.outcome("[grown, part]"),
+            format!("[{grown}, {}]", &grown[1..])
+        );
+        assert_eq!(
+            session.outcome("[grown, part]"),
+            format!("[{grown}, {}]", &grown[1..])
+        );
+    }
+}

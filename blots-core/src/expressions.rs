@@ -693,16 +693,8 @@ pub(crate) fn apply_binary_op(
                             (l_list[idx], r_list[idx])
                         };
                         let value = match (l, r) {
-                            (Value::String(_), Value::String(_)) => {
-                                let (l_str, r_str) = {
-                                    let borrowed_heap = heap.borrow();
-                                    (
-                                        l.as_string(&borrowed_heap)?.to_string(),
-                                        r.as_string(&borrowed_heap)?.to_string(),
-                                    )
-                                };
-                                heap.borrow_mut()
-                                    .insert_string(format!("{}{}", l_str, r_str))
+                            (Value::String(l), Value::String(r)) => {
+                                heap.borrow_mut().join_strings(l, r)?
                             }
                             (Value::Number(_), Value::Number(_)) => {
                                 Number(l.as_number()? + r.as_number()?)
@@ -978,16 +970,8 @@ pub(crate) fn apply_binary_op(
                         };
                         let value = if is_list_first {
                             match (item, scalar) {
-                                (Value::String(_), Value::String(_)) => {
-                                    let (v_str, s_str) = {
-                                        let borrowed_heap = heap.borrow();
-                                        (
-                                            item.as_string(&borrowed_heap)?.to_string(),
-                                            scalar.as_string(&borrowed_heap)?.to_string(),
-                                        )
-                                    };
-                                    heap.borrow_mut()
-                                        .insert_string(format!("{}{}", v_str, s_str))
+                                (Value::String(item), Value::String(scalar)) => {
+                                    heap.borrow_mut().join_strings(item, scalar)?
                                 }
                                 (Value::Number(_), Value::Number(_)) => {
                                     Number(item.as_number()? + scalar.as_number()?)
@@ -1006,16 +990,8 @@ pub(crate) fn apply_binary_op(
                             }
                         } else {
                             match (scalar, item) {
-                                (Value::String(_), Value::String(_)) => {
-                                    let (s_str, v_str) = {
-                                        let borrowed_heap = heap.borrow();
-                                        (
-                                            scalar.as_string(&borrowed_heap)?.to_string(),
-                                            item.as_string(&borrowed_heap)?.to_string(),
-                                        )
-                                    };
-                                    heap.borrow_mut()
-                                        .insert_string(format!("{}{}", s_str, v_str))
+                                (Value::String(scalar), Value::String(item)) => {
+                                    heap.borrow_mut().join_strings(scalar, item)?
                                 }
                                 (Value::Number(_), Value::Number(_)) => {
                                     Number(scalar.as_number()? + item.as_number()?)
@@ -1350,17 +1326,10 @@ pub(crate) fn apply_binary_op(
             BinaryOp::And | BinaryOp::NaturalAnd => Ok(Bool(lhs.as_bool()? && rhs.as_bool()?)),
             BinaryOp::Or | BinaryOp::NaturalOr => Ok(Bool(lhs.as_bool()? || rhs.as_bool()?)),
             BinaryOp::Add => {
-                if lhs.is_string() {
-                    let (l_str, r_str) = {
-                        (
-                            lhs.as_string(&heap.borrow())?.to_string(),
-                            rhs.as_string(&heap.borrow())?.to_string(),
-                        )
-                    };
+                if let Value::String(first) = lhs {
+                    let second = rhs.as_string_pointer()?;
 
-                    return Ok(heap
-                        .borrow_mut()
-                        .insert_string(format!("{}{}", l_str, r_str)));
+                    return Ok(heap.borrow_mut().join_strings(first, second)?);
                 }
 
                 Ok(Number(lhs.as_number()? + rhs.as_number()?))

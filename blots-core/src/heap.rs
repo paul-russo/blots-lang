@@ -218,6 +218,33 @@ impl Heap {
         ))
     }
 
+    /// The string at `first` followed by the one at `second`, as a string of its own. It
+    /// takes time in proportion to the length of the second one when the first one was not
+    /// followed before and its characters have room behind them (see [`Text::followed_by`]).
+    pub fn join_strings(&mut self, first: StringPointer, second: StringPointer) -> Result<Value> {
+        let base = first.reify(self).as_text()?;
+        let more = second.reify(self).as_text()?;
+
+        // A string that nothing is added to is the string that results.
+        if more.is_empty() {
+            return Ok(Value::String(first));
+        }
+        if base.is_empty() {
+            return Ok(Value::String(second));
+        }
+
+        let joined = base.followed_by(more);
+        let added = match joined.shares_buffer_with(base) {
+            true => more.len(),
+            false => joined.held_bytes(),
+        };
+
+        self.approx_bytes += size_of::<HeapValue>() + added;
+        self.values.push(HeapValue::String(joined));
+
+        Ok(Value::String(StringPointer::new(self.values.len() - 1)))
+    }
+
     pub fn insert_record(&mut self, record: impl Into<Record>) -> Value {
         Value::Record(RecordPointer::new(
             self.insert(HeapValue::Record(record.into())),
@@ -254,6 +281,12 @@ impl Heap {
     /// True only before the constants record has been inserted (i.e. never for a built `Heap`).
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
+    }
+
+    /// The estimate of the bytes that the values of the heap hold.
+    #[cfg(test)]
+    pub(crate) fn approx_bytes(&self) -> usize {
+        self.approx_bytes
     }
 
     /// Reclaim heap slots that are no longer reachable from the root environment's bindings,

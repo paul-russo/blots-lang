@@ -198,6 +198,14 @@ impl Vm {
             | Op::Where => {
                 let (lhs, rhs) = (self.reg(b), self.reg(c));
 
+                // Two strings that are added are joined right in the heap.
+                if let (Op::Add, Value::String(first), Value::String(second)) = (instr.op, lhs, rhs)
+                {
+                    let value = self.heap.borrow_mut().join_strings(first, second)?;
+                    self.set_reg(a, value);
+                    return Ok(Flow::Continue);
+                }
+
                 // SAFETY: the state of the loop is published, as `broadcast` needs it.
                 if (lhs.is_list() || rhs.is_list()) && unsafe { self.broadcast(instr) } {
                     return Ok(Flow::Continue);
