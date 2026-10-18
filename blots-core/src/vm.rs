@@ -654,9 +654,8 @@ impl Vm {
     }
 
     /// Whether calls that name a built-in function may be compiled into something other than
-    /// calls of the function's value: inline loops for the higher-order ones, an instruction
-    /// that calls the function for the others. Profiling reports every call, so it needs
-    /// the callbacks to stay real calls.
+    /// calls: inline loops for the higher-order ones, instructions of their own for the
+    /// others. Profiling reports every call, so it needs them all to stay real calls.
     pub fn inlines_callbacks(&self) -> bool {
         !self.is_profiling()
     }
@@ -1262,7 +1261,7 @@ impl Vm {
             let args = self.stack[base..base + argc].to_vec();
             self.run_built_in(built_in, args, depth + 1)
         } else {
-            self.run_plain_built_in(built_in, base, argc, depth + 1)
+            self.run_plain_built_in(built_in, &self.stack[base..base + argc], depth + 1)
         };
 
         match result {
@@ -1272,11 +1271,32 @@ impl Vm {
 
                 Ok(())
             }
-            Err(error) => {
-                let error = error.with_function_context(&built_in_name(built_in));
-                Err(self.at_call_site(error))
-            }
+            Err(error) => Err(self.in_built_in(built_in, error)),
         }
+    }
+
+    /// What [`Vm::call_built_in`] does for a built-in function that calls no function
+    /// itself, with arguments that are anywhere: the result is returned.
+    fn call_plain_built_in(
+        &self,
+        built_in: BuiltInFunction,
+        args: &[Value],
+    ) -> Result<Value, RuntimeError> {
+        let depth = self.top().depth();
+        if depth > MAX_CALL_DEPTH {
+            return Err(self.at_call_site(depth_exceeded(&built_in_name(built_in))));
+        }
+
+        self.run_plain_built_in(built_in, args, depth + 1)
+            .map_err(|error| self.in_built_in(built_in, error))
+    }
+
+    /// An error that a built-in function raised, the way the call that the innermost frame
+    /// is executing reports it.
+    fn in_built_in(&self, built_in: BuiltInFunction, error: RuntimeError) -> RuntimeError {
+        let error = error.with_function_context(&built_in_name(built_in));
+
+        self.at_call_site(error)
     }
 
     /// Run a built-in that may call back into the VM. The arguments are owned because the
@@ -1304,18 +1324,17 @@ impl Vm {
         result
     }
 
-    /// Run a built-in that takes no callbacks directly on the arguments in the value stack.
+    /// Run a built-in that takes no callbacks directly on its arguments, wherever they are
+    /// (which is in the value stack for most).
     fn run_plain_built_in(
-        &mut self,
+        &self,
         built_in: BuiltInFunction,
-        base: usize,
-        argc: usize,
+        args: &[Value],
         depth: usize,
     ) -> Result<Value, RuntimeError> {
         #[cfg(not(target_arch = "wasm32"))]
         let start = self.profiling.then(std::time::Instant::now);
 
-        let args = &self.stack[base..base + argc];
         let result = built_in.call_with(args, &self.heap, depth, &mut |_, _, _, _| {
             Err(RuntimeError::new(format!(
                 "{} cannot call functions",

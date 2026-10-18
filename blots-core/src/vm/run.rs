@@ -302,6 +302,50 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 }};
             }
 
+            // Whether the frame is at a depth that it can call a built-in function from. (A
+            // frame that has to look itself up again is taken for one that cannot.)
+            macro_rules! calls_built_ins {
+                () => {
+                    (*frame).meta as u32 <= MAX_CALL_DEPTH as u32
+                };
+            }
+
+            // `R[a] = F(R[b])` for a built-in function `F` that comes from one number to
+            // another by looking at nothing else.
+            macro_rules! number_function {
+                (|$x:ident| $value:expr) => {{
+                    if let Value::Number($x) = &*reg!(instr.b)
+                        && calls_built_ins!()
+                    {
+                        let $x = *$x;
+                        reg!(instr.a).write(Value::Number($value));
+                        next!(1);
+                    }
+                }};
+            }
+
+            // `R[a] = F(R[b], R[c])` for `min` (`$wins` is `<`) or `max` (`$wins` is `>`) of
+            // two numbers of which one wins against the other, or which are one and the same.
+            // That leaves two things to the function: a NaN, which it passes over, and two
+            // zeros that differ in their sign, of which it finds the one that the standard
+            // library of the machine this is compiled for finds.
+            macro_rules! extreme {
+                ($wins:tt) => {{
+                    if let (Value::Number(x), Value::Number(y)) =
+                        (&*reg!(instr.b), &*reg!(instr.c))
+                        && calls_built_ins!()
+                    {
+                        let (x, y) = (*x, *y);
+                        let same = x == y && x.to_bits() == y.to_bits();
+                        if x $wins y || y $wins x || same {
+                            let extreme = if y $wins x { y } else { x };
+                            reg!(instr.a).write(Value::Number(extreme));
+                            next!(1);
+                        }
+                    }
+                }};
+            }
+
             // Every arm either finishes its instruction and continues with the next one, or
             // leaves the instruction untouched and falls out of the `match`.
             match instr.op {
@@ -531,6 +575,44 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                             copy_value(params.add(offset), args.add(offset));
                         }
                         restart!(meta);
+                    }
+                }
+                Op::Sqrt => number_function!(|x| x.sqrt()),
+                Op::Sin => number_function!(|x| x.sin()),
+                Op::Cos => number_function!(|x| x.cos()),
+                Op::Tan => number_function!(|x| x.tan()),
+                Op::Asin => number_function!(|x| x.asin()),
+                Op::Acos => number_function!(|x| x.acos()),
+                Op::Atan => number_function!(|x| x.atan()),
+                Op::Log => number_function!(|x| x.ln()),
+                Op::Log10 => number_function!(|x| x.log10()),
+                Op::Exp => number_function!(|x| x.exp()),
+                Op::Abs => number_function!(|x| x.abs()),
+                Op::Floor => number_function!(|x| x.floor()),
+                Op::Ceil => number_function!(|x| x.ceil()),
+                Op::Round => number_function!(|x| x.round()),
+                Op::Trunc => number_function!(|x| x.trunc()),
+                Op::Min => extreme!(<),
+                Op::Max => extreme!(>),
+                Op::Len => {
+                    // The length of a string is the number of its bytes.
+                    let len = match &*reg!(instr.b) {
+                        Value::List(pointer) => match heap_value!(pointer) {
+                            Some(HeapValue::List(items)) => Some(items.len()),
+                            _ => None,
+                        },
+                        Value::String(pointer) => match heap_value!(pointer) {
+                            Some(HeapValue::String(text)) => Some(text.len()),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+
+                    if let Some(len) = len
+                        && calls_built_ins!()
+                    {
+                        reg!(instr.a).write(Value::Number(len as f64));
+                        next!(1);
                     }
                 }
                 Op::Return => {

@@ -6702,7 +6702,9 @@ mod shared_record_tests {
 }
 
 // A call that names a built-in function is compiled to an instruction that calls that
-// function. Nothing may tell that from calling the function through its value.
+// function, and for the functions that are called the most to one that does what the function
+// does where that takes no more than looking at numbers, or at a list or a string. Nothing
+// may tell either from calling the function through its value.
 #[cfg(test)]
 mod built_in_call_tests {
     use crate::ast::Expr;
@@ -6714,6 +6716,29 @@ mod built_in_call_tests {
     use crate::vm::Vm;
     use std::cell::RefCell;
     use std::rc::Rc;
+
+    /// The functions of one argument that have an instruction.
+    const OF_ONE: [(&str, Op); 16] = [
+        ("sqrt", Op::Sqrt),
+        ("sin", Op::Sin),
+        ("cos", Op::Cos),
+        ("tan", Op::Tan),
+        ("asin", Op::Asin),
+        ("acos", Op::Acos),
+        ("atan", Op::Atan),
+        ("log", Op::Log),
+        ("log10", Op::Log10),
+        ("exp", Op::Exp),
+        ("abs", Op::Abs),
+        ("floor", Op::Floor),
+        ("ceil", Op::Ceil),
+        ("round", Op::Round),
+        ("trunc", Op::Trunc),
+        ("len", Op::Len),
+    ];
+
+    /// The functions that have an instruction for two arguments.
+    const OF_TWO: [(&str, Op); 2] = [("min", Op::Min), ("max", Op::Max)];
 
     /// Values of every kind, and the numbers that functions tell apart.
     const VALUES: [&str; 30] = [
@@ -6835,16 +6860,24 @@ mod built_in_call_tests {
 
     #[test]
     fn a_call_that_names_a_function_is_an_instruction() {
+        for (function, op) in OF_ONE {
+            let code = format!("x => {function}(x)");
+            assert_eq!(count(&code, op), 1, "{code}");
+            assert_eq!(calls_of_values(&code), 0, "{code}");
+        }
+
+        for (function, op) in OF_TWO {
+            let code = format!("(a, b) => {function}(a, b)");
+            assert_eq!(count(&code, op), 1, "{code}");
+            assert_eq!(calls_of_values(&code), 0, "{code}");
+        }
+
         for code in [
             "x => typeof(x)",
             "x => to_string(x)",
             "x => keys(x)",
-            "x => sqrt(x)",
-            "x => len(x)",
-            "x => round(x)",
             "x => round(x, 2)",
             "x => min(x)",
-            "(a, b) => min(a, b)",
             "(a, b, c) => max(a, b, c)",
             "(a, b) => sum(a, b)",
             "(a, b) => concat(a, b)",
@@ -6876,6 +6909,9 @@ mod built_in_call_tests {
         ] {
             assert_eq!(count(code, op), 1, "{code}");
             assert_eq!(count(code, Op::CallBuiltIn), 0, "{code}");
+            for (_, instruction) in OF_ONE.into_iter().chain(OF_TWO) {
+                assert_eq!(count(code, instruction), 0, "{code}");
+            }
         }
     }
 
@@ -6889,6 +6925,23 @@ mod built_in_call_tests {
             assert_eq!(direct, session.outcome(&code, false), "{code}");
             outcomes.insert(direct);
         };
+
+        for (function, _) in OF_ONE {
+            for value in VALUES {
+                check(format!("{function}({value})"));
+                check(format!("1 / {function}({value})"));
+                check(format!("[{function}({value}), {function}({value})]"));
+            }
+        }
+
+        for (function, _) in OF_TWO {
+            for first in VALUES {
+                for second in VALUES {
+                    check(format!("{function}({first}, {second})"));
+                    check(format!("1 / {function}({first}, {second})"));
+                }
+            }
+        }
 
         for call in [
             "typeof(V)",
@@ -6925,23 +6978,15 @@ mod built_in_call_tests {
             "reduce([4, 9], V, 0)",
             "sort_by([4, 9], V)",
             "ugt(V, 1)",
-            "sqrt(V)",
-            "abs(V)",
-            "floor(V)",
-            "round(V)",
-            "len(V)",
-            "min(V, 1)",
-            "max(0 * -1, V)",
         ] {
             for value in VALUES {
                 check(call.replace('V', value));
-                check(format!("1 / {}", call.replace('V', value)));
             }
         }
 
         // The calls come to enough different things to tell the functions and their
         // arguments apart.
-        assert!(outcomes.len() > 400, "{} outcomes", outcomes.len());
+        assert!(outcomes.len() > 900, "{} outcomes", outcomes.len());
     }
 
     #[test]
@@ -6966,15 +7011,77 @@ mod built_in_call_tests {
     }
 
     #[test]
+    fn the_smaller_and_the_larger_of_two_numbers_are_what_the_functions_find() {
+        let session = Session::new();
+        for (code, expected) in [
+            (
+                "[min(1, 2), min(2, 1), max(1, 2), max(2, 1)]",
+                "[1, 1, 2, 2]",
+            ),
+            ("[min(-inf, inf), max(-inf, inf)]", "[-inf, inf]"),
+            ("[min(inf, inf), max(-inf, -inf)]", "[inf, -inf]"),
+            ("[min(3, 3), max(-3, -3)]", "[3, -3]"),
+            ("[1 / min(0, 0), 1 / max(0 * -1, 0 * -1)]", "[inf, -inf]"),
+            // A number that is none is passed over, and so are two of them.
+            (
+                "[min(nan, 1), min(1, nan), max(nan, 1), max(1, nan)]",
+                "[1, 1, 1, 1]",
+            ),
+            ("[min(nan, nan), max(nan, nan)]", "[inf, -inf]"),
+            ("[min(inf, nan), max(-inf, nan)]", "[inf, -inf]"),
+        ] {
+            for direct in [true, false] {
+                assert_eq!(session.outcome(code, direct), expected, "{code}");
+            }
+        }
+
+        // Which of two zeros that differ in their sign is found is up to the machine, but
+        // not to how the function is called.
+        for code in [
+            "1 / min(0, 0 * -1)",
+            "1 / min(0 * -1, 0)",
+            "1 / max(0, 0 * -1)",
+            "1 / max(0 * -1, 0)",
+        ] {
+            let found = session.outcome(code, true);
+            assert!(found == "inf" || found == "-inf", "{code}: {found}");
+            assert_eq!(found, session.outcome(code, false), "{code}");
+        }
+    }
+
+    #[test]
+    fn the_length_of_a_string_is_the_number_of_its_bytes() {
+        let session = Session::new();
+        for (code, expected) in [
+            ("len(\"\")", "0"),
+            ("len(\"abc\")", "3"),
+            ("len(\"héllo\")", "6"),
+            ("len(\"abc\" + \"déf\")", "7"),
+            ("len([])", "0"),
+            ("len([1, [2, 3]])", "2"),
+            ("len(range(1000))", "1000"),
+            ("len([...[1, 2], ...[3]])", "3"),
+        ] {
+            for direct in [true, false] {
+                assert_eq!(session.outcome(code, direct), expected, "{code}");
+            }
+        }
+    }
+
+    #[test]
     fn a_function_that_is_called_too_deep_fails_as_its_call_does() {
-        let calls = [
-            "typeof(4)",
-            "sum(4, 3)",
-            "round(0.25, 1)",
-            "sqrt(0.5)",
-            "len([4])",
-            "min(4, 3)",
-        ];
+        let calls = OF_ONE
+            .into_iter()
+            .map(|(function, _)| match function {
+                "len" => "len([4])".to_string(),
+                _ => format!("{function}(0.5)"),
+            })
+            .chain(
+                OF_TWO
+                    .into_iter()
+                    .map(|(function, _)| format!("{function}(4, 3)")),
+            )
+            .chain(["typeof(4)", "sum(4, 3)", "round(0.25, 1)"].map(String::from));
 
         for call in calls {
             let function = call.split('(').next().unwrap();
@@ -6989,7 +7096,7 @@ mod built_in_call_tests {
 
             assert_eq!(
                 session.outcome("f(999)", true),
-                session.outcome(call, true),
+                session.outcome(&call, true),
                 "{call}"
             );
 

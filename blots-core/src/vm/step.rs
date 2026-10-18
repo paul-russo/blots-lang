@@ -364,6 +364,36 @@ impl Vm {
 
                 self.call_built_in(built_in, base, instr.x as usize, c)?;
             }
+            Op::Sqrt
+            | Op::Sin
+            | Op::Cos
+            | Op::Tan
+            | Op::Asin
+            | Op::Acos
+            | Op::Atan
+            | Op::Log
+            | Op::Log10
+            | Op::Exp
+            | Op::Abs
+            | Op::Floor
+            | Op::Ceil
+            | Op::Round
+            | Op::Trunc
+            | Op::Len
+            | Op::Min
+            | Op::Max => {
+                let Some((built_in, argc)) = instr.op.built_in_call() else {
+                    unreachable!("the instruction calls a built-in function");
+                };
+
+                // Operand `c` only names a register where there is a second argument.
+                let args = match argc {
+                    1 => [self.reg(b), Value::Null],
+                    _ => [self.reg(b), self.reg(c)],
+                };
+                let value = self.call_plain_built_in(built_in, &args[..argc])?;
+                self.set_reg(a, value);
+            }
             Op::CallList => {
                 let argc = self.place_list_args(register_index(a));
                 self.call_slow(register_index(a), argc, c)?;

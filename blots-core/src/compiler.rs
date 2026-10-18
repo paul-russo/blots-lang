@@ -2402,25 +2402,37 @@ impl FnCompiler {
             return Ok(false);
         }
 
-        let function = self.constant(Value::BuiltIn(built_in));
-        let Ok(function) = u16::try_from(function) else {
-            return Ok(false);
-        };
-
-        // The arguments occupy consecutive registers.
         let mark = self.free_reg;
-        let first = match args.is_empty() {
-            true => 0,
-            false => self.free_reg,
-        };
-        for arg in args {
-            let reg = self.alloc()?;
-            self.expr_into(arg, reg)?;
+
+        if let Some(op) = Op::of_call(built_in, args.len()) {
+            // The instruction reads its arguments wherever they are.
+            let first = self.expr_any(&args[0])?;
+            let second = match args.get(1) {
+                Some(arg) => self.expr_any(arg)?,
+                None => 0,
+            };
+            self.emit_spanned(Instr::abc(op, dst, first, second), span);
+        } else {
+            let function = self.constant(Value::BuiltIn(built_in));
+            let Ok(function) = u16::try_from(function) else {
+                return Ok(false);
+            };
+
+            // The arguments occupy consecutive registers.
+            let first = match args.is_empty() {
+                true => 0,
+                false => self.free_reg,
+            };
+            for arg in args {
+                let reg = self.alloc()?;
+                self.expr_into(arg, reg)?;
+            }
+
+            let mut instr = Instr::abc(Op::CallBuiltIn, first, function, dst);
+            instr.x = args.len() as u8;
+            self.emit_spanned(instr, span);
         }
 
-        let mut instr = Instr::abc(Op::CallBuiltIn, first, function, dst);
-        instr.x = args.len() as u8;
-        self.emit_spanned(instr, span);
         self.free_reg = mark;
 
         Ok(true)

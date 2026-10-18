@@ -8,6 +8,7 @@
 
 use crate::{
     ast::{BinaryOp, Span, SpannedExpr},
+    functions::BuiltInFunction,
     intern::Symbol,
     record::Keys,
     values::{LambdaArg, Value},
@@ -187,9 +188,39 @@ pub(crate) enum Op {
 
     /// `R[c] = F(R[a], ..., R[a+x-1])`, where `F` is the built-in function `K[b]`, which
     /// takes that many arguments. This is what a call that names a built-in function is
-    /// compiled to: it does everything that calling the function through its value does,
-    /// except for finding out what is being called.
+    /// compiled to (unless it has an instruction of its own, see below): it does everything
+    /// that calling the function through its value does, except for finding out what is
+    /// being called.
     CallBuiltIn,
+
+    // Calls of the built-in functions that come from one number to another: `R[a] = F(R[b])`.
+    // A number is all that the instruction looks at; whatever else it is given is handed to
+    // the function (see [`Op::built_in_call`]), which is also where a call that is made too
+    // deep fails.
+    Sqrt,
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Log,
+    Log10,
+    Exp,
+    Abs,
+    Floor,
+    Ceil,
+    Round,
+    Trunc,
+
+    /// `R[a] = len(R[b])`, which the instruction finds for a list and for a string, and the
+    /// function fails to find for anything else.
+    Len,
+
+    // `R[a] = min(R[b], R[c])` and `R[a] = max(R[b], R[c])`, which the instruction finds for
+    // two numbers that are ordered, and the function for everything else.
+    Min,
+    Max,
 
     /// `R[a] = ` closure of lambda template `L[bx]`
     Closure,
@@ -268,6 +299,29 @@ pub(crate) enum Op {
     ListPush,
 }
 
+/// The calls of built-in functions that have an instruction of their own: the function, the
+/// number of arguments it is called with, and the opcode of the instruction.
+const BUILT_IN_CALLS: [(BuiltInFunction, usize, Op); 18] = [
+    (BuiltInFunction::Sqrt, 1, Op::Sqrt),
+    (BuiltInFunction::Sin, 1, Op::Sin),
+    (BuiltInFunction::Cos, 1, Op::Cos),
+    (BuiltInFunction::Tan, 1, Op::Tan),
+    (BuiltInFunction::Asin, 1, Op::Asin),
+    (BuiltInFunction::Acos, 1, Op::Acos),
+    (BuiltInFunction::Atan, 1, Op::Atan),
+    (BuiltInFunction::Log, 1, Op::Log),
+    (BuiltInFunction::Log10, 1, Op::Log10),
+    (BuiltInFunction::Exp, 1, Op::Exp),
+    (BuiltInFunction::Abs, 1, Op::Abs),
+    (BuiltInFunction::Floor, 1, Op::Floor),
+    (BuiltInFunction::Ceil, 1, Op::Ceil),
+    (BuiltInFunction::Round, 1, Op::Round),
+    (BuiltInFunction::Trunc, 1, Op::Trunc),
+    (BuiltInFunction::Len, 1, Op::Len),
+    (BuiltInFunction::Min, 2, Op::Min),
+    (BuiltInFunction::Max, 2, Op::Max),
+];
+
 /// Operand `a` of an instruction (see [`Op::registers`]).
 const OPERAND_A: u8 = 1;
 
@@ -278,6 +332,25 @@ const OPERAND_B: u8 = 2;
 const OPERAND_C: u8 = 4;
 
 impl Op {
+    /// The opcode of the instruction that calls `built_in` with `argc` arguments, when such
+    /// a call has an instruction of its own. Its operands `b` and (for two arguments) `c`
+    /// are the arguments, and `a` is where the result goes.
+    pub fn of_call(built_in: BuiltInFunction, argc: usize) -> Option<Op> {
+        BUILT_IN_CALLS
+            .iter()
+            .find(|(function, count, _)| *function == built_in && *count == argc)
+            .map(|(_, _, op)| *op)
+    }
+
+    /// The built-in function that an instruction with this opcode calls, when it is one of
+    /// those that [`Op::of_call`] has for a call, and the number of arguments it passes.
+    pub fn built_in_call(self) -> Option<(BuiltInFunction, usize)> {
+        BUILT_IN_CALLS
+            .iter()
+            .find(|(_, _, op)| *op == self)
+            .map(|(function, count, _)| (*function, *count))
+    }
+
     /// Which of the operands `a`, `b` and `c` of an instruction with this opcode name a
     /// register.
     const fn registers(self) -> u8 {
@@ -312,7 +385,9 @@ impl Op {
             | Op::Into
             | Op::Where
             | Op::Coalesce
-            | Op::Index => A | B | C,
+            | Op::Index
+            | Op::Min
+            | Op::Max => A | B | C,
 
             Op::Move
             | Op::AddK
@@ -343,7 +418,23 @@ impl Op {
             | Op::NewRecord
             | Op::GetField
             | Op::Spread
-            | Op::RangePrep => A | B,
+            | Op::RangePrep
+            | Op::Sqrt
+            | Op::Sin
+            | Op::Cos
+            | Op::Tan
+            | Op::Asin
+            | Op::Acos
+            | Op::Atan
+            | Op::Log
+            | Op::Log10
+            | Op::Exp
+            | Op::Abs
+            | Op::Floor
+            | Op::Ceil
+            | Op::Round
+            | Op::Trunc
+            | Op::Len => A | B,
 
             Op::Call
             | Op::CallBuiltIn
