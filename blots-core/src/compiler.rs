@@ -80,6 +80,22 @@ const MAX_HOISTED: usize = 8;
 /// through a loop; the expressions it is made of still are.
 const MAX_INVARIANT_NODES: usize = 32;
 
+/// The most expressions of one condition whose values are kept for its branches, each of
+/// which keeps a register until the branches end.
+const MAX_SHARED: usize = 4;
+
+/// The most values that are kept for the branches of all the conditions around one point
+/// of a function.
+const MAX_SHARED_AT_ONCE: usize = 16;
+
+/// The number of nodes a function's branches are searched through, all in all, for
+/// expressions that their conditions evaluate as well.
+const SHARED_SEARCH_NODES: usize = 4096;
+
+/// Values are kept for branches where fewer registers than this are taken, so that keeping
+/// them leaves a function its place among those with small frames.
+const MAX_SHARING_FRAME: usize = FAST_FRAME_SLOTS / 2;
+
 /// A table of up to this many entries is searched from the start for an entry.
 const MAX_SCANNED_ENTRIES: usize = 16;
 
@@ -456,6 +472,168 @@ fn is_constant_name(name: Symbol) -> bool {
     matches!(name.as_str(), "infinity" | "inf" | "constants")
 }
 
+/// The name that a reference to a variable reads.
+fn variable_name(expr: &SpannedExpr) -> Option<Symbol> {
+    match &expr.node {
+        Expr::Identifier(name) | Expr::ParamSlot { name, .. } | Expr::CaptureSlot { name, .. } => {
+            Some(*name)
+        }
+        _ => None,
+    }
+}
+
+/// Whether two expressions are spelled alike, as far as they are made of constants, names
+/// and the operators that call no function. Where the names mean the same variables in
+/// both, the two come to the same value.
+fn same_shape(a: &SpannedExpr, b: &SpannedExpr) -> bool {
+    match (&a.node, &b.node) {
+        (Expr::Number(x), Expr::Number(y)) => x.to_bits() == y.to_bits(),
+        (Expr::Bool(x), Expr::Bool(y)) => x == y,
+        (Expr::Null, Expr::Null) => true,
+        (Expr::String(x), Expr::String(y)) => x == y,
+        (
+            Expr::BinaryOp { op, left, right },
+            Expr::BinaryOp {
+                op: other_op,
+                left: other_left,
+                right: other_right,
+            },
+        ) => op == other_op && same_shape(left, other_left) && same_shape(right, other_right),
+        (
+            Expr::Access { expr, index },
+            Expr::Access {
+                expr: other,
+                index: other_index,
+            },
+        ) => same_shape(expr, other) && same_shape(index, other_index),
+        (
+            Expr::DotAccess { expr, field },
+            Expr::DotAccess {
+                expr: other,
+                field: other_field,
+            },
+        ) => field == other_field && same_shape(expr, other),
+        (
+            Expr::UnaryOp { op, expr },
+            Expr::UnaryOp {
+                op: other_op,
+                expr: other,
+            },
+        ) => op == other_op && same_shape(expr, other),
+        (
+            Expr::PostfixOp { op, expr },
+            Expr::PostfixOp {
+                op: other_op,
+                expr: other,
+            },
+        ) => op == other_op && same_shape(expr, other),
+        _ => match (variable_name(a), variable_name(b)) {
+            (Some(name), Some(other)) => name == other,
+            _ => false,
+        },
+    }
+}
+
+/// Whether `expr` holds an expression that is spelled like `needle` (see [`same_shape`]),
+/// looking at no more than `budget` of its nodes, and not into the expressions that are
+/// spelled like one of `kept`: the value of such an expression is taken as a whole.
+fn occurs(needle: &SpannedExpr, expr: &SpannedExpr, kept: &[Shared], budget: &mut usize) -> bool {
+    if *budget == 0 {
+        return false;
+    }
+    *budget -= 1;
+
+    if kept.iter().any(|kept| same_shape(kept.expr(), expr)) {
+        return false;
+    }
+
+    if same_shape(needle, expr) {
+        return true;
+    }
+
+    match &expr.node {
+        Expr::Number(_)
+        | Expr::String(_)
+        | Expr::Bool(_)
+        | Expr::Null
+        | Expr::Identifier(_)
+        | Expr::InputReference(_)
+        | Expr::BuiltIn(_)
+        | Expr::ParamSlot { .. }
+        | Expr::CaptureSlot { .. } => false,
+        Expr::List(items) => items
+            .iter()
+            .any(|item| occurs(needle, &item.node, kept, budget)),
+        Expr::Record(entries) => entries.iter().any(|entry| {
+            let entry = &entry.node;
+
+            match &entry.key {
+                RecordKey::Dynamic(key) => {
+                    occurs(needle, key, kept, budget) || occurs(needle, &entry.value, kept, budget)
+                }
+                RecordKey::Spread(key) => occurs(needle, key, kept, budget),
+                RecordKey::Static(_) => occurs(needle, &entry.value, kept, budget),
+                RecordKey::Shorthand(_) => false,
+            }
+        }),
+        Expr::Lambda { body, .. } => occurs(needle, body, kept, budget),
+        Expr::Conditional {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            occurs(needle, condition, kept, budget)
+                || occurs(needle, then_expr, kept, budget)
+                || occurs(needle, else_expr, kept, budget)
+        }
+        Expr::DoBlock {
+            statements,
+            return_expr,
+        } => {
+            statements
+                .iter()
+                .any(|statement| occurs(needle, &statement.node, kept, budget))
+                || occurs(needle, &return_expr.node, kept, budget)
+        }
+        Expr::Call { func, args } => {
+            occurs(needle, func, kept, budget)
+                || args.iter().any(|arg| occurs(needle, arg, kept, budget))
+        }
+        Expr::Access { expr, index } => {
+            occurs(needle, expr, kept, budget) || occurs(needle, index, kept, budget)
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            occurs(needle, left, kept, budget) || occurs(needle, right, kept, budget)
+        }
+        Expr::Assignment { value: operand, .. }
+        | Expr::Output { expr: operand }
+        | Expr::DotAccess { expr: operand, .. }
+        | Expr::UnaryOp { expr: operand, .. }
+        | Expr::PostfixOp { expr: operand, .. }
+        | Expr::Spread(operand) => occurs(needle, operand, kept, budget),
+    }
+}
+
+/// What `expr` evaluates before it applies an operator that calls no function, when that is
+/// what it does: the operands of the operator, in the order they are evaluated.
+fn plain_operands(expr: &SpannedExpr) -> Option<[Option<&SpannedExpr>; 2]> {
+    match &expr.node {
+        Expr::BinaryOp { op, left, right }
+            if !matches!(op, BinaryOp::Via | BinaryOp::Into | BinaryOp::Where) =>
+        {
+            Some([Some(left), Some(right)])
+        }
+        Expr::Access {
+            expr: object,
+            index,
+        } => Some([Some(object), Some(index)]),
+        Expr::DotAccess { expr: operand, .. }
+        | Expr::UnaryOp { expr: operand, .. }
+        | Expr::PostfixOp { expr: operand, .. } => Some([Some(operand), None]),
+        _ => None,
+    }
+}
+
 /// Whether evaluating `expr` can produce a function value (which an assignment then names).
 fn may_be_lambda(expr: &SpannedExpr) -> bool {
     match &expr.node {
@@ -628,6 +806,36 @@ struct FnCompiler {
     /// The expressions of the inlined callbacks being compiled whose values were computed
     /// ahead of their loops, and the registers holding them (see [`Self::hoist`]).
     hoisted: Vec<(*const SpannedExpr, u16)>,
+
+    /// The expressions of the conditions around the current point whose values are kept for
+    /// their branches (see [`Self::share`]).
+    shared: Vec<Shared>,
+
+    /// How many more nodes are searched for expressions to share.
+    shared_search: usize,
+}
+
+/// An expression that a condition evaluates and that one of its branches evaluates again:
+/// the first value is kept in a register for as long as the branches last.
+struct Shared {
+    expr: *const SpannedExpr,
+    reg: u16,
+
+    /// The registers of the variables that the expression reads, in the order it names them.
+    /// A name can mean another variable further into a branch, so these are what tells
+    /// whether an expression there that is spelled the same comes to the same value.
+    variables: Vec<u16>,
+
+    /// Whether the code up to the current point has computed the value.
+    computed: bool,
+}
+
+impl Shared {
+    fn expr(&self) -> &SpannedExpr {
+        // SAFETY: the expression is part of the body that the compiler was given to compile,
+        // which outlives the compiler.
+        unsafe { &*self.expr }
+    }
 }
 
 impl FnCompiler {
@@ -658,6 +866,8 @@ impl FnCompiler {
             inline,
             self_target: None,
             hoisted: Vec::new(),
+            shared: Vec::new(),
+            shared_search: SHARED_SEARCH_NODES,
         }
     }
 
@@ -1149,6 +1359,22 @@ impl FnCompiler {
             return Ok(reg);
         }
 
+        if !self.shared.is_empty() {
+            // The value is computed into the register that keeps it for the branches, or
+            // was already.
+            if let Some(index) = self.awaited_shared(expr) {
+                let reg = self.shared[index].reg;
+                self.expr_into(expr, reg)?;
+                self.shared[index].computed = true;
+
+                return Ok(reg);
+            }
+
+            if let Some(reg) = self.shared_reg(expr) {
+                return Ok(reg);
+            }
+        }
+
         let reg = self.alloc()?;
         self.expr_into(expr, reg)?;
 
@@ -1192,6 +1418,14 @@ impl FnCompiler {
     /// final instruction of the expression, so it may alias a variable the expression reads.
     fn expr_into(&mut self, expr: &SpannedExpr, dst: u16) -> CResult<()> {
         if let Some(reg) = self.hoisted_reg(expr) {
+            self.emit(Instr::abc(Op::Move, dst, reg, 0));
+
+            return Ok(());
+        }
+
+        if !self.shared.is_empty()
+            && let Some(reg) = self.shared_reg(expr)
+        {
             self.emit(Instr::abc(Op::Move, dst, reg, 0));
 
             return Ok(());
@@ -1428,6 +1662,10 @@ impl FnCompiler {
         else_expr: &SpannedExpr,
         target: Target,
     ) -> CResult<()> {
+        let mark = self.free_reg;
+        let shared = self.shared.len();
+        self.share(condition, [then_expr, else_expr])?;
+
         let to_else = self.branch_if_false(condition)?;
 
         // Cache checks emitted inside a branch do not dominate the code after it.
@@ -1455,7 +1693,209 @@ impl FnCompiler {
             }
         }
 
+        self.shared.truncate(shared);
+        self.free_reg = mark;
+
         Ok(())
+    }
+
+    /// Keep what `condition` computes on the way to its value for its `branches`, where one
+    /// of them computes the same again.
+    ///
+    /// The expressions in question read variables and apply operators that call no
+    /// function, so all they do is come to a value or fail, and they come to the same
+    /// value for as long as the variables hold theirs. Those of a condition have not
+    /// failed by the time a branch runs, and no variable is assigned in between: a branch
+    /// can only bind variables of its own. So a branch that takes the value the condition
+    /// came to cannot be told from one that computes it.
+    ///
+    /// Each such expression is given a register here, which the condition computes it into
+    /// (see [`Self::expr_any`]) and which stays put until the branches end.
+    fn share(&mut self, condition: &SpannedExpr, branches: [&SpannedExpr; 2]) -> CResult<()> {
+        if self.free_reg as usize >= MAX_SHARING_FRAME {
+            return Ok(());
+        }
+
+        let first = self.shared.len();
+
+        match &condition.node {
+            // A comparison that decides a branch is compiled together with the branch: it
+            // has no value to keep, but its operands do.
+            Expr::BinaryOp { op, left, right } if compare_jump_opcodes(*op).is_some() => {
+                self.share_from(left, branches, first)?;
+                self.share_from(right, branches, first)
+            }
+            _ => self.share_from(condition, branches, first),
+        }
+    }
+
+    /// [`Self::share`] for `expr` and everything it evaluates on the way to its value, as
+    /// part of a condition whose kept values start at `first`.
+    fn share_from(
+        &mut self,
+        expr: &SpannedExpr,
+        branches: [&SpannedExpr; 2],
+        first: usize,
+    ) -> CResult<()> {
+        let Some(operands) = plain_operands(expr) else {
+            return Ok(());
+        };
+
+        if self.shared.len() - first == MAX_SHARED || self.shared.len() == MAX_SHARED_AT_ONCE {
+            return Ok(());
+        }
+
+        if self.is_plain(expr, u16::MAX, &mut MAX_INVARIANT_NODES.clone()) {
+            // The value may be on hand already, or about to be.
+            let awaited = self.shared[first..]
+                .iter()
+                .any(|shared| !shared.computed && same_shape(shared.expr(), expr));
+            if awaited || self.shared_reg(expr).is_some() {
+                return Ok(());
+            }
+
+            // A branch that only repeats the expression as part of one that is kept already
+            // has no use for it.
+            let mut search = self.shared_search;
+            let kept = &self.shared[first..];
+            let repeated = branches
+                .iter()
+                .any(|branch| occurs(expr, branch, kept, &mut search));
+            self.shared_search = search;
+
+            if repeated {
+                let mut variables = Vec::new();
+                self.variable_regs(expr, &mut variables);
+
+                // A value that was computed ahead of a loop is where it will stay.
+                let (reg, computed) = match self.hoisted_reg(expr) {
+                    Some(reg) => (reg, true),
+                    None => (self.alloc()?, false),
+                };
+                self.shared.push(Shared {
+                    expr,
+                    reg,
+                    variables,
+                    computed,
+                });
+            }
+        }
+
+        for operand in operands.into_iter().flatten() {
+            self.share_from(operand, branches, first)?;
+        }
+
+        Ok(())
+    }
+
+    /// The registers of the variables that `expr` reads, in the order it names them. `expr`
+    /// is an expression that [`Self::is_plain`] holds for.
+    fn variable_regs(&self, expr: &SpannedExpr, out: &mut Vec<u16>) {
+        if let Some(operands) = plain_operands(expr) {
+            for operand in operands.into_iter().flatten() {
+                self.variable_regs(operand, out);
+            }
+        } else if let Resolved::Register(reg) | Resolved::Global(_, reg) = self.place(expr) {
+            out.push(reg);
+        }
+    }
+
+    /// The kept value that `expr` itself is to be computed into, as a position in `shared`.
+    fn awaited_shared(&self, expr: &SpannedExpr) -> Option<usize> {
+        self.shared
+            .iter()
+            .position(|shared| !shared.computed && std::ptr::eq(shared.expr, expr))
+    }
+
+    /// The register that holds the value of `expr` already, when a condition around this
+    /// point has computed the same expression over the same variables (see [`Self::share`]).
+    fn shared_reg(&self, expr: &SpannedExpr) -> Option<u16> {
+        plain_operands(expr)?;
+
+        self.shared
+            .iter()
+            .find(|shared| {
+                shared.computed
+                    && self.same_value(shared.expr(), &mut shared.variables.iter(), expr)
+            })
+            .map(|shared| shared.reg)
+    }
+
+    /// Whether `expr` comes to the value that the kept expression `kept` came to: the two
+    /// are spelled alike, and the variables `expr` reads at this point are those that
+    /// `kept` read where it was evaluated, whose registers `variables` yields in the order
+    /// `kept` names them.
+    fn same_value(
+        &self,
+        kept: &SpannedExpr,
+        variables: &mut std::slice::Iter<u16>,
+        expr: &SpannedExpr,
+    ) -> bool {
+        match (&kept.node, &expr.node) {
+            (Expr::Number(x), Expr::Number(y)) => x.to_bits() == y.to_bits(),
+            (Expr::Bool(x), Expr::Bool(y)) => x == y,
+            (Expr::Null, Expr::Null) => true,
+            (Expr::String(x), Expr::String(y)) => x == y,
+            (
+                Expr::BinaryOp { op, left, right },
+                Expr::BinaryOp {
+                    op: other_op,
+                    left: other_left,
+                    right: other_right,
+                },
+            ) => {
+                op == other_op
+                    && self.same_value(left, variables, other_left)
+                    && self.same_value(right, variables, other_right)
+            }
+            (
+                Expr::Access {
+                    expr: object,
+                    index,
+                },
+                Expr::Access {
+                    expr: other,
+                    index: other_index,
+                },
+            ) => {
+                self.same_value(object, variables, other)
+                    && self.same_value(index, variables, other_index)
+            }
+            (
+                Expr::DotAccess {
+                    expr: operand,
+                    field,
+                },
+                Expr::DotAccess {
+                    expr: other,
+                    field: other_field,
+                },
+            ) => field == other_field && self.same_value(operand, variables, other),
+            (
+                Expr::UnaryOp { op, expr: operand },
+                Expr::UnaryOp {
+                    op: other_op,
+                    expr: other,
+                },
+            ) => op == other_op && self.same_value(operand, variables, other),
+            (
+                Expr::PostfixOp { op, expr: operand },
+                Expr::PostfixOp {
+                    op: other_op,
+                    expr: other,
+                },
+            ) => op == other_op && self.same_value(operand, variables, other),
+            (Expr::Identifier(name), _) if is_constant_name(*name) => {
+                matches!(&expr.node, Expr::Identifier(other) if other == name)
+            }
+            _ if variable_name(kept).is_some() => match (variables.next(), self.place(expr)) {
+                (Some(kept_reg), Resolved::Register(reg) | Resolved::Global(_, reg)) => {
+                    *kept_reg == reg
+                }
+                _ => false,
+            },
+            _ => false,
+        }
     }
 
     fn do_block(
@@ -2034,12 +2474,17 @@ impl FnCompiler {
             .map(|(_, reg)| *reg)
     }
 
-    /// Whether `expr` comes to the same value on every pass through the inlined loop whose
-    /// state registers start at `state`, and gets there without running anything but its own
-    /// operators: it reads elements and fields and applies operators that call no function,
-    /// to constants and to variables that were bound before the loop. `budget` is the number
-    /// of nodes that are still looked at.
-    fn is_invariant(&self, expr: &SpannedExpr, state: u16, budget: &mut usize) -> bool {
+    /// Whether `expr` gets to its value without running anything but its own operators, and
+    /// from nothing but constants and the variables in the registers below `limit`: it reads
+    /// elements and fields and applies operators that call no function. All such an
+    /// expression does is come to a value or fail, and it does the same whenever those
+    /// variables hold the same values. `budget` is the number of nodes that are still looked
+    /// at.
+    ///
+    /// With the first state register of an inlined loop for `limit`, the variables are those
+    /// that were bound before the loop, so the expression comes to the same value on every
+    /// pass through it.
+    fn is_plain(&self, expr: &SpannedExpr, limit: u16, budget: &mut usize) -> bool {
         if *budget == 0 {
             return false;
         }
@@ -2050,30 +2495,22 @@ impl FnCompiler {
             Expr::Identifier(name) if is_constant_name(*name) => true,
             Expr::Identifier(_) | Expr::ParamSlot { .. } | Expr::CaptureSlot { .. } => {
                 match self.place(expr) {
-                    Resolved::Register(reg) | Resolved::Global(_, reg) => reg < state,
+                    Resolved::Register(reg) | Resolved::Global(_, reg) => reg < limit,
                     Resolved::Dynamic => false,
                 }
             }
-            Expr::Access {
-                expr: object,
-                index,
-            } => {
-                self.is_invariant(object, state, budget) && self.is_invariant(index, state, budget)
-            }
-            Expr::DotAccess { expr: operand, .. }
-            | Expr::UnaryOp { expr: operand, .. }
-            | Expr::PostfixOp { expr: operand, .. } => self.is_invariant(operand, state, budget),
-            Expr::BinaryOp { op, left, right } => {
-                !matches!(op, BinaryOp::Via | BinaryOp::Into | BinaryOp::Where)
-                    && self.is_invariant(left, state, budget)
-                    && self.is_invariant(right, state, budget)
-            }
-            _ => false,
+            _ => match plain_operands(expr) {
+                Some(operands) => operands
+                    .into_iter()
+                    .flatten()
+                    .all(|operand| self.is_plain(operand, limit, budget)),
+                None => false,
+            },
         }
     }
 
     /// Compute what the body of an inlined callback starts with ahead of its loop, where that
-    /// is the same on every pass (see [`Self::is_invariant`]). `expr` is the next expression
+    /// is the same on every pass (see [`Self::is_plain`]). `expr` is the next expression
     /// the body evaluates, and `state` the first state register of the loop.
     ///
     /// This is called where the first pass is about to begin, so the code it emits runs as
@@ -2101,7 +2538,7 @@ impl FnCompiler {
             return Ok(false);
         }
 
-        if self.is_invariant(expr, state, &mut MAX_INVARIANT_NODES.clone()) {
+        if self.is_plain(expr, state, &mut MAX_INVARIANT_NODES.clone()) {
             let reg = self.alloc()?;
             self.expr_into(expr, reg)?;
             self.hoisted.push((expr, reg));

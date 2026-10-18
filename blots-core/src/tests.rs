@@ -4064,3 +4064,400 @@ mod power_of_two_tests {
         }
     }
 }
+
+// A condition computes on the way to its answer what its branches often compute again. The
+// value is kept for them and taken where the expression is repeated, as long as its names
+// still mean the same variables there. Nothing may tell a value that was taken from one that
+// was computed.
+#[cfg(test)]
+mod kept_value_tests {
+    use crate::ast::Expr;
+    use crate::bytecode::{Instr, Op};
+    use crate::compiler::compile_lambda;
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code`, up to the value of the last one.
+    fn evaluate(code: &str, heap: &Rc<RefCell<Heap>>) -> Result<Value, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+            result = evaluate_ast(
+                &expr,
+                Rc::clone(heap),
+                Rc::clone(&bindings),
+                0,
+                Rc::clone(&source),
+            )?;
+        }
+
+        Ok(result)
+    }
+
+    /// What the statements of `code` come to, rendered: the value, or the error with the
+    /// place it points at.
+    fn outcome(code: &str) -> String {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        match evaluate(code, &heap) {
+            Ok(value) => value.stringify_internal(&heap.borrow()),
+            Err(error) => format!("{} at {:?}", error.message, error.span),
+        }
+    }
+
+    fn assert_evaluates_to(code: &str, expected: &str) {
+        assert_eq!(outcome(code), expected, "{code}");
+    }
+
+    /// How many instructions with the operation `op` the function `code` compiles to.
+    fn count(code: &str, op: Op) -> usize {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let [Statement::Expression(expr)] = &statements[..] else {
+            panic!("{code} is not a single expression");
+        };
+        let Expr::Lambda { args, body, .. } = &expr.node else {
+            panic!("{code} is not a function");
+        };
+        let proto = compile_lambda(&Rc::new(args.clone()), body, true).unwrap();
+
+        let mut count = 0;
+        let mut pc = 0;
+        while pc < proto.code.len() {
+            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
+            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            count += usize::from(instr.op == op);
+            pc += 1 + instr.operand_words();
+        }
+
+        count
+    }
+
+    #[test]
+    fn a_branch_takes_what_its_condition_computed() {
+        for (code, op, expected) in [
+            // The squares of a point, compared to a bound and then put to use.
+            (
+                "(zr, zi) => if zr * zr + zi * zi > 4 then 0 else zr * zr - zi * zi",
+                Op::Mul,
+                2,
+            ),
+            // A field and an element, in either branch and in both.
+            ("(a, b) => if a.x > b then a.x else b", Op::GetField, 1),
+            (
+                "(xs, i) => if xs[i] > 0 then 0 else 0 - xs[i]",
+                Op::Index,
+                1,
+            ),
+            (
+                "(a, b) => if a % b > 1 then a % b + 1 else a % b - 1",
+                Op::Mod,
+                1,
+            ),
+            // The whole condition.
+            ("(a, b) => if a + b then a + b else 0", Op::Add, 1),
+            // A part of a part, where only that is repeated, and the larger part where both are.
+            (
+                "(a, b) => if (a - b) * (a + b) > 4 then a - b else 0",
+                Op::Sub,
+                1,
+            ),
+            (
+                "(a, b) => if (a - b) * 3 > 4 then (a - b) * 3 + (a - b) else 0",
+                Op::Sub,
+                1,
+            ),
+            // The condition of a branch, and a branch of a branch.
+            (
+                "(a, b) => if a * b > 10 then 1 else if a * b > 5 then 2 else a * b",
+                Op::Mul,
+                1,
+            ),
+            (
+                "(a, b) => if a > b then (if a * b > 5 then a * b else b) else a",
+                Op::Mul,
+                1,
+            ),
+            // In what a branch calls with, builds and binds.
+            (
+                "(n, a) => if n * a > 100 then n else f(n * a, [n * a], {k: n * a})",
+                Op::Mul,
+                1,
+            ),
+            (
+                "(n, a) => if n * a > 100 then n else do { m = n * a; return m + n * a }",
+                Op::Mul,
+                1,
+            ),
+            // In a callback that is compiled in place, and around one.
+            (
+                "(xs, k) => map(xs, x => if x * k > 10 then x * k else 0)",
+                Op::Mul,
+                1,
+            ),
+            (
+                "(xs, k) => if k * k > 10 then map(xs, x => x + k * k) else xs",
+                Op::Mul,
+                1,
+            ),
+        ] {
+            assert_eq!(count(code, op), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn what_calls_a_function_is_computed_every_time() {
+        for (code, op, expected) in [
+            ("a => if f(a) > 3 then f(a) else 0", Op::Call, 2),
+            ("a => if f(a) + 1 > 3 then f(a) + 1 else 0", Op::Call, 2),
+            ("a => (f(a) + 1) * (f(a) + 1)", Op::Call, 2),
+            (
+                "(xs, g) => ((xs via g) + 1) * ((xs via g) + 1)",
+                Op::AddK,
+                2,
+            ),
+            (
+                "(xs, g) => if sum(xs via g) > 3 then xs via g else xs",
+                Op::Call,
+                1,
+            ),
+            (
+                "(x, g) => if (x into g) + 1 > 3 then (x into g) + 1 else 0",
+                Op::AddK,
+                2,
+            ),
+            (
+                "(xs, g) => if (xs where g)[0] > 3 then (xs where g)[0] else 0",
+                Op::Index,
+                2,
+            ),
+        ] {
+            assert_eq!(count(code, op), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_remainder_that_the_condition_does_not_compute_is_computed_by_the_branch() {
+        assert_eq!(
+            count("x => if x % 2 == 0 then x % 2 else x % 2 + 1", Op::ModK),
+            2
+        );
+        assert_evaluates_to(
+            "f = x => if x % 2 == 0 then [x % 2] else x % 2 + 1\n[f(4), f(7), f(-3)]",
+            "[[0], 2, 0]",
+        );
+        assert_evaluates_to(
+            "f = (x, y) => if (x + y) % 4 != 1 then [(x + y) % 4, x + y] else x + y\n[f(1, 2), f(2, 3), f(-3, 0)]",
+            "[[3, 3], 5, [-3, -3]]",
+        );
+    }
+
+    #[test]
+    fn a_function_with_many_registers_keeps_nothing() {
+        let function = |params: usize| {
+            let params = (0..params)
+                .map(|i| format!("p{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            format!("({params}) => if p0 * p1 > 4 then p0 * p1 else 0")
+        };
+
+        assert_eq!(count(&function(100), Op::Mul), 1);
+        assert_eq!(count(&function(127), Op::Mul), 1);
+        assert_eq!(count(&function(128), Op::Mul), 2);
+        assert_eq!(count(&function(250), Op::Mul), 2);
+
+        for params in [100, 127, 128, 250] {
+            let args = (0..params)
+                .map(|i| (i + 2).to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            assert_evaluates_to(&format!("f = {}\nf({args})", function(params)), "6");
+        }
+    }
+
+    #[test]
+    fn a_name_that_means_another_variable_reads_that_variable() {
+        for (code, expected) in [
+            // A parameter of a callback, compiled in place or called.
+            (
+                "f = (a, b) => if a * b > 3 then map([1, 2], a => a * b) else 0\nf(2, 5)",
+                "[5, 10]",
+            ),
+            (
+                "f = (a, b) => if a * b > 3 then reduce([1, 2], (b, x) => a * b + x, 1) else 0\nf(2, 5)",
+                "8",
+            ),
+            (
+                "f = (a, b) => if a * b > 3 then ((a) => a * b)(7) else 0\nf(2, 5)",
+                "35",
+            ),
+            (
+                "f = (a, b) => if a * b > 3 then [1, 2] via (b => a * b) else 0\nf(2, 5)",
+                "[2, 4]",
+            ),
+            // A variable of a block, before and after it is bound.
+            (
+                "f = (a, b) => if a * b > 3 then do { x = a * b; a = 10; return [x, a * b] } else 0\nf(2, 5)",
+                "[10, 50]",
+            ),
+            (
+                "f = (a, b) => if a * b > 3 then do { a = a * b; b = a * b; return [a, b, a * b] } else 0\nf(2, 5)",
+                "[10, 50, 500]",
+            ),
+            (
+                "f = (a, b) => if a * b > 3 then do { t = do { a = b; return a * b }; return [t, a * b] } else 0\nf(2, 5)",
+                "[25, 10]",
+            ),
+            // A variable that the branch of a condition in the branch hides again.
+            (
+                "f = (a, b) => if a * b > 3 then do { a = 3; return if a * b > 3 then do { a = 4; return a * b } else a * b } else 0\n[f(2, 5), f(4, 1)]",
+                "[20, 3]",
+            ),
+            // The same names in the same places still take the value.
+            (
+                "f = (a, b) => if a * b > 3 then do { c = a * b; d = map([1], x => a * b + x); return [c, d, a * b] } else a * b\n[f(2, 5), f(1, 2)]",
+                "[[10, [11], 10], 2]",
+            ),
+        ] {
+            assert_evaluates_to(code, expected);
+        }
+    }
+
+    #[test]
+    fn a_value_that_is_kept_is_not_written_over() {
+        for (code, expected) in [
+            // A list that arithmetic over lists would otherwise put its result into.
+            (
+                "f = xs => if sum(xs * 2) > 3 then [xs * 2 + 1, xs * 2, (xs * 2) * (xs * 2)] else xs * 2 - 1\n[f([1, 2]), f([0, 1])]",
+                "[[[3, 5], [2, 4], [4, 16]], [-1, 1]]",
+            ),
+            (
+                "f = xs => (xs + 1) * (xs + 1) - (xs + 1)\nf([1, 2, 3])",
+                "[2, 6, 12]",
+            ),
+            (
+                "f = (s, t) => (s + t) + (s + t)\nf(\"ab\", \"c\")",
+                "abcabc",
+            ),
+            // A value that a call in the branch works with.
+            (
+                "f = (n, k) => if n * k > 50 then n * k else f(n * k, k) + n * k\nf(1, 3)",
+                "120",
+            ),
+            (
+                "f = (zr, zi, i) => if zr * zr + zi * zi > 4 or i == 0 then [zr * zr, zi * zi, i] else f(zr * zr - zi * zi + 1, 2 * zr * zi, i - 1)\nf(0, 0, 9)",
+                "[25, 0, 6]",
+            ),
+        ] {
+            assert_evaluates_to(code, expected);
+        }
+    }
+
+    #[test]
+    fn a_value_is_kept_for_as_long_as_the_branches_last() {
+        // What follows the branches computes the expression anew, by which time the register
+        // that kept its value holds something else.
+        for (code, expected) in [
+            (
+                "f = (a, b) => [if a * b > 3 then a * b else 0, a + b, a * b]\nf(2, 5)",
+                "[10, 7, 10]",
+            ),
+            (
+                "f = (a, b) => (if a * b > 3 then a * b else 0) + (a - b) * (a * b)\nf(2, 5)",
+                "-20",
+            ),
+            (
+                "f = (a, b) => do { x = if a * b > 3 then a * b else 0; y = a + b; return [x, y, a * b] }\nf(2, 5)",
+                "[10, 7, 10]",
+            ),
+            (
+                "f = (a, b) => if (if a * b > 3 then a * b else 0) > a + b then [a + b, a * b] else [a * b, a + b]\n[f(2, 5), f(1, 1)]",
+                "[[7, 10], [1, 2]]",
+            ),
+            (
+                "f = (a, b) => map([1, 2], x => (if a * b > x then a * b else x) + (x + 1) * (a * b))\nf(2, 5)",
+                "[30, 40]",
+            ),
+        ] {
+            assert_evaluates_to(code, expected);
+        }
+    }
+
+    #[test]
+    fn many_conditions_keep_values_at_once() {
+        // More conditions around one point than there are values kept at once, each with a
+        // value for its branches, and more values in one condition than it has kept.
+        let depth = 24;
+        let mut body = "[a, b]".to_string();
+        for level in (0..depth).rev() {
+            body = format!(
+                "if a * {level} + b > {limit} then [{level}, a * {level} + b] else {body}",
+                limit = 100 - level
+            );
+        }
+
+        assert_evaluates_to(
+            &format!("f = (a, b) => {body}\n[f(1, 200), f(4, 3), f(0, 0)]"),
+            "[[0, 200], [20, 83], [0, 0]]",
+        );
+
+        assert_evaluates_to(
+            "f = (a, b) => if (a + 1) * (a + 2) * (a + 3) * (a + 4) * (a + 5) * (a + 6) > b then [a + 1, a + 2, a + 3, a + 4, a + 5, a + 6] else [a + 6, a + 5, a + 4, a + 3, a + 2, a + 1]\n[f(1, 0), f(1, 1e9)]",
+            "[[2, 3, 4, 5, 6, 7], [7, 6, 5, 4, 3, 2]]",
+        );
+    }
+
+    #[test]
+    fn a_condition_fails_where_it_does_whatever_its_branches_repeat() {
+        // An expression of the same length in the place of the repeated one, as the error
+        // points at the code.
+        for (kept, other) in [
+            (
+                "f = a => if a.x > 1 then a.x else 0\nf(5)",
+                "f = a => if a.x > 1 then a.y else 0\nf(5)",
+            ),
+            (
+                "f = (a, b) => if a * b > 1 then a * b else a * b + 1\nf(2, \"s\")",
+                "f = (a, b) => if a * b > 1 then a + b else a + b + 1\nf(2, \"s\")",
+            ),
+            (
+                "f = (a, i) => if a[i] + a[0] > 1 then a[i] else a[0]\nf([1, 2], 7)",
+                "f = (a, i) => if a[i] + a[0] > 1 then a[1] else a[1]\nf([1, 2], 7)",
+            ),
+            (
+                "f = (a, b) => (a - b) * (a - b)\nf(1, null)",
+                "f = (a, b) => (a - b) * (a + b)\nf(1, null)",
+            ),
+            (
+                "map([1, null], x => if x * 2 > 1 then x * 2 else 0)",
+                "map([1, null], x => if x * 2 > 1 then x * 3 else 0)",
+            ),
+        ] {
+            let (actual, expected) = (outcome(kept), outcome(other));
+
+            assert!(expected.contains(" at "), "{other}: {expected}");
+            assert_eq!(actual, expected, "{kept}");
+        }
+
+        // What only a branch computes fails in the branch.
+        assert!(
+            outcome("f = (a, b) => if a > 0 then a * b else 0\n[f(0, null), f(1, null)]")
+                .contains("expected a number")
+        );
+        assert_evaluates_to("f = (a, b) => if a > 0 then a * b else 0\nf(0, null)", "0");
+    }
+}
