@@ -21,6 +21,7 @@ pub mod precedence;
 pub mod record;
 pub mod stats;
 pub mod tests;
+pub mod text;
 pub mod units;
 pub mod values;
 mod vm;

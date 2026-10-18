@@ -4940,7 +4940,7 @@ mod shared_list_tests {
         let before: Vec<Value> = held.to_vec();
 
         for _ in 0..50 {
-            session.heap.borrow_mut().insert_string("garbage".into());
+            session.heap.borrow_mut().insert_string("garbage");
         }
         session.compact();
 

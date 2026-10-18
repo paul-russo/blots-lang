@@ -18,6 +18,7 @@ use crate::{
     intern::Symbol,
     list::List,
     record::Record,
+    text::Text,
 };
 
 /// Format a number for display output, matching the JS displayNumber function:
@@ -607,7 +608,7 @@ pub struct WithHeap<'h, T> {
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum ReifiedIterableValue<'h> {
     List(&'h [Value]),
-    String(&'h String),
+    String(&'h str),
     Record(&'h Record),
 }
 
@@ -1277,8 +1278,13 @@ impl Value {
     }
 
     pub fn as_string<'h>(&self, heap: &'h Heap) -> Result<&'h str> {
+        self.as_text(heap).map(Text::as_str)
+    }
+
+    /// The text of the string this is, which can be copied without copying its characters.
+    pub fn as_text<'h>(&self, heap: &'h Heap) -> Result<&'h Text> {
         match self {
-            Value::String(p) => p.reify(heap).as_string(),
+            Value::String(p) => p.reify(heap).as_text(),
             _ => Err(anyhow!("expected a string, but got a {}", self.get_type())),
         }
     }

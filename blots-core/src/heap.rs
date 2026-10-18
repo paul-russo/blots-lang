@@ -1,6 +1,7 @@
 use crate::environment::Environment;
 use crate::list::{List, SharedBuffers};
 use crate::record::Record;
+use crate::text::Text;
 use crate::values::{LambdaDef, PrimitiveValue, ReifiedIterableValue, Value};
 use anyhow::{Result, anyhow};
 use indexmap::IndexMap;
@@ -46,7 +47,10 @@ pub enum HeapValue {
     /// A list can be copied without copying its elements, so that iterating it outside of a
     /// heap borrow (e.g. higher-order builtins and broadcasting loops) is cheap.
     List(List),
-    String(String),
+
+    /// A string can be copied without copying its characters, and one that is made from
+    /// another one shares them where it can.
+    String(Text),
     Record(Record),
 
     /// Lambda definitions are shared via `Rc` so that resolving a callee for a call expression
@@ -74,8 +78,14 @@ impl HeapValue {
     }
 
     pub fn as_string(&self) -> Result<&str> {
+        self.as_text().map(Text::as_str)
+    }
+
+    /// The text of the string this is. Callers that need its characters without holding a
+    /// borrow of the heap copy the text, which does not copy the characters.
+    pub fn as_text(&self) -> Result<&Text> {
         match self {
-            HeapValue::String(string) => Ok(string),
+            HeapValue::String(text) => Ok(text),
             _ => Err(anyhow!("expected a list, but got a {}", self.get_type())),
         }
     }
@@ -202,8 +212,10 @@ impl Heap {
         Value::List(ListPointer::new(self.values.len() - 1))
     }
 
-    pub fn insert_string(&mut self, string: String) -> Value {
-        Value::String(StringPointer::new(self.insert(HeapValue::String(string))))
+    pub fn insert_string(&mut self, string: impl Into<Text>) -> Value {
+        Value::String(StringPointer::new(
+            self.insert(HeapValue::String(string.into())),
+        ))
     }
 
     pub fn insert_record(&mut self, record: impl Into<Record>) -> Value {
@@ -436,15 +448,16 @@ impl Heap {
 }
 
 /// Rough estimate of the memory a heap value holds (slot struct plus payload). Only used to
-/// decide when compaction is worthwhile, so it favors being cheap over being exact: string text
-/// and record keys are approximated. The elements of a list are not part of it: lists can
-/// share them, so they are counted where it is known how many of them are new.
+/// decide when compaction is worthwhile, so it favors being cheap over being exact: record
+/// keys are approximated, and a string that shares its characters counts its share of them.
+/// The elements of a list are not part of it: lists can share them, so they are counted
+/// where it is known how many of them are new.
 fn approx_heap_value_bytes(value: &HeapValue) -> usize {
     use std::mem::size_of;
 
     let payload = match value {
         HeapValue::List(_) => 0,
-        HeapValue::String(string) => string.len(),
+        HeapValue::String(text) => text.held_bytes(),
         HeapValue::Record(record) => record.len() * size_of::<Value>() + 16,
         HeapValue::Lambda(def) => 64 + def.scope.len() * (size_of::<Value>() + size_of::<usize>()),
     };
