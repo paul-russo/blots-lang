@@ -5830,6 +5830,125 @@ mod shared_string_tests {
     }
 
     #[test]
+    fn parts_of_a_string_read_the_characters_of_the_string() {
+        let session = Session::new();
+        session
+            .evaluate(&format!(
+                "whole = {}\npadded = \"  \" + whole + \" \t\"\nlisted = whole + \",\" + whole",
+                letters(4)
+            ))
+            .unwrap();
+        let whole = session.text("whole");
+        let alphabet = "abcdefghijklmnopqrstuvwxyz";
+
+        for (code, expected) in [
+            (
+                "tail(whole)",
+                format!("{}{}", &alphabet[1..], alphabet.repeat(3)),
+            ),
+            (
+                "slice(whole, 2, 52)",
+                format!("{}{}", &alphabet[2..], alphabet),
+            ),
+            ("slice(whole, 0, 104)", alphabet.repeat(4)),
+            ("slice(whole, 78, 104)", alphabet.to_string()),
+            (
+                "tail(tail(slice(whole, 1, 60)))",
+                alphabet.repeat(3)[3..60].to_string(),
+            ),
+        ] {
+            let part = session.text(code);
+
+            assert!(part.shares_buffer_with(&whole), "{code}");
+            assert_eq!(part.as_str(), expected, "{code}");
+        }
+
+        assert!(
+            session
+                .text("trim(padded)")
+                .shares_buffer_with(&session.text("padded"))
+        );
+        assert_eq!(session.outcome("trim(padded) == whole"), "true");
+        assert!(
+            session
+                .text("split(listed, \",\")[1]")
+                .shares_buffer_with(&session.text("listed"))
+        );
+        assert_eq!(
+            session.outcome("split(listed, \",\") == [whole, whole]"),
+            "[true, true]"
+        );
+
+        // A part that is short has its characters to itself.
+        assert!(
+            !session
+                .text("slice(whole, 2, 24)")
+                .shares_buffer_with(&whole)
+        );
+        assert_eq!(session.outcome("slice(whole, 2, 24)"), alphabet[2..24]);
+        assert_eq!(session.outcome("whole"), alphabet.repeat(4));
+    }
+
+    #[test]
+    fn parts_of_a_string_are_what_they_were_before_strings_shared_their_characters() {
+        for (code, expected) in [
+            ("head(\"\")", ""),
+            ("head(\"abc\")", "a"),
+            ("head(\"é\")", ""),
+            ("head(\"aé\")", "a"),
+            ("tail(\"\")", ""),
+            ("tail(\"a\")", ""),
+            ("tail(\"abc\")", "bc"),
+            ("tail(\"é\")", ""),
+            ("tail(\"aé\")", "é"),
+            ("slice(\"abcd\", 1, 3)", "bc"),
+            ("slice(\"abcd\", 0, 0)", ""),
+            ("slice(\"abcd\", 4, 4)", ""),
+            ("slice(\"abcd\", 0, 4)", "abcd"),
+            (
+                "slice(\"abcd\", 2, 1)",
+                "in built-in function \"slice\": index out of bounds",
+            ),
+            (
+                "slice(\"abcd\", 0, 5)",
+                "in built-in function \"slice\": index out of bounds",
+            ),
+            (
+                "slice(\"abcd\", 5, 5)",
+                "in built-in function \"slice\": index out of bounds",
+            ),
+            ("slice(\"aé\", 1, 3)", "é"),
+            (
+                "slice(\"aé\", 1, 2)",
+                "in built-in function \"slice\": index out of bounds",
+            ),
+            (
+                "slice(\"aé\", 2, 3)",
+                "in built-in function \"slice\": index out of bounds",
+            ),
+            ("slice(\"abcd\", -1, 2)", "ab"),
+            ("slice(\"abcd\", 1.9, 2.9)", "b"),
+            ("split(\"a,b,,c\", \",\")", "[a, b, , c]"),
+            ("split(\"abc\", \"\")", "[, a, b, c, ]"),
+            ("split(\"\", \",\")", "[]"),
+            ("split(\"\", \"\")", "[, ]"),
+            ("split(\"abc\", \"abc\")", "[, ]"),
+            ("split(\"aébéc\", \"é\")", "[a, b, c]"),
+            ("split(\"abc\", \"x\")", "[abc]"),
+            ("trim(\"  ab cd \")", "ab cd"),
+            ("trim(\"\")", ""),
+            ("trim(\"   \")", ""),
+            ("trim(\"ab\")", "ab"),
+            ("trim(\"\u{a0}é\u{3000}\")", "é"),
+            ("len(\"é\")", "2"),
+            ("len(tail(\"aé\"))", "2"),
+            ("len(split(\"a,b\", \",\"))", "2"),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
     fn the_characters_of_a_string_are_found_by_their_position() {
         let session = Session::new();
         session
@@ -5898,6 +6017,34 @@ mod shared_string_tests {
     }
 
     #[test]
+    fn a_part_that_ends_its_string_is_followed_without_changing_the_string() {
+        let session = Session::new();
+        let alphabet = "abcdefghijklmnopqrstuvwxyz";
+
+        session
+            .evaluate(&format!(
+                "whole = reduce(range(4), (acc, i) => acc + \"-\", {})\n\
+                 end = slice(whole, 20, 56)\n\
+                 longer = end + \"1\"\n\
+                 other = whole + \"2\"\n\
+                 middle = slice(whole, 10, 40) + \"3\"",
+                letters(2)
+            ))
+            .unwrap();
+
+        let whole = format!("{}----", alphabet.repeat(2));
+        assert_eq!(
+            session.outcome("[whole, end, longer, other, middle]"),
+            format!(
+                "[{whole}, {}, {}1, {whole}2, {}3]",
+                &whole[20..],
+                &whole[20..],
+                &whole[10..40]
+            )
+        );
+    }
+
+    #[test]
     fn strings_that_share_their_characters_survive_compaction() {
         let session = Session::new();
         let alphabet = "abcdefghijklmnopqrstuvwxyz";
@@ -5955,6 +6102,32 @@ mod shared_string_tests {
                 &grown[102..160]
             )
         );
+    }
+
+    #[test]
+    fn compaction_gives_up_the_characters_that_no_string_reads_any_more() {
+        let session = Session::new();
+
+        session
+            .evaluate(
+                "part = (whole => slice(whole, 5000, 5010))(reduce(range(100000), (acc, i) => acc + to_string(i % 10), \"\"))",
+            )
+            .unwrap();
+        assert!(session.heap.borrow().len() > 100_000);
+
+        session.compact();
+
+        assert!(
+            session.heap.borrow().len() < 100,
+            "{} slots",
+            session.heap.borrow().len()
+        );
+        assert!(
+            session.heap.borrow().approx_bytes() < 10_000,
+            "{} bytes",
+            session.heap.borrow().approx_bytes()
+        );
+        assert_eq!(session.outcome("part"), "0123456789");
     }
 
     #[test]

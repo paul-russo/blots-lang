@@ -646,15 +646,11 @@ impl BuiltInFunction {
                     .copied()
                     .unwrap_or(Value::Null)),
                 Value::String(p) => {
-                    let val = {
-                        p.reify(&heap.borrow())
-                            .as_string()?
-                            .get(0..1)
-                            .unwrap_or("")
-                            .to_string()
-                    };
+                    let mut heap = heap.borrow_mut();
+                    let text = p.reify(&heap).as_text()?;
+                    let head = text.part(0..1).unwrap_or_default();
 
-                    Ok(heap.borrow_mut().insert_string(val))
+                    Ok(heap.insert_string(head))
                 }
                 _ => Err(RuntimeError::from("argument must be a list or string")),
             },
@@ -667,15 +663,11 @@ impl BuiltInFunction {
                     Ok(heap.slice_list(*p, len.min(1)..len)?)
                 }
                 Value::String(s) => {
-                    let val = {
-                        s.reify(&heap.borrow())
-                            .as_string()?
-                            .get(1..)
-                            .unwrap_or("")
-                            .to_string()
-                    };
+                    let mut heap = heap.borrow_mut();
+                    let text = s.reify(&heap).as_text()?;
+                    let tail = text.part(1..text.len()).unwrap_or_default();
 
-                    Ok(heap.borrow_mut().insert_string(val))
+                    Ok(heap.insert_string(tail))
                 }
                 _ => Err(RuntimeError::from("argument must be a list or string")),
             },
@@ -695,15 +687,12 @@ impl BuiltInFunction {
                         Ok(heap.slice_list(list, start..end)?)
                     }
                     Value::String(_) => {
-                        let s = {
-                            let borrowed_heap = &heap.borrow();
-                            args[0].as_string(borrowed_heap)?.to_string()
-                        };
+                        let mut heap = heap.borrow_mut();
+                        let part = args[0].as_text(&heap)?.part(start..end);
 
-                        s.get(start..end)
-                            .map_or(Err(RuntimeError::from("index out of bounds")), |s| {
-                                Ok(heap.borrow_mut().insert_string(s.to_string()))
-                            })
+                        part.map_or(Err(RuntimeError::from("index out of bounds")), |part| {
+                            Ok(heap.insert_string(part))
+                        })
                     }
                     _ => Err(RuntimeError::from("argument must be a list or string")),
                 }
@@ -826,20 +815,20 @@ impl BuiltInFunction {
 
             // String functions
             Self::Split => {
-                let (s, delimeter) = {
-                    let borrowed_heap = &heap.borrow();
-                    (
-                        args[0].as_string(borrowed_heap)?.to_string(),
-                        args[1].as_string(borrowed_heap)?.to_string(),
-                    )
-                };
+                let mut heap = heap.borrow_mut();
+                let (text, delimeter) = (
+                    args[0].as_text(&heap)?.clone(),
+                    args[1].as_text(&heap)?.clone(),
+                );
 
-                let list = s
-                    .split(&delimeter)
-                    .map(|s| heap.borrow_mut().insert_string(s.to_string()))
+                // The pieces are parts of the string, which the long ones share their
+                // characters with.
+                let list = text
+                    .split(delimeter.as_str())
+                    .map(|piece| heap.insert_string(text.part_of(piece)))
                     .collect();
 
-                Ok(heap.borrow_mut().insert_list(list))
+                Ok(heap.insert_list(list))
             }
 
             Self::Join => {
@@ -869,12 +858,11 @@ impl BuiltInFunction {
             }
 
             Self::Trim => {
-                let string = {
-                    let borrowed_heap = heap.borrow();
-                    args[0].as_string(&borrowed_heap)?.trim().to_string()
-                };
+                let mut heap = heap.borrow_mut();
+                let text = args[0].as_text(&heap)?;
+                let trimmed = text.part_of(text.trim());
 
-                Ok(heap.borrow_mut().insert_string(string))
+                Ok(heap.insert_string(trimmed))
             }
 
             Self::Uppercase => {
