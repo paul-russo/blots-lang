@@ -25,8 +25,8 @@ use crate::{
     },
     bytecode::{
         CaptureSource, FAST_FRAME_SLOTS, FieldCache, Handler, Instr, LAST_USE_B, LAST_USE_C,
-        LambdaTemplate, LocalVar, MAX_REGISTERS, Op, Proto, RECIPROCAL, RecordLayout, SelfRef,
-        Wrap, binary_opcode, exact_reciprocal,
+        LambdaTemplate, LocalVar, MAX_REGISTERS, Op, Proto, RECIPROCAL, RecordLayout,
+        RemainderTest, SelfRef, Wrap, binary_opcode, exact_reciprocal,
     },
     environment::Environment,
     error::RuntimeError,
@@ -721,13 +721,31 @@ impl FnCompiler {
 
     /// Emit the number operand of the instruction that was just emitted.
     fn emit_number(&mut self, number: f64) {
-        self.code.push(number.to_bits());
+        self.emit_word(number.to_bits());
+    }
+
+    /// Emit an operand word of the instruction that was just emitted.
+    fn emit_word(&mut self, word: u64) {
+        self.code.push(word);
         self.span_index.push(u32::MAX);
     }
 
     fn emit_spanned(&mut self, instr: Instr, span: Span) -> usize {
         let index = self.emit(instr);
+        self.set_span(index, span);
 
+        index
+    }
+
+    /// Emit an operand word of the instruction that was just emitted. An error that the
+    /// instruction raises once it has got as far as this word is located at `span`.
+    fn emit_word_spanned(&mut self, word: u64, span: Span) {
+        self.emit_word(word);
+        self.set_span(self.code.len() - 1, span);
+    }
+
+    /// Locate the errors raised at code word `index` at `span`.
+    fn set_span(&mut self, index: usize, span: Span) {
         // Consecutive instructions often share a span (e.g. the checks of one assignment).
         let span_id = match self.spans.last() {
             Some(last) if *last == span => self.spans.len() - 1,
@@ -737,8 +755,6 @@ impl FnCompiler {
             }
         };
         self.span_index[index] = span_id as u32;
-
-        index
     }
 
     fn here(&self) -> usize {
@@ -1357,6 +1373,31 @@ impl FnCompiler {
             }
 
             if let Some(constant) = Self::number_operand(right) {
+                // The remainder by a power of two is tested without being computed. The
+                // instruction is located at the division, and its first operand word at the
+                // comparison, which is where each of the two can fail.
+                if let Some(remainder_op) = remainder_jump_opcode(*op)
+                    && self.hoisted_reg(left).is_none()
+                    && let Expr::BinaryOp {
+                        op: BinaryOp::Modulo,
+                        left: dividend,
+                        right: divisor,
+                    } = &left.node
+                    && let Some(test) = Self::number_operand(divisor)
+                        .and_then(|divisor| RemainderTest::new(divisor, constant))
+                {
+                    let dividend_reg = self.expr_any(dividend)?;
+                    let jump = self.emit_spanned(
+                        Instr::abx(remainder_op, dividend_reg, 0),
+                        binary_span(dividend, divisor),
+                    );
+                    self.emit_word_spanned(test.mask, span);
+                    self.emit_word(test.bits);
+                    self.free_reg = mark;
+
+                    return Ok(jump);
+                }
+
                 let left_reg = self.expr_any(left)?;
                 let jump = self.emit_spanned(Instr::abx(jump_const_op, left_reg, 0), span);
                 self.emit_number(constant);
@@ -2465,6 +2506,16 @@ fn const_lhs_opcode(op: BinaryOp) -> Option<Op> {
         BinaryOp::Power => Op::KPow,
         _ => return None,
     })
+}
+
+/// The fused opcode that compares the remainder by a power of two the way `op` does and
+/// branches on it.
+fn remainder_jump_opcode(op: BinaryOp) -> Option<Op> {
+    match op {
+        BinaryOp::Equal => Some(Op::JmpNotRemEq),
+        BinaryOp::NotEqual => Some(Op::JmpNotRemNe),
+        _ => None,
+    }
 }
 
 /// The fused compare-and-branch opcodes (register and constant right-hand side) for `op`.

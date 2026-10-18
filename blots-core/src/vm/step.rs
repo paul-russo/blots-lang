@@ -12,7 +12,7 @@ use super::{
 };
 use crate::{
     ast::BinaryOp,
-    bytecode::{Instr, Op, RECIPROCAL, register_index},
+    bytecode::{Instr, Op, RECIPROCAL, RemainderTest, register_index},
     error::RuntimeError,
     values::Value,
 };
@@ -285,6 +285,22 @@ impl Vm {
                 let rhs = Value::Number(self.operand());
                 let holds = self.compare_slow(operator_of(instr.op), self.reg(a), rhs)?;
                 self.skip(if holds { 1 } else { instr.sbx() });
+            }
+            Op::JmpNotRemEq | Op::JmpNotRemNe => {
+                // SAFETY: the instruction is followed by the two code words of its test.
+                let test = unsafe { RemainderTest::read(self.top().ip) };
+                let (divisor, remainder) = test.operands();
+                let comparison = match instr.op {
+                    Op::JmpNotRemEq => BinaryOp::Equal,
+                    _ => BinaryOp::NotEqual,
+                };
+
+                // The remainder is taken at the instruction, and it is compared one code word
+                // further on: that is where an error of each of the two is located.
+                let value = self.binary_slow(BinaryOp::Modulo, self.reg(a), Value::Number(divisor))?;
+                self.skip(1);
+                let holds = self.compare_slow(comparison, value, Value::Number(remainder))?;
+                self.skip(if holds { 1 } else { instr.sbx() - 1 });
             }
 
             Op::EqNull | Op::NeNull => {

@@ -10,11 +10,11 @@
 
 use super::{
     Builder, CALLBACK_CALL_DEPTH, DEPTH_MASK, ENTRY, Frame, MAX_CALL_DEPTH, NOT_TRUNCATED,
-    PROFILED, TAIL_SHIFT, UNBOUND, Vm, copy_value, is_unbound, less, less_eq, list_next,
-    load_value, range_next, register, step::Flow, store_value, truncate,
+    PROFILED, TAIL_SHIFT, UNBOUND, Vm, copy_value, is_unbound, leaves_remainder, less, less_eq,
+    list_next, load_value, range_next, register, step::Flow, store_value, truncate, whole,
 };
 use crate::{
-    bytecode::{Instr, Op, Proto, register_index},
+    bytecode::{Instr, Op, Proto, RemainderTest, register_index},
     error::RuntimeError,
     expressions::modulo,
     heap::{Heap, HeapValue},
@@ -223,6 +223,27 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 }};
             }
 
+            // A fused test of what the number `R[a]` leaves when it is divided by a power of
+            // two, whose two operand words the jump follows: the branch goes the way of
+            // `$equal` when that is the remainder asked for. A whole number shows it in its
+            // bits; any other number is divided.
+            macro_rules! remainder_branch {
+                ($equal:expr) => {{
+                    if let Value::Number(number) = &*reg!(instr.a) {
+                        let test = RemainderTest::read(ip.add(1));
+                        let leaves = match whole(*number) {
+                            Some(whole) => test.holds_for(whole),
+                            None => leaves_remainder(*number, test),
+                        };
+
+                        if leaves == $equal {
+                            next!(3);
+                        }
+                        jump!(ip);
+                    }
+                }};
+            }
+
             // `R[a] = (R[b] == null)` when `$null` is true, `R[a] = (R[b] != null)` otherwise.
             // Comparing a list against `null` broadcasts over its elements.
             macro_rules! null_test {
@@ -361,6 +382,8 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 Op::JmpNotLeK => branch_k!(|x, y| less_eq(x, y)),
                 Op::JmpNotGtK => branch_k!(|x, y| less(y, x)),
                 Op::JmpNotGeK => branch_k!(|x, y| less_eq(y, x)),
+                Op::JmpNotRemEq => remainder_branch!(true),
+                Op::JmpNotRemNe => remainder_branch!(false),
 
                 Op::EqNull => null_test!(true),
                 Op::NeNull => null_test!(false),

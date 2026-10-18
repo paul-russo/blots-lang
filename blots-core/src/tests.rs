@@ -3270,7 +3270,7 @@ mod loop_invariant_tests {
             // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
             let instr = unsafe { Instr::decode(chunk.code[pc]) };
             instructions.push((pc, instr));
-            pc += 1 + instr.has_number_operand() as usize;
+            pc += 1 + instr.operand_words();
         }
 
         // A loop is complete before the loop around it goes on to its next pass, so the first
@@ -3627,8 +3627,9 @@ mod loop_invariant_tests {
     }
 }
 
-// Dividing by a power of two is compiled to a multiplication by its reciprocal, which comes to
-// the same number in a fraction of the time. Nothing may tell the two apart.
+// A power of two divides a number without a division. The quotient is the product with its
+// reciprocal, and what a whole number leaves is in its lowest bits, so a condition that asks
+// about the remainder reads them and never computes it. Nothing may tell either from dividing.
 #[cfg(test)]
 mod power_of_two_tests {
     use crate::bytecode::{Instr, Op};
@@ -3649,7 +3650,8 @@ mod power_of_two_tests {
         heap: &Rc<RefCell<Heap>>,
         bindings: &Rc<Environment>,
     ) -> Result<Value, RuntimeError> {
-        let statements = parse_program(code).expect("a program the fast parser reads");
+        let statements = parse_program(code)
+            .unwrap_or_else(|| panic!("the fast parser does not read {code}"));
         let source: Rc<str> = code.into();
 
         let mut result = Value::Null;
@@ -3695,31 +3697,25 @@ mod power_of_two_tests {
             // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
             let instr = unsafe { Instr::decode(chunk.code[pc]) };
             operations.push(instr.op);
-            pc += 1 + instr.has_number_operand() as usize;
+            pc += 1 + instr.operand_words();
         }
 
         operations
     }
 
-    /// Numbers of every kind: the ones at the edges, and a couple of thousand whose bits are
-    /// picked at random, which covers every sign and every exponent there is.
+    /// Numbers of every kind: the ones at the edges, whole numbers around every power of two
+    /// and halfway between them, and a couple of thousand whose bits are picked at random,
+    /// which covers every sign and every exponent there is.
     fn numbers() -> Vec<f64> {
         let mut numbers = vec![
             0.0,
-            -0.0,
-            1.0,
-            -1.0,
-            2.0,
-            3.0,
-            -7.0,
             0.1,
             0.5,
             1.0 / 3.0,
             1e15,
             1e16,
-            9_007_199_254_740_991.0,
-            9_007_199_254_740_992.0,
-            9_007_199_254_740_994.0,
+            1e19,
+            1e300,
             f64::EPSILON,
             f64::MIN_POSITIVE,
             f64::MIN_POSITIVE / 2.0,
@@ -3729,11 +3725,19 @@ mod power_of_two_tests {
             f64::from_bits(3),
             f64::MAX,
             f64::MAX / 2.0,
-            f64::MIN,
             f64::INFINITY,
-            f64::NEG_INFINITY,
             f64::NAN,
         ];
+
+        for whole in 0..=70 {
+            numbers.extend([whole as f64, whole as f64 + 0.5, whole as f64 + 0.25]);
+        }
+
+        for exponent in 0..=70 {
+            let power = 2f64.powi(exponent);
+            numbers.extend([-3.0, -2.0, -1.0, -0.5, 0.5, 1.0, 2.0, 3.0].map(|near| power + near));
+            numbers.push(power * 1.5);
+        }
 
         let mut bits = 0x9E37_79B9_7F4A_7C15_u64;
         for _ in 0..2000 {
@@ -3741,7 +3745,13 @@ mod power_of_two_tests {
             bits ^= bits >> 7;
             bits ^= bits << 17;
             numbers.push(f64::from_bits(bits));
+
+            // The same, as a whole number of every size that there is a remainder to read from.
+            numbers.push((bits >> (bits % 64)) as f64);
         }
+
+        let negated = numbers.iter().map(|number| -number).collect::<Vec<_>>();
+        numbers.extend(negated);
 
         numbers
     }
@@ -3903,6 +3913,152 @@ mod power_of_two_tests {
                         "{shape}: {expected}"
                     );
                     assert_eq!(actual, expected, "{shape} of {dividend} by {power_of_two}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_condition_on_the_remainder_by_a_power_of_two_computes_no_remainder() {
+        let fused = |condition: &str| {
+            let operations = operations(&format!("if {condition} then 1 else 2"));
+
+            (
+                operations.contains(&Op::JmpNotRemEq),
+                operations.contains(&Op::JmpNotRemNe),
+                operations.contains(&Op::ModK),
+            )
+        };
+
+        for (divisor, remainder) in [
+            ("2", "0"),
+            ("2", "1"),
+            ("1", "0"),
+            ("4", "3"),
+            ("1024", "512"),
+            ("4503599627370496", "4503599627370495"),
+        ] {
+            assert_eq!(
+                fused(&format!("x % {divisor} == {remainder}")),
+                (true, false, false),
+                "{divisor} {remainder}"
+            );
+            assert_eq!(
+                fused(&format!("(x + 1) % {divisor} != {remainder}")),
+                (false, true, false),
+                "{divisor} {remainder}"
+            );
+        }
+
+        // Every other remainder is computed: by what is no power of two or too large a one,
+        // one that a power of two never leaves, and one that is ordered rather than matched.
+        for condition in [
+            "x % 3 == 0",
+            "x % 6 != 2",
+            "x % 0 == 0",
+            "x % 0.5 == 0",
+            "x % 1.5 == 1",
+            "x % 9007199254740992 == 0",
+            "x % 2 == 2",
+            "x % 2 == 0.5",
+            "x % 4 != 4",
+            "x % 2 < 1",
+            "x % 2 >= 1",
+            "x % y == 0",
+            "x % 2 == y",
+            "2 % x == 0",
+            "0 == x % 2",
+        ] {
+            let (equal, unequal, _) = fused(condition);
+            assert!(!equal && !unequal, "{condition}");
+        }
+    }
+
+    #[test]
+    fn the_condition_holds_for_the_numbers_that_leave_the_remainder() {
+        let numbers = numbers();
+
+        for exponent in [0, 1, 2, 3, 4, 10, 31, 32, 33, 51, 52] {
+            let divisor = 2f64.powi(exponent);
+            let remainders = [0.0, 1.0, 2.0, 3.0, divisor / 2.0, divisor - 1.0]
+                .into_iter()
+                .filter(|remainder| *remainder < divisor && remainder.fract() == 0.0);
+
+            for remainder in remainders {
+                let cases: [(&str, fn(f64, f64) -> bool); 2] = [
+                    ("==", |left, right| left == right),
+                    ("!=", |left, right| left != right),
+                ];
+
+                for (operator, holds) in cases {
+                    let condition = format!("x % {divisor} {operator} {remainder}");
+
+                    for code in [
+                        format!("map(xs, x => if {condition} then 1 else 0)"),
+                        format!("test = x => if {condition} then 1 else 0\nmap(xs, test)"),
+                        format!(
+                            "test = (x, n) => if n == 0 then 0 else if {condition} then 1 else test(x, n - 1)\nmap(xs, x => test(x, 2))"
+                        ),
+                    ] {
+                        let actual = over(&numbers, &code);
+                        assert_eq!(actual.len(), numbers.len(), "{code}");
+
+                        for (actual, number) in actual.into_iter().zip(&numbers) {
+                            let left = number % divisor;
+
+                            assert_eq!(
+                                actual == 1.0,
+                                holds(left, remainder),
+                                "{number:e} % {divisor} is {left}, to be {operator} {remainder} ({code})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn what_is_not_a_number_has_its_remainder_taken_and_compared() {
+        // What has no remainder, and a remainder that is no condition (the list of answers
+        // that a list comes to), fail the way they do with a divisor that the remainder is
+        // computed for.
+        for dividend in [
+            "\"a\"",
+            "null",
+            "true",
+            "[1, 2, 3]",
+            "[4, 8]",
+            "[]",
+            "[1, \"a\"]",
+            "[[1, 2], [3, 4]]",
+            "{a: 1}",
+            "(x => x)",
+        ] {
+            for shape in [
+                "x = {dividend}\nif x % {divisor} {operator} 0 then 1 else 2",
+                "f = x =>\n  if x == 1 then 0\n  else if x % {divisor} {operator} 0 then 1\n  else 2\nf({dividend})",
+                "f = x => if x % {divisor} {operator} 0 then 1 else 2\nf({dividend})",
+                "f = (x, n) => if n == 0 then 0 else if x % {divisor} {operator} 0 then f(x, n - 1) else f(x, n - 1)\nf({dividend}, 3)",
+                "map([1, {dividend}], x => if x % {divisor} {operator} 0 then 1 else 2)",
+                "x = {dividend}\nmap([1, 2], y => if x % {divisor} {operator} 0 then y else -y)",
+                "filter([{dividend}], x => if x % {divisor} {operator} 0 then true else false)",
+            ] {
+                for operator in ["==", "!="] {
+                    let program = |divisor: &str| {
+                        shape
+                            .replace("{dividend}", dividend)
+                            .replace("{divisor}", divisor)
+                            .replace("{operator}", operator)
+                    };
+
+                    for (power_of_two, other) in [("2", "3"), ("4", "5"), ("8", "7")] {
+                        let (expected, actual) =
+                            (outcome(&program(other)), outcome(&program(power_of_two)));
+
+                        assert!(expected.contains("expected a "), "{shape}: {expected}");
+                        assert_eq!(actual, expected, "{shape} of {dividend} by {power_of_two}");
+                    }
                 }
             }
         }

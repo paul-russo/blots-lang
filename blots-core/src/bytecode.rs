@@ -129,6 +129,14 @@ pub(crate) enum Op {
     JmpNotGtK,
     JmpNotGeK,
 
+    // Fused remainder tests, for `R[a] % k == c` and `R[a] % k != c` where `k` is a power of
+    // two and `c` is a whole number from zero up to it. Two code words follow, which say what
+    // the test comes to for an `R[a]` that is a whole number: its bits under the mask in the
+    // first word are those in the second (see [`remainder_test`]). When the comparison holds,
+    // execution continues after those words, otherwise `pc += sbx` (relative to the first).
+    JmpNotRemEq,
+    JmpNotRemNe,
+
     /// `R[a] = (R[b] == null)`; `x == 1` when `null` is the left-hand operand.
     EqNull,
     /// `R[a] = (R[b] != null)`; `x == 1` when `null` is the left-hand operand.
@@ -350,6 +358,8 @@ impl Op {
             | Op::JmpNotLeK
             | Op::JmpNotGtK
             | Op::JmpNotGeK
+            | Op::JmpNotRemEq
+            | Op::JmpNotRemNe
             | Op::JmpNotEqNull
             | Op::JmpNotNeNull
             | Op::JmpIfFalse
@@ -453,6 +463,84 @@ pub(crate) fn exact_reciprocal(divisor: f64) -> Option<f64> {
     exact.then_some(reciprocal)
 }
 
+/// How a fused remainder test decides `x % divisor == remainder` for a whole number `x`
+/// without dividing: by the bits of `x` (as a two's complement `i64`) under `mask`, which
+/// have to be `bits`.
+///
+/// For a remainder of zero, the mask covers the bits below the divisor: they are all clear
+/// in exactly the multiples of a power of two, of either sign. A remainder above zero is
+/// only left by a number that is not negative, as a remainder takes the sign of the number
+/// that was divided, so the mask covers the sign bit as well.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RemainderTest {
+    pub mask: u64,
+    pub bits: u64,
+}
+
+impl RemainderTest {
+    const SIGN: u64 = 1 << 63;
+
+    /// The largest divisor a test is made for. Every whole number up to it is a number.
+    const MAX_DIVISOR: f64 = (1u64 << 52) as f64;
+
+    /// The test for `x % divisor == remainder`, when the two make for one: the divisor is a
+    /// power of two, and the remainder is a whole number that it can leave.
+    pub fn new(divisor: f64, remainder: f64) -> Option<Self> {
+        let whole = |number: f64| number.fract() == 0.0 && number.is_sign_positive();
+        if !whole(divisor)
+            || !whole(remainder)
+            || !(1.0..=Self::MAX_DIVISOR).contains(&divisor)
+            || remainder >= divisor
+        {
+            return None;
+        }
+
+        let (divisor, remainder) = (divisor as u64, remainder as u64);
+        if !divisor.is_power_of_two() {
+            return None;
+        }
+
+        Some(match remainder {
+            0 => Self {
+                mask: divisor - 1,
+                bits: 0,
+            },
+            _ => Self {
+                mask: (divisor - 1) | Self::SIGN,
+                bits: remainder,
+            },
+        })
+    }
+
+    /// The test in the two code words at `words`.
+    ///
+    /// # Safety
+    /// `words` must point at the code word after a fused remainder test.
+    #[inline(always)]
+    pub unsafe fn read(words: *const u64) -> Self {
+        // SAFETY: the instruction is followed by the two code words of its test.
+        unsafe {
+            Self {
+                mask: *words,
+                bits: *words.add(1),
+            }
+        }
+    }
+
+    /// The divisor and the remainder the test was made for.
+    pub fn operands(self) -> (f64, f64) {
+        let divisor = (self.mask & !Self::SIGN) + 1;
+
+        (divisor as f64, self.bits as f64)
+    }
+
+    /// Whether `whole % divisor == remainder`.
+    #[inline(always)]
+    pub fn holds_for(self, whole: i64) -> bool {
+        whole as u64 & self.mask == self.bits
+    }
+}
+
 impl Instr {
     /// An instruction with the operands `a`, `b` and `c`, where those that name a register
     /// are given as its index.
@@ -546,6 +634,14 @@ impl Instr {
                 | Op::JmpNotGtK
                 | Op::JmpNotGeK
         )
+    }
+
+    /// The number of code words after the instruction that hold operands of it.
+    pub fn operand_words(self) -> usize {
+        match self.op {
+            Op::JmpNotRemEq | Op::JmpNotRemNe => 2,
+            _ => self.has_number_operand() as usize,
+        }
     }
 }
 
@@ -757,8 +853,10 @@ impl fmt::Debug for Proto {
 
             if instr.has_number_operand() {
                 write!(f, " k={}", f64::from_bits(self.code[pc]))?;
-                pc += 1;
+            } else if instr.operand_words() == 2 {
+                write!(f, " mask={:#x} bits={}", self.code[pc], self.code[pc + 1])?;
             }
+            pc += instr.operand_words();
 
             writeln!(f)?;
         }

@@ -20,11 +20,14 @@ mod step;
 
 use crate::{
     ast::{BinaryOp, Span},
-    bytecode::{CaptureSource, FAST_FRAME_SLOTS, Proto, REGISTER_SCALE, Wrap, register_index},
+    bytecode::{
+        CaptureSource, FAST_FRAME_SLOTS, Proto, REGISTER_SCALE, RemainderTest, Wrap,
+        register_index,
+    },
     compiler::{compile_lambda, compile_self_variant},
     environment::Environment,
     error::RuntimeError,
-    expressions::{OpSite, apply_binary_op, flatten_spread_value},
+    expressions::{OpSite, apply_binary_op, flatten_spread_value, modulo},
     functions::{BuiltInFunction, FunctionDef, check_lambda_arity, lambda_name},
     heap::{
         CONSTANTS, Heap, HeapPointer, HeapValue, IterablePointer, LambdaPointer, StringPointer,
@@ -323,6 +326,29 @@ fn truncate(number: f64) -> i64 {
     {
         number as i64
     }
+}
+
+/// The whole number that `number` is, when it is one that fits an `i64`.
+#[inline(always)]
+fn whole(number: f64) -> Option<i64> {
+    let truncated = truncate(number);
+
+    // Where the conversion saturates, a number at or beyond 2^63 comes out as the largest
+    // `i64`, which converts back to 2^63. No number is that `i64`.
+    let exact = truncated as f64 == number
+        && (cfg!(target_arch = "x86_64") || truncated != i64::MAX);
+
+    exact.then_some(truncated)
+}
+
+/// What a fused remainder test comes to for a number that is not whole (or too large to tell
+/// by its bits): whether what `number` leaves when it is divided is the remainder asked for.
+#[cold]
+#[inline(never)]
+fn leaves_remainder(number: f64, test: RemainderTest) -> bool {
+    let (divisor, remainder) = test.operands();
+
+    modulo(number, divisor) == remainder
 }
 
 /// The position of the element a (possibly negative) index refers to.
