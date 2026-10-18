@@ -1,10 +1,12 @@
 use crate::environment::Environment;
+use crate::list::{List, SharedBuffers};
 use crate::record::Record;
 use crate::values::{LambdaDef, PrimitiveValue, ReifiedIterableValue, Value};
 use anyhow::{Result, anyhow};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display, Formatter};
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::LazyLock;
 
@@ -41,9 +43,9 @@ pub static CONSTANTS: LazyLock<IndexMap<String, PrimitiveValue>> = LazyLock::new
 
 #[derive(Debug, Clone)]
 pub enum HeapValue {
-    /// List elements are shared via `Rc` so that iterating a list outside of a heap borrow
-    /// (e.g. higher-order builtins and broadcasting loops) clones a pointer, not the elements.
-    List(Rc<Vec<Value>>),
+    /// A list can be copied without copying its elements, so that iterating it outside of a
+    /// heap borrow (e.g. higher-order builtins and broadcasting loops) is cheap.
+    List(List),
     String(String),
     Record(Record),
 
@@ -62,18 +64,11 @@ impl HeapValue {
         }
     }
 
-    pub fn as_list(&self) -> Result<&Vec<Value>> {
+    /// The list this is. Callers that need to iterate it without holding a borrow of the
+    /// heap copy the list, which does not copy its elements.
+    pub fn as_list(&self) -> Result<&List> {
         match self {
             HeapValue::List(list) => Ok(list),
-            _ => Err(anyhow!("expected a list, but got a {}", self.get_type())),
-        }
-    }
-
-    /// Cheap shared handle to a list's elements, for callers that need to iterate the list
-    /// without holding a borrow of the heap (the elements are not copied).
-    pub fn as_list_rc(&self) -> Result<Rc<Vec<Value>>> {
-        match self {
-            HeapValue::List(list) => Ok(Rc::clone(list)),
             _ => Err(anyhow!("expected a list, but got a {}", self.get_type())),
         }
     }
@@ -124,7 +119,7 @@ impl HeapValue {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Heap {
     values: Vec<HeapValue>,
 
@@ -162,6 +157,9 @@ impl Heap {
 
     pub fn insert(&mut self, value: HeapValue) -> usize {
         self.approx_bytes += approx_heap_value_bytes(&value);
+        if let HeapValue::List(list) = &value {
+            self.approx_bytes += list.len() * size_of::<Value>();
+        }
         self.values.push(value);
 
         self.values.len() - 1
@@ -169,8 +167,39 @@ impl Heap {
 
     pub fn insert_list(&mut self, list: Vec<Value>) -> Value {
         Value::List(ListPointer::new(
-            self.insert(HeapValue::List(Rc::new(list))),
+            self.insert(HeapValue::List(List::new(list))),
         ))
+    }
+
+    /// The list at `base` followed by `items`, as a list of its own. It takes time in
+    /// proportion to the number of `items` when the list was not extended before and its
+    /// elements have room behind them (see [`List::followed_by`]).
+    pub fn extend_list(&mut self, base: ListPointer, items: &[Value]) -> Result<Value> {
+        let list = base.reify(self).as_list()?;
+        let extended = list.followed_by(items);
+        let added = match extended.shares_buffer_with(list) {
+            true => items.len(),
+            false => extended.len(),
+        };
+
+        Ok(self.insert_sharing(extended, added))
+    }
+
+    /// The elements of the list at `base` at the positions in `range`, which have to exist,
+    /// as a list of its own. The elements are not copied.
+    pub fn slice_list(&mut self, base: ListPointer, range: Range<usize>) -> Result<Value> {
+        let part = base.reify(self).as_list()?.slice(range);
+
+        Ok(self.insert_sharing(part, 0))
+    }
+
+    /// Add a list of which only `added` elements are not also the elements of a list that
+    /// is in the heap already.
+    fn insert_sharing(&mut self, list: List, added: usize) -> Value {
+        self.approx_bytes += size_of::<HeapValue>() + added * size_of::<Value>();
+        self.values.push(HeapValue::List(list));
+
+        Value::List(ListPointer::new(self.values.len() - 1))
     }
 
     pub fn insert_string(&mut self, string: String) -> Value {
@@ -231,6 +260,7 @@ impl Heap {
         let old_len = self.values.len();
         let mut reachable = vec![false; old_len];
         let mut worklist: Vec<usize> = Vec::new();
+        let mut shared = SharedBuffers::default();
 
         fn mark(slot: usize, reachable: &mut [bool], worklist: &mut Vec<usize>) {
             if !reachable[slot] {
@@ -261,8 +291,9 @@ impl Heap {
         // record fields, or lambda captured scope.
         while let Some(slot) = worklist.pop() {
             match &self.values[slot] {
-                HeapValue::List(items) => {
-                    for item in items.iter() {
+                HeapValue::List(list) => {
+                    // Lists that share their elements only have them looked at once.
+                    for item in list.unmarked(&mut shared).into_iter().flatten() {
                         if let Some(child) = value_slot(item) {
                             mark(child, &mut reachable, &mut worklist);
                         }
@@ -321,10 +352,12 @@ impl Heap {
             live_bytes += approx_heap_value_bytes(value);
 
             match value {
-                HeapValue::List(items) => {
-                    for item in Rc::make_mut(items).iter_mut() {
-                        *item = remap_value(*item, &remap);
-                    }
+                HeapValue::List(list) => {
+                    // SAFETY: a pass runs while nothing else refers to the heap (see above),
+                    // and this loop rewrites every list that is left.
+                    let rewritten =
+                        unsafe { list.rewrite(&mut shared, &mut |item| remap_value(item, &remap)) };
+                    live_bytes += rewritten * size_of::<Value>();
                 }
                 HeapValue::Record(record) => {
                     for item in record.values_mut() {
@@ -404,13 +437,13 @@ impl Heap {
 
 /// Rough estimate of the memory a heap value holds (slot struct plus payload). Only used to
 /// decide when compaction is worthwhile, so it favors being cheap over being exact: string text
-/// and record keys are approximated, and a list payload shared by several slots is counted once
-/// per referencing slot.
+/// and record keys are approximated. The elements of a list are not part of it: lists can
+/// share them, so they are counted where it is known how many of them are new.
 fn approx_heap_value_bytes(value: &HeapValue) -> usize {
     use std::mem::size_of;
 
     let payload = match value {
-        HeapValue::List(items) => items.len() * size_of::<Value>(),
+        HeapValue::List(_) => 0,
         HeapValue::String(string) => string.len(),
         HeapValue::Record(record) => record.len() * size_of::<Value>() + 16,
         HeapValue::Lambda(def) => 64 + def.scope.len() * (size_of::<Value>() + size_of::<usize>()),
@@ -457,6 +490,28 @@ fn remap_value(value: Value, remap: &[usize]) -> Value {
 impl Default for Heap {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A copy of a heap has lists of its own: a compaction pass rewrites the elements of the
+/// lists in its heap where they are, which a list of another heap must not see.
+impl Clone for Heap {
+    fn clone(&self) -> Self {
+        let values = self
+            .values
+            .iter()
+            .map(|value| match value {
+                HeapValue::List(list) => HeapValue::List(List::new(list.to_vec())),
+                other => other.clone(),
+            })
+            .collect();
+
+        Self {
+            values,
+            approx_bytes: self.approx_bytes,
+            compact_threshold_bytes: self.compact_threshold_bytes,
+            compact_growth_factor: self.compact_growth_factor,
+        }
     }
 }
 

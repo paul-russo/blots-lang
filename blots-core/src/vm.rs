@@ -1596,6 +1596,70 @@ impl Vm {
         self.heap.borrow_mut().insert_list(items)
     }
 
+    /// Build a list from `count` registers starting at `first`, flattening spread values.
+    ///
+    /// A list that starts with the elements of another one, like `[...list, item]`, follows
+    /// that list: it shares the elements where it can instead of copying them (see
+    /// [`Heap::extend_list`]).
+    #[inline(never)]
+    fn new_list_spread(
+        &mut self,
+        first: *const Value,
+        count: usize,
+    ) -> Result<Value, RuntimeError> {
+        // SAFETY: the elements are `count` consecutive registers of the innermost frame,
+        // which nothing writes to before this returns.
+        let values = unsafe { std::slice::from_raw_parts(first, count) };
+        let (base, rest) = match values.split_first() {
+            Some((Value::Spread(IterablePointer::List(base)), rest)) => (Some(*base), rest),
+            _ => (None, values),
+        };
+
+        if let Some(base) = base {
+            if !rest.iter().any(|value| matches!(value, Value::Spread(_))) {
+                return Ok(self.heap.borrow_mut().extend_list(base, rest)?);
+            }
+
+            if let [Value::Spread(IterablePointer::List(only))] = rest {
+                let items = flatten_spread_value(&IterablePointer::List(*only), &self.heap)?;
+                return Ok(self.heap.borrow_mut().extend_list(base, &items)?);
+            }
+        }
+
+        let mut items: Vec<Value> = Vec::with_capacity(self.flattened_len(rest));
+        for value in rest {
+            match value {
+                Value::Spread(pointer) => {
+                    items.extend_from_slice(&flatten_spread_value(pointer, &self.heap)?);
+                }
+                value => items.push(*value),
+            }
+        }
+
+        let mut heap = self.heap.borrow_mut();
+        match base {
+            Some(base) => Ok(heap.extend_list(base, &items)?),
+            None => Ok(heap.insert_list(items)),
+        }
+    }
+
+    /// The number of elements that `values` flatten to, as far as it is known without
+    /// flattening them: spread lists count their elements, everything else counts once.
+    fn flattened_len(&self, values: &[Value]) -> usize {
+        let heap = self.heap.borrow();
+
+        values
+            .iter()
+            .map(|value| match value {
+                Value::Spread(IterablePointer::List(pointer)) => match heap.get(pointer.index()) {
+                    Some(HeapValue::List(items)) => items.len(),
+                    _ => 1,
+                },
+                _ => 1,
+            })
+            .sum()
+    }
+
     /// Start building a list. `hint` selects the capacity: 1 = the length of the list in
     /// `source`, 2 = the element count of an inlined range in `source` (stored as the bit
     /// pattern of a number, like all loop counters).

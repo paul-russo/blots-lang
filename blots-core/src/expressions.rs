@@ -9,6 +9,7 @@ use crate::{
     functions::{BuiltInFunction, Invoke, get_function_def, is_built_in_function},
     heap::{Heap, HeapPointer, HeapValue, IterablePointer},
     intern::Symbol,
+    list::List,
     parser::Rule,
     precedence::PRATT,
     values::{
@@ -62,16 +63,16 @@ pub fn evaluate_pairs(
 }
 
 /// Helper function to flatten a spread value into the values it expands to. For list spreads
-/// this returns a shared handle to the existing elements; strings and records build a fresh
-/// (Rc-wrapped) vector of the expanded values.
+/// this returns the list itself, which shares its elements with the one in the heap; strings
+/// and records build a fresh list of the expanded values.
 pub(crate) fn flatten_spread_value(
     spread_ptr: &IterablePointer,
     heap: &Rc<RefCell<Heap>>,
-) -> AnyhowResult<Rc<Vec<Value>>> {
+) -> AnyhowResult<List> {
     match spread_ptr {
         IterablePointer::List(list_ptr) => {
             let borrowed_heap = heap.borrow();
-            list_ptr.reify(&borrowed_heap).as_list_rc()
+            list_ptr.reify(&borrowed_heap).as_list().cloned()
         }
         IterablePointer::String(string_ptr) => {
             let string = {
@@ -79,12 +80,10 @@ pub(crate) fn flatten_spread_value(
                 string_ptr.reify(&borrowed_heap).as_string()?.to_string()
             };
             // Convert string to list of character values
-            Ok(Rc::new(
-                string
-                    .chars()
-                    .map(|c| heap.borrow_mut().insert_string(c.to_string()))
-                    .collect(),
-            ))
+            Ok(string
+                .chars()
+                .map(|c| heap.borrow_mut().insert_string(c.to_string()))
+                .collect())
         }
         IterablePointer::Record(record_ptr) => {
             let entries = {
@@ -97,15 +96,13 @@ pub(crate) fn flatten_spread_value(
                     .collect::<Vec<(String, Value)>>()
             };
             // Convert record to list of [key, value] pairs
-            Ok(Rc::new(
-                entries
-                    .into_iter()
-                    .map(|(k, v)| {
-                        let key = heap.borrow_mut().insert_string(k);
-                        heap.borrow_mut().insert_list(vec![key, v])
-                    })
-                    .collect(),
-            ))
+            Ok(entries
+                .into_iter()
+                .map(|(k, v)| {
+                    let key = heap.borrow_mut().insert_string(k);
+                    heap.borrow_mut().insert_list(vec![key, v])
+                })
+                .collect())
         }
     }
 }
@@ -1171,7 +1168,7 @@ pub(crate) fn apply_binary_op(
                         // per element is slower.
                         let items = {
                             let borrowed_heap = heap.borrow();
-                            list.reify(&borrowed_heap).as_list_rc()?
+                            list.reify(&borrowed_heap).as_list()?.clone()
                         };
 
                         let mut mapped_list = Vec::with_capacity(list_len);
@@ -1268,7 +1265,7 @@ pub(crate) fn apply_binary_op(
                         // per element is slower.
                         let items = {
                             let borrowed_heap = heap.borrow();
-                            list.reify(&borrowed_heap).as_list_rc()?
+                            list.reify(&borrowed_heap).as_list()?.clone()
                         };
 
                         let mut filtered_list = vec![];

@@ -190,6 +190,8 @@ pub(crate) enum Op {
 
     /// `R[a] = [R[b], ..., R[b+c-1]]`
     NewList,
+    /// `R[a] = [R[b], ..., R[b+c-1]]`, flattening spread values.
+    NewListSpread,
     /// Start building a list. `x` selects a capacity hint: 1 = the length of the list
     /// `R[a+1]`, 2 = the element count `R[a+1]` of an inlined range.
     ListBegin,
@@ -331,6 +333,7 @@ impl Op {
             | Op::Not
             | Op::Factorial
             | Op::NewList
+            | Op::NewListSpread
             | Op::NewRecord
             | Op::GetField
             | Op::Spread

@@ -667,6 +667,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 | Op::CallList
                 | Op::Closure
                 | Op::NewList
+                | Op::NewListSpread
                 | Op::ListBegin
                 | Op::ListAppend
                 | Op::ListEnd

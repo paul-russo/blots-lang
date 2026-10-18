@@ -2126,14 +2126,18 @@ impl FnCompiler {
             .iter()
             .any(|item| matches!(item.node.node, Expr::Spread(_)));
 
-        if !has_spread && items.len() <= LIST_BATCH {
+        if items.len() <= LIST_BATCH {
             let first = self.free_reg;
             for item in items {
                 let reg = self.alloc()?;
                 self.expr_into(&item.node, reg)?;
             }
 
-            self.emit(Instr::abc(Op::NewList, dst, first, items.len() as u16));
+            let op = match has_spread {
+                true => Op::NewListSpread,
+                false => Op::NewList,
+            };
+            self.emit(Instr::abc(op, dst, first, items.len() as u16));
             self.free_reg = mark;
 
             return Ok(());

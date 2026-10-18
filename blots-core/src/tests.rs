@@ -4474,3 +4474,511 @@ mod kept_value_tests {
         assert_evaluates_to("f = (a, b) => if a > 0 then a * b else 0\nf(0, null)", "0");
     }
 }
+
+// A list that is made from another one reads the elements of that list where it can instead
+// of copying them: one that starts with a spread, `concat`, `tail`, `slice` and `chunk`.
+// A list that keeps growing this way takes time in proportion to its length, not to the
+// square of it. Nothing may tell a list that shares its elements from one that has its own.
+#[cfg(test)]
+mod shared_list_tests {
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::{Heap, HeapValue};
+    use crate::list::List;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// A program that is evaluated a few statements at a time.
+    struct Session {
+        heap: Rc<RefCell<Heap>>,
+        bindings: Rc<Environment>,
+    }
+
+    impl Session {
+        fn new() -> Self {
+            Self {
+                heap: Rc::new(RefCell::new(Heap::new())),
+                bindings: Rc::new(Environment::new()),
+            }
+        }
+
+        /// Evaluate the statements of `code`, up to the value of the last one.
+        fn evaluate(&self, code: &str) -> Result<Value, RuntimeError> {
+            let statements = parse_program(code).expect("a program the fast parser reads");
+            let source: Rc<str> = code.into();
+
+            let mut result = Value::Null;
+            for statement in statements {
+                let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement
+                else {
+                    continue;
+                };
+                result = evaluate_ast(
+                    &expr,
+                    Rc::clone(&self.heap),
+                    Rc::clone(&self.bindings),
+                    0,
+                    Rc::clone(&source),
+                )?;
+            }
+
+            Ok(result)
+        }
+
+        /// What the statements of `code` come to, rendered: the value, or the error.
+        fn outcome(&self, code: &str) -> String {
+            match self.evaluate(code) {
+                Ok(value) => value.stringify_internal(&self.heap.borrow()),
+                Err(error) => error.message,
+            }
+        }
+
+        /// The list that `code` comes to.
+        fn list(&self, code: &str) -> List {
+            let value = self.evaluate(code).unwrap();
+
+            value.as_list(&self.heap.borrow()).unwrap().clone()
+        }
+
+        /// Drop everything that the variables of the program do not lead to.
+        fn compact(&self) {
+            self.heap.borrow_mut().compact(&self.bindings, &mut []);
+        }
+
+        /// The number of buffers that the lists of at least `len` elements in the heap read
+        /// their elements from.
+        fn buffers(&self, len: usize) -> usize {
+            let heap = self.heap.borrow();
+            let mut distinct: Vec<&List> = Vec::new();
+
+            for slot in 0..heap.len() {
+                if let Some(HeapValue::List(list)) = heap.get(slot)
+                    && list.len() >= len
+                    && !distinct.iter().any(|known| known.shares_buffer_with(list))
+                {
+                    distinct.push(list);
+                }
+            }
+
+            distinct.len()
+        }
+    }
+
+    fn outcome(code: &str) -> String {
+        Session::new().outcome(code)
+    }
+
+    #[test]
+    fn a_list_that_starts_with_a_spread_holds_what_it_is_made_of() {
+        for (code, expected) in [
+            ("[...[1, 2], 3]", "[1, 2, 3]"),
+            ("[...[], 3]", "[3]"),
+            ("[...[1, 2]]", "[1, 2]"),
+            ("[...[]]", "[]"),
+            ("[...[1, 2], ...[3, 4]]", "[1, 2, 3, 4]"),
+            ("[...[1, 2], 3, ...[4], 5]", "[1, 2, 3, 4, 5]"),
+            ("[...[1], ...[2], ...[3]]", "[1, 2, 3]"),
+            ("[0, ...[1, 2], 3]", "[0, 1, 2, 3]"),
+            ("[...\"ab\", 3]", "[a, b, 3]"),
+            ("[...[1], ...\"ab\"]", "[1, a, b]"),
+            ("[...{a: 1}, 2]", "[[a, 1], 2]"),
+            ("[...[1], ...{a: 1}, 2]", "[1, [a, 1], 2]"),
+            ("xs = [1, 2]\n[...xs, ...xs]", "[1, 2, 1, 2]"),
+            ("xs = [1, 2]\n[...xs, xs]", "[1, 2, [1, 2]]"),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+
+        assert_eq!(outcome("[...1, 2]"), "expected a list, record, or string",);
+        assert_eq!(
+            outcome("[...[1], ...null]"),
+            "expected a list, record, or string",
+        );
+    }
+
+    #[test]
+    fn lists_that_follow_the_same_list_do_not_show_up_in_each_other() {
+        let session = Session::new();
+
+        session
+            .evaluate(
+                "base = [1, 2, 3]\n\
+                 a = [...base, 4]\n\
+                 b = [...base, 5]\n\
+                 c = [...a, 6]\n\
+                 d = [...a, 7]\n\
+                 e = [...c, 8]\n\
+                 f = [...a, 9, 10]\n\
+                 g = concat(c, [11])\n\
+                 h = concat(e, [12], 13)\n\
+                 i = [...e, 14]",
+            )
+            .unwrap();
+
+        assert_eq!(
+            session.outcome("[base, a, b, c, d, e, f, g, h, i]"),
+            "[[1, 2, 3], [1, 2, 3, 4], [1, 2, 3, 5], [1, 2, 3, 4, 6], [1, 2, 3, 4, 7], \
+             [1, 2, 3, 4, 6, 8], [1, 2, 3, 4, 9, 10], [1, 2, 3, 4, 6, 11], \
+             [1, 2, 3, 4, 6, 8, 12, 13], [1, 2, 3, 4, 6, 8, 14]]"
+        );
+    }
+
+    #[test]
+    fn every_step_of_a_fold_keeps_the_list_it_made() {
+        assert_eq!(
+            outcome(
+                "reduce(range(5), (state, i) => {now: [...state.now, i], before: [...state.before, state.now]}, {now: [], before: []}).before"
+            ),
+            "[[], [0], [0, 1], [0, 1, 2], [0, 1, 2, 3]]"
+        );
+
+        assert_eq!(
+            outcome(
+                "reduce(range(6), (state, i) => {now: [...tail(state.now), i], before: [...state.before, state.now]}, {now: [7, 8, 9], before: []}).before"
+            ),
+            "[[7, 8, 9], [8, 9, 0], [9, 0, 1], [0, 1, 2], [1, 2, 3], [2, 3, 4]]"
+        );
+
+        assert_eq!(
+            outcome("map(range(4), i => [...[1, 2], i])"),
+            "[[1, 2, 0], [1, 2, 1], [1, 2, 2], [1, 2, 3]]"
+        );
+    }
+
+    #[test]
+    fn a_list_that_grows_in_a_fold_is_not_copied_at_every_step() {
+        for (code, len, first, last) in [
+            (
+                "reduce(range(3000), (acc, i) => [...acc, i], [])",
+                3000,
+                0.0,
+                2999.0,
+            ),
+            (
+                "reduce(range(3000), (acc, i) => [...acc, i, -i], [])",
+                6000,
+                0.0,
+                -2999.0,
+            ),
+            (
+                "reduce(range(3000), (acc, i) => concat(acc, [i]), [])",
+                3000,
+                0.0,
+                2999.0,
+            ),
+            (
+                "reduce(range(3000), (acc, i) => concat(acc, [i], [-i]), [])",
+                6000,
+                0.0,
+                -2999.0,
+            ),
+            (
+                "reduce(range(3000), (acc, i) => [...acc, ...[i]], [])",
+                3000,
+                0.0,
+                2999.0,
+            ),
+            (
+                "reduce(range(3000), (acc, i) => if i % 2 == 0 then [...acc, i] else acc, [])",
+                1500,
+                0.0,
+                2998.0,
+            ),
+            (
+                "grow = (n, acc) => if n == 0 then acc else grow(n - 1, [...acc, n])\ngrow(900, [])",
+                900,
+                900.0,
+                1.0,
+            ),
+        ] {
+            let session = Session::new();
+            let list = session.list(code);
+
+            assert_eq!(list.len(), len, "{code}");
+            assert_eq!(list[0], Value::Number(first), "{code}");
+            assert_eq!(list[len - 1], Value::Number(last), "{code}");
+
+            // A buffer for every time that the list outgrows the one before, which is twice
+            // as large every time, rather than one for each of the steps.
+            let buffers = session.buffers(3);
+            assert!(buffers <= 40, "{code}: {buffers} buffers");
+
+            let sharing = {
+                let heap = session.heap.borrow();
+                (0..heap.len())
+                    .filter(|slot| match heap.get(*slot) {
+                        Some(HeapValue::List(other)) => other.shares_buffer_with(&list),
+                        _ => false,
+                    })
+                    .count()
+            };
+            assert!(
+                sharing > len / 8,
+                "{code}: {sharing} lists share the last buffer"
+            );
+        }
+    }
+
+    #[test]
+    fn a_queue_that_drops_from_the_front_is_not_copied_at_every_step() {
+        let session = Session::new();
+        let queue =
+            session.list("reduce(range(5000), (queue, i) => [...tail(queue), i], [0, 0, 0, 0])");
+
+        assert_eq!(queue.len(), 4);
+        assert_eq!(queue[3], Value::Number(4999.0));
+        assert_eq!(queue[0], Value::Number(4996.0));
+
+        // A tail reads the elements of its list, and the element that follows it is written
+        // after them for as long as there is room: a few steps go by for every buffer.
+        let buffers = session.buffers(3);
+        assert!(buffers < 2600, "{buffers} buffers");
+    }
+
+    #[test]
+    fn parts_of_a_list_read_the_elements_of_the_list() {
+        let session = Session::new();
+        session.evaluate("whole = range(10)").unwrap();
+        let whole = session.list("whole");
+
+        for (code, expected) in [
+            ("tail(whole)", "[1, 2, 3, 4, 5, 6, 7, 8, 9]"),
+            ("slice(whole, 2, 5)", "[2, 3, 4]"),
+            ("slice(whole, 0, 10)", "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]"),
+            ("slice(whole, 10, 10)", "[]"),
+            ("slice(whole, 4, 4)", "[]"),
+            ("chunk(whole, 4)[1]", "[4, 5, 6, 7]"),
+            ("chunk(whole, 4)[2]", "[8, 9]"),
+            ("tail(tail(slice(whole, 1, 6)))", "[3, 4, 5]"),
+        ] {
+            let part = session.list(code);
+
+            assert!(part.shares_buffer_with(&whole), "{code}");
+            assert_eq!(session.outcome(code), expected, "{code}");
+        }
+
+        assert_eq!(session.outcome("whole"), "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]");
+    }
+
+    #[test]
+    fn parts_of_a_list_are_what_they_were_before_lists_shared_their_elements() {
+        for (code, expected) in [
+            ("tail([])", "[]"),
+            ("tail([1])", "[]"),
+            ("tail([1, 2])", "[2]"),
+            ("tail(\"\")", ""),
+            ("tail(\"abc\")", "bc"),
+            (
+                "tail(1)",
+                "in built-in function \"tail\": argument must be a list or string",
+            ),
+            ("slice([1, 2, 3], 1, 3)", "[2, 3]"),
+            ("slice([1, 2, 3], 0, 0)", "[]"),
+            ("slice([1, 2, 3], 3, 3)", "[]"),
+            (
+                "slice([1, 2, 3], 2, 1)",
+                "in built-in function \"slice\": index out of bounds",
+            ),
+            (
+                "slice([1, 2, 3], 0, 4)",
+                "in built-in function \"slice\": index out of bounds",
+            ),
+            (
+                "slice([1, 2, 3], 4, 4)",
+                "in built-in function \"slice\": index out of bounds",
+            ),
+            ("slice([1, 2, 3], -1, 2)", "[1, 2]"),
+            ("slice([1, 2, 3], 0, -1)", "[]"),
+            ("slice([1, 2, 3], 1.9, 2.9)", "[2]"),
+            (
+                "slice([1, 2, 3], 0, 1e300)",
+                "in built-in function \"slice\": index out of bounds",
+            ),
+            ("slice(\"abcd\", 1, 3)", "bc"),
+            (
+                "slice(1, 1, 3)",
+                "in built-in function \"slice\": argument must be a list or string",
+            ),
+            ("chunk([], 2)", "[]"),
+            ("chunk([1, 2, 3], 1)", "[[1], [2], [3]]"),
+            ("chunk([1, 2, 3], 2)", "[[1, 2], [3]]"),
+            ("chunk([1, 2, 3], 5)", "[[1, 2, 3]]"),
+            ("chunk([1, 2, 3], 1e300)", "[[1, 2, 3]]"),
+            (
+                "chunk([1, 2, 3], 0)",
+                "in built-in function \"chunk\": chunk size must be greater than 0",
+            ),
+            (
+                "chunk(1, 2)",
+                "in built-in function \"chunk\": expected a list, but got a number",
+            ),
+            ("concat([1], [2])", "[1, 2]"),
+            ("concat([1], 2)", "[1, 2]"),
+            ("concat(1, [2])", "[1, 2]"),
+            ("concat(1, 2)", "[1, 2]"),
+            ("concat([], [])", "[]"),
+            ("concat([1], [])", "[1]"),
+            ("concat([], [1])", "[1]"),
+            ("concat([1], [2], [3], 4)", "[1, 2, 3, 4]"),
+            ("concat([1], [[2]])", "[1, [2]]"),
+            ("concat([1], \"ab\")", "[1, ab]"),
+            ("concat(\"ab\", [1])", "[ab, 1]"),
+            ("xs = [1, 2]\nconcat(xs, xs)", "[1, 2, 1, 2]"),
+            ("xs = [1, 2]\nconcat(xs, xs, xs)", "[1, 2, 1, 2, 1, 2]"),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_part_that_ends_its_list_is_followed_without_changing_the_list() {
+        let session = Session::new();
+
+        session
+            .evaluate(
+                "whole = [...[1, 2, 3], 4]\n\
+                 end = slice(whole, 2, 4)\n\
+                 longer = [...end, 5]\n\
+                 other = [...whole, 6]\n\
+                 middle = [...slice(whole, 1, 3), 7]",
+            )
+            .unwrap();
+
+        assert_eq!(
+            session.outcome("[whole, end, longer, other, middle]"),
+            "[[1, 2, 3, 4], [3, 4], [3, 4, 5], [1, 2, 3, 4, 6], [2, 3, 7]]"
+        );
+    }
+
+    #[test]
+    fn lists_that_share_their_elements_survive_compaction() {
+        let session = Session::new();
+
+        session
+            .evaluate(
+                "names = map(range(200), i => \"n\" + to_string(i))\n\
+                 few = slice(names, 100, 104)\n\
+                 more = [...few, \"x\"]\n\
+                 rest = tail(few)\n\
+                 grown = reduce(range(100), (acc, i) => [...acc, [i, to_string(i)]], [])\n\
+                 last = slice(grown, 97, 100)\n\
+                 kept = (whole => [slice(whole, 500, 503), slice(whole, 501, 505)])(map(range(1000), i => {n: i}))",
+            )
+            .unwrap();
+
+        let rendered = |session: &Session| {
+            session.outcome(
+                "[few, more, rest, last, kept, len(names), names[199], len(grown), grown[50]]",
+            )
+        };
+        let expected = "[[n100, n101, n102, n103], [n100, n101, n102, n103, x], [n101, n102, n103], \
+                        [[97, 97], [98, 98], [99, 99]], \
+                        [[{n: 500}, {n: 501}, {n: 502}], [{n: 501}, {n: 502}, {n: 503}, {n: 504}]], \
+                        200, n199, 100, [50, 50]]";
+        assert_eq!(rendered(&session), expected);
+
+        let slots = session.heap.borrow().len();
+        session.compact();
+        assert!(session.heap.borrow().len() < slots);
+        assert_eq!(rendered(&session), expected);
+
+        // The lists can be followed and taken apart like before.
+        session
+            .evaluate(
+                "again = [...more, \"y\"]\n\
+                 further = [...grown, [100, \"100\"]]\n\
+                 inner = [...kept[1], {n: 0}]",
+            )
+            .unwrap();
+        session.compact();
+
+        assert_eq!(rendered(&session), expected);
+        assert_eq!(
+            session.outcome("[again, len(further), further[100], grown[99], inner, tail(rest)]"),
+            "[[n100, n101, n102, n103, x, y], 101, [100, 100], [99, 99], \
+             [{n: 501}, {n: 502}, {n: 503}, {n: 504}, {n: 0}], [n102, n103]]"
+        );
+    }
+
+    #[test]
+    fn compaction_gives_up_the_elements_that_no_list_reads_any_more() {
+        let session = Session::new();
+
+        session
+            .evaluate("part = (whole => slice(whole, 5000, 5010))(map(range(100000), i => [i]))")
+            .unwrap();
+        let slots = session.heap.borrow().len();
+        assert!(slots > 100_000);
+
+        session.compact();
+
+        // The lists that the dropped elements were are gone with them.
+        assert!(
+            session.heap.borrow().len() < 100,
+            "{} slots",
+            session.heap.borrow().len()
+        );
+        assert_eq!(
+            session.outcome("part"),
+            "[[5000], [5001], [5002], [5003], [5004], [5005], [5006], [5007], [5008], [5009]]"
+        );
+    }
+
+    #[test]
+    fn a_list_that_is_held_while_the_heap_is_compacted_keeps_its_elements() {
+        let session = Session::new();
+        session
+            .evaluate(
+                "names = map(range(50), i => \"n\" + to_string(i))\nfew = slice(names, 10, 13)",
+            )
+            .unwrap();
+
+        let held = session.list("few");
+        let before: Vec<Value> = held.to_vec();
+
+        for _ in 0..50 {
+            session.heap.borrow_mut().insert_string("garbage".into());
+        }
+        session.compact();
+
+        assert_eq!(held.to_vec(), before);
+        assert_eq!(
+            session.outcome("[few, names[12], len(names)]"),
+            "[[n10, n11, n12], n12, 50]"
+        );
+        assert_eq!(session.outcome("[...few, \"x\"]"), "[n10, n11, n12, x]");
+        assert_eq!(held.to_vec(), before);
+    }
+
+    #[test]
+    fn a_copy_of_a_heap_has_lists_of_its_own() {
+        let session = Session::new();
+        session
+            .evaluate("xs = [...[1, 2], 3]\nys = [...xs, 4]\npart = tail(ys)")
+            .unwrap();
+
+        let copy = Session {
+            heap: Rc::new(RefCell::new(session.heap.borrow().clone())),
+            bindings: Rc::clone(&session.bindings),
+        };
+
+        let original = session.list("ys");
+        let copied = copy.list("ys");
+        assert_eq!(original, copied);
+        assert!(!original.shares_buffer_with(&copied));
+
+        assert_eq!(copy.outcome("[...ys, 5]"), "[1, 2, 3, 4, 5]");
+        assert_eq!(session.outcome("[...ys, 6]"), "[1, 2, 3, 4, 6]");
+        assert_eq!(
+            copy.outcome("[xs, ys, part]"),
+            "[[1, 2, 3], [1, 2, 3, 4], [2, 3, 4]]"
+        );
+        assert_eq!(
+            session.outcome("[xs, ys, part]"),
+            "[[1, 2, 3], [1, 2, 3, 4], [2, 3, 4]]"
+        );
+    }
+}

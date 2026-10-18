@@ -400,6 +400,10 @@ impl Vm {
                 let value = self.new_list(self.reg_ptr(b), c as usize);
                 self.set_reg(a, value);
             }
+            Op::NewListSpread => {
+                let value = self.new_list_spread(self.reg_ptr(b), c as usize)?;
+                self.set_reg(a, value);
+            }
             // SAFETY: the register after a loop state's first one lies within the frame.
             Op::ListBegin => self.list_begin(instr.x, unsafe { self.reg_ptr(a).add(1) }),
             Op::ListAppend => self.list_append(self.reg_ptr(a), b as usize)?,

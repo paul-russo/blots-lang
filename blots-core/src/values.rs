@@ -16,6 +16,7 @@ use crate::{
         StringPointer,
     },
     intern::Symbol,
+    list::List,
     record::Record,
 };
 
@@ -497,7 +498,7 @@ pub struct WithHeap<'h, T> {
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum ReifiedIterableValue<'h> {
-    List(&'h Vec<Value>),
+    List(&'h [Value]),
     String(&'h String),
     Record(&'h Record),
 }
@@ -530,7 +531,7 @@ impl<'h> IntoIterator for WithHeap<'h, ReifiedIterableValue<'h>> {
     fn into_iter(self) -> Self::IntoIter {
         match self.value {
             // Yields an iterator over the values in the list.
-            ReifiedIterableValue::List(l) => (*l).clone().into_iter(),
+            ReifiedIterableValue::List(l) => Vec::from(*l).into_iter(),
             // Yields an iterator over the characters in the string.
             ReifiedIterableValue::String(s) => s
                 .chars()
@@ -601,7 +602,7 @@ pub enum ReifiedValue<'h> {
     /// A null value represents the absence of a value.
     Null,
     /// A list is a sequence of values.
-    List(&'h Vec<Value>, ListPointer),
+    List(&'h [Value], ListPointer),
     /// A string is a sequence of characters.
     String(&'h str, StringPointer),
     /// A record is a collection of key-value pairs.
@@ -1139,7 +1140,7 @@ impl Value {
         }
     }
 
-    pub fn as_list<'h>(&self, heap: &'h Heap) -> Result<&'h Vec<Value>> {
+    pub fn as_list<'h>(&self, heap: &'h Heap) -> Result<&'h List> {
         match self {
             Value::List(l) => l.reify(heap).as_list(),
             _ => Err(anyhow!("expected a list, but got a {}", self.get_type())),

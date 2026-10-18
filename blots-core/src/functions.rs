@@ -660,15 +660,10 @@ impl BuiltInFunction {
 
             Self::Tail => match &args[0] {
                 Value::List(p) => {
-                    let val = {
-                        p.reify(&heap.borrow())
-                            .as_list()?
-                            .get(1..)
-                            .unwrap_or([].as_slice())
-                            .to_vec()
-                    };
+                    let mut heap = heap.borrow_mut();
+                    let len = p.reify(&heap).as_list()?.len();
 
-                    Ok(heap.borrow_mut().insert_list(val))
+                    Ok(heap.slice_list(*p, len.min(1)..len)?)
                 }
                 Value::String(s) => {
                     let val = {
@@ -689,16 +684,14 @@ impl BuiltInFunction {
                 let end = args[2].as_number()? as usize;
 
                 match args[0] {
-                    Value::List(_) => {
-                        let slice = {
-                            let borrowed_heap = heap.borrow();
-                            let list = args[0].as_list(&borrowed_heap)?;
-                            list.get(start..end)
-                                .ok_or_else(|| RuntimeError::from("index out of bounds"))?
-                                .to_vec()
-                        };
+                    Value::List(list) => {
+                        let mut heap = heap.borrow_mut();
+                        let len = list.reify(&heap).as_list()?.len();
+                        if start > end || end > len {
+                            return Err(RuntimeError::from("index out of bounds"));
+                        }
 
-                        Ok(heap.borrow_mut().insert_list(slice))
+                        Ok(heap.slice_list(list, start..end)?)
                     }
                     Value::String(_) => {
                         let s = {
@@ -716,6 +709,18 @@ impl BuiltInFunction {
             }
 
             Self::Concat => {
+                // What follows a list goes behind its elements, which are shared with the
+                // result where they can be instead of being copied.
+                let (base, args) = match args.split_first() {
+                    Some((Value::List(base), rest)) => (Some(*base), rest),
+                    _ => (None, args),
+                };
+
+                if let (Some(base), [Value::List(only)]) = (base, args) {
+                    let items = only.reify(&heap.borrow()).as_list()?.clone();
+                    return Ok(heap.borrow_mut().extend_list(base, &items)?);
+                }
+
                 let mut list = vec![];
 
                 for &arg in args {
@@ -746,7 +751,10 @@ impl BuiltInFunction {
                     }
                 }
 
-                Ok(heap.borrow_mut().insert_list(list))
+                match base {
+                    Some(base) => Ok(heap.borrow_mut().extend_list(base, &list)?),
+                    None => Ok(heap.borrow_mut().insert_list(list)),
+                }
             }
 
             Self::Dot => {
@@ -792,7 +800,7 @@ impl BuiltInFunction {
             Self::Sort => {
                 let mut list = {
                     let borrowed_heap = &heap.borrow();
-                    args[0].as_list(borrowed_heap)?.clone()
+                    args[0].as_list(borrowed_heap)?.to_vec()
                 };
                 let borrowed_heap = heap.borrow();
                 list.sort_by(|a, b| {
@@ -805,7 +813,7 @@ impl BuiltInFunction {
             }
 
             Self::Reverse => {
-                let mut list = { args[0].as_list(&heap.borrow())?.clone() };
+                let mut list = { args[0].as_list(&heap.borrow())?.to_vec() };
                 list.reverse();
                 Ok(heap.borrow_mut().insert_list(list))
             }
@@ -1029,7 +1037,7 @@ impl BuiltInFunction {
                 };
                 let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list_rc()?
+                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
                 };
 
                 let mut groups: IndexMap<String, Vec<Value>> = IndexMap::new();
@@ -1068,7 +1076,7 @@ impl BuiltInFunction {
                 };
                 let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list_rc()?
+                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
                 };
 
                 let mut counts: IndexMap<String, f64> = IndexMap::new();
@@ -1162,18 +1170,19 @@ impl BuiltInFunction {
                     return Err(RuntimeError::from("chunk size must be greater than 0"));
                 }
 
-                let chunk_values = {
-                    let borrowed_heap = heap.borrow();
-                    let list = args[0].as_list(&borrowed_heap)?;
-                    list.chunks(n)
-                        .map(|chunk| chunk.to_vec())
-                        .collect::<Vec<_>>()
-                };
                 let mut borrowed_heap = heap.borrow_mut();
-                let chunks = chunk_values
-                    .into_iter()
-                    .map(|chunk| borrowed_heap.insert_list(chunk))
-                    .collect();
+                let len = args[0].as_list(&borrowed_heap)?.len();
+                let Value::List(list) = args[0] else {
+                    unreachable!("only a list is read as a list");
+                };
+
+                // The chunks are parts of the list, which they share their elements with.
+                let chunks = (0..len)
+                    .step_by(n)
+                    .map(|start| {
+                        borrowed_heap.slice_list(list, start..start.saturating_add(n).min(len))
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
 
                 Ok(borrowed_heap.insert_list(chunks))
             }
@@ -1269,7 +1278,7 @@ impl BuiltInFunction {
                 // slower.
                 let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list_rc()?
+                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
                 };
                 let func_accepts_two_args = func_def.arity().can_accept(2);
 
@@ -1299,7 +1308,7 @@ impl BuiltInFunction {
                 };
                 let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list_rc()?
+                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
                 };
                 let func_accepts_two_args = func_def.arity().can_accept(2);
 
@@ -1332,7 +1341,7 @@ impl BuiltInFunction {
                 };
                 let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list_rc()?
+                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
                 };
                 let func_accepts_three_args = func_def.arity().can_accept(3);
 
@@ -1361,7 +1370,7 @@ impl BuiltInFunction {
                 };
                 let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list_rc()?
+                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
                 };
                 let func_accepts_two_args = func_def.arity().can_accept(2);
 
@@ -1392,7 +1401,7 @@ impl BuiltInFunction {
                 };
                 let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list_rc()?
+                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
                 };
                 let func_accepts_two_args = func_def.arity().can_accept(2);
 
@@ -1417,7 +1426,7 @@ impl BuiltInFunction {
                 let func = &args[1];
                 let mut list = {
                     let borrowed_heap = &heap.borrow();
-                    args[0].as_list(borrowed_heap)?.clone()
+                    args[0].as_list(borrowed_heap)?.to_vec()
                 };
 
                 // Look up (and clone) the key function once rather than once per comparison.
