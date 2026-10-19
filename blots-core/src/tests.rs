@@ -9019,3 +9019,746 @@ mod remembered_name_tests {
         }
     }
 }
+
+// The instruction loop takes the call into the rest of the VM itself for an instruction that
+// is one such call whatever its operands are, and for two strings that are added, a character
+// of a string, and a field that is not where it was found last. Nothing may tell that from
+// handing the instruction to the code that executes any instruction in full, which is where
+// every instruction goes in a build with `blots_vm_step_only`.
+#[cfg(test)]
+mod instruction_call_tests {
+    use crate::ast::Expr;
+    use crate::bytecode::{Instr, Op};
+    use crate::compiler::compile_lambda;
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::{evaluate_ast, evaluate_statement};
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code`, up to the value of the last one, with the heap
+    /// compacted while a statement runs (`compacts`) or left alone.
+    fn evaluate(
+        code: &str,
+        heap: &Rc<RefCell<Heap>>,
+        compacts: bool,
+    ) -> Result<Value, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+
+            let (heap, bindings) = (Rc::clone(heap), Rc::clone(&bindings));
+            result = match compacts {
+                true => evaluate_statement(&expr, heap, bindings, Rc::clone(&source), &mut [])?,
+                false => evaluate_ast(&expr, heap, bindings, 0, Rc::clone(&source))?,
+            };
+        }
+
+        Ok(result)
+    }
+
+    /// What the statements of `code` come to, rendered: the value, or the message of the
+    /// error and the part of `code` that it points at. Returns the number of passes over
+    /// the heap as well.
+    fn run(code: &str, compacts: bool) -> (String, usize) {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        let outcome = match evaluate(code, &heap, compacts) {
+            Ok(value) => value.stringify_internal(&heap.borrow()),
+            Err(error) => {
+                let place = match error.span {
+                    Some(span) => &code[span.start_byte..span.end_byte],
+                    None => "nothing",
+                };
+
+                format!("{} at {place}", error.message)
+            }
+        };
+
+        (outcome, heap.borrow().passes())
+    }
+
+    /// What `code` comes to, which is the same with passes over the heap in its statements
+    /// as without.
+    fn outcome(code: &str) -> String {
+        let (outcome, _) = run(code, true);
+
+        assert_eq!(outcome, run(code, false).0, "{code}");
+
+        outcome
+    }
+
+    /// The operations of the instructions of the function `code`.
+    fn operations(code: &str) -> Vec<Op> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let [Statement::Expression(expr)] = &statements[..] else {
+            panic!("{code} is not a single expression");
+        };
+        let Expr::Lambda { args, body, .. } = &expr.node else {
+            panic!("{code} is not a function");
+        };
+        let proto = compile_lambda(&Rc::new(args.clone()), body, true).unwrap();
+
+        let mut operations = Vec::new();
+        let mut pc = 0;
+        while pc < proto.code.len() {
+            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
+            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            operations.push(instr.op);
+            pc += 1 + instr.operand_words();
+        }
+
+        operations
+    }
+
+    /// A list of `count` elements, which are the parameters `a`, `b` and `c` in turn, with
+    /// `last` behind them.
+    fn long_list(count: usize, last: &str) -> String {
+        let items: Vec<&str> = ["a", "b", "c"].into_iter().cycle().take(count).collect();
+
+        format!("[{}{last}]", items.join(", "))
+    }
+
+    #[test]
+    fn the_functions_of_these_tests_are_made_of_the_instructions_in_question() {
+        let long = format!("(a, b, c) => {}", long_list(300, ", ...a"));
+
+        for (code, expected) in [
+            ("(a, b) => a + b", &[Op::Add][..]),
+            ("(s, i) => s[i]", &[Op::Index]),
+            ("r => r.x", &[Op::GetField]),
+            ("x => typeof(x)", &[Op::CallBuiltIn]),
+            ("(xs, g) => map(xs, g)", &[Op::CallBuiltIn]),
+            ("k => (() => k)", &[Op::Closure]),
+            ("a => [a, a + 1, [a]]", &[Op::NewList]),
+            ("xs => [...xs, 3]", &[Op::Spread, Op::NewListSpread]),
+            (
+                "(f, xs) => f(1, ...xs, 2)",
+                &[Op::ListBegin, Op::Spread, Op::ListAppend, Op::CallList],
+            ),
+            (
+                long.as_str(),
+                &[Op::ListBegin, Op::ListAppend, Op::Spread, Op::ListEnd],
+            ),
+            ("(a, b) => {a: a, b: b}", &[Op::NewRecord]),
+            (
+                "(r, a) => {...r, a: a}",
+                &[
+                    Op::RecordBegin,
+                    Op::Spread,
+                    Op::RecordSpread,
+                    Op::RecordSet,
+                    Op::RecordEnd,
+                ],
+            ),
+            (
+                "(k, v) => {[k]: v}",
+                &[
+                    Op::RecordBegin,
+                    Op::RecordKey,
+                    Op::RecordValue,
+                    Op::RecordEnd,
+                ],
+            ),
+            (
+                "xs => map(xs, x => x + 1)",
+                &[Op::IterPrep, Op::ListBegin, Op::ListEnd],
+            ),
+            (
+                "n => map(range(n), x => x * 2)",
+                &[Op::RangePrep, Op::ListBegin, Op::ListEnd],
+            ),
+        ] {
+            let operations = operations(code);
+
+            for op in expected {
+                assert!(
+                    operations.contains(op),
+                    "{code}: {op:?} is not in {operations:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn two_strings_that_are_added_are_joined() {
+        for (code, expected) in [
+            // Strings of every length, and with characters of more than one byte.
+            ("s = \"ab\"\nt = \"cd\"\ns + t", "abcd"),
+            (
+                "f = (a, b) => a + b\n[f(\"x\", \"y\"), f(1, 2), f(\"x\", \"\"), f(\"\", \"\"), f(\"é\", \"ü\")]",
+                "[xy, 3, x, , éü]",
+            ),
+            // A string that is added to stays what it was for whoever else has it.
+            (
+                "s = \"x\"\nt = s + s\nu = t + t\n[s, t, u, u + s + t]",
+                "[x, xx, xxxx, xxxxxxx]",
+            ),
+            (
+                "s = \"x\"\nt = s + \"y\"\nu = s + \"z\"\n[s, t, u]",
+                "[x, xy, xz]",
+            ),
+            // A string that grows on every pass of a loop.
+            (
+                "reduce([\"a\", \"b\", \"c\", \"d\"], (acc, s) => acc + s, \"\")",
+                "abcd",
+            ),
+            (
+                "len(reduce(range(200), (acc, n) => acc + to_string(n % 10), \"\"))",
+                "200",
+            ),
+            (
+                "words = map(range(50), n => \"w\" + to_string(n))\nlen(reduce(words, (acc, w) => acc + w + \" \", \"\"))",
+                "190",
+            ),
+            // Whatever else is added is added as it always was.
+            (
+                "f = (a, b) => a + b\nf([\"a\", \"b\"], [\"c\", \"d\"])",
+                "[ac, bd]",
+            ),
+            ("f = (a, b) => a + b\nf([1, 2], [3, 4])", "[4, 6]"),
+            (
+                "f = (a, b) => a + b\nf(\"x\", 1)",
+                "in function \"f\": expected a string, but got a number at (\"x\", 1)",
+            ),
+            (
+                "f = (a, b) => a + b\nf(1, \"x\")",
+                "in function \"f\": expected a number, but got a string at (1, \"x\")",
+            ),
+            (
+                "f = (a, b) => a + b\nf(\"x\", null)",
+                "in function \"f\": expected a string, but got a null at (\"x\", null)",
+            ),
+            (
+                "f = (a, b) => a + b\nf([1, 2], \"x\")",
+                "in function \"f\": can't add number and string at a + b",
+            ),
+            (
+                "f = (a, b) => a + b\nf(\"x\", [1, 2])",
+                "in function \"f\": can't add string and number at a + b",
+            ),
+            (
+                "f = (a, b) => a + b\nf({a: 1}, \"x\")",
+                "in function \"f\": expected a number, but got a record at ({a: 1}, \"x\")",
+            ),
+            (
+                "f = (a, b) => a + b\nf(true, \"x\")",
+                "in function \"f\": expected a number, but got a boolean at (true, \"x\")",
+            ),
+            (
+                "f = (a, b) => a + b\nf(x => x, \"x\")",
+                "in function \"f\": expected a number, but got a function at (x => x, \"x\")",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_string_has_a_character_at_an_index() {
+        for (code, expected) in [
+            // From the start and from the end, in range and out of it, whole or not.
+            (
+                "s = \"héllo\"\n[s[0], s[1], s[4], s[5], s[-1], s[-5], s[-6], s[1.7], s[-1.5], s[1e30], s[-1e30]]",
+                "[h, é, o, null, o, h, null, é, o, null, null]",
+            ),
+            (
+                "f = (s, i) => s[i]\n[f(\"ab\", 0 / 0), f([1, 2], 0 / 0), f(\"\", 0)]",
+                "[a, 1, null]",
+            ),
+            // One instruction that indexes a string, a list and a record in turn.
+            (
+                "f = (s, i) => s[i]\n[f(\"ab\", 1), f([1, 2], 1), f({a: 1}, \"a\"), f(\"ab\", -1), f([1, 2], -1), f({a: 1}, \"b\")]",
+                "[b, 2, 1, b, 2, null]",
+            ),
+            (
+                "s = \"abc\"\nmap(range(5), i => s[i])",
+                "[a, b, c, null, null]",
+            ),
+            (
+                "s = \"abc\"\nmap(range(5), i => s[i] ?? \"-\")",
+                "[a, b, c, -, -]",
+            ),
+            (
+                "letters = s => map(range(len(s)), i => s[i])\nletters(\"héllo wörld\")",
+                "[h, é, l, l, o,  , w, ö, r, l, d, null, null]",
+            ),
+            // What cannot be indexed, and what cannot be an index.
+            (
+                "f = (s, i) => s[i]\nf(\"ab\", \"a\")",
+                "in function \"f\": expected a number, but got a string at (\"ab\", \"a\")",
+            ),
+            (
+                "f = (s, i) => s[i]\nf(\"ab\", null)",
+                "in function \"f\": expected a number, but got a null at (\"ab\", null)",
+            ),
+            (
+                "f = (s, i) => s[i]\nf(\"ab\", [0])",
+                "in function \"f\": expected a number, but got a list at (\"ab\", [0])",
+            ),
+            (
+                "f = (s, i) => s[i]\nf(1, 0)",
+                "in function \"f\": expected a record, list, or string, but got a number at s",
+            ),
+            (
+                "f = (s, i) => s[i]\nf(null, 0)",
+                "in function \"f\": expected a record, list, or string, but got a null at s",
+            ),
+            (
+                "f = (s, i) => s[i]\nf({a: 1}, 0)",
+                "in function \"f\": expected a string, but got a number at ({a: 1}, 0)",
+            ),
+            (
+                "f = (s, i) => s[i]\nf([1], \"a\")",
+                "in function \"f\": expected a number, but got a string at ([1], \"a\")",
+            ),
+            (
+                "f = (s, i) => s[i]\nf(x => x, 0)",
+                "in function \"f\": expected a record, list, or string, but got a function at s",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_field_is_found_wherever_the_record_has_it() {
+        for (code, expected) in [
+            ("r = {a: 1, b: 2}\n[r.a, r.b, r.c]", "[1, 2, null]"),
+            // One instruction that reads records whose keys are in tables of their own.
+            (
+                "f = r => r.x\n[f({x: 1}), f({y: 2}), f({y: 1, x: 3}), f({x: 4, y: 5}), f({}), f({x: null})]",
+                "[1, null, 3, 4, null, null]",
+            ),
+            (
+                "f = r => r.x\nmap([{x: 1}, {y: 2}, {x: 3, y: 4}, {y: 5, x: 6}], f)",
+                "[1, null, 3, 6]",
+            ),
+            ("f = r => r.x.y\n[f({x: {y: 1}}), f({x: {}})]", "[1, null]"),
+            // What has no fields.
+            (
+                "f = r => r.x\nf(1)",
+                "in function \"f\": expected a record, but got a number at r",
+            ),
+            (
+                "f = r => r.x\nf(\"s\")",
+                "in function \"f\": expected a record, but got a string at r",
+            ),
+            (
+                "f = r => r.x\nf([1])",
+                "in function \"f\": expected a record, but got a list at r",
+            ),
+            (
+                "f = r => r.x\nf(null)",
+                "in function \"f\": expected a record, but got a null at r",
+            ),
+            (
+                "f = r => r.x\nf(x => x)",
+                "in function \"f\": expected a record, but got a function at r",
+            ),
+            (
+                "f = r => r.x.y\nf({})",
+                "in function \"f\": expected a record, but got a null at .x",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_built_in_function_is_called_by_its_name() {
+        for (code, expected) in [
+            (
+                "f = x => typeof(x)\n[f(1), f(\"a\"), f([1]), f({a: 1}), f(null), f(true), f(f)]",
+                "[number, string, list, record, null, boolean, function]",
+            ),
+            ("f = x => keys(x)\nf({a: 1, b: 2})", "[a, b]"),
+            (
+                "f = x => to_string(x)\n[f(12), f(\"a\"), f([1, \"b\"]), f({a: 1})]",
+                "[12, a, [1, b], {a: 1}]",
+            ),
+            (
+                "f = (a, b, c) => slice(a, b, c)\n[f([1, 2, 3], 1, 2), f(\"abc\", 0, 2)]",
+                "[[2], ab]",
+            ),
+            // A function that calls back, which runs the instruction loop again.
+            (
+                "f = (xs, g) => map(xs, g)\nf([1, 2, 3], x => x * 2)",
+                "[2, 4, 6]",
+            ),
+            (
+                "f = (xs, g) => sort_by(xs, g)\nf([3, 1, 2], x => 0 - x)",
+                "[3, 2, 1]",
+            ),
+            (
+                "f = (xs, g) => reduce(xs, g, 0)\nf([3, 1, 2], (a, x) => a + x)",
+                "6",
+            ),
+            (
+                "deep = n => if n == 0 then 0 else sum(map([n], x => deep(x - 1))) + 1\ndeep(20)",
+                "20",
+            ),
+            // What the function does not take, and what goes wrong in what it calls back.
+            (
+                "f = x => keys(x)\nf(1)",
+                "in function \"f\": in built-in function \"keys\": expected a record, but got a number at (x)",
+            ),
+            (
+                "f = (a, b, c) => slice(a, b, c)\nf([1], \"a\", 2)",
+                "in function \"f\": in built-in function \"slice\": expected a number, but got a string at (a, b, c)",
+            ),
+            (
+                "f = (xs, g) => map(xs, g)\nf(1, x => x)",
+                "in function \"f\": in built-in function \"map\": expected a list, but got a number at (xs, g)",
+            ),
+            (
+                "f = (xs, g) => map(xs, g)\nf([1, 2], 3)",
+                "in function \"f\": in built-in function \"map\": second argument must be a function at (xs, g)",
+            ),
+            (
+                "f = (xs, g) => map(xs, g)\nf([1], x => x.a)",
+                "in function \"f\": in built-in function \"map\": in anonymous function: expected a record, but got a number at x",
+            ),
+            (
+                "f = (xs, g) => map(xs, g)\nf([{a: 1}, 2], x => x.a)",
+                "in function \"f\": in built-in function \"map\": in anonymous function: expected a record, but got a number at x",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_function_is_made_with_what_it_captures() {
+        for (code, expected) in [
+            (
+                "fs = map([1, 2, 3], x => (y => x + y))\nmap(fs, f => f(10))",
+                "[11, 12, 13]",
+            ),
+            ("mk = k => (() => k)\n[mk(1)(), mk(2)()]", "[1, 2]"),
+            (
+                "mk = k => (() => k + j)\nj = 10\n[mk(1)(), mk(2)()]",
+                "[11, 12]",
+            ),
+            (
+                "counter = n => { next: () => counter(n + 1), value: n }\ncounter(0).next().next().value",
+                "2",
+            ),
+            (
+                "compose = (f, g) => x => f(g(x))\ninc = x => x + 1\ndbl = x => x * 2\n[compose(inc, dbl)(5), compose(dbl, inc)(5)]",
+                "[11, 12]",
+            ),
+            (
+                "mk = k => (() => missing + k)\nmk(1)()",
+                "in anonymous function: unknown identifier: missing at missing",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_list_is_built_from_values_and_from_what_is_spread() {
+        for (code, expected) in [
+            ("a = 1\n[a, a + 1, [a]]", "[1, 2, [1]]"),
+            (
+                "xs = [1, 2]\n[[...xs, 3], [0, ...xs, ...xs], [...\"ab\", 1], [...{a: 1, b: 2}], [...xs], [...[], ...xs, ...[]]]",
+                "[[1, 2, 3], [0, 1, 2, 1, 2], [a, b, 1], [[a, 1], [b, 2]], [1, 2], [1, 2]]",
+            ),
+            (
+                "f = x => [0, ...x, 1]\n[f([]), f(\"\"), f({}), f([[1]]), f(\"é\")]",
+                "[[0, 1], [0, 1], [0, 1], [0, [1], 1], [0, é, 1]]",
+            ),
+            // The arguments of a call, of which only the call finds out how many there are.
+            (
+                "g = (...xs) => xs\nf = xs => g(...xs)\n[f([1, 2]), f([]), f(\"ab\")]",
+                "[[1, 2], [], [a, b]]",
+            ),
+            (
+                "g = (...xs) => len(xs)\nf = xs => g(...xs, ...xs, 1)\n[f([1, 2]), f(range(100))]",
+                "[5, 201]",
+            ),
+            (
+                "g = (a, b) => a - b\nf = xs => g(...xs)\n[f([5, 2]), f([1, 2, 3])]",
+                "in function \"f\": function \"g\" takes exactly 2 arguments, but 3 were given at (...xs)",
+            ),
+            (
+                "g = (a, b) => a - b\nf = xs => g(...xs)\nf([1])",
+                "in function \"f\": function \"g\" takes exactly 2 arguments, but 1 were given at (...xs)",
+            ),
+            // What cannot be spread.
+            (
+                "f = x => [...x]\nf(1)",
+                "in function \"f\": expected a list, record, or string at x",
+            ),
+            (
+                "f = x => [...x]\nf(null)",
+                "in function \"f\": expected a list, record, or string at x",
+            ),
+            (
+                "f = x => [0, ...x, 1]\nf(true)",
+                "in function \"f\": expected a list, record, or string at x",
+            ),
+            (
+                "f = x => [0, ...x, 1]\nf(y => y)",
+                "in function \"f\": expected a list, record, or string at x",
+            ),
+            (
+                "g = (a, b) => a - b\nf = xs => g(1, ...xs)\nf(3)",
+                "in function \"f\": expected a list, record, or string at xs",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_record_is_built_from_entries_and_from_what_is_spread() {
+        for (code, expected) in [
+            (
+                "f = (a, b) => {a: a, b: b}\n[f(1, 2), f(\"x\", [1])]",
+                "[{a: 1, b: 2}, {a: x, b: [1]}]",
+            ),
+            (
+                "nest = n => if n == 0 then {} else {inner: nest(n - 1), n: n}\nnest(3)",
+                "{inner: {inner: {inner: {}, n: 1}, n: 2}, n: 3}",
+            ),
+            // An entry behind what is spread and in front of it.
+            (
+                "f = (r, a) => {...r, a: a}\n[f({}, 1), f({a: 0, b: 2}, 1), f({b: 2}, 1)]",
+                "[{a: 1}, {a: 1, b: 2}, {b: 2, a: 1}]",
+            ),
+            (
+                "f = (r, a) => {a: a, ...r}\n[f({}, 1), f({a: 0, b: 2}, 1), f({b: 2}, 1)]",
+                "[{a: 1}, {a: 0, b: 2}, {a: 1, b: 2}]",
+            ),
+            (
+                "f = (r, a) => {...r, a: a}\n[f([7, 8], 2), f(\"xy\", 2)]",
+                "[{0: 7, 1: 8, a: 2}, {0: x, 1: y, a: 2}]",
+            ),
+            // A key that is only known when the record is built.
+            (
+                "f = (k, v) => {[k]: v}\n[f(\"a\", 1), f(\"\", 2), f(\"é\", [3])]",
+                "[{a: 1}, {: 2}, {é: [3]}]",
+            ),
+            (
+                "f = (k, j) => {[k]: 1, [j]: 2, [k]: 3}\nf(\"a\", \"b\")",
+                "{a: 3, b: 2}",
+            ),
+            (
+                "f = (k, r) => {[k]: 1, ...r, b: 2}\n[f(\"a\", {a: 5, c: 6}), f(\"b\", {}), f(\"c\", {b: 0})]",
+                "[{a: 5, c: 6, b: 2}, {b: 2}, {c: 1, b: 2}]",
+            ),
+            // What cannot be spread, and what cannot be a key.
+            (
+                "f = (r, a) => {...r, a: a}\nf(1, 2)",
+                "in function \"f\": expected a list, record, or string at r",
+            ),
+            (
+                "f = (r, a) => {...r, a: a}\nf(null, 2)",
+                "in function \"f\": expected a list, record, or string at r",
+            ),
+            (
+                "f = (k, r) => {[k]: 1, ...r, b: 2}\nf(\"a\", 1)",
+                "in function \"f\": expected a list, record, or string at r",
+            ),
+            (
+                "f = (k, v) => {[k]: v}\nf(1, 2)",
+                "in function \"f\": expected a string, but got a number at (1, 2)",
+            ),
+            (
+                "f = (k, v) => {[k]: v}\nf(null, 2)",
+                "in function \"f\": expected a string, but got a null at (null, 2)",
+            ),
+            (
+                "f = (k, v) => {[k]: v}\nf([\"a\"], 2)",
+                "in function \"f\": expected a string, but got a list at ([\"a\"], 2)",
+            ),
+            (
+                "f = (k, r) => {[k]: 1, ...r, b: 2}\nf(1, {})",
+                "in function \"f\": expected a string, but got a number at (1, {})",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_loop_is_set_up_over_a_range_or_a_list() {
+        for (code, expected) in [
+            (
+                "f = n => map(range(n), x => x * 2)\n[f(0), f(3), f(2.9)]",
+                "[[], [0, 2, 4], [0, 2]]",
+            ),
+            (
+                "f = (a, b) => map(range(a, b), x => x)\n[f(2, 5), f(2, 2), f(-2, 1)]",
+                "[[2, 3, 4], [], [-2, -1, 0]]",
+            ),
+            (
+                "f = xs => map(xs, x => x + 1)\n[f([1, 2, 3]), f([])]",
+                "[[2, 3, 4], []]",
+            ),
+            (
+                "f = xs => filter(xs, x => x > 1)\n[f([1, 2, 3]), f([])]",
+                "[[2, 3], []]",
+            ),
+            (
+                "f = xs => reduce(xs, (a, x) => a + x, 0)\n[f([1, 2, 3]), f([])]",
+                "[6, 0]",
+            ),
+            (
+                "f = xs => map(xs, x => map(range(x), y => {v: y, s: to_string(y) + \"!\"}))\nf([1, 2])",
+                "[[{v: 0, s: 0!}], [{v: 0, s: 0!}, {v: 1, s: 1!}]]",
+            ),
+            // A range that the function does not make.
+            (
+                "f = (a, b) => map(range(a, b), x => x)\nf(3, 1)",
+                "in function \"f\": in built-in function \"range\": range requires start to be less than or equal to end at (a, b)",
+            ),
+            (
+                "f = n => map(range(n), x => x)\nf(\"a\")",
+                "in function \"f\": in built-in function \"range\": range requires 1 or 2 numbers at (n)",
+            ),
+            (
+                "f = n => map(range(n), x => x)\nf(null)",
+                "in function \"f\": in built-in function \"range\": range requires 1 or 2 numbers at (n)",
+            ),
+            (
+                "f = n => map(range(n), x => x)\nf(-1)",
+                "in function \"f\": in built-in function \"range\": range requires start to be less than or equal to end at (n)",
+            ),
+            (
+                "f = n => map(range(n), x => x)\nf(1 / 0)",
+                "in function \"f\": in built-in function \"range\": range requires finite numbers at (n)",
+            ),
+            (
+                "f = n => map(range(n), x => x)\nf(0 / 0)",
+                "in function \"f\": in built-in function \"range\": range requires finite numbers at (n)",
+            ),
+            (
+                "f = n => map(range(n), x => x)\nf(1e10)",
+                "in function \"f\": in built-in function \"range\": list would be longer than the maximum length of 4294967295 at (n)",
+            ),
+            // What is not a list.
+            (
+                "f = xs => map(xs, x => x + 1)\nf(1)",
+                "in function \"f\": in built-in function \"map\": expected a list, but got a number at (xs, x => x + 1)",
+            ),
+            (
+                "f = xs => map(xs, x => x + 1)\nf(\"ab\")",
+                "in function \"f\": in built-in function \"map\": expected a list, but got a string at (xs, x => x + 1)",
+            ),
+            (
+                "f = xs => map(xs, x => x + 1)\nf({a: 1})",
+                "in function \"f\": in built-in function \"map\": expected a list, but got a record at (xs, x => x + 1)",
+            ),
+            (
+                "f = xs => map(xs, x => x + 1)\nf(null)",
+                "in function \"f\": in built-in function \"map\": expected a list, but got a null at (xs, x => x + 1)",
+            ),
+            (
+                "f = xs => filter(xs, x => x > 1)\nf(7)",
+                "in function \"f\": in built-in function \"filter\": expected a list, but got a number at (xs, x => x > 1)",
+            ),
+            (
+                "f = xs => reduce(xs, (a, x) => a + x, 0)\nf(\"abc\")",
+                "in function \"f\": in built-in function \"reduce\": expected a list, but got a string at (xs, (a, x) => a + x, 0)",
+            ),
+            // What goes wrong on a pass, with a list or a record half built.
+            (
+                "f = xs => map(xs, x => [x, ...missing])\nf([1])",
+                "in function \"f\": in built-in function \"map\": in anonymous function: unknown identifier: missing at missing",
+            ),
+            (
+                "f = xs => map(xs, x => {a: x, ...x})\nf([1])",
+                "in function \"f\": in built-in function \"map\": in anonymous function: expected a list, record, or string at x",
+            ),
+            (
+                "f = xs => map(xs, x => [{a: [x, ...x.b]}])\nf([{b: [1]}, {b: 2}])",
+                "in function \"f\": in built-in function \"map\": in anonymous function: expected a list, record, or string at .b",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_list_of_more_elements_than_a_function_has_registers_is_built_in_parts() {
+        for (last, call, expected) in [
+            ("", "f(1, 2, 3)", "[300, 600, 1, 3]"),
+            (", ...a", "f([7, 8], 2, 3)", "[302, 515, [7, 8], 8]"),
+            (", ...a", "f(\"xy\", 2, 3)", "[302, 500, xy, y]"),
+            (", ...a", "f({k: 1}, 2, 3)", "[301, 500, {k: 1}, [k, 1]]"),
+            (
+                ", ...a",
+                "f(1, 2, 3)",
+                "in function \"f\": expected a list, record, or string at a",
+            ),
+        ] {
+            let code = format!(
+                "g = xs => [len(xs), sum(filter(xs, x => typeof(x) == \"number\")), xs[0], xs[-1]]\nf = (a, b, c) => g({})\n{call}",
+                long_list(300, last)
+            );
+
+            assert_eq!(outcome(&code), expected, "{call} with{last}");
+        }
+    }
+
+    #[test]
+    fn the_heap_is_compacted_behind_what_these_instructions_add_to_it() {
+        for (code, expected) in [
+            // Strings that are made and joined.
+            (
+                "sum(map(range(100000), i => len(\"a\" + to_string(i % 10))))",
+                "200000",
+            ),
+            // A character of a string.
+            (
+                "s = \"héllo\"\nsum(map(range(100000), i => len(s[i % 5] ?? \"\")))",
+                "120000",
+            ),
+            // Functions that are made and called.
+            (
+                "sum(map(range(100000), i => (j => i + j)(1)))",
+                "5000050000",
+            ),
+            // Records and lists, of entries and of what is spread.
+            (
+                "sum(map(range(100000), i => {a: i, b: [i]}.a))",
+                "4999950000",
+            ),
+            (
+                "r = {a: 1, b: 2}\nsum(map(range(100000), i => {...r, a: i}.a + {a: i, ...r}.b))",
+                "5000150000",
+            ),
+            (
+                "k = \"key\"\nsum(map(range(100000), i => {[k]: i}.key))",
+                "4999950000",
+            ),
+            (
+                "xs = [1, 2]\nsum(map(range(100000), i => len([...xs, i]) + [i, ...xs][0]))",
+                "5000250000",
+            ),
+            // Arguments that are spread into a call.
+            (
+                "g = (a, b) => a - b\nsum(map(range(100000), i => g(...[i, 1])))",
+                "4999850000",
+            ),
+        ] {
+            let (outcome, passes) = run(code, true);
+
+            assert_eq!(outcome, expected, "{code}");
+            assert_eq!(run(code, false), (outcome, 0), "{code}");
+            assert!(passes > 0, "{code}: no pass");
+        }
+    }
+}

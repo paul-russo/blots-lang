@@ -23,7 +23,8 @@ mod step;
 use crate::{
     ast::{BinaryOp, Span},
     bytecode::{
-        CaptureSource, FAST_FRAME_SLOTS, Proto, REGISTER_SCALE, RemainderTest, Wrap, register_index,
+        CaptureSource, FAST_FRAME_SLOTS, Instr, Proto, REGISTER_SCALE, RemainderTest, Wrap,
+        register_index,
     },
     compiler::{compile_lambda, compile_self_variant},
     environment::Environment,
@@ -1245,6 +1246,20 @@ impl Vm {
         }
     }
 
+    /// What a run of the instruction loop comes to that `error` ends, which the instruction
+    /// that the innermost frame is executing raised: the frames of the run are abandoned
+    /// (see [`Vm::unwind`]), and so are the lists and records that it began to build, of
+    /// which there were `builders` when it started.
+    #[cold]
+    #[inline(never)]
+    fn abandon(&mut self, error: RuntimeError, builders: usize) -> Result<Value, RuntimeError> {
+        let error = self.unwind(error);
+        self.builders.truncate(builders);
+        self.leave_loop();
+
+        Err(error)
+    }
+
     // ---------------------------------------------------------------------------------------
     // Compaction of the heap in the middle of a run
     // ---------------------------------------------------------------------------------------
@@ -1906,6 +1921,19 @@ impl Vm {
                 Err(self.span_error(message))
             }
         }
+    }
+
+    /// Execute `instr`, which calls the built-in function that it names with the number of
+    /// arguments that it says (see [`Vm::call_built_in`]).
+    #[inline(never)]
+    fn call_named_built_in(&mut self, instr: Instr) -> Result<(), RuntimeError> {
+        let frame = self.top();
+        let Value::BuiltIn(built_in) = frame.proto().consts[instr.b as usize] else {
+            unreachable!("the instruction names a built-in function");
+        };
+        let base = self.slot_index(frame.base) + register_index(instr.a);
+
+        self.call_built_in(built_in, base, instr.x as usize, instr.c)
     }
 
     /// Call a built-in function with the `argc` arguments from slot `base` of the value stack

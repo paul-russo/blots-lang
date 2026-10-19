@@ -2,23 +2,24 @@
 //!
 //! The loop keeps the state of the innermost frame (the frame record, the instruction pointer
 //! and the base of its registers) in local variables and works on raw pointers throughout. It
-//! only implements the common case of each instruction, and only where that case takes no
-//! call into the rest of the VM: whatever is left is handed to [`Vm::step`], which executes
-//! any instruction in full. That hand-over is the only place where the loop publishes its
-//! state (the frame stack is seen through `Vm::top` and each frame's saved `ip`) and picks it
-//! up again, so everywhere else the state lives in machine registers.
+//! implements the common case of each instruction where that case takes no call into the rest
+//! of the VM, and an instruction that is one such call whatever its operands are takes that
+//! call from here. Whatever is left is handed to [`Vm::step`], which executes any instruction
+//! in full. Only for a call into the rest of the VM does the loop publish its state (the frame
+//! stack is seen through `Vm::top` and each frame's saved `ip`), so everywhere else the state
+//! lives in machine registers.
 
 use super::{
     Builder, CALLBACK_CALL_DEPTH, DEPTH_MASK, ENTRY, Frame, MAX_CALL_DEPTH, NOT_TRUNCATED,
     PROFILED, TAIL_SHIFT, UNBOUND, Vm, copy_value, is_unbound, leaves_remainder, less, less_eq,
-    list_next, load_value, range_next, register, same_strings, step::Flow, store_value,
+    list_next, load_value, range_next, register, same_strings, set_state, step::Flow, store_value,
     string_order, truncate, whole,
 };
 use crate::{
     bytecode::{Instr, Op, Proto, REGISTER_SCALE, RemainderTest, register_index},
     error::RuntimeError,
     expressions::{modulo, small_remainder},
-    heap::{Heap, HeapValue},
+    heap::{Heap, HeapValue, IterablePointer},
     values::{LambdaDef, Value},
 };
 use std::rc::Rc;
@@ -89,14 +90,16 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
     // every path through a proto ends in a return or an error. The stack covers `max_stack`
     // registers from the base of every active frame (plus the slot below the base of a
     // function frame, which holds the value the function was called through). Nothing in the
-    // loop itself allocates on the heap or moves the stacks; `Vm::step` may do both, and
-    // `frame`, `ip` and `base` are re-derived after it.
+    // loop itself allocates on the heap or moves the stacks. What it calls may add to the
+    // heap, and the slots are looked up again after it; `Vm::step` and a call of a built-in
+    // function may move the stacks as well, and `frame`, `ip` and `base` are re-derived after
+    // them.
     unsafe {
         let heap: *const Heap = (*vm).heap.as_ptr();
         let builders = (*vm).builders.len();
 
-        // The slots of the heap, looked up again whenever `Vm::step` may have added to them
-        // or a compaction pass may have moved what they hold.
+        // The slots of the heap, looked up again whenever a call into the rest of the VM may
+        // have added to them or a compaction pass may have moved what they hold.
         let mut slots: *const [HeapValue] = (*heap).slots();
         let mut frame: *mut Frame = (*vm).top;
         let mut ip: *const u64 = (*frame).ip;
@@ -113,20 +116,27 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 }};
             }
 
-            // The run is over because of `$error`, which every frame of it has been abandoned
-            // for already.
+            // The run is over because of `$error`, which the instruction that the loop has
+            // published raised.
             macro_rules! fail {
-                ($error:expr) => {{
-                    let error = $error;
-                    (*vm).builders.truncate(builders);
-                    leave!(Err(error));
-                }};
+                ($error:expr) => {
+                    return (*vm).abandon($error, builders)
+                };
             }
 
             // The register an operand of the instruction names.
             macro_rules! reg {
                 ($operand:expr) => {{
                     debug_assert!(register_index($operand) < (*(*frame).proto).max_stack);
+                    register(base, $operand)
+                }};
+            }
+
+            // The first of the `$count` registers from the one that an operand of the
+            // instruction names on, which is no register of the frame when there are none.
+            macro_rules! regs {
+                ($operand:expr, $count:expr) => {{
+                    debug_assert!(register_index($operand) + $count <= (*(*frame).proto).max_stack);
                     register(base, $operand)
                 }};
             }
@@ -166,13 +176,46 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 }};
             }
 
+            // The loop tells the rest of the VM where it is: which frame is the innermost one,
+            // and that the instruction it is executing is the one before its saved `ip`.
+            macro_rules! publish {
+                () => {{
+                    (*frame).ip = ip.add(1);
+                    (*vm).top = frame;
+                }};
+            }
+
+            // What the loop just called may have added to the heap: that is where the heap is
+            // found to have grown, and between two instructions is where it can be compacted,
+            // since everything the run goes on with is where the VM can find it. The slots of
+            // the heap are looked up again.
+            macro_rules! added {
+                () => {{
+                    if (*vm).compaction_is_due(&*heap) {
+                        (*vm).compact();
+                    }
+
+                    slots = (*heap).slots();
+                }};
+            }
+
+            // What a call into the rest of the VM that executes the instruction comes back
+            // with, unless that is an error, which ends the run.
+            macro_rules! done {
+                ($result:expr) => {
+                    match $result {
+                        Ok(value) => value,
+                        Err(error) => fail!(error),
+                    }
+                };
+            }
+
             // `R[a]` is what `$name` is bound to, when it is bound to something: by the frame,
             // or by one of the frames below it (see `Vm::find`, which looks at the frame stack
             // but leaves the stacks and the heap alone).
             macro_rules! find {
                 ($name:expr) => {{
-                    (*frame).ip = ip.add(1);
-                    (*vm).top = frame;
+                    publish!();
 
                     if let Some(value) = (*vm).find($name) {
                         store_value(reg!(instr.a), value);
@@ -504,7 +547,16 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     late_capture!(instr.bx());
                 }
 
-                Op::Add => arithmetic!(|x, y| x + y),
+                Op::Add => {
+                    arithmetic!(|x, y| x + y);
+
+                    // Two strings are joined, which is what is added the most after numbers.
+                    publish!();
+                    if done!((*vm).join(*instr)) {
+                        added!();
+                        next!(1);
+                    }
+                }
                 Op::Sub => arithmetic!(|x, y| x - y),
                 Op::Mul => arithmetic!(|x, y| x * y),
                 Op::Div => arithmetic!(|x, y| x / y),
@@ -840,6 +892,16 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                         }
                         next!(1);
                     }
+
+                    // A character of a string is a string of its own.
+                    if let Value::String(_) = &*reg!(instr.b) {
+                        rare();
+                        publish!();
+                        if done!((*vm).character(*instr)) {
+                            added!();
+                            next!(1);
+                        }
+                    }
                 }
                 Op::GetField => {
                     // The field usually sits where this access site found it last time.
@@ -876,6 +938,14 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                             next!(1);
                         }
                     }
+
+                    // The field is looked up, and where it is found is where the next read
+                    // looks first.
+                    publish!();
+                    let site = instr.c as usize | (instr.x as usize) << 16;
+                    let value = done!((*vm).field(*reg!(instr.b), site));
+                    store_value(reg!(instr.a), value);
+                    next!(1);
                 }
 
                 Op::AddDepth => {
@@ -913,9 +983,141 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     next!(1);
                 }
 
-                // These always take a call into the rest of the VM. Naming them, instead of
-                // leaving them to a wildcard, tells the compiler that every opcode has an arm,
-                // so the jump to the arm needs no range check.
+                Op::Spread => {
+                    // The spread form of a list, a string or a record is the same pointer.
+                    let iterable = match &*reg!(instr.b) {
+                        Value::List(pointer) => Some(IterablePointer::List(*pointer)),
+                        Value::String(pointer) => Some(IterablePointer::String(*pointer)),
+                        Value::Record(pointer) => Some(IterablePointer::Record(*pointer)),
+                        _ => None,
+                    };
+
+                    if let Some(iterable) = iterable {
+                        store_value(reg!(instr.a), Value::Spread(iterable));
+                        next!(1);
+                    }
+                }
+
+                // An instruction that is one call into the rest of the VM, whatever its
+                // operands are, takes that call right here: `Vm::step` would take the same
+                // one, after finding out again which instruction this is.
+                Op::CallBuiltIn => {
+                    publish!();
+                    done!((*vm).call_named_built_in(*instr));
+                    added!();
+
+                    // A function that the built-in one called back may have moved the stacks.
+                    frame = (*vm).top;
+                    ip = (*frame).ip;
+                    base = (*frame).base;
+                    continue 'run;
+                }
+                Op::Closure => {
+                    publish!();
+                    let value = done!((*vm).make_closure(instr.bx()));
+                    store_value(reg!(instr.a), value);
+                    added!();
+                    next!(1);
+                }
+                Op::NewList => {
+                    publish!();
+                    let first = regs!(instr.b, instr.c as usize);
+                    let value = (*vm).new_list(first, instr.c as usize);
+                    store_value(reg!(instr.a), value);
+                    added!();
+                    next!(1);
+                }
+                Op::NewListSpread => {
+                    publish!();
+                    let first = regs!(instr.b, instr.c as usize);
+                    let value = done!((*vm).new_list_spread(first, instr.c as usize));
+                    store_value(reg!(instr.a), value);
+                    added!();
+                    next!(1);
+                }
+                Op::ListBegin => {
+                    publish!();
+                    (*vm).list_begin(instr.x, reg!(instr.a).add(1));
+                    next!(1);
+                }
+                Op::ListAppend => {
+                    publish!();
+                    let first = regs!(instr.a, instr.b as usize);
+                    done!((*vm).list_append(first, instr.b as usize));
+                    added!();
+                    next!(1);
+                }
+                Op::ListEnd => {
+                    publish!();
+                    let value = (*vm).list_end();
+                    store_value(reg!(instr.a), value);
+                    added!();
+                    next!(1);
+                }
+                Op::NewRecord => {
+                    publish!();
+                    let value = (*vm).new_record(instr.c as usize, regs!(instr.b, 0));
+                    store_value(reg!(instr.a), value);
+                    added!();
+                    next!(1);
+                }
+                Op::RecordBegin => {
+                    publish!();
+                    (*vm).record_begin(instr.bx());
+                    next!(1);
+                }
+                Op::RecordSet => {
+                    publish!();
+                    (*vm).record_set(instr.bx(), *reg!(instr.a));
+                    next!(1);
+                }
+                Op::RecordKey => {
+                    publish!();
+                    done!((*vm).record_key(*reg!(instr.a)));
+                    next!(1);
+                }
+                Op::RecordValue => {
+                    publish!();
+                    (*vm).record_value(*reg!(instr.a));
+                    next!(1);
+                }
+                Op::RecordSpread => {
+                    publish!();
+                    done!((*vm).record_spread(*reg!(instr.a)));
+                    added!();
+                    next!(1);
+                }
+                Op::RecordEnd => {
+                    publish!();
+                    let value = (*vm).record_end();
+                    store_value(reg!(instr.a), value);
+                    added!();
+                    next!(1);
+                }
+                Op::RangePrep => {
+                    publish!();
+                    let args = regs!(instr.b, instr.c as usize);
+                    let (first, count) = done!((*vm).range_bounds(args, instr.c as usize));
+                    let state = reg!(instr.a);
+
+                    set_state(state, 0);
+                    set_state(state.add(1), count);
+                    state.add(2).write(Value::Number(first));
+                    next!(1);
+                }
+                Op::IterPrep => {
+                    publish!();
+                    let state = reg!(instr.a);
+                    let (first, end) = done!((*vm).iter_bounds(*state.add(1)));
+
+                    set_state(state, first as u64);
+                    set_state(state.add(4), end as u64);
+                    next!(1);
+                }
+
+                // These are rare, and always take a call into the rest of the VM. Naming them,
+                // instead of leaving them to a wildcard, tells the compiler that every opcode
+                // has an arm, so the jump to the arm needs no range check.
                 Op::GetEnvParam
                 | Op::GetEnvCapture
                 | Op::GetInput
@@ -923,33 +1125,15 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 | Op::Into
                 | Op::Where
                 | Op::Factorial
-                | Op::CallBuiltIn
                 | Op::CallList
-                | Op::Closure
-                | Op::NewList
-                | Op::NewListSpread
-                | Op::ListBegin
-                | Op::ListAppend
-                | Op::ListEnd
-                | Op::NewRecord
-                | Op::RecordBegin
-                | Op::RecordSet
-                | Op::RecordKey
-                | Op::RecordValue
-                | Op::RecordSpread
-                | Op::RecordEnd
-                | Op::Spread
                 | Op::Raise
                 | Op::CheckUnbound
                 | Op::NameLambda
-                | Op::SetGlobal
-                | Op::RangePrep
-                | Op::IterPrep => {}
+                | Op::SetGlobal => {}
             }
 
-            // Whatever the fast paths above do not cover.
-            (*frame).ip = ip.add(1);
-            (*vm).top = frame;
+            // Whatever the paths above do not cover.
+            publish!();
 
             match (*vm).step(*instr) {
                 Ok(Flow::Continue) => {}
@@ -957,17 +1141,10 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 Err(error) => fail!(error),
             }
 
-            // Only `Vm::step` adds to the heap, so this is where the heap is found to have
-            // grown, and between two instructions is where it can be compacted: everything
-            // the run goes on with is where the VM can find it.
-            if (*vm).compaction_is_due(&*heap) {
-                (*vm).compact();
-            }
-
+            added!();
             frame = (*vm).top;
             ip = (*frame).ip;
             base = (*frame).base;
-            slots = (*heap).slots();
         }
     }
 }

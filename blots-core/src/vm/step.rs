@@ -63,22 +63,6 @@ fn operator_of(op: Op) -> BinaryOp {
 }
 
 impl Vm {
-    /// Execute `instr`, the instruction right before the saved `ip` of the innermost frame.
-    /// An error comes back with every frame of the current `run` already abandoned.
-    ///
-    /// # Safety
-    /// The state of the instruction loop must be published: `Vm::top` is the frame executing
-    /// `instr`, and its saved `ip` points at the code word after it.
-    #[cold]
-    #[inline(never)]
-    pub(super) unsafe fn step(&mut self, instr: Instr) -> Result<Flow, RuntimeError> {
-        // SAFETY: guaranteed by the caller.
-        match unsafe { self.perform(instr) } {
-            Ok(flow) => Ok(flow),
-            Err(error) => Err(self.unwind(error)),
-        }
-    }
-
     /// The value in the register of the innermost frame that `operand` names.
     #[inline(always)]
     fn reg(&self, operand: u16) -> Value {
@@ -117,9 +101,49 @@ impl Vm {
         unsafe { (*self.top).ip = (*self.top).ip.offset(offset) }
     }
 
+    /// Execute `instr`, which adds two values, when both of them are strings: they are joined
+    /// right in the heap. Whether they were is what comes back.
+    #[inline(never)]
+    pub(super) fn join(&mut self, instr: Instr) -> Result<bool, RuntimeError> {
+        let (Value::String(first), Value::String(second)) = (self.reg(instr.b), self.reg(instr.c))
+        else {
+            return Ok(false);
+        };
+
+        let value = self.heap.borrow_mut().join_strings(first, second)?;
+        self.set_reg(instr.a, value);
+
+        Ok(true)
+    }
+
+    /// Execute `instr`, which indexes a value, when that value is a string and the index is a
+    /// number: the character there is a string of its own. Whether it was one is what comes
+    /// back. Lists and records are indexed far more often, which is what `cold` says.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn character(&mut self, instr: Instr) -> Result<bool, RuntimeError> {
+        let (string @ Value::String(_), index @ Value::Number(_)) =
+            (self.reg(instr.b), self.reg(instr.c))
+        else {
+            return Ok(false);
+        };
+
+        let value = self.index(string, index)?;
+        self.set_reg(instr.a, value);
+
+        Ok(true)
+    }
+
+    /// Execute `instr`, the instruction right before the saved `ip` of the innermost frame.
+    /// An error is the one that the instruction raised: the frames of the current `run` are
+    /// all still there, for [`Vm::abandon`] to go down.
+    ///
     /// # Safety
-    /// As for [`Vm::step`].
-    unsafe fn perform(&mut self, instr: Instr) -> Result<Flow, RuntimeError> {
+    /// The state of the instruction loop must be published: `Vm::top` is the frame executing
+    /// `instr`, and its saved `ip` points at the code word after it.
+    #[cold]
+    #[inline(never)]
+    pub(super) unsafe fn step(&mut self, instr: Instr) -> Result<Flow, RuntimeError> {
         let (a, b, c) = (instr.a, instr.b, instr.c);
 
         match instr.op {
@@ -204,11 +228,7 @@ impl Vm {
             | Op::Where => {
                 let (lhs, rhs) = (self.reg(b), self.reg(c));
 
-                // Two strings that are added are joined right in the heap.
-                if let (Op::Add, Value::String(first), Value::String(second)) = (instr.op, lhs, rhs)
-                {
-                    let value = self.heap.borrow_mut().join_strings(first, second)?;
-                    self.set_reg(a, value);
+                if instr.op == Op::Add && self.join(instr)? {
                     return Ok(Flow::Continue);
                 }
 
@@ -362,14 +382,7 @@ impl Vm {
             }
 
             Op::Call => self.call_slow(register_index(a), b as usize, c)?,
-            Op::CallBuiltIn => {
-                let Value::BuiltIn(built_in) = self.top().proto().consts[b as usize] else {
-                    unreachable!("the instruction names a built-in function");
-                };
-                let base = self.slot_index(self.top().base) + register_index(a);
-
-                self.call_built_in(built_in, base, instr.x as usize, c)?;
-            }
+            Op::CallBuiltIn => self.call_named_built_in(instr)?,
             Op::Sqrt
             | Op::Sin
             | Op::Cos
