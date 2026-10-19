@@ -1565,11 +1565,26 @@ impl Vm {
         Err(self.span_error("factorial only works on non-negative integers".to_string()))
     }
 
+    /// The string that string literal `index` of the innermost frame's code stands for: the
+    /// one that was made for it before in this run, or else a new one, which every
+    /// evaluation of the literal that follows in this run finds.
     #[inline(never)]
     fn load_string(&mut self, index: usize) -> Value {
-        let text = self.top().proto().strings[index].as_str();
+        let proto = self.top().proto();
+        let literal = &proto.literals[index];
 
-        self.heap.borrow_mut().insert_string(text)
+        if literal.run() == self.run_number {
+            // SAFETY: the literal holds a value.
+            return unsafe { literal.value().read() };
+        }
+
+        let value = self
+            .heap
+            .borrow_mut()
+            .insert_string(proto.strings[index].as_str());
+        literal.remember(self.run_number, value);
+
+        value
     }
 
     /// Create a function value from lambda template `index` of the innermost frame's proto,

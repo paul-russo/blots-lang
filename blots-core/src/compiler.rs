@@ -25,7 +25,7 @@ use crate::{
     },
     bytecode::{
         CaptureSource, FAST_FRAME_SLOTS, FieldCache, Handler, Instr, LAST_USE_B, LAST_USE_C,
-        LambdaTemplate, LocalVar, MAX_REGISTERS, Op, Proto, RECIPROCAL, RecordLayout,
+        LambdaTemplate, Literal, LocalVar, MAX_REGISTERS, Op, Proto, RECIPROCAL, RecordLayout,
         RemainderTest, SelfRef, Wrap, binary_opcode, exact_reciprocal,
     },
     environment::Environment,
@@ -897,6 +897,12 @@ impl FnCompiler {
         Proto {
             code: self.code,
             consts: self.consts,
+            literals: self
+                .strings
+                .entries
+                .iter()
+                .map(|_| Literal::new())
+                .collect(),
             strings: self.strings.entries,
             names: self.names.entries,
             slot_refs: self.slot_refs,

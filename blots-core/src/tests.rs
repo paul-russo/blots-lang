@@ -5683,8 +5683,9 @@ mod shared_string_tests {
         assert_eq!(session.outcome("len(\"\" + long + \"\")"), "78");
         assert_eq!(session.outcome("short + \"\""), "ab");
 
-        // Only the empty strings that the program spells out were made.
-        assert_eq!(session.heap.borrow().len(), slots + 4);
+        // Only the empty string that each of the three statements spells out was made, and
+        // only once where a statement spells it out twice.
+        assert_eq!(session.heap.borrow().len(), slots + 3);
     }
 
     #[test]
@@ -6201,6 +6202,95 @@ mod shared_string_tests {
             ("format(\"{}/{}\", short, 1)", "def/1"),
         ] {
             assert_eq!(session.outcome(code), expected, "{code}");
+        }
+    }
+
+    /// The number of values that evaluating `code` adds to a heap.
+    fn values_made(code: &str) -> usize {
+        let session = Session::new();
+        let slots = session.heap.borrow().len();
+        session.evaluate(code).unwrap();
+
+        session.heap.borrow().len() - slots
+    }
+
+    #[test]
+    fn a_string_literal_is_made_once_however_often_a_statement_evaluates_it() {
+        for code in [
+            "sum(map(range({}), i => len(\"abc\")))",
+            "sum(map(range({}), i => if \"abc\" < \"abd\" then 1 else 0))",
+            "len(filter(range({}), i => \"number\" != \"string\" && \"\" == \"\"))",
+            "count = (n, acc) => if n == 0 then acc else count(n - 1, acc + len(\"abc\"))\ncount({}, 0)",
+        ] {
+            let few = values_made(&code.replace("{}", "3"));
+            let many = values_made(&code.replace("{}", "900"));
+
+            assert_eq!(many, few, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_string_literal_is_made_again_by_the_statements_that_follow() {
+        let session = Session::new();
+        session
+            .evaluate(
+                "greet = name => \"hello \" + name\n\
+                 first = greet(\"a\")",
+            )
+            .unwrap();
+
+        // What a statement leaves behind goes, and what the variables hold moves there.
+        for name in ["second", "third", "fourth"] {
+            session
+                .evaluate(&format!(
+                    "map(range(100), i => to_string(i) + \"!\")\n{name} = greet(\"{name}\")"
+                ))
+                .unwrap();
+            session.compact();
+        }
+
+        assert_eq!(
+            session.outcome("[first, second, third, fourth, greet(\"last\"), greet(\"hello \")]"),
+            "[hello a, hello second, hello third, hello fourth, hello last, hello hello ]"
+        );
+    }
+
+    #[test]
+    fn what_is_made_of_a_string_literal_leaves_the_literal_as_it_is() {
+        let long = letters(1);
+        let text = "abcdefghijklmnopqrstuvwxyz";
+
+        for (code, expected) in [
+            (
+                format!("map(range(3), i => {long} + to_string(i))"),
+                format!("[{text}0, {text}1, {text}2]"),
+            ),
+            (
+                format!("map(range(3), i => {long} + {long})"),
+                format!("[{text}{text}, {text}{text}, {text}{text}]"),
+            ),
+            (
+                format!("reduce(range(3), (acc, i) => acc + {long}, {long}) == {long} + {long} + {long} + {long}"),
+                "true".to_string(),
+            ),
+            (
+                format!("(s => [s + \"1\", s + \"2\", {long} + \"3\", s == {long}, s])({long})"),
+                format!("[{text}1, {text}2, {text}3, true, {text}]"),
+            ),
+            (
+                "map(range(3), i => [\"ab\" + \"cd\", \"ab\", \"cd\", \"ab\" == \"ab\", \"ab\" < \"cd\"])[2]".to_string(),
+                "[abcd, ab, cd, true, true]".to_string(),
+            ),
+            (
+                "map([\"a\", \"b\"], s => {[s]: \"v\", v: s + \"v\"})".to_string(),
+                "[{a: v, v: av}, {b: v, v: bv}]".to_string(),
+            ),
+            (
+                "map(range(2), i => slice(\"abcdef\", i, 4) + uppercase(\"abcdef\")[i] + \"abcdef\"[i])".to_string(),
+                "[abcdAa, bcdBb]".to_string(),
+            ),
+        ] {
+            assert_eq!(outcome(&code), expected, "{code}");
         }
     }
 }

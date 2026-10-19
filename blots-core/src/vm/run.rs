@@ -367,6 +367,18 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     reg!(instr.a).write(Value::Number(f64::from_bits(*ip.add(1))));
                     next!(2);
                 }
+                Op::LoadStr => {
+                    let literals = &(*(*frame).proto).literals;
+                    debug_assert!(instr.bx() < literals.len());
+                    let literal = literals.get_unchecked(instr.bx());
+
+                    // The string that was made for the literal in this run is still where
+                    // it was put.
+                    if literal.run() == (*vm).run_number {
+                        load_value(reg!(instr.a), literal.value());
+                        next!(1);
+                    }
+                }
                 Op::LoadUnbound => {
                     store_value(reg!(instr.a), UNBOUND);
                     next!(1);
@@ -748,8 +760,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 // These always take a call into the rest of the VM. Naming them, instead of
                 // leaving them to a wildcard, tells the compiler that every opcode has an arm,
                 // so the jump to the arm needs no range check.
-                Op::LoadStr
-                | Op::GetName
+                Op::GetName
                 | Op::GetEnvParam
                 | Op::GetEnvCapture
                 | Op::GetInput

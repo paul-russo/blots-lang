@@ -874,6 +874,48 @@ impl Drop for FieldCache {
     }
 }
 
+/// What the code remembers about the string that was made for one of its string literals.
+///
+/// A string never changes, so the one that a literal was evaluated to once is what it
+/// evaluates to again, for as long as that string is where it was put. Nothing moves or
+/// removes the values of the heap while a run of a VM lasts (see `Vm::run_number`), so that
+/// is at least until the run is over.
+#[derive(Debug)]
+pub(crate) struct Literal {
+    /// The number of the run that the string was made in, or zero, which no run has.
+    run: Cell<u64>,
+
+    /// The string.
+    value: Cell<Value>,
+}
+
+impl Literal {
+    pub fn new() -> Self {
+        Self {
+            run: Cell::new(0),
+            value: Cell::new(Value::Null),
+        }
+    }
+
+    /// The number of the run that [`Literal::value`] is the string of.
+    #[inline(always)]
+    pub fn run(&self) -> u64 {
+        self.run.get()
+    }
+
+    /// Where the string of the literal is, when it was made in the run in progress.
+    #[inline(always)]
+    pub fn value(&self) -> *const Value {
+        self.value.as_ptr()
+    }
+
+    /// Remember that `value` is the string of the literal for the rest of run `run`.
+    pub fn remember(&self, run: u64, value: Value) {
+        self.value.set(value);
+        self.run.set(run);
+    }
+}
+
 /// A capture a function calls with exactly its own (all required) parameters. When the
 /// function is named `name` and its capture slot `slot` is unbound, that capture is the
 /// function itself, and such calls can run `variant`: the same body compiled with them as
@@ -893,6 +935,9 @@ pub(crate) struct Proto {
     pub code: Vec<u64>,
     pub consts: Vec<Value>,
     pub strings: Vec<String>,
+
+    /// For each of the `strings`, the string value that `LoadStr` made of it.
+    pub literals: Vec<Literal>,
     pub names: Vec<Symbol>,
 
     /// Parameter and capture slot references: the slot index and the name to fall back to.
