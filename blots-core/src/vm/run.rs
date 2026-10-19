@@ -70,7 +70,12 @@ unsafe fn waiting_param(arg: *mut Value, window: u16) -> *mut Value {
 #[inline(always)]
 fn rare() {}
 
-/// Run the innermost frame of `vm`, and every frame it calls, until it returns or fails.
+/// Run the innermost frame of `vm`, and every frame it calls, until it returns or fails. A
+/// run that fails gives up the lists and records that it began to build.
+///
+/// What ends a run is done here, where the run ends, and not by the caller once it has the
+/// result: the result is then written once, to where it is wanted, which is a good part of
+/// what a function costs that native code calls back for every element of a list.
 ///
 /// # Safety
 /// The innermost frame must have been set up by `Vm::run_chunk` or `Vm::call_function`: its
@@ -88,6 +93,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
     // `frame`, `ip` and `base` are re-derived after it.
     unsafe {
         let heap: *const Heap = (*vm).heap.as_ptr();
+        let builders = (*vm).builders.len();
 
         // The slots of the heap, looked up again whenever `Vm::step` may have added to them
         // or a compaction pass may have moved what they hold.
@@ -98,6 +104,24 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
 
         'run: loop {
             let instr = &*ip.cast::<Instr>();
+
+            // The run is over, and comes to `$result`.
+            macro_rules! leave {
+                ($result:expr) => {{
+                    (*vm).leave_loop();
+                    return $result;
+                }};
+            }
+
+            // The run is over because of `$error`, which every frame of it has been abandoned
+            // for already.
+            macro_rules! fail {
+                ($error:expr) => {{
+                    let error = $error;
+                    (*vm).builders.truncate(builders);
+                    leave!(Err(error));
+                }};
+            }
 
             // The register an operand of the instruction names.
             macro_rules! reg {
@@ -755,7 +779,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                         let value = reg!(instr.a).read();
                         (*vm).top = frame.sub(1);
 
-                        return Ok(value);
+                        leave!(Ok(value));
                     }
                 }
 
@@ -929,8 +953,8 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
 
             match (*vm).step(*instr) {
                 Ok(Flow::Continue) => {}
-                Ok(Flow::Finished(value)) => return Ok(value),
-                Err(error) => return Err(error),
+                Ok(Flow::Finished(value)) => leave!(Ok(value)),
+                Err(error) => fail!(error),
             }
 
             // Only `Vm::step` adds to the heap, so this is where the heap is found to have

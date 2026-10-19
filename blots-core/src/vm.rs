@@ -1224,8 +1224,6 @@ impl Vm {
 
     /// Run the innermost frame, and every frame it calls, until it returns.
     fn run(&mut self) -> Result<Value, RuntimeError> {
-        let builders = self.builders.len();
-
         // The frame to run is the only one when the caller is not this VM: a run starts.
         if self.frame_count() == 1 {
             self.run_number = next_run_number();
@@ -1234,17 +1232,17 @@ impl Vm {
         self.loops += 1;
         // SAFETY: the innermost frame was set up by `run_chunk` or `call_function`: its code
         // is alive, its registers lie within the value stack and its parameters are bound.
-        let result = unsafe { run::execute(self) };
+        unsafe { run::execute(self) }
+    }
+
+    /// What ends a run of the instruction loop that [`Vm::run`] entered, however it ends.
+    #[inline(always)]
+    fn leave_loop(&mut self) {
         self.loops -= 1;
 
-        if result.is_err() {
-            self.builders.truncate(builders);
-        }
         if self.frame_count() == 0 {
             self.retired.clear();
         }
-
-        result
     }
 
     // ---------------------------------------------------------------------------------------
