@@ -179,7 +179,7 @@ unsafe fn report_stack_overflows() {
     // has the signature that `SA_SIGINFO` asks for and only calls what a handler may call.
     unsafe {
         let mut action: libc::sigaction = mem::zeroed();
-        action.sa_sigaction = on_invalid_access as libc::sighandler_t;
+        action.sa_sigaction = on_invalid_access as *const () as libc::sighandler_t;
         action.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
 
         let mut previous: libc::sigaction = mem::zeroed();
