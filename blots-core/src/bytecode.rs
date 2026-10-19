@@ -37,7 +37,8 @@ pub(crate) enum Op {
     /// record-shorthand flavour of the "unknown identifier" error (no span, no hint).
     GetName,
     /// Chunk frames only: `if R[a] is unbound { R[a] = lookup of N[bx] in the boundary
-    /// environment }`. The value is then read straight from `R[a]` for the rest of the chunk.
+    /// environment }`. The value is then read straight from `R[a]` for the rest of the chunk,
+    /// where an assignment that binds the name again moves its value (see `SetGlobal`).
     /// Names that are bound before the chunk starts need no such check (see
     /// [`Proto::preloaded`]).
     EnsureGlobal,
@@ -268,7 +269,9 @@ pub(crate) enum Op {
     /// If `R[a]` is a lambda, record `N[bx]` as its name. `x == 1` promises that the lambda was
     /// created by the preceding instruction.
     NameLambda,
-    /// Bind `N[bx] = R[a]` in the boundary environment.
+    /// Bind `N[bx] = R[a]` in the boundary environment. The name may be bound there already:
+    /// an assignment finds its name unbound before its value is evaluated, and the value may
+    /// bind the name.
     SetGlobal,
 
     /// Adjust the frame's call depth by `sbx` (entering/leaving an inlined callback region).

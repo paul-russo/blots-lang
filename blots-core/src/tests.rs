@@ -8178,3 +8178,107 @@ mod in_run_compaction_tests {
         }
     }
 }
+
+// Tests for names that are bound more than once while a statement runs
+#[cfg(test)]
+mod rebound_name_tests {
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code`, up to the value of the last one.
+    fn evaluate(code: &str, heap: &Rc<RefCell<Heap>>) -> Result<Value, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+            result = evaluate_ast(
+                &expr,
+                Rc::clone(heap),
+                Rc::clone(&bindings),
+                0,
+                Rc::clone(&source),
+            )?;
+        }
+
+        Ok(result)
+    }
+
+    /// What the statements of `code` come to, rendered: the value, or the message of the
+    /// error.
+    fn outcome(code: &str) -> String {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        match evaluate(code, &heap) {
+            Ok(value) => value.stringify_internal(&heap.borrow()),
+            Err(error) => error.message,
+        }
+    }
+
+    #[test]
+    fn a_name_that_its_own_value_binds_is_read_as_what_it_is_bound_to_in_the_end() {
+        // An assignment finds its name unbound before it evaluates the value, so the value
+        // may bind the name, and what reads the name behind that assignment reads what the
+        // outer one binds it to.
+        for (code, expected) in [
+            ("[x = [(x = 5), x][1] + 1, x]", "[6, 6]"),
+            ("y = [x = [(x = 5), x][1] + 1, x]\n[x, y]", "[6, [6, 6]]"),
+            ("x = [(x = 5), x][1] + 1\nx", "6"),
+            ("[x = (x = (x = 5) + x) + x, x]", "[20, 20]"),
+            // The name is read where the value of the inner assignment is not sure to be.
+            (
+                "[x = [(x = 5), (if true then x else 0)][1] + 1, x]",
+                "[6, 6]",
+            ),
+            (
+                "[x = [(if true then (x = 5) else 0), x][1] + 1, x]",
+                "[6, 6]",
+            ),
+            // By a function that is made there, the key of a record and the callback of a
+            // loop.
+            ("[x = [(x = 5), x][1] + 1, (() => x)()]", "[6, 6]"),
+            ("[x = [(x = 5), x][1] + 1, {x}.x]", "[6, 6]"),
+            (
+                "[x = [(x = 5), x][1] + 1, sum(map([1, 2], v => v * x))]",
+                "[6, 18]",
+            ),
+            // By a function that finds the name where it is called from.
+            (
+                "r = () => x\n[x = [(x = 5), r()][1] + 1, r(), x]",
+                "[6, 6, 6]",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_is_bound_cannot_be_bound_by_what_follows() {
+        for (code, expected) in [
+            (
+                "[x = [(x = 5), x][1] + 1, (x = 7)]",
+                "x is already defined, and cannot be reassigned",
+            ),
+            (
+                "[(x = 5), x = x + 1]",
+                "x is already defined, and cannot be reassigned",
+            ),
+            (
+                "[(if false then (x = 5) else 0), x]",
+                "unknown identifier: x",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+}

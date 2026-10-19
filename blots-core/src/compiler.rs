@@ -667,6 +667,8 @@ fn too_complex(what: &str) -> RuntimeError {
 /// binding, and an assignment to a name that is visible anywhere fails. So the chunk reads
 /// such names from registers that are loaded before it starts (see [`Proto::preloaded`]),
 /// and only the names that are still unbound are looked up, where the program reads them.
+/// Those can be bound more than once while the chunk runs, by an assignment whose value
+/// binds the name of the assignment: each time, the value goes into the register as well.
 pub(crate) fn compile_chunk(
     expr: &SpannedExpr,
     inline: bool,
@@ -2112,6 +2114,17 @@ impl FnCompiler {
         match scope.kind {
             ScopeKind::Root if self.is_chunk => {
                 self.emit(Instr::abx(Op::SetGlobal, dst, name));
+
+                // The value may have bound the name itself, to something that a reference
+                // in it then read into the cache register of the name; this binds the name
+                // again. The register follows it.
+                if let Some(&(_, reg)) = self.globals.iter().find(|(global, _)| *global == ident) {
+                    self.emit(Instr::abc(Op::Move, reg, dst, 0));
+
+                    if !self.ensured.contains(&ident) {
+                        self.ensured.push(ident);
+                    }
+                }
             }
             ScopeKind::Root | ScopeKind::Block => {
                 let reg = scope
