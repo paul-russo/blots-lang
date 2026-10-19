@@ -292,17 +292,22 @@ impl Vm {
             unsafe { *register(frame.base, operand) }
         };
 
-        // SAFETY (for every read through `cursor` below): arithmetic instructions are
-        // followed by their number operand, if they take one, and then by at least one more
+        // What every read through `cursor` below relies on: an arithmetic instruction is
+        // followed by its number operand, if it takes one, and then by at least one more
         // instruction, since every path through a proto ends in a return or an error.
         let mut cursor = frame.ip;
-        let number_operand = |cursor: *const u64| Value::Number(f64::from_bits(unsafe { *cursor }));
+        let number_operand = |operand: *const u64| {
+            // SAFETY: only ever called with the word that follows an instruction taking a
+            // number operand.
+            Value::Number(f64::from_bits(unsafe { *operand }))
+        };
         let (lhs, rhs) = match form {
             Form::Registers => (value_in(instr.b), value_in(instr.c)),
             Form::NumberRight => (value_in(instr.b), number_operand(cursor)),
             Form::NumberLeft => (number_operand(cursor), value_in(instr.b)),
         };
         if !matches!(form, Form::Registers) {
+            // SAFETY: the number operand is followed by an instruction.
             cursor = unsafe { cursor.add(1) };
         }
 
@@ -336,6 +341,7 @@ impl Vm {
         // An instruction joins the chain when it is the last to read the result so far and
         // combines it with a number or with a list of the same length.
         while count < MAX_STEPS {
+            // SAFETY: `cursor` points at the instruction after the chain so far.
             let next = unsafe { Instr::decode(*cursor) };
             let Some((op, form)) = arithmetic_of(next.op) else {
                 break;
@@ -350,9 +356,11 @@ impl Vm {
                     (value_in(next.b), true)
                 }
                 Form::NumberRight if takes(next.b, LAST_USE_B) => {
+                    // SAFETY: an instruction of this form is followed by its number operand.
                     (number_operand(unsafe { cursor.add(1) }), false)
                 }
                 Form::NumberLeft if takes(next.b, LAST_USE_B) => {
+                    // SAFETY: an instruction of this form is followed by its number operand.
                     (number_operand(unsafe { cursor.add(1) }), true)
                 }
                 _ => break,
@@ -374,6 +382,8 @@ impl Vm {
             };
             count += 1;
             result = next.a;
+            // SAFETY: the instruction, and its number operand if it takes one, are followed
+            // by another instruction.
             cursor = unsafe {
                 cursor.add(if matches!(form, Form::Registers) {
                     1
@@ -387,11 +397,15 @@ impl Vm {
 
         // The call of an aggregate function with the result as its only argument can take the
         // numbers as they come, as long as the call is sure to succeed.
+        //
+        // SAFETY: `cursor` points at the instruction after the chain.
+        let after = unsafe { Instr::decode(*cursor) };
         if !source.is_empty()
-            && let Some((fold, target)) = self.fold_after(unsafe { Instr::decode(*cursor) }, result)
+            && let Some((fold, target)) = self.fold_after(after, result)
         {
             let number = reduce(source, steps, fold)?;
 
+            // SAFETY: a call is followed by another instruction.
             return Some((Outcome::Number(number), target, unsafe { cursor.add(1) }));
         }
 

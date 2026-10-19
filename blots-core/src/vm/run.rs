@@ -79,7 +79,7 @@ fn rare() {}
 pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
     let vm: *mut Vm = vm;
 
-    // SAFETY (for everything below): the compiler only emits register indices below the
+    // SAFETY: for everything below, the compiler only emits register indices below the
     // proto's `max_stack`, table indices that exist, and jumps that land on instructions, and
     // every path through a proto ends in a return or an error. The stack covers `max_stack`
     // registers from the base of every active frame (plus the slot below the base of a

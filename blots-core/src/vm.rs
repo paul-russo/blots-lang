@@ -269,6 +269,7 @@ unsafe fn number_in(slot: *const Value) -> f64 {
     // SAFETY: guaranteed by the caller.
     match unsafe { &*slot } {
         Value::Number(number) => *number,
+        // SAFETY: the caller guarantees that the register holds a number.
         _ => unsafe { unreachable_unchecked() },
     }
 }
@@ -302,6 +303,7 @@ unsafe fn update_state(slot: *mut Value, bits: u64) {
     // SAFETY: guaranteed by the caller.
     match unsafe { &mut *slot } {
         Value::Number(number) => *number = f64::from_bits(bits),
+        // SAFETY: `set_state` only ever writes a number.
         _ => unsafe { unreachable_unchecked() },
     }
 }
@@ -978,9 +980,9 @@ impl Vm {
             self.run_number = next_run_number();
         }
 
+        self.loops += 1;
         // SAFETY: the innermost frame was set up by `run_chunk` or `call_function`: its code
         // is alive, its registers lie within the value stack and its parameters are bound.
-        self.loops += 1;
         let result = unsafe { run::execute(self) };
         self.loops -= 1;
 
@@ -2033,8 +2035,8 @@ impl Vm {
     /// pattern of a number, like all loop counters).
     #[inline(never)]
     fn list_begin(&mut self, hint: u8, source: *const Value) {
-        // SAFETY: with a hint, `source` is a loop state register of the innermost frame.
         let capacity = match hint {
+            // SAFETY: with a hint, `source` is a loop state register of the innermost frame.
             1 => match unsafe { *source } {
                 Value::List(pointer) => match self.heap.borrow().get(pointer.index()) {
                     Some(HeapValue::List(items)) => items.len(),
@@ -2042,6 +2044,7 @@ impl Vm {
                 },
                 _ => 0,
             },
+            // SAFETY: as above.
             2 => match unsafe { *source } {
                 Value::Number(count) => count.to_bits() as usize,
                 _ => 0,

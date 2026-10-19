@@ -437,9 +437,9 @@ impl Values {
     #[inline(always)]
     unsafe fn from_start(start: NonNull<Value>) -> Self {
         // SAFETY: the values follow their block in the same allocation.
-        Self {
-            block: unsafe { start.cast::<Block>().sub(1) },
-        }
+        let block = unsafe { start.cast::<Block>().sub(1) };
+
+        Self { block }
     }
 
     /// Give the hold up for the address of the first value of its block, which is all that

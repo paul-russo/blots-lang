@@ -148,9 +148,8 @@ unsafe fn reopen_closed_streams() {
         // The lowest free descriptor is the one that is handed out, so opening anything fills
         // the gap. Leaving it open would let an unrelated file be read or written as a
         // standard stream.
-        //
-        // SAFETY: the path is a C string.
         if stream.revents & libc::POLLNVAL != 0
+            // SAFETY: the path is a C string.
             && unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDWR, 0) } == -1
         {
             // SAFETY: `abort` is always sound.
