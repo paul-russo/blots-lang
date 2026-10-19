@@ -3,8 +3,9 @@ use crate::{
     environment::Environment,
     error::RuntimeError,
     heap::{Heap, HeapPointer, IterablePointer},
+    text::Text,
     units,
-    values::{FunctionArity, LambdaDef, ReifiedValue, Value},
+    values::{FunctionArity, LambdaDef, ReifiedValue, Value, WHOLE_DIGITS, whole_digits},
     vm::Vm,
 };
 use anyhow::Result as AnyhowResult;
@@ -1143,6 +1144,16 @@ impl BuiltInFunction {
             // Conversion functions
             Self::ToString => match args[0] {
                 Value::String(_) => Ok(args[0]), // If it's already a string, just return it
+                Value::Number(number) => {
+                    // The digits of a whole number are a string as they are.
+                    let mut room = [0; WHOLE_DIGITS];
+                    let text = match whole_digits(number, &mut room) {
+                        Some(digits) => Text::new(digits),
+                        None => Text::from(number.to_string()),
+                    };
+
+                    Ok(heap.borrow_mut().insert_string(text))
+                }
                 _ => {
                     let string = args[0].stringify_internal(&heap.borrow());
                     Ok(heap.borrow_mut().insert_string(string))

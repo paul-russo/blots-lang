@@ -10,6 +10,7 @@ use std::{
 use crate::{
     ast::SpannedExpr,
     bytecode::Proto,
+    expressions::truncate,
     functions::BuiltInFunction,
     heap::{
         Heap, HeapPointer, HeapValue, IterablePointer, LambdaPointer, ListPointer, RecordPointer,
@@ -20,6 +21,60 @@ use crate::{
     record::Record,
     text::Text,
 };
+
+/// The most characters that [`whole_digits`] writes: the digits of the largest whole number
+/// below 2^53, and the sign of a negative one.
+pub(crate) const WHOLE_DIGITS: usize = 17;
+
+/// What `Display` writes for `number`, when that is a whole number below 2^53 in magnitude
+/// and not a zero with a sign: its digits, behind the sign of a negative one. They are
+/// written to the end of `room`.
+///
+/// `Display` looks for the fewest digits that tell a number from the ones next to it, which
+/// for such a number are all of its own: the numbers next to it are whole as well.
+#[inline]
+pub(crate) fn whole_digits(number: f64, room: &mut [u8; WHOLE_DIGITS]) -> Option<&str> {
+    /// The first whole number that has numbers next to it that are more than one apart.
+    const LIMIT: u64 = 1 << 53;
+
+    let whole = truncate(number);
+    let magnitude = whole.unsigned_abs();
+
+    // A fraction, a zero with a sign and what is no number have other bits than the whole
+    // number that they convert to.
+    if magnitude >= LIMIT || (whole as f64).to_bits() != number.to_bits() {
+        return None;
+    }
+
+    let mut start = room.len();
+    let mut rest = magnitude;
+
+    loop {
+        start -= 1;
+        room[start] = b'0' + (rest % 10) as u8;
+        rest /= 10;
+
+        if rest == 0 {
+            break;
+        }
+    }
+
+    if whole < 0 {
+        start -= 1;
+        room[start] = b'-';
+    }
+
+    // SAFETY: everything from `start` on was written, and is a digit or the sign.
+    Some(unsafe { str::from_utf8_unchecked(&room[start..]) })
+}
+
+/// What `to_string` makes of a number, which is what `Display` writes for it.
+pub(crate) fn plain_number(number: f64) -> String {
+    match whole_digits(number, &mut [0; WHOLE_DIGITS]) {
+        Some(digits) => digits.to_owned(),
+        None => number.to_string(),
+    }
+}
 
 /// Format a number for display output, matching the JS displayNumber function:
 /// - Very small values (< 0.0001) or extremely large values (>= 1e15) use scientific notation
@@ -1502,7 +1557,7 @@ impl Value {
                 if display_format {
                     format_display_number(*n)
                 } else {
-                    n.to_string()
+                    plain_number(*n)
                 }
             }
             Value::Bool(b) => b.to_string(),
@@ -1621,5 +1676,106 @@ mod tests {
         // Both stringify methods should preserve -0
         assert_eq!(neg_zero.stringify_internal(&heap), "-0");
         assert_eq!(neg_zero.stringify_for_display(&heap), "-0");
+    }
+
+    /// The whole numbers that are the first and the last of every length, the ones around
+    /// every power of two up to the first that has no whole digits, and a few thousand of
+    /// every length in between.
+    fn whole_numbers() -> Vec<f64> {
+        let mut numbers = vec![0.0];
+
+        let mut power = 1_u64;
+        while power < 1 << 53 {
+            numbers.extend([power - 1, power, power + 1].map(|whole| whole as f64));
+            power *= 2;
+        }
+
+        let mut power = 10_u64;
+        while power < 1 << 53 {
+            numbers.extend([power - 1, power, power + 1].map(|whole| whole as f64));
+            power *= 10;
+        }
+
+        let mut bits = 0x9E37_79B9_7F4A_7C15_u64;
+        for _ in 0..4000 {
+            bits ^= bits << 13;
+            bits ^= bits >> 7;
+            bits ^= bits << 17;
+            numbers.push((bits >> (11 + bits % 53)) as f64);
+        }
+
+        numbers.push(((1_u64 << 53) - 1) as f64);
+        numbers.retain(|number| *number < (1_u64 << 53) as f64);
+
+        let negated = numbers.iter().map(|number| -number).collect::<Vec<_>>();
+        numbers.extend(negated);
+
+        numbers
+    }
+
+    #[test]
+    fn the_digits_of_a_whole_number_are_what_display_writes_for_it() {
+        let numbers = whole_numbers();
+        assert!(numbers.len() > 8000);
+
+        for number in numbers {
+            let mut room = [0; WHOLE_DIGITS];
+            let digits = whole_digits(number, &mut room);
+
+            // A zero with a sign has no digits of its own: it is written with the sign.
+            if number == 0.0 && number.is_sign_negative() {
+                assert_eq!(digits, None);
+            } else {
+                assert_eq!(digits, Some(number.to_string().as_str()), "{number:e}");
+            }
+
+            assert_eq!(plain_number(number), number.to_string(), "{number:e}");
+        }
+    }
+
+    #[test]
+    fn the_longest_whole_digits_fill_their_room() {
+        let longest = -(((1_u64 << 53) - 1) as f64);
+        let mut room = [0; WHOLE_DIGITS];
+
+        assert_eq!(whole_digits(longest, &mut room), Some("-9007199254740991"));
+        assert_eq!("-9007199254740991".len(), WHOLE_DIGITS);
+    }
+
+    #[test]
+    fn a_number_that_is_not_whole_or_not_exact_has_no_whole_digits() {
+        let limit = (1_u64 << 53) as f64;
+
+        assert_eq!(whole_digits(-0.0, &mut [0; WHOLE_DIGITS]), None);
+        assert_eq!(plain_number(-0.0), "-0");
+
+        for number in [
+            0.5,
+            0.1,
+            1.5,
+            1e-300,
+            f64::MIN_POSITIVE,
+            f64::from_bits(1),
+            4_294_967_295.5,
+            4_503_599_627_370_495.5,
+            limit,
+            limit + 2.0,
+            1e16,
+            9.223372036854776e18,
+            1.8446744073709552e19,
+            1e300,
+            f64::MAX,
+            f64::INFINITY,
+            f64::NAN,
+        ] {
+            for number in [number, -number] {
+                assert_eq!(
+                    whole_digits(number, &mut [0; WHOLE_DIGITS]),
+                    None,
+                    "{number:e}"
+                );
+                assert_eq!(plain_number(number), number.to_string(), "{number:e}");
+            }
+        }
     }
 }

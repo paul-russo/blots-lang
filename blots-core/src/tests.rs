@@ -3695,7 +3695,7 @@ mod power_of_two_tests {
     use std::rc::Rc;
 
     /// Evaluate the statements of `code` against `bindings`, up to the value of the last one.
-    fn evaluate(
+    pub(super) fn evaluate(
         code: &str,
         heap: &Rc<RefCell<Heap>>,
         bindings: &Rc<Environment>,
@@ -4239,6 +4239,106 @@ mod constant_divisor_tests {
                     "{dividend} % {divisor} is {expected}, not {actual}"
                 );
             }
+        }
+    }
+}
+
+// The string of a whole number is its digits, which are written without asking how few of
+// them tell the number from the ones next to it. Nothing may tell that string from the one
+// that a number of any kind gets.
+#[cfg(test)]
+mod number_string_tests {
+    use super::power_of_two_tests::{evaluate, numbers};
+    use crate::environment::Environment;
+    use crate::heap::Heap;
+    use crate::intern::Symbol;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// The strings in the list that `code` comes to, with `xs` bound to `numbers`.
+    fn strings(numbers: &[f64], code: &str) -> Vec<String> {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+        let list = numbers.iter().copied().map(Value::Number).collect();
+        let xs = heap.borrow_mut().insert_list(list);
+        bindings.insert(Symbol::intern("xs"), xs);
+
+        let value = evaluate(code, &heap, &bindings).unwrap();
+        let heap = heap.borrow();
+
+        value
+            .as_list(&heap)
+            .unwrap()
+            .iter()
+            .map(|value| value.as_string(&heap).unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_number_of_any_kind_becomes_the_string_that_it_is_written_as() {
+        let numbers = numbers();
+        let expected = numbers
+            .iter()
+            .map(|number| number.to_string())
+            .collect::<Vec<_>>();
+
+        for (code, around) in [
+            // By the function itself, in a callback, and in a function of the program.
+            ("map(xs, to_string)", ["", ""]),
+            ("map(xs, x => to_string(x))", ["", ""]),
+            ("written = x => to_string(x)\nmap(xs, written)", ["", ""]),
+            // As the value of a list and of a record, which are written around it.
+            ("map(xs, x => to_string([x]))", ["[", "]"]),
+            ("map(xs, x => to_string({is: x}))", ["{is: ", "}"]),
+        ] {
+            let actual = strings(&numbers, code);
+            assert_eq!(actual.len(), numbers.len(), "{code}");
+
+            for ((actual, expected), number) in actual.iter().zip(&expected).zip(&numbers) {
+                let [before, after] = around;
+                let expected = format!("{before}{expected}{after}");
+
+                assert_eq!(*actual, expected, "{number:e} ({code})");
+            }
+        }
+    }
+
+    #[test]
+    fn a_whole_number_keeps_every_digit_in_its_string() {
+        for (code, expected) in [
+            ("to_string(0)", "0"),
+            ("to_string(-0)", "-0"),
+            ("to_string(7)", "7"),
+            ("to_string(-7)", "-7"),
+            ("to_string(10)", "10"),
+            ("to_string(1000000)", "1000000"),
+            ("to_string(4294967296)", "4294967296"),
+            ("to_string(9007199254740991)", "9007199254740991"),
+            ("to_string(-9007199254740991)", "-9007199254740991"),
+            ("to_string(9007199254740992)", "9007199254740992"),
+            ("to_string(9007199254740993)", "9007199254740992"),
+            ("to_string(1e21)", "1000000000000000000000"),
+            ("to_string(1.5)", "1.5"),
+            ("to_string(0.1 + 0.2)", "0.30000000000000004"),
+            ("to_string(1 / 0)", "inf"),
+            ("to_string(-1 / 0)", "-inf"),
+            // A string that is as long as a text keeps without a buffer, and one longer.
+            (
+                "\"number \" + to_string(12345678901234)",
+                "number 12345678901234",
+            ),
+            (
+                "\"number \" + to_string(1234567890123456)",
+                "number 1234567890123456",
+            ),
+            ("to_string(12) + to_string(34)", "1234"),
+        ] {
+            let heap = Rc::new(RefCell::new(Heap::new()));
+            let bindings = Rc::new(Environment::new());
+
+            let value = evaluate(code, &heap, &bindings).unwrap();
+            assert_eq!(value.as_string(&heap.borrow()).unwrap(), expected, "{code}");
         }
     }
 }
