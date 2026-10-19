@@ -6819,6 +6819,44 @@ mod shared_record_tests {
     }
 
     #[test]
+    fn a_record_has_what_it_was_given_under_a_string_and_nothing_under_any_other() {
+        let session = Session::new();
+        session
+            .evaluate(
+                "small = {a: 1, bb: 2, ccc: 3, [\"a key of many bytes\"]: 4, [\"\"]: 5}\n\
+                 large = reduce(range(40), (acc, i) => {...acc, [\"k\" + to_string(i)]: i}, {})\n\
+                 name = i => \"k\" + to_string(i)",
+            )
+            .unwrap();
+
+        for (code, expected) in [
+            (
+                "[small[\"a\"], small[\"bb\"], small[\"ccc\"], small[\"\"]]",
+                "[1, 2, 3, 5]",
+            ),
+            ("small[\"a key of many bytes\"]", "4"),
+            (
+                "[small[\"b\"], small[\"aa\"], small[\"cccc\"], small[\"a key of many bytes!\"]]",
+                "[null, null, null, null]",
+            ),
+            ("map(keys(small), k => small[k])", "[1, 2, 3, 4, 5]"),
+            (
+                "map(range(38, 42), i => large[name(i)])",
+                "[38, 39, null, null]",
+            ),
+            ("sum(map(keys(large), k => large[k]))", "780"),
+            ("{...large, k3: \"three\"}[name(3)]", "three"),
+            ("small[0]", "expected a string, but got a number"),
+            ("small[null]", "expected a string, but got a null"),
+            ("small[[\"a\"]]", "expected a string, but got a list"),
+            ("[1, 2][\"a\"]", "expected a number, but got a string"),
+            ("\"abc\"[\"a\"]", "expected a number, but got a string"),
+        ] {
+            assert_eq!(session.outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
     fn records_that_share_their_values_survive_compaction() {
         let session = Session::new();
 

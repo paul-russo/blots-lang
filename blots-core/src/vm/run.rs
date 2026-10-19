@@ -737,6 +737,22 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                         load_value(reg!(instr.a), items.as_ptr().add(position));
                         next!(1);
                     }
+
+                    // A record is asked for what it has under a string, which is nothing
+                    // when that is not one of its keys.
+                    if let (Value::Record(pointer), Value::String(key)) =
+                        (&*reg!(instr.b), &*reg!(instr.c))
+                        && let Some(HeapValue::Record(record)) = heap_value!(pointer)
+                        && let Some(HeapValue::String(key)) = heap_value!(key)
+                    {
+                        match record.position(key.as_str()) {
+                            Some(position) => {
+                                load_value(reg!(instr.a), record.as_slice().as_ptr().add(position));
+                            }
+                            None => store_value(reg!(instr.a), Value::Null),
+                        }
+                        next!(1);
+                    }
                 }
                 Op::GetField => {
                     // The field usually sits where this access site found it last time.
