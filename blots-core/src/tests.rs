@@ -10111,3 +10111,684 @@ mod instruction_call_tests {
         }
     }
 }
+
+// `list via function` and `list where function` go through a list the way `map` and `filter`
+// do, so a function that is written out on the right of the operator runs as a loop in the
+// function that the operator is in. Nothing may tell that from the operator calling the
+// function: not what it comes to, not what an error says and points at, and not how deep the
+// calls of a program go.
+#[cfg(test)]
+mod operator_loop_tests {
+    use crate::ast::Expr;
+    use crate::bytecode::{Instr, Op};
+    use crate::compiler::{compile_chunk, compile_lambda};
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code`, up to the value of the last one.
+    fn evaluate(code: &str, heap: &Rc<RefCell<Heap>>) -> Result<Value, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+            result = evaluate_ast(
+                &expr,
+                Rc::clone(heap),
+                Rc::clone(&bindings),
+                0,
+                Rc::clone(&source),
+            )?;
+        }
+
+        Ok(result)
+    }
+
+    /// What the statements of `code` come to, rendered: the value, or the message of the
+    /// error and the part of `code` that it points at.
+    fn outcome(code: &str) -> String {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        match evaluate(code, &heap) {
+            Ok(value) => value.stringify_internal(&heap.borrow()),
+            Err(error) => {
+                let place = match error.span {
+                    Some(span) => &code[span.start_byte..span.end_byte],
+                    None => "nothing",
+                };
+
+                format!("{} at {place}", error.message)
+            }
+        }
+    }
+
+    /// The operations of the instructions of the function `code`.
+    fn operations(code: &str) -> Vec<Op> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let [Statement::Expression(expr)] = &statements[..] else {
+            panic!("{code} is not a single expression");
+        };
+        let Expr::Lambda { args, body, .. } = &expr.node else {
+            panic!("{code} is not a function");
+        };
+        let proto = compile_lambda(&Rc::new(args.clone()), body, true).unwrap();
+
+        let mut operations = Vec::new();
+        let mut pc = 0;
+        while pc < proto.code.len() {
+            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
+            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            operations.push(instr.op);
+            pc += 1 + instr.operand_words();
+        }
+
+        operations
+    }
+
+    /// The operations of the instructions of the statement `code`, which is no function.
+    fn chunk_operations(code: &str) -> Vec<Op> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let [Statement::Expression(expr)] = &statements[..] else {
+            panic!("{code} is not a single expression");
+        };
+        let chunk = compile_chunk(expr, true, &Environment::new()).unwrap();
+
+        let mut operations = Vec::new();
+        let mut pc = 0;
+        while pc < chunk.code.len() {
+            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
+            let instr = unsafe { Instr::decode(chunk.code[pc]) };
+            operations.push(instr.op);
+            pc += 1 + instr.operand_words();
+        }
+
+        operations
+    }
+
+    /// What `body` comes to in a function that has called itself `depth` times before it
+    /// gets there, without the functions that an error went through on its way out.
+    fn at_depth(body: &str, depth: usize) -> String {
+        let code = format!(
+            "g = x => x + 1\nd = k => if k <= 0 then {body} else [d(k - 1)][0]\nd({depth})"
+        );
+
+        outcome(&code)
+            .trim_start_matches("in function \"d\": ")
+            .to_string()
+    }
+
+    #[test]
+    fn an_operator_with_a_function_written_out_is_a_loop() {
+        let list = [
+            Op::IterList,
+            Op::ListBegin,
+            Op::ForList,
+            Op::CallbackDepth,
+            Op::ListPush,
+            Op::ForListNext,
+            Op::ListEnd,
+        ];
+        let range = [
+            Op::RangePrep,
+            Op::ListBegin,
+            Op::ForRange,
+            Op::CallbackDepth,
+            Op::ListPush,
+            Op::ForRangeNext,
+            Op::ListEnd,
+        ];
+        let loops = [
+            Op::IterList,
+            Op::IterPrep,
+            Op::RangePrep,
+            Op::ForList,
+            Op::ForRange,
+        ];
+        let calls = [Op::Closure, Op::Via, Op::Where];
+
+        for (code, expected, absent) in [
+            // A loop for a list, and behind it the operator for anything else.
+            (
+                "xs => (xs via (x => x + 1))",
+                &[&list[..], &[Op::Closure, Op::Via]].concat()[..],
+                &[Op::IterPrep, Op::Where][..],
+            ),
+            (
+                "xs => (xs via ((x, i) => x * i))",
+                &[&list[..], &[Op::Closure, Op::Via]].concat(),
+                &[Op::IterPrep, Op::Where],
+            ),
+            (
+                "xs => (xs where (x => x > 1))",
+                &[&list[..], &[Op::Closure, Op::Where]].concat(),
+                &[Op::IterPrep, Op::Via],
+            ),
+            (
+                "xs => (xs via (x => do { y = x + 1; return y * 2 }))",
+                &[&list[..], &[Op::Closure, Op::Via]].concat(),
+                &[Op::IterPrep, Op::Where],
+            ),
+            // A range is a list whatever it is made from, so the operator has nothing to do.
+            ("n => (range(n) via (x => x * 2))", &range, &calls),
+            ("n => (range(1, n) where (x => x > 2))", &range, &calls),
+            // A function that is not written out, one that an operator does not call with
+            // what it takes, and an operator that goes through nothing.
+            ("(xs, g) => (xs via g)", &[Op::Via], &loops),
+            ("(xs, g) => (xs where g)", &[Op::Where], &loops),
+            ("xs => (xs via (() => 1))", &[Op::Closure, Op::Via], &loops),
+            (
+                "xs => (xs where ((x, i, j) => x))",
+                &[Op::Closure, Op::Where],
+                &loops,
+            ),
+            (
+                "xs => (xs via ((x, i?) => x))",
+                &[Op::Closure, Op::Via],
+                &loops,
+            ),
+            (
+                "xs => (xs via ((...rest) => rest))",
+                &[Op::Closure, Op::Via],
+                &loops,
+            ),
+            (
+                "xs => (xs into (ys => len(ys)))",
+                &[Op::Closure, Op::Into],
+                &loops,
+            ),
+        ] {
+            let operations = operations(code);
+
+            for op in expected {
+                assert!(
+                    operations.contains(op),
+                    "{code}: {op:?} is not in {operations:?}"
+                );
+            }
+            for op in absent {
+                assert!(
+                    !operations.contains(op),
+                    "{code}: {op:?} is in {operations:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_operator_loop_looks_a_name_up_once() {
+        let count =
+            |operations: &[Op], op: Op| operations.iter().filter(|other| **other == op).count();
+
+        // The first element that gets to a name looks it up, and the others find it where
+        // that put it: in a register that the loop keeps for the name.
+        for (code, kept, lookups) in [
+            ("xs => (xs via (x => x + k))", 1, 1),
+            ("xs => (xs where (x => x > k))", 1, 1),
+            ("xs => (xs via (x => x * k + k))", 1, 1),
+            ("xs => (xs via (x => if x > 1 then k else j))", 2, 2),
+            // A loop keeps the names of the loops in it, which start once for each of its
+            // elements.
+            (
+                "m => (m via (row => reduce(row, (acc, x) => acc + x * k, 0)))",
+                1,
+                1,
+            ),
+            ("m => map(m, row => (row via (x => x * k)))", 1, 1),
+            ("m => (m via (row => (row where (x => x > k))))", 1, 1),
+            // A variable is not looked up at all.
+            ("(xs, k) => (xs via (x => x + k))", 0, 0),
+            ("xs => (xs via (k => k + 1))", 0, 0),
+            ("xs => do { k = 5; return xs where (x => x > k) }", 0, 0),
+        ] {
+            let operations = operations(code);
+
+            assert_eq!(count(&operations, Op::LoadUnbound), kept, "{code}");
+            assert_eq!(count(&operations, Op::EnsureName), lookups, "{code}");
+            assert_eq!(count(&operations, Op::GetName), 0, "{code}");
+        }
+
+        // At the top level of a program, the names are those of the program.
+        for (code, lookups) in [
+            ("[1, 2, 3] via (x => x + k)", 1),
+            ("[1, 2, 3] where (x => x > k)", 1),
+            ("xs via (x => x + k * j)", 3),
+            ("[[1], [2]] via (row => (row via (x => x * k)))", 1),
+            ("[1, 2, 3] via (x => x + 1)", 0),
+        ] {
+            let operations = chunk_operations(code);
+
+            assert_eq!(count(&operations, Op::EnsureGlobal), lookups, "{code}");
+            assert_eq!(count(&operations, Op::GetName), 0, "{code}");
+        }
+
+        // A name that an assignment may have bound is looked up wherever it is read.
+        let operations = operations("xs => [(k = 5), xs via (x => x + k)]");
+
+        assert_eq!(count(&operations, Op::GetName), 1);
+        assert_eq!(count(&operations, Op::EnsureName), 0);
+    }
+
+    #[test]
+    fn an_operator_comes_to_what_calling_its_function_comes_to() {
+        for (code, expected) in [
+            // Every element, with its index for a function that takes one.
+            ("[1, 2, 3] via (x => x * 2)", "[2, 4, 6]"),
+            ("[1, 2, 3] via ((x, i) => x * 10 + i)", "[10, 21, 32]"),
+            ("[1, 2, 3] where (x => x > 1)", "[2, 3]"),
+            ("[5, 6, 7] where ((x, i) => i != 1)", "[5, 7]"),
+            ("[[] via (x => x * 2), [] where (x => x)]", "[[], []]"),
+            ("range(4) via ((x, i) => x * i)", "[0, 1, 4, 9]"),
+            ("range(2, 6) where (x => x != 3)", "[2, 4, 5]"),
+            ("sum(range(1000) via (x => x * 2))", "999000"),
+            ("len(range(1000) where (x => x % 3 == 0))", "334"),
+            // Elements of every kind, and whatever a function makes of them.
+            ("[{a: 1}, {a: 2}] via (r => r.a)", "[1, 2]"),
+            (
+                "[\"a\", \"b\"] via ((s, i) => s + to_string(i))",
+                "[a0, b1]",
+            ),
+            ("[\"a\", \"bb\", \"\"] where (s => len(s) > 0)", "[a, bb]"),
+            (
+                "[1, 2, 3] via (x => if x > 1 then [x] else null)",
+                "[null, [2], [3]]",
+            ),
+            (
+                "fs = [1, 2] via (x => (y => x + y))\n[fs[0](10), fs[1](10)]",
+                "[11, 12]",
+            ),
+            ("[1, 2] via ((x, x) => x)", "[1, 2]"),
+            ("[1, 2] via (x => do { y = x + 1; return y * 2 })", "[4, 6]"),
+            // Parameters that a function need not be given.
+            ("[1, 2] via ((x, i?) => [x, i])", "[[1, 0], [2, 1]]"),
+            (
+                "[1, 2] via ((x, i, j?) => [x, i, j])",
+                "[[1, 0, null], [2, 1, null]]",
+            ),
+            ("[1, 2] where ((x?) => x > 1)", "[2]"),
+            ("[1, 2] via ((...rest) => rest)", "[[1, 0], [2, 1]]"),
+            (
+                "[1, 2] via ((x, ...rest) => [x, rest])",
+                "[[1, [0]], [2, [1]]]",
+            ),
+            // One operator after another, and one in the function of another.
+            (
+                "[1, 2, 3, 4] where (x => x % 2 == 0) via (x => x * x)",
+                "[4, 16]",
+            ),
+            (
+                "[1, 2, 3, 4] via (x => x * x) where (x => x > 4)",
+                "[9, 16]",
+            ),
+            (
+                "[3, 1, 2] where (x => x > 1) via ((x, i) => [i, x])",
+                "[[0, 3], [1, 2]]",
+            ),
+            (
+                "[[1, 2], [3]] via (xs => (xs via (y => y + 1)))",
+                "[[2, 3], [4]]",
+            ),
+            (
+                "[[1, 2], [3], []] via (xs => (xs where (y => y > 1)))",
+                "[[2], [3], []]",
+            ),
+            (
+                "map([[1, 2], [3]], xs => (xs via ((y, i) => y + i)))",
+                "[[1, 3], [3]]",
+            ),
+            (
+                "[[1, 2], [3]] via (xs => reduce(xs, (acc, y) => acc + y, 0))",
+                "[3, 3]",
+            ),
+            // The list stays what it was, and so does what the operator made of it before.
+            (
+                "xs = [1, 2, 3]\nys = xs where (x => x > 1)\nzs = xs via (x => x + len(ys))\n[xs, ys, zs]",
+                "[[1, 2, 3], [2, 3], [3, 4, 5]]",
+            ),
+            ("xs = [1, 2]\nxs via (x => len(xs) + x)", "[3, 4]"),
+            // What the function reads: variables of the function around it, names that its
+            // callers bind, and names of the program that are bound by the time it runs.
+            (
+                "f = (xs, k) => (xs via (x => x + k))\n[f([1, 2], 10), f([], 1), f([3], -3)]",
+                "[[11, 12], [], [0]]",
+            ),
+            (
+                "f = (xs, k) => (xs where (x => x > k))\n[f([1, 2, 3], 1), f([], 1), f([3], 3)]",
+                "[[2, 3], [], []]",
+            ),
+            (
+                "total = xs => sum(xs via (x => x * k))\ncall = k => total([1, 2, 3])\n[call(1), call(10)]",
+                "[6, 60]",
+            ),
+            (
+                "f = xs => (xs via (x => x + w))\ng = w => f([1, 2, 3])\n[g(10), g(20)]",
+                "[[11, 12, 13], [21, 22, 23]]",
+            ),
+            (
+                "f = xs => (xs where (x => x > w))\nw = 1\nf([1, 2, 3])",
+                "[2, 3]",
+            ),
+            // A function that goes through a list of its own results.
+            (
+                "f = n => if n == 0 then [] else [n, ...(f(n - 1) via (x => x * 2))]\nf(4)",
+                "[4, 6, 8, 8]",
+            ),
+            (
+                "f = t => if typeof(t) == \"list\" then sum(t via (c => f(c))) else t\nf([1, [2, [3, 4]], [[5]]])",
+                "15",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn what_is_no_list_is_left_to_the_operator() {
+        for (code, expected) in [
+            // `via` gives its function whatever is on the left.
+            ("5 via (x => x * 2)", "10"),
+            ("\"ab\" via (x => x + \"!\")", "ab!"),
+            ("null via (x => x)", "null"),
+            ("{a: 1} via (x => x.a)", "1"),
+            ("true via (x => !x)", "false"),
+            ("(y => y) via (f => f(3))", "3"),
+            // One operator that finds a list in one call and something else in the next.
+            (
+                "f = v => (v via (x => [x]))\n[f(1), f([1, 2]), f(\"a\"), f(null), f([]), f({a: 1})]",
+                "[[1], [[1], [2]], [a], [null], [], [{a: 1}]]",
+            ),
+            (
+                "f = v => (v via (x => x + k))\ncall = k => [f(1), f([1, 2]), f(2)]\ncall(10)",
+                "[11, [11, 12], 12]",
+            ),
+            // There is no index for what is not an element.
+            (
+                "5 via ((x, i) => x)",
+                "in \"via\" callback: anonymous function takes exactly 2 arguments, but 1 were given at 5 via ((x, i) => x",
+            ),
+            (
+                "f = v => (v via ((x, i) => [x, i]))\n[f([7, 8]), f(7)]",
+                "in function \"f\": in \"via\" callback: anonymous function takes exactly 2 arguments, but 1 were given at v via ((x, i) => [x, i]",
+            ),
+            // `where` goes through lists only.
+            (
+                "5 where (x => x > 2)",
+                "where operator requires a list on the left side at 5 where (x => x > 2",
+            ),
+            (
+                "\"ab\" where (x => true)",
+                "where operator requires a list on the left side at \"ab\" where (x => true",
+            ),
+            (
+                "null where (x => true)",
+                "where operator requires a list on the left side at null where (x => true",
+            ),
+            (
+                "{a: 1} where (x => true)",
+                "where operator requires a list on the left side at {a: 1} where (x => true",
+            ),
+            (
+                "f = v => (v where (x => x > 1))\n[f([1, 2]), f(2)]",
+                "in function \"f\": where operator requires a list on the left side at v where (x => x > 1",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn an_error_is_put_down_to_the_operator_and_to_its_function() {
+        for (code, expected) in [
+            // What goes wrong in the function, where it goes wrong.
+            (
+                "[1, \"a\", 3] via (x => x * 2)",
+                "in \"via\" callback: in anonymous function: expected a number, but got a string at [1, \"a\", 3] via (x => x * 2",
+            ),
+            (
+                "[1, 2, 3] via (x => x + missing)",
+                "in \"via\" callback: in anonymous function: unknown identifier: missing at missing",
+            ),
+            (
+                "[1, 2, 3] via (x => x.a)",
+                "in \"via\" callback: in anonymous function: expected a record, but got a number at x",
+            ),
+            (
+                "[1, 2, 3] where (x => x > \"a\")",
+                "in \"where\" callback: in anonymous function: cannot compare number with string at x > \"a\"",
+            ),
+            (
+                "[1, 2] via (x => [x, ...missing])",
+                "in \"via\" callback: in anonymous function: unknown identifier: missing at missing",
+            ),
+            (
+                "[1, 2] via ((x, i) => {a: x, ...i})",
+                "in \"via\" callback: in anonymous function: expected a list, record, or string at i",
+            ),
+            (
+                "f = xs => (xs via (x => x.a))\nf([1])",
+                "in function \"f\": in \"via\" callback: in anonymous function: expected a record, but got a number at x",
+            ),
+            // What `where` has against what its function comes to is no error of the function.
+            (
+                "[1, 2, 3] where (x => x)",
+                "in \"where\" callback: expected a boolean, but got a number at [1, 2, 3] where (x => x",
+            ),
+            (
+                "[1, 2, 3] where (x => null)",
+                "in \"where\" callback: expected a boolean, but got a null at [1, 2, 3] where (x => null",
+            ),
+            (
+                "f = xs => (xs where (x => x.a))\nf([{a: true}, {a: 1}])",
+                "in function \"f\": in \"where\" callback: expected a boolean, but got a number at xs where (x => x.a",
+            ),
+            // What the function calls, and the loops in it.
+            (
+                "g = x => x.a\n[1] via (x => g(x))",
+                "in \"via\" callback: in anonymous function: in function \"g\": expected a record, but got a number at x",
+            ),
+            (
+                "g = x => x.a\n[1] where (x => g(x))",
+                "in \"where\" callback: in anonymous function: in function \"g\": expected a record, but got a number at x",
+            ),
+            (
+                "[1, 2] where (x => sum([]) > x)",
+                "in \"where\" callback: in anonymous function: in built-in function \"sum\": sum requires at least one number at ([])",
+            ),
+            (
+                "[[1], 2] via (xs => (xs where (y => y > 0)))",
+                "in \"via\" callback: in anonymous function: where operator requires a list on the left side at xs where (y => y > 0",
+            ),
+            (
+                "[[1], [null]] via (xs => (xs via (y => y + 1)))",
+                "in \"via\" callback: in anonymous function: in \"via\" callback: in anonymous function: expected a number, but got a null at xs via (y => y + 1",
+            ),
+            (
+                "[1, 2] via (x => map([x], y => y + missing))",
+                "in \"via\" callback: in anonymous function: in built-in function \"map\": in anonymous function: unknown identifier: missing at missing",
+            ),
+            (
+                "map([[1]], xs => (xs where (y => y + missing)))",
+                "in built-in function \"map\": in anonymous function: in \"where\" callback: in anonymous function: unknown identifier: missing at missing",
+            ),
+            // A function that cannot take an element is not called, and neither is one that
+            // takes more than an element and its index.
+            (
+                "[1, 2] via (() => 1)",
+                "in \"via\" callback: anonymous function takes exactly 0 arguments, but 1 were given at [1, 2] via (() => 1",
+            ),
+            (
+                "[1, 2] where (() => true)",
+                "in \"where\" callback: anonymous function takes exactly 0 arguments, but 1 were given at [1, 2] where (() => true",
+            ),
+            (
+                "[1, 2] via ((x, i, j) => x)",
+                "in \"via\" callback: anonymous function takes exactly 3 arguments, but 1 were given at [1, 2] via ((x, i, j) => x",
+            ),
+            (
+                "[1, 2] where ((x, i, j) => true)",
+                "in \"where\" callback: anonymous function takes exactly 3 arguments, but 1 were given at [1, 2] where ((x, i, j) => true",
+            ),
+            // A list without elements calls nothing, so nothing goes wrong.
+            ("[] via (x => x + missing)", "[]"),
+            ("[] where (x => missing)", "[]"),
+            ("[] via (() => 1)", "[]"),
+            ("[] where ((x, i, j) => true)", "[]"),
+            // What is on the left fails before the operator has anything to do.
+            (
+                "missing via (x => x)",
+                "unknown identifier: missing at missing",
+            ),
+            (
+                "missing where (x => x)",
+                "unknown identifier: missing at missing",
+            ),
+            (
+                "range(3, 1) via (x => x)",
+                "in built-in function \"range\": range requires start to be less than or equal to end at (3, 1)",
+            ),
+            (
+                "range(\"a\") where (x => x)",
+                "in built-in function \"range\": range requires 1 or 2 numbers at (\"a\")",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_function_is_called_as_deep_as_the_operator_calls_it() {
+        // What an operator comes to at the last depth that it works at, and what goes wrong
+        // one call further in.
+        for (body, last, expected, error) in [
+            // The function is called from where the operator is, and runs one level further
+            // in than that.
+            (
+                "[1, 2] via (x => x + 1)",
+                999,
+                "[2, 3]",
+                "in \"via\" callback: in anonymous function: maximum call depth of 1000 exceeded at [1, 2] via (x => x + 1",
+            ),
+            (
+                "[1, 2] via ((x, i) => x + i)",
+                999,
+                "[1, 3]",
+                "in \"via\" callback: in anonymous function: maximum call depth of 1000 exceeded at [1, 2] via ((x, i) => x + i",
+            ),
+            (
+                "[1, 2] where (x => x > 1)",
+                999,
+                "[2]",
+                "in \"where\" callback: in anonymous function: maximum call depth of 1000 exceeded at [1, 2] where (x => x > 1",
+            ),
+            (
+                "7 via (x => x + 1)",
+                999,
+                "8",
+                "in \"via\" callback: in anonymous function: maximum call depth of 1000 exceeded at 7 via (x => x + 1",
+            ),
+            // What the function calls is one level further in again.
+            (
+                "[1, 2] via (x => g(x))",
+                998,
+                "[2, 3]",
+                "in \"via\" callback: in anonymous function: in function \"g\": maximum call depth of 1000 exceeded at (x)",
+            ),
+            (
+                "[1, 2] where (x => g(x) > 2)",
+                998,
+                "[2]",
+                "in \"where\" callback: in anonymous function: in function \"g\": maximum call depth of 1000 exceeded at (x)",
+            ),
+            (
+                "[1, 2] via (x => typeof(x))",
+                998,
+                "[number, number]",
+                "in \"via\" callback: in anonymous function: in built-in function \"typeof\": maximum call depth of 1000 exceeded at (x)",
+            ),
+            // An operator in the function of an operator, or of a built-in function that
+            // calls its function two levels further in than it is called from.
+            (
+                "[1, 2] via (x => ([x] via (y => y)))",
+                998,
+                "[[1], [2]]",
+                "in \"via\" callback: in anonymous function: in \"via\" callback: in anonymous function: maximum call depth of 1000 exceeded at [x] via (y => y",
+            ),
+            (
+                "[[1], [2]] via (x => (x where (y => g(y) > 0)))",
+                997,
+                "[[1], [2]]",
+                "in \"via\" callback: in anonymous function: in \"where\" callback: in anonymous function: in function \"g\": maximum call depth of 1000 exceeded at (y)",
+            ),
+            (
+                "[1, 2] via (x => (7 via (y => g(y))))",
+                997,
+                "[8, 8]",
+                "in \"via\" callback: in anonymous function: in \"via\" callback: in anonymous function: in function \"g\": maximum call depth of 1000 exceeded at (y)",
+            ),
+            (
+                "map([[1], [2]], x => (x via (y => y)))",
+                996,
+                "[[1], [2]]",
+                "in built-in function \"map\": in anonymous function: in \"via\" callback: in anonymous function: maximum call depth of 1000 exceeded at x via (y => y",
+            ),
+            (
+                "map([[1], [2]], x => (x via (y => g(y))))",
+                995,
+                "[[2], [3]]",
+                "in built-in function \"map\": in anonymous function: in \"via\" callback: in anonymous function: in function \"g\": maximum call depth of 1000 exceeded at (y)",
+            ),
+            (
+                "[[1], [2]] via (x => map(x, y => g(y)))",
+                995,
+                "[[2], [3]]",
+                "in \"via\" callback: in anonymous function: in built-in function \"map\": in anonymous function: in function \"g\": maximum call depth of 1000 exceeded at (y)",
+            ),
+            // A list without elements calls nothing, so it is gone through wherever a
+            // function runs. A range is made by a function that is called.
+            (
+                "[] via (x => x + 1)",
+                1000,
+                "[]",
+                "maximum call depth of 1000 exceeded at (k - 1)",
+            ),
+            (
+                "[] where (x => x > 1)",
+                1000,
+                "[]",
+                "maximum call depth of 1000 exceeded at (k - 1)",
+            ),
+            (
+                "range(2) via (x => x + 1)",
+                999,
+                "[1, 2]",
+                "in built-in function \"range\": maximum call depth of 1000 exceeded at (2)",
+            ),
+            (
+                "range(0) via (x => x + 1)",
+                999,
+                "[]",
+                "in built-in function \"range\": maximum call depth of 1000 exceeded at (0)",
+            ),
+        ] {
+            assert_eq!(at_depth(body, last), expected, "{body} at {last}");
+            assert_eq!(at_depth(body, last + 1), error, "{body} at {}", last + 1);
+        }
+
+        // `where` fails for what is no list however deep it is.
+        for depth in [999, 1000] {
+            assert_eq!(
+                at_depth("7 where (x => x > 1)", depth),
+                "where operator requires a list on the left side at 7 where (x => x > 1"
+            );
+        }
+    }
+}

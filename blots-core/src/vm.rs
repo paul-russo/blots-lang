@@ -52,10 +52,6 @@ use std::{
 /// A call made from a body that is itself nested this deep fails.
 const MAX_CALL_DEPTH: usize = 1000;
 
-/// How much deeper than its caller the callback of a higher-order built-in is called: one
-/// level for the built-in, one for the callback.
-const CALLBACK_CALL_DEPTH: usize = 2;
-
 /// The smallest value stack worth allocating.
 const MIN_STACK: usize = 1024;
 
@@ -2729,6 +2725,19 @@ impl Vm {
         let items = pointer.reify(&heap).as_list()?.as_ptr_range();
 
         Ok((items.start, items.end))
+    }
+
+    /// Where the elements of `value` are, when it is a list: the first one and the end of
+    /// the last one.
+    fn list_bounds(&self, value: Value) -> Option<(*const Value, *const Value)> {
+        let Value::List(pointer) = value else {
+            return None;
+        };
+
+        let heap = self.heap.borrow();
+        let items = pointer.reify(&heap).as_list().ok()?.as_ptr_range();
+
+        Some((items.start, items.end))
     }
 
     /// Check the arguments of an inlined `range` call the way the built-in does, returning the

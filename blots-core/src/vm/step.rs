@@ -7,8 +7,8 @@
 //! this way.
 
 use super::{
-    Builder, CALLBACK_CALL_DEPTH, MAX_CALL_DEPTH, UNBOUND, Vm, depth_exceeded, is_unbound,
-    list_next, range_next, register, set_state, store_value,
+    Builder, MAX_CALL_DEPTH, UNBOUND, Vm, depth_exceeded, is_unbound, list_next, range_next,
+    register, set_state, store_value,
 };
 use crate::{
     ast::BinaryOp,
@@ -527,7 +527,7 @@ impl Vm {
                 frame.meta = frame.meta.wrapping_add(instr.sbx() as u64);
             }
             Op::CallbackDepth => {
-                if self.top().depth() + CALLBACK_CALL_DEPTH > MAX_CALL_DEPTH {
+                if self.top().depth() + b as usize > MAX_CALL_DEPTH {
                     return Err(depth_exceeded("anonymous function"));
                 }
             }
@@ -567,9 +567,26 @@ impl Vm {
                     set_state(state.add(4), end as u64);
                 }
             }
+            Op::IterList => {
+                // SAFETY: the loop state registers lie within the frame.
+                let list = unsafe { *self.reg_ptr(a).add(1) };
+
+                match self.list_bounds(list) {
+                    Some((first, end)) => {
+                        let state = self.reg_ptr(a);
+
+                        // SAFETY: as above.
+                        unsafe {
+                            set_state(state, first as u64);
+                            set_state(state.add(4), end as u64);
+                        }
+                    }
+                    None => self.skip(instr.sbx()),
+                }
+            }
             Op::ForList => {
-                // SAFETY: the loop state was set up by `IterPrep`, and the list it points
-                // into is kept alive by the register holding it.
+                // SAFETY: the loop state was set up by `IterPrep` or by `IterList`, and the
+                // list it points into is kept alive by the register holding it.
                 if !unsafe { list_next(self.reg_ptr(a), instr.x == 1, true) } {
                     self.skip(instr.sbx());
                 }

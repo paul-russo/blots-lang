@@ -296,6 +296,10 @@ pub(crate) enum Op {
     /// value is a list, then points the cursor `R[a]` at its first element and `R[a+4]` past
     /// its last one (both are raw addresses, never visible to the program).
     IterPrep,
+    /// Start an inlined iteration over `R[a+1]` when that is a list, the way `IterPrep` does
+    /// but at any call depth: an operator that goes through a list calls nothing before the
+    /// function it was given. `pc += sbx` when `R[a+1]` is anything else.
+    IterList,
     /// List iteration entry: `if R[a] == R[a+4] { pc += sbx } else { R[a+2] = *R[a]; R[a+3] =
     /// 0 (only when x == 1); R[a] += 1 }`.
     ForList,
@@ -303,7 +307,8 @@ pub(crate) enum Op {
     /// x == 1); R[a] += 1; pc += sbx }`.
     ForListNext,
     /// Raise the "maximum call depth" error an out-of-line callback call would have produced
-    /// when the frame is too deep. Executed once, before the first iteration.
+    /// when the frame is too deep: the callback is called `b` levels further in than the
+    /// frame is. Executed once, before the first iteration.
     CallbackDepth,
     /// Append `R[a]` to the list being built.
     ListPush,
@@ -499,6 +504,7 @@ impl Op {
             | Op::ForRange
             | Op::ForRangeNext
             | Op::IterPrep
+            | Op::IterList
             | Op::ForList
             | Op::ForListNext
             | Op::ListPush => A,

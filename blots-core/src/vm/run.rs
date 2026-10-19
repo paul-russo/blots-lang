@@ -10,10 +10,10 @@
 //! lives in machine registers.
 
 use super::{
-    Builder, CALLBACK_CALL_DEPTH, DEPTH_MASK, ENTRY, Frame, MAX_CALL_DEPTH, NOT_TRUNCATED,
-    PROFILED, TAIL_SHIFT, UNBOUND, Vm, copy_value, is_unbound, leaves_remainder, less, less_eq,
-    list_next, load_value, range_next, register, same_strings, set_state, step::Flow, store_value,
-    string_order, truncate, whole,
+    Builder, DEPTH_MASK, ENTRY, Frame, MAX_CALL_DEPTH, NOT_TRUNCATED, PROFILED, TAIL_SHIFT,
+    UNBOUND, Vm, copy_value, is_unbound, leaves_remainder, less, less_eq, list_next, load_value,
+    range_next, register, same_strings, set_state, step::Flow, store_value, string_order, truncate,
+    whole,
 };
 use crate::{
     bytecode::{Instr, Op, Proto, REGISTER_SCALE, RemainderTest, register_index},
@@ -952,7 +952,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 }
                 Op::CallbackDepth => {
                     let depth = ((*frame).meta & DEPTH_MASK) as usize;
-                    if depth + CALLBACK_CALL_DEPTH <= MAX_CALL_DEPTH {
+                    if depth + instr.b as usize <= MAX_CALL_DEPTH {
                         next!(1);
                     }
                 }
@@ -1111,6 +1111,22 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     set_state(state, first as u64);
                     set_state(state.add(4), end as u64);
                     next!(1);
+                }
+                Op::IterList => {
+                    let state = reg!(instr.a);
+
+                    if let Value::List(pointer) = &*state.add(1)
+                        && let Some(HeapValue::List(items)) = heap_value!(pointer)
+                    {
+                        let items = items.as_ptr_range();
+
+                        set_state(state, items.start as u64);
+                        set_state(state.add(4), items.end as u64);
+                        next!(1);
+                    }
+
+                    // Anything else is for the operator to deal with.
+                    jump!(ip);
                 }
 
                 // These are rare, and always take a call into the rest of the VM. Naming them,

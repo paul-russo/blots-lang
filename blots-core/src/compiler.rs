@@ -56,9 +56,10 @@ const MAX_CACHED_GLOBALS: usize = 256;
 /// in registers, each of which is cleared whenever the loop starts.
 const MAX_LOOP_NAMES: usize = 16;
 
-/// How many call-depth levels separate the caller of a higher-order built-in from the body of
-/// its callback: one for the built-in itself, one for the callback call, one for its body.
-const CALLBACK_DEPTH: i32 = 3;
+/// How much deeper than its caller the callback of a higher-order built-in is called: one
+/// level for the built-in itself, one for the callback call. The body of a callback runs one
+/// level further in than it is called from.
+const CALLBACK_CALL_DEPTH: u16 = 2;
 
 /// The most arguments a direct self call can pass: its argument count is an 8-bit operand.
 const MAX_SELF_CALL_ARGS: usize = u8::MAX as usize;
@@ -212,38 +213,32 @@ enum Target {
     Return,
 }
 
-/// A call to a higher-order built-in that can be compiled as an inline loop.
+/// A call to a higher-order built-in that can be compiled as an inline loop, or an operator
+/// that goes through a list the way one of them does.
 pub(crate) struct InlineCall<'e> {
+    /// The built-in function that is called, or the one that does to a list what the
+    /// operator does to it: `map` for `via` and `filter` for `where`.
     builtin: BuiltInFunction,
     list: &'e SpannedExpr,
     params: &'e [LambdaArg],
     body: &'e SpannedExpr,
     init: Option<&'e SpannedExpr>,
+
+    /// The operator and its right-hand side, which is the lambda, when this is not a call.
+    operator: Option<(BinaryOp, &'e SpannedExpr)>,
 }
 
-/// Recognise `map(list, lambda)`-style calls whose callback is a literal lambda the compiler
-/// can inline. The callback must take only required parameters, in a number the built-in
-/// would call it with, and must not assign variables directly in its call frame.
-fn inline_call<'e>(func: &SpannedExpr, args: &'e [SpannedExpr]) -> Option<InlineCall<'e>> {
-    let Expr::BuiltIn(builtin) = &func.node else {
-        return None;
-    };
-    let (arg_count, min_params) = match builtin {
-        BuiltInFunction::Map
-        | BuiltInFunction::Filter
-        | BuiltInFunction::Every
-        | BuiltInFunction::Some => (2, 1),
-        BuiltInFunction::Reduce => (3, 2),
-        _ => return None,
-    };
-
-    if args.len() != arg_count || args.iter().any(|arg| matches!(arg.node, Expr::Spread(_))) {
-        return None;
-    }
-
+/// The parameters and the body of `callback` when it is a literal lambda the compiler can
+/// inline. It must take only required parameters, in a number that it would be called with
+/// (`min_params`, or one more for the index of the element), and must not assign variables
+/// directly in its call frame.
+fn inline_callback(
+    callback: &SpannedExpr,
+    min_params: usize,
+) -> Option<(&[LambdaArg], &SpannedExpr)> {
     let Expr::Lambda {
         args: params, body, ..
-    } = &args[1].node
+    } = &callback.node
     else {
         return None;
     };
@@ -261,12 +256,64 @@ fn inline_call<'e>(func: &SpannedExpr, args: &'e [SpannedExpr]) -> Option<Inline
         return None;
     }
 
+    Some((params, body))
+}
+
+/// Recognise `map(list, lambda)`-style calls whose callback is a literal lambda the compiler
+/// can inline (see [`inline_callback`]).
+fn inline_call<'e>(func: &SpannedExpr, args: &'e [SpannedExpr]) -> Option<InlineCall<'e>> {
+    let Expr::BuiltIn(builtin) = &func.node else {
+        return None;
+    };
+    let (arg_count, min_params) = match builtin {
+        BuiltInFunction::Map
+        | BuiltInFunction::Filter
+        | BuiltInFunction::Every
+        | BuiltInFunction::Some => (2, 1),
+        BuiltInFunction::Reduce => (3, 2),
+        _ => return None,
+    };
+
+    if args.len() != arg_count || args.iter().any(|arg| matches!(arg.node, Expr::Spread(_))) {
+        return None;
+    }
+
+    let (params, body) = inline_callback(&args[1], min_params)?;
+
     Some(InlineCall {
         builtin: *builtin,
         list: &args[0],
         params,
         body,
         init: args.get(2),
+        operator: None,
+    })
+}
+
+/// Recognise `list via lambda` and `list where lambda` with a literal lambda the compiler can
+/// inline (see [`inline_callback`]). What the operator does to a list is what `map` and
+/// `filter` do to it, apart from how deep the lambda is called and what an error is told
+/// about where it comes from. What is on the left may turn out to be something else than a
+/// list, which the operator is left to deal with as it does when nothing is inlined.
+fn inline_operator<'e>(
+    op: BinaryOp,
+    left: &'e SpannedExpr,
+    right: &'e SpannedExpr,
+) -> Option<InlineCall<'e>> {
+    let builtin = match op {
+        BinaryOp::Via => BuiltInFunction::Map,
+        BinaryOp::Where => BuiltInFunction::Filter,
+        _ => return None,
+    };
+    let (params, body) = inline_callback(right, 1)?;
+
+    Some(InlineCall {
+        builtin,
+        list: left,
+        params,
+        body,
+        init: None,
+        operator: Some((op, right)),
     })
 }
 
@@ -482,7 +529,13 @@ fn collect_late_names(expr: &SpannedExpr, in_callback: bool, out: &mut Vec<Symbo
             collect_late_names(index, in_callback, out);
         }
         Expr::DotAccess { expr, .. } => collect_late_names(expr, in_callback, out),
-        Expr::BinaryOp { left, right, .. } => {
+        Expr::BinaryOp { op, left, right } => {
+            if let Some(inline) = inline_operator(*op, left, right) {
+                collect_late_names(inline.list, in_callback, out);
+                collect_late_names(inline.body, true, out);
+                return;
+            }
+
             collect_late_names(left, in_callback, out);
             collect_late_names(right, in_callback, out);
         }
@@ -828,7 +881,8 @@ struct FnCompiler {
 
     /// Whether a call that names a built-in function may be compiled into something other
     /// than a call of the function's value: an inline loop for the higher-order ones, an
-    /// instruction that calls the function for the others.
+    /// instruction that calls the function for the others. An operator that calls a function
+    /// for the elements of a list is compiled into such a loop under the same condition.
     inline: bool,
 
     /// Variants only: the capture (name and slot) that is known to hold the function itself.
@@ -1579,6 +1633,12 @@ impl FnCompiler {
     ) -> CResult<()> {
         let span = binary_span(left, right);
         let mark = self.free_reg;
+
+        if self.inline
+            && let Some(inline) = inline_operator(op, left, right)
+        {
+            return self.inline_loop(span, &inline, dst);
+        }
 
         if let Some(null_op) = null_compare_opcode(op)
             && let Some((operand, null_first)) = null_operand(left, right)
@@ -2824,11 +2884,22 @@ impl FnCompiler {
             .retain(|name| !released.iter().any(|(released, _)| released == name));
     }
 
-    /// Compile `map`/`filter`/`reduce`/`every`/`some` over a literal lambda as an inline loop.
+    /// Compile `map`/`filter`/`reduce`/`every`/`some` over a literal lambda as an inline loop,
+    /// and `via`/`where` with a literal lambda on the right as one that runs when what is on
+    /// the left is a list. `span` is where the call is, or the operation.
     fn inline_loop(&mut self, span: Span, call: &InlineCall, dst: u16) -> CResult<()> {
         let mark = self.free_reg;
         let cached = self.cache_loop_names(call)?;
         let is_reduce = call.builtin == BuiltInFunction::Reduce;
+
+        // How much deeper than the frame the callback would have been called: a built-in
+        // function calls it from one level further in than its own call, and an operator
+        // from where the operator is. Its body runs one level further in than that.
+        let call_depth = match call.operator {
+            Some(_) => 0,
+            None => CALLBACK_CALL_DEPTH,
+        };
+        let body_depth = i32::from(call_depth) + 1;
         let element_params = if is_reduce {
             &call.params[1..]
         } else {
@@ -2888,8 +2959,16 @@ impl FnCompiler {
 
         let region_start = self.here();
 
+        // A built-in function fails when it is given anything but a list. An operator does
+        // something else with that, which is compiled behind the loop.
+        let mut to_operator = None;
         if range_args.is_none() {
-            self.emit(Instr::abc(Op::IterPrep, state, 0, 0));
+            match call.operator {
+                Some(_) => to_operator = Some(self.emit_jump(Op::IterList, state)),
+                None => {
+                    self.emit(Instr::abc(Op::IterPrep, state, 0, 0));
+                }
+            }
         }
 
         let (entry_op, next_op) = if range_args.is_some() {
@@ -2912,8 +2991,8 @@ impl FnCompiler {
         entry.x = wants_index as u8;
         let to_exit = self.emit(entry);
 
-        self.emit(Instr::abc(Op::CallbackDepth, 0, 0, 0));
-        self.emit(Instr::abx(Op::AddDepth, 0, CALLBACK_DEPTH as u32));
+        self.emit(Instr::abc(Op::CallbackDepth, 0, call_depth, 0));
+        self.emit(Instr::abx(Op::AddDepth, 0, body_depth as u32));
 
         let ensured = self.ensured.len();
 
@@ -3006,7 +3085,7 @@ impl FnCompiler {
         let back = self.emit(next);
         self.patch_jump(back, loop_start);
 
-        self.emit(Instr::abx(Op::AddDepth, 0, (-CALLBACK_DEPTH) as u32));
+        self.emit(Instr::abx(Op::AddDepth, 0, (-body_depth) as u32));
 
         match call.builtin {
             BuiltInFunction::Map | BuiltInFunction::Filter => {
@@ -3030,7 +3109,7 @@ impl FnCompiler {
                 let to_end = self.emit_jump(Op::Jmp, 0);
 
                 self.patch_jump(early_exit.expect("early exit"), self.here());
-                self.emit(Instr::abx(Op::AddDepth, 0, (-CALLBACK_DEPTH) as u32));
+                self.emit(Instr::abx(Op::AddDepth, 0, (-body_depth) as u32));
                 self.load_const(dst, Value::Bool(!exhausted));
 
                 self.patch_jump(to_end, self.here());
@@ -3038,19 +3117,41 @@ impl FnCompiler {
             _ => unreachable!("not an inlinable built-in"),
         }
 
+        // An error that leaves the loop is told where it comes from the way the built-in
+        // function would have told it, or the operator.
+        let context = match call.operator {
+            Some((BinaryOp::Where, _)) => String::from("\"where\" callback"),
+            Some(_) => String::from("\"via\" callback"),
+            None => format!("built-in function \"{}\"", call.builtin.name()),
+        };
         self.handlers.push(Handler {
             start: region_start as u32,
             end: self.here() as u32,
             wraps: vec![
-                Wrap::FunctionContext(Rc::from(format!(
-                    "built-in function \"{}\"",
-                    call.builtin.name()
-                ))),
+                Wrap::FunctionContext(Rc::from(context)),
                 Wrap::CallSite(span),
             ],
         });
 
         self.release_loop_names(cached);
+
+        if let (Some(to_operator), Some((op, lambda))) = (to_operator, call.operator) {
+            // What is on the left is no list: the operator gets it together with the
+            // function that the lambda makes, as it does when nothing is inlined. Nothing
+            // was done since the left-hand side was evaluated that the lambda could tell.
+            let to_end = self.emit_jump(Op::Jmp, 0);
+            self.patch_jump(to_operator, self.here());
+
+            let function = self.alloc()?;
+            self.expr_into(lambda, function)?;
+            self.emit_spanned(
+                Instr::abc(binary_opcode(op), dst, state + 1, function),
+                span,
+            );
+
+            self.patch_jump(to_end, self.here());
+        }
+
         self.free_reg = mark;
 
         Ok(())
