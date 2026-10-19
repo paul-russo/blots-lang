@@ -9,7 +9,9 @@
 //! Scoping is dynamic: a name that is not bound in the function that reads it is looked up in
 //! the function that called it, and so on down to the environment the VM was created with. The
 //! frame stack is that scope chain. Each frame knows, through its proto's local table, which
-//! of its registers hold which variables at the instruction it is currently executing.
+//! of its registers hold which variables at the instruction it is currently executing. What
+//! a lookup finds below the frames that it goes down is remembered for the lookups that
+//! come across those frames again (see [`Vm::find`]).
 //!
 //! This module holds the VM's state, its entry points and everything that does not run once
 //! per instruction; the instruction loop itself lives in [`run`].
@@ -80,6 +82,9 @@ const ENTRY: u64 = 1 << 56;
 
 /// Set on a frame whose call is being timed for the profiler.
 const PROFILED: u64 = 1 << 57;
+
+/// Set on a frame that has a [stamp](Frame::stamp).
+const STAMPED: u64 = 1 << 58;
 
 /// The content of a register whose variable has not been assigned (yet). No expression can
 /// produce this value, so it never escapes into the program.
@@ -483,6 +488,11 @@ struct Frame {
     /// The saved `ip` of the tail call that last restarted the frame (only meaningful when
     /// the tail-call count is not zero).
     tail_ip: *const u64,
+
+    /// What tells the call apart from every other call the VM makes, once a name was looked
+    /// up through the frame (only meaningful when the frame is flagged [`STAMPED`]; see
+    /// [`Vm::find`]).
+    stamp: u64,
 }
 
 const NO_FRAME: Frame = Frame {
@@ -492,7 +502,132 @@ const NO_FRAME: Frame = Frame {
     def: ptr::null(),
     meta: 0,
     tail_ip: ptr::null(),
+    stamp: 0,
 };
+
+/// What the lookups of a name came to that went further down than the frame below the one
+/// that asked (see [`Vm::find`]).
+#[derive(Clone, Copy)]
+struct Found {
+    name: Option<Symbol>,
+
+    /// The first and the last of the stamps of the frames that the lookup of the name comes
+    /// to `value` from. No frame has a stamp between them when the first is the larger one.
+    first: u64,
+    last: u64,
+
+    /// What the name is bound to, [`UNBOUND`] when nothing binds it.
+    value: Value,
+}
+
+const NOT_FOUND: Found = Found {
+    name: None,
+    first: 1,
+    last: 0,
+    value: UNBOUND,
+};
+
+/// The [`Found`] of every name that has one: a hash table that is keyed by the address of
+/// the name and probed linearly, and that is only allocated once a name goes into it.
+#[derive(Default)]
+struct Finds {
+    /// Some power of two of slots, of which at least half hold no name, or none at all.
+    slots: Vec<Found>,
+
+    /// The number of slots that hold a name.
+    names: usize,
+}
+
+impl Finds {
+    const MIN_SLOTS: usize = 8;
+
+    /// The slot that holds `name`, or else the one that it goes into. There are slots.
+    #[inline(always)]
+    fn slot_of(&self, name: Symbol) -> usize {
+        debug_assert!(self.slots.len().is_power_of_two());
+
+        let mask = self.slots.len() - 1;
+        let address = name.as_str().as_ptr() as usize as u64;
+        let mut slot = (address.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as usize & mask;
+
+        loop {
+            match self.slots[slot].name {
+                Some(other) if other != name => slot = (slot + 1) & mask,
+                _ => return slot,
+            }
+        }
+    }
+
+    /// What the lookup of `name` comes to from the frame stamped `stamp`, if that is known.
+    #[inline(always)]
+    fn get(&self, name: Symbol, stamp: u64) -> Option<Value> {
+        if self.slots.is_empty() {
+            return None;
+        }
+
+        // A slot without a name is one without stamps.
+        let found = &self.slots[self.slot_of(name)];
+
+        (found.first <= stamp && stamp <= found.last).then_some(found.value)
+    }
+
+    /// The lookup of `name`, which is known to come to something from the frames below the
+    /// one stamped `last`, comes to the same from every frame up to that one.
+    fn extend(&mut self, name: Symbol, last: u64) {
+        let slot = self.slot_of(name);
+        debug_assert!(self.slots[slot].name == Some(name));
+
+        self.slots[slot].last = last;
+    }
+
+    /// The lookup of `name` comes to `value` from the frames stamped `first` to `last`, and
+    /// that is all that is known about it.
+    fn record(&mut self, name: Symbol, first: u64, last: u64, value: Value) {
+        if self.slots.len() < 2 * (self.names + 1) {
+            self.grow();
+        }
+
+        let slot = self.slot_of(name);
+        if self.slots[slot].name.is_none() {
+            self.names += 1;
+        }
+
+        self.slots[slot] = Found {
+            name: Some(name),
+            first,
+            last,
+            value,
+        };
+    }
+
+    #[cold]
+    fn grow(&mut self) {
+        let len = (self.slots.len() * 2).max(Self::MIN_SLOTS);
+
+        for found in mem::replace(&mut self.slots, vec![NOT_FOUND; len]) {
+            if let Some(name) = found.name {
+                let slot = self.slot_of(name);
+                self.slots[slot] = found;
+            }
+        }
+    }
+
+    /// `name` was bound to something else: nothing is known about it any more.
+    fn forget(&mut self, name: Symbol) {
+        if self.slots.is_empty() {
+            return;
+        }
+
+        let slot = self.slot_of(name);
+        (self.slots[slot].first, self.slots[slot].last) = (NOT_FOUND.first, NOT_FOUND.last);
+    }
+
+    /// The values of the heap are no longer where they were: nothing is known any more.
+    fn clear(&mut self) {
+        self.slots.fill(NOT_FOUND);
+        self.names = 0;
+    }
+}
 
 impl Frame {
     #[inline(always)]
@@ -532,6 +667,49 @@ impl Frame {
         // SAFETY: every function frame is laid out right above its callee value.
         unsafe { *self.base.sub(1) }
     }
+
+    /// What the innermost block variable called `name` holds that is visible at the
+    /// instruction the frame is executing (or suspended in) and that has been assigned.
+    #[inline(always)]
+    fn variable(&self, name: Symbol) -> Option<Value> {
+        let proto = self.proto();
+        if proto.locals.is_empty() {
+            return None;
+        }
+
+        let pc = self.pc() as u32;
+
+        for local in proto.locals.iter().rev() {
+            if local.name != name || pc < local.start || pc >= local.end {
+                continue;
+            }
+
+            // SAFETY: the registers of the proto's locals lie within the frame.
+            let value = unsafe { *self.base.add(local.reg as usize) };
+            if !is_unbound(&value) {
+                return Some(value);
+            }
+        }
+
+        None
+    }
+
+    /// What the function that the frame is running binds `name` to wherever its body is
+    /// at: a parameter, which shadows the function's own name, which shadows its captures.
+    #[inline(always)]
+    fn binding(&self, name: Symbol) -> Option<Value> {
+        if let Some(position) = self.proto().params.iter().position(|param| *param == name) {
+            // SAFETY: parameters occupy the first registers of the frame.
+            return Some(unsafe { *self.base.add(position) });
+        }
+
+        let def = self.def()?;
+        if def.name == Some(name) {
+            return Some(self.this_value());
+        }
+
+        def.scope.get(name)
+    }
 }
 
 /// The stacks of a VM that has finished.
@@ -550,6 +728,18 @@ thread_local! {
 
     /// The number of the run that started last on this thread (see [`Vm::run_number`]).
     static RUNS: Cell<u64> = const { Cell::new(0) };
+
+    /// The number of frames that the lookups of names on this thread went down to, below
+    /// the frames that asked (see [`Vm::find_below`]).
+    #[cfg(test)]
+    static FRAMES_SEARCHED: Cell<usize> = const { Cell::new(0) };
+}
+
+/// The number of frames that the lookups of names on this thread went down to so far, below
+/// the frames that asked.
+#[cfg(test)]
+pub(crate) fn frames_searched() -> usize {
+    FRAMES_SEARCHED.get()
 }
 
 /// The [`Vm::run_number`] of a VM that has not run anything yet: not the number of any run,
@@ -720,6 +910,14 @@ pub struct Vm {
     /// besides the bindings of the environment.
     held: Vec<Value>,
 
+    /// What the names that were looked up far down the frame stack are bound to there (see
+    /// [`Vm::find`]).
+    finds: Finds,
+
+    /// The stamp that was given to a frame last (see [`Frame::stamp`]). Every frame gets a
+    /// larger one than the frames that were stamped before it.
+    stamp: u64,
+
     #[cfg(not(target_arch = "wasm32"))]
     profiling: bool,
 
@@ -759,6 +957,8 @@ impl Vm {
             loops: 0,
             compacts: false,
             held: Vec::new(),
+            finds: Finds::default(),
+            stamp: 0,
             #[cfg(not(target_arch = "wasm32"))]
             profiling: crate::functions::is_profiling_enabled(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -854,6 +1054,7 @@ impl Vm {
             def: ptr::null(),
             meta: call_depth.min(DEPTH_MASK as usize / 2) as u64 | ENTRY,
             tail_ip: ptr::null(),
+            stamp: 0,
         });
 
         self.run()
@@ -953,6 +1154,7 @@ impl Vm {
             def: Rc::as_ptr(lambda),
             meta,
             tail_ip: ptr::null(),
+            stamp: 0,
         });
 
         self.run()
@@ -1014,6 +1216,7 @@ impl Vm {
             def: Rc::as_ptr(lambda),
             meta: (call_depth + 1) as u64 | ENTRY,
             tail_ip: ptr::null(),
+            stamp: 0,
         });
 
         self.run()
@@ -1079,7 +1282,8 @@ impl Vm {
     /// [`Heap::compact_in_run`]).
     ///
     /// What the run remembers about where values of the heap are (see
-    /// [`crate::bytecode::Literal`]) goes with the number that it gives up for a new one.
+    /// [`crate::bytecode::Literal`]) goes with the number that it gives up for a new one,
+    /// and so does what it remembers names to be bound to (see [`Vm::find`]).
     ///
     /// [`List::rewrite`]: crate::list::List::rewrite
     #[cold]
@@ -1118,7 +1322,10 @@ impl Vm {
             // The definitions that are shared stay shared for as long as the run lasts.
             Pass::Refused => self.compacts = false,
             Pass::Kept => {}
-            Pass::Moved => self.run_number = next_run_number(),
+            Pass::Moved => {
+                self.run_number = next_run_number();
+                self.finds.clear();
+            }
         }
     }
 
@@ -1293,33 +1500,7 @@ impl Vm {
     /// the function's own name, which shadows its captures.
     fn lookup(&self, name: Symbol) -> Option<Value> {
         for frame in self.active_frames().iter().rev() {
-            let proto = frame.proto();
-            let pc = frame.pc() as u32;
-
-            for local in proto.locals.iter().rev() {
-                if local.name != name || pc < local.start || pc >= local.end {
-                    continue;
-                }
-
-                // SAFETY: the registers of the proto's locals lie within the frame.
-                let value = unsafe { *frame.base.add(local.reg as usize) };
-                if !is_unbound(&value) {
-                    return Some(value);
-                }
-            }
-
-            if let Some(position) = proto.params.iter().position(|param| *param == name) {
-                // SAFETY: parameters occupy the first registers of the frame.
-                return Some(unsafe { *frame.base.add(position) });
-            }
-
-            let Some(def) = frame.def() else {
-                continue;
-            };
-            if def.name == Some(name) {
-                return Some(frame.this_value());
-            }
-            if let Some(value) = def.scope.get(name) {
+            if let Some(value) = frame.variable(name).or_else(|| frame.binding(name)) {
                 return Some(value);
             }
         }
@@ -1331,6 +1512,163 @@ impl Vm {
     fn lookup_or_unknown(&self, name: Symbol) -> Result<Value, RuntimeError> {
         self.lookup(name)
             .ok_or_else(|| self.unknown_identifier(name))
+    }
+
+    /// What [`Vm::lookup`] comes to for `name`, found without going down the frames that
+    /// a lookup of the name went down before.
+    ///
+    /// A name that is bound far below the frame that reads it would be looked for in every
+    /// frame in between, every time: a function that is defined after one that calls it is
+    /// such a name, at every level of a recursion of the caller. But a frame that is waiting
+    /// for a call to return binds the same things for as long as it waits. Its variables
+    /// are below the registers of the call, the definition that it is running is not
+    /// written to (see [`Vm::name_lambda`]), and the environment below the frames is only
+    /// assigned to by a chunk that is the only frame (see [`Vm::set_global`]). So what a
+    /// lookup that starts at a frame comes to is the same for as long as the frame is
+    /// active, as far as it is about the frames below it.
+    ///
+    /// That is what a [`Found`] remembers of the last lookup of a name that went down the
+    /// frames: the frames that it passed without finding the name, which bind it to
+    /// nothing but their variables (they are looked at every time), and what it found
+    /// below them. The frames are told apart by their [stamps](Frame::stamp). A frame is
+    /// stamped when a lookup first passes it, together with every frame below it, and a
+    /// stamp is larger than every stamp before it: so the stamps of the active frames grow
+    /// from the bottom of the frame stack up to where the frames have none yet, the frames
+    /// that a lookup passed are the active ones in a range of stamps, and a frame that is
+    /// pushed later is never taken for one of them. A lookup of the name that comes
+    /// across one of those frames is done, and the frames that it passed on the way there
+    /// join the range.
+    ///
+    /// The innermost frame has to be executing an instruction (or be suspended in one):
+    /// its saved `ip` is what tells which of its variables are visible.
+    #[inline(never)]
+    fn find(&mut self, name: Symbol) -> Option<Value> {
+        debug_assert!(self.frame_count() > 0, "the VM has no active frame");
+
+        let top = self.top;
+        // SAFETY: `top` points at the innermost active frame.
+        let frame = unsafe { &*top };
+
+        let value = 'found: {
+            if let Some(value) = frame.variable(name) {
+                break 'found value;
+            }
+
+            if frame.meta & STAMPED != 0
+                && let Some(value) = self.finds.get(name, frame.stamp)
+            {
+                break 'found value;
+            }
+
+            if let Some(value) = frame.binding(name) {
+                break 'found value;
+            }
+
+            self.find_below(top, name)
+        };
+
+        let found = (!is_unbound(&value)).then_some(value);
+        debug_assert!(
+            match (found, self.lookup(name)) {
+                (Some(Value::Number(found)), Some(Value::Number(bound))) =>
+                    found.to_bits() == bound.to_bits(),
+                (found, bound) => found == bound,
+            },
+            "the lookup of {name} was remembered to come to something else"
+        );
+
+        found
+    }
+
+    /// [`Vm::find`] for a name that `top`, the innermost frame, does not bind itself: what
+    /// the frames below it or else the environment bind it to, [`UNBOUND`] when nothing
+    /// does.
+    fn find_below(&mut self, top: *mut Frame, name: Symbol) -> Value {
+        let placeholder = self.frames.as_ptr();
+        let mut frame = top;
+
+        // Whether the value is what a lookup found before, from `frame` on down.
+        let (value, known) = loop {
+            // SAFETY: the frame records from the placeholder up to `top` are initialised,
+            // and `frame` is above the placeholder.
+            frame = unsafe { frame.sub(1) };
+            if ptr::eq(frame, placeholder) {
+                break (self.env.get(name).unwrap_or(UNBOUND), false);
+            }
+
+            // SAFETY: as above.
+            let below = unsafe { &*frame };
+
+            #[cfg(test)]
+            FRAMES_SEARCHED.set(FRAMES_SEARCHED.get() + 1);
+
+            if let Some(value) = below.variable(name) {
+                break (value, false);
+            }
+
+            if below.meta & STAMPED != 0
+                && let Some(value) = self.finds.get(name, below.stamp)
+            {
+                break (value, true);
+            }
+
+            if let Some(value) = below.binding(name) {
+                break (value, false);
+            }
+        };
+
+        // What the caller of `top` binds itself (or the environment, when `top` has no
+        // caller) is found as fast as it would be remembered.
+        // SAFETY: `top` is above the placeholder.
+        if !known && ptr::eq(frame, unsafe { top.sub(1) }) {
+            return value;
+        }
+
+        // SAFETY: `frame` is below `top`, so the record above it is one of an active frame,
+        // which was just stamped like every other one.
+        unsafe {
+            self.stamp_through(top);
+
+            match known {
+                true => self.finds.extend(name, (*top).stamp),
+                false => self
+                    .finds
+                    .record(name, (*frame.add(1)).stamp, (*top).stamp, value),
+            }
+        }
+
+        value
+    }
+
+    /// Stamp the active frames up to `top` that have no stamp yet. They are the ones above
+    /// those that have one: a frame is only ever stamped together with every frame below
+    /// it, and a frame that is pushed has none.
+    ///
+    /// # Safety
+    /// `top` must point at an active frame.
+    unsafe fn stamp_through(&mut self, top: *mut Frame) {
+        let placeholder = self.frames.as_ptr();
+
+        // SAFETY: the frame records from the placeholder up to `top` are initialised.
+        unsafe {
+            let mut frame = top;
+            while (*frame).meta & STAMPED == 0 {
+                let below = frame.sub(1);
+                if ptr::eq(below, placeholder) || (*below).meta & STAMPED != 0 {
+                    break;
+                }
+                frame = below;
+            }
+
+            // `frame` is the lowest frame without a stamp, or `top` when every frame has
+            // one.
+            while frame <= top && (*frame).meta & STAMPED == 0 {
+                self.stamp += 1;
+                (*frame).stamp = self.stamp;
+                (*frame).meta |= STAMPED;
+                frame = frame.add(1);
+            }
+        }
     }
 
     // ---------------------------------------------------------------------------------------
@@ -1550,6 +1888,7 @@ impl Vm {
                     def,
                     meta,
                     tail_ip: ptr::null(),
+                    stamp: 0,
                 });
 
                 Ok(())
@@ -1811,10 +2150,10 @@ impl Vm {
     /// Look up name `index` of the innermost frame's proto for an identifier expression, or
     /// for a record shorthand (which reports failure without a location or a hint).
     #[inline(never)]
-    fn get_name(&self, index: usize, shorthand: bool) -> Result<Value, RuntimeError> {
+    fn get_name(&mut self, index: usize, shorthand: bool) -> Result<Value, RuntimeError> {
         let name = self.top().proto().names[index];
 
-        match self.lookup(name) {
+        match self.find(name) {
             Some(value) => Ok(value),
             None if shorthand => Err(RuntimeError::new(format!("unknown identifier: {}", name))),
             None => Err(self.unknown_identifier(name)),
@@ -1835,7 +2174,7 @@ impl Vm {
     /// turned out to be unbound: through the function's own name (unless something may
     /// shadow it), then by name.
     #[inline(never)]
-    fn capture_fallback(&self, index: usize, shadowable: bool) -> Result<Value, RuntimeError> {
+    fn capture_fallback(&mut self, index: usize, shadowable: bool) -> Result<Value, RuntimeError> {
         let frame = self.top();
         let (_, name) = frame.proto().slot_refs[index];
 
@@ -1843,7 +2182,7 @@ impl Vm {
             return Ok(frame.this_value());
         }
 
-        self.lookup_or_unknown(name)
+        self.find(name).ok_or_else(|| self.unknown_identifier(name))
     }
 
     /// Read slot reference `index` of the innermost frame's proto from the nearest call
@@ -1864,10 +2203,12 @@ impl Vm {
     }
 
     #[inline(never)]
-    fn input(&self, index: usize) -> Result<Value, RuntimeError> {
-        let field = &self.top().proto().strings[index];
+    fn input(&mut self, index: usize) -> Result<Value, RuntimeError> {
+        let proto = self.top().proto;
+        // SAFETY: the code of an active frame outlives it (see `Vm::proto_for`).
+        let field = unsafe { &(&(*proto).strings)[index] };
         let inputs = self
-            .lookup(inputs_symbol())
+            .find(inputs_symbol())
             .ok_or_else(|| format!("inputs not found (required for #{} syntax)", field))?;
 
         let Value::Record(record) = inputs else {
@@ -1921,8 +2262,9 @@ impl Vm {
     /// capturing the current values of its free variables.
     #[inline(never)]
     fn make_closure(&mut self, index: usize) -> Result<Value, RuntimeError> {
-        let frame = self.top();
-        let template = &frame.proto().lambdas[index];
+        let frame = *self.top();
+        // SAFETY: the code of an active frame outlives it (see `Vm::proto_for`).
+        let template = unsafe { &(&(*frame.proto).lambdas)[index] };
         let mut values = Vec::with_capacity(template.captures.len());
         let mut any_bound = false;
 
@@ -1933,7 +2275,7 @@ impl Vm {
                     let value = unsafe { *frame.base.add(*reg as usize) };
                     (!is_unbound(&value)).then_some(value)
                 }
-                CaptureSource::Dynamic => self.lookup(*name),
+                CaptureSource::Dynamic => self.find(*name),
             };
             any_bound |= value.is_some();
             values.push(value);
@@ -1961,7 +2303,7 @@ impl Vm {
             args: Rc::clone(&template.args),
             body: Rc::clone(&template.body),
             scope,
-            source: self.source_of(frame),
+            source: self.source_of(&frame),
         };
 
         Ok(self.heap.borrow_mut().insert_lambda(lambda))
@@ -2330,9 +2672,19 @@ impl Vm {
         )))
     }
 
+    /// Bind name `index` of the innermost frame's proto in the boundary environment. The
+    /// frame is a chunk, and the only one: nothing that is running is anywhere else than
+    /// at the top level of a statement when the statement assigns to a name.
     #[inline(never)]
-    fn set_global(&self, index: usize, value: Value) {
-        self.env.insert(self.top().proto().names[index], value);
+    fn set_global(&mut self, index: usize, value: Value) {
+        debug_assert!(
+            self.frame_count() == 1,
+            "a chunk assigns to a name when it is the only frame"
+        );
+
+        let name = self.top().proto().names[index];
+        self.env.insert(name, value);
+        self.finds.forget(name);
     }
 
     /// Check that an inlined iteration over `list` may start, the way the built-in it replaces
@@ -2391,6 +2743,134 @@ impl Vm {
                 "list would be longer than the maximum length of {}",
                 u32::MAX
             ))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NO_STAMPS: [u64; 0] = [];
+
+    fn number(value: f64) -> Option<Value> {
+        Some(Value::Number(value))
+    }
+
+    /// The stamps from which `finds` knows what `name` is bound to, among the first twenty.
+    fn stamps_of(finds: &Finds, name: Symbol) -> Vec<u64> {
+        (0..20)
+            .filter(|stamp| finds.get(name, *stamp).is_some())
+            .collect()
+    }
+
+    #[test]
+    fn a_name_is_found_from_the_frames_that_a_lookup_went_down() {
+        let (a, b) = (Symbol::intern("a"), Symbol::intern("b"));
+        let mut finds = Finds::default();
+
+        assert_eq!(finds.get(a, 0), None);
+        assert_eq!(finds.get(a, 1), None);
+
+        finds.record(a, 3, 5, Value::Number(1.0));
+
+        assert_eq!(stamps_of(&finds, a), [3, 4, 5]);
+        assert_eq!(finds.get(a, 4), number(1.0));
+        assert_eq!(finds.get(a, u64::MAX), None);
+        assert_eq!(stamps_of(&finds, b), NO_STAMPS);
+
+        // The frames that a later lookup went down before it came across one of those.
+        finds.extend(a, 9);
+
+        assert_eq!(stamps_of(&finds, a), [3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(finds.get(a, 9), number(1.0));
+
+        // A lookup that found the name somewhere else is all that is known from then on.
+        finds.record(a, 12, 12, Value::Number(2.0));
+
+        assert_eq!(stamps_of(&finds, a), [12]);
+        assert_eq!(finds.get(a, 12), number(2.0));
+
+        // A name that nothing binds is found to be unbound.
+        finds.record(b, 1, 2, UNBOUND);
+
+        assert!(finds.get(b, 2).is_some_and(|value| is_unbound(&value)));
+        assert_eq!(stamps_of(&finds, a), [12]);
+    }
+
+    #[test]
+    fn a_name_that_is_bound_again_is_forgotten_alone() {
+        let (a, b) = (Symbol::intern("a"), Symbol::intern("b"));
+        let mut finds = Finds::default();
+
+        // Nothing is known yet, and there is nothing to forget.
+        finds.forget(a);
+        finds.clear();
+
+        finds.record(a, 1, 4, Value::Number(1.0));
+        finds.record(b, 2, 4, Value::Number(2.0));
+        finds.forget(a);
+        finds.forget(Symbol::intern("c"));
+
+        assert_eq!(stamps_of(&finds, a), NO_STAMPS);
+        assert_eq!(stamps_of(&finds, b), [2, 3, 4]);
+
+        finds.record(a, 4, 6, Value::Number(3.0));
+
+        assert_eq!(stamps_of(&finds, a), [4, 5, 6]);
+        assert_eq!(finds.get(a, 4), number(3.0));
+        assert_eq!(finds.get(b, 4), number(2.0));
+        assert_eq!(finds.names, 2);
+
+        finds.clear();
+
+        assert_eq!(stamps_of(&finds, a), NO_STAMPS);
+        assert_eq!(stamps_of(&finds, b), NO_STAMPS);
+        assert_eq!(finds.names, 0);
+
+        finds.record(b, 7, 7, Value::Number(4.0));
+
+        assert_eq!(stamps_of(&finds, b), [7]);
+        assert_eq!(finds.names, 1);
+    }
+
+    #[test]
+    fn the_names_keep_what_was_found_for_them_when_there_are_more_of_them() {
+        let names: Vec<Symbol> = (0..300)
+            .map(|index| Symbol::intern(&format!("found_{index}")))
+            .collect();
+        let mut finds = Finds::default();
+
+        for (index, name) in names.iter().enumerate() {
+            let stamp = index as u64 + 1;
+            finds.record(*name, stamp, stamp + 2, Value::Number(index as f64));
+
+            assert!(finds.slots.len().is_power_of_two());
+            assert!(finds.slots.len() >= 2 * finds.names);
+            assert_eq!(finds.names, index + 1);
+        }
+
+        for (index, name) in names.iter().enumerate() {
+            let stamp = index as u64 + 1;
+
+            assert_eq!(finds.get(*name, stamp - 1), None);
+            assert_eq!(finds.get(*name, stamp), number(index as f64));
+            assert_eq!(finds.get(*name, stamp + 2), number(index as f64));
+            assert_eq!(finds.get(*name, stamp + 3), None);
+        }
+
+        // Half of them are forgotten, and the others are found behind them.
+        for name in names.iter().step_by(2) {
+            finds.forget(*name);
+        }
+
+        for (index, name) in names.iter().enumerate() {
+            let found = finds.get(*name, index as u64 + 1);
+
+            match index % 2 {
+                0 => assert_eq!(found, None),
+                _ => assert_eq!(found, number(index as f64)),
+            }
         }
     }
 }

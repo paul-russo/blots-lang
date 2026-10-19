@@ -142,6 +142,40 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 }};
             }
 
+            // `R[a]` is what `$name` is bound to, when it is bound to something: by the frame,
+            // or by one of the frames below it (see `Vm::find`, which looks at the frame stack
+            // but leaves the stacks and the heap alone).
+            macro_rules! find {
+                ($name:expr) => {{
+                    (*frame).ip = ip.add(1);
+                    (*vm).top = frame;
+
+                    if let Some(value) = (*vm).find($name) {
+                        store_value(reg!(instr.a), value);
+                        next!(1);
+                    }
+                }};
+            }
+
+            // `R[a]` is what slot reference `$reference` of the frame's proto is bound to,
+            // whose capture slot the closure was made without: the function itself, when
+            // that is the name of the function and nothing can shadow it (operand `x`), or
+            // else what the name is bound to wherever it is.
+            macro_rules! late_capture {
+                ($reference:expr) => {{
+                    let references = &(*(*frame).proto).slot_refs;
+                    debug_assert!($reference < references.len());
+                    let (_, name) = *references.get_unchecked($reference);
+
+                    if instr.x == 0 && (*(*frame).def).name == Some(name) {
+                        copy_value(reg!(instr.a), base.sub(1));
+                        next!(1);
+                    }
+
+                    find!(name);
+                }};
+            }
+
             // `R[a] = R[b] <op> R[c]` on two numbers.
             macro_rules! arithmetic {
                 (|$x:ident, $y:ident| $value:expr) => {{
@@ -405,10 +439,24 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     store_value(reg!(instr.a), UNBOUND);
                     next!(1);
                 }
-                Op::EnsureGlobal | Op::EnsureName => {
+                Op::GetName => {
+                    let names = &(*(*frame).proto).names;
+                    debug_assert!(instr.bx() < names.len());
+                    find!(*names.get_unchecked(instr.bx()));
+                }
+                Op::EnsureGlobal => {
                     if !is_unbound(&*reg!(instr.a)) {
                         next!(1);
                     }
+                }
+                Op::EnsureName => {
+                    if !is_unbound(&*reg!(instr.a)) {
+                        next!(1);
+                    }
+
+                    let names = &(*(*frame).proto).names;
+                    debug_assert!(instr.bx() < names.len());
+                    find!(*names.get_unchecked(instr.bx()));
                 }
                 Op::GetCapture => {
                     debug_assert!(!(*frame).def.is_null());
@@ -417,6 +465,8 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                         load_value(reg!(instr.a), value);
                         next!(1);
                     }
+
+                    late_capture!(instr.c as usize);
                 }
                 Op::GetCaptureRef => {
                     debug_assert!(!(*frame).def.is_null());
@@ -426,6 +476,8 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                         load_value(reg!(instr.a), value);
                         next!(1);
                     }
+
+                    late_capture!(instr.bx());
                 }
 
                 Op::Add => arithmetic!(|x, y| x + y),
@@ -840,8 +892,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 // These always take a call into the rest of the VM. Naming them, instead of
                 // leaving them to a wildcard, tells the compiler that every opcode has an arm,
                 // so the jump to the arm needs no range check.
-                Op::GetName
-                | Op::GetEnvParam
+                Op::GetEnvParam
                 | Op::GetEnvCapture
                 | Op::GetInput
                 | Op::Via

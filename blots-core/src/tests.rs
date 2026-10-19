@@ -7998,6 +7998,31 @@ mod in_run_compaction_tests {
     }
 
     #[test]
+    fn a_pass_in_a_run_forgets_where_the_names_that_were_looked_up_had_their_values() {
+        // A name that is bound after the function that reads it is looked up in the frames
+        // every time, which remember what it came to from the ones that are still running.
+        for (code, expected) in [
+            // What the program binds the name to, behind what the statement before left.
+            (
+                "read = i => late[i][1]\ntwig = i => read(i)\nbefore = junk(60000)\nlate = [[0, \"zero\"], [1, \"one\"], [2, \"two\"]]\nwalk = (n, acc) => if n == 0 then acc else walk(n - 1, [twig(n % 3), junk(4000), ...acc])\nr = walk(30, [])\n[len(r), r[0], r[2], r[4], r[58]]",
+                "[60, one, two, zero, zero]",
+            ),
+            // A function, and what it captured.
+            (
+                "call = x => late(x)\ntwig = x => call(x)\nbefore = junk(60000)\nscale = [3, \"three\"]\nlate = x => [x * scale[0], scale[1]]\nwalk = (n, acc) => if n == 0 then acc else walk(n - 1, [twig(n), junk(4000), ...acc])\nr = walk(30, [])\n[len(r), r[0], r[58]]",
+                "[60, [3, three], [90, three]]",
+            ),
+            // What a call that is waiting has in a parameter.
+            (
+                "read = i => held[i]\ntwig = i => read(i)\nwalk = (n, acc) => if n == 0 then acc else walk(n - 1, [twig(n % 2), junk(4000), ...acc])\nhold = (pad, held) => [pad, ...walk(30, [])]\nr = hold(junk(60000), [[\"even\"], [\"odd\"]])\n[len(r), r[1], r[3], r[59]]",
+                "[61, [odd], [even], [even]]",
+            ),
+        ] {
+            assert_eq!(reclaims(&format!("{JUNK}{code}")), expected, "{code}");
+        }
+    }
+
+    #[test]
     fn a_pass_in_a_run_makes_the_string_of_a_literal_again() {
         for (code, expected) in [
             // A literal of a function is made into a string by every call of the function,
@@ -8688,6 +8713,309 @@ mod loop_name_tests {
             ("xs => map(xs, x => do { t = t * 2; return t + 1 })", 1),
         ] {
             assert_eq!(count(code, Op::LoadUnbound), expected, "{code}");
+        }
+    }
+}
+
+// A function finds a name that it does not bind where it was called from: in the frame of its
+// caller, in that of the caller's caller, and so on down to the top level of the program. The
+// VM remembers what a lookup found below the frames that it went down, for the lookups that
+// come across those frames again. Nothing but the time that a lookup takes may tell that from
+// going down the frames every time.
+#[cfg(test)]
+mod remembered_name_tests {
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::values::Value;
+    use crate::vm::frames_searched;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code`, up to the value of the last one.
+    fn evaluate(code: &str, heap: &Rc<RefCell<Heap>>) -> Result<Value, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+            result = evaluate_ast(
+                &expr,
+                Rc::clone(heap),
+                Rc::clone(&bindings),
+                0,
+                Rc::clone(&source),
+            )?;
+        }
+
+        Ok(result)
+    }
+
+    /// What the statements of `code` come to, rendered: the value, or the message of the
+    /// error and the part of `code` that it points at.
+    fn outcome(code: &str) -> String {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        match evaluate(code, &heap) {
+            Ok(value) => value.stringify_internal(&heap.borrow()),
+            Err(error) => {
+                let place = match error.span {
+                    Some(span) => &code[span.start_byte..span.end_byte],
+                    None => "nothing",
+                };
+
+                format!("{} at {place}", error.message)
+            }
+        }
+    }
+
+    /// The number of frames that the lookups of `code` went down to, and what it came to.
+    fn searched(code: &str) -> (usize, String) {
+        let before = frames_searched();
+        let outcome = outcome(code);
+
+        (frames_searched() - before, outcome)
+    }
+
+    #[test]
+    fn a_name_is_found_in_the_frame_that_binds_it_however_far_down() {
+        for (code, expected) in [
+            // A function that is defined after the one that calls it, at every level of a
+            // recursion.
+            (
+                "f = n => if n == 0 then 0 else g(n) + f(n - 1)\ng = n => n * 2\nf(50)",
+                "2550",
+            ),
+            (
+                "even = n => if n == 0 then true else odd(n - 1)\nodd = n => if n == 0 then false else even(n - 1)\n[even(10), odd(7), even(7)]",
+                "[true, true, false]",
+            ),
+            // A parameter of the caller's caller, between two calls that have none.
+            (
+                "show = () => k\nvia = () => show()\nmid = k => via()\nk = 1\n[via(), mid(2), via(), mid(3), show()]",
+                "[1, 2, 1, 3, 1]",
+            ),
+            // A parameter of every level of a recursion, read before the levels further in
+            // and after them, and from further in than the frames that read it before.
+            (
+                "leaf = () => k\ntwig = () => leaf()\nrec = k => if k == 0 then [] else [twig(), ...rec(k - 1), twig()]\nrec(3)",
+                "[3, 2, 1, 1, 2, 3]",
+            ),
+            (
+                "leaf = () => k\ntwig = n => if n == 0 then leaf() else twig(n - 1) + 0\nrec = k => if k == 0 then [] else [twig(k), ...rec(k - 1), twig(0)]\nrec(4)",
+                "[4, 3, 2, 1, 1, 2, 3, 4]",
+            ),
+            // What a function captured when it was made, and the function itself.
+            (
+                "leaf = () => k\ntwig = () => leaf()\nmk = k => (() => [k, twig()])\nc = mk(7)\nk = 1\n[c(), twig(), mk(9)()]",
+                "[[7, 7], 1, [9, 9]]",
+            ),
+            (
+                "leaf = () => typeof(me)\ntwig = () => leaf()\nfs = [do { me = n => twig(); return me }]\nfs[0](1)",
+                "function",
+            ),
+            // The inputs of whoever calls.
+            (
+                "leaf = () => inputs.a + #b\ntwig = () => leaf()\ng = inputs => twig()\n[g({a: 1, b: 10}), g({a: 2, b: 20})]",
+                "[11, 22]",
+            ),
+            // Below a built-in function that calls back.
+            (
+                "leaf = x => x * k\ntwig = x => leaf(x)\nw = k => sort_by([3, 1, 2], x => twig(x))\n[w(1), w(-1)]",
+                "[[1, 2, 3], [3, 2, 1]]",
+            ),
+            (
+                "leaf = x => x * k\ntwig = x => leaf(x)\nw = k => ([1, 2] via twig)\n[w(2), w(3), w(2)]",
+                "[[2, 4], [3, 6], [2, 4]]",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_frame_binds_a_name_from_where_it_assigns_it() {
+        for (code, expected) in [
+            // A variable of a block is bound for the calls that the block makes after it
+            // assigned it, and for no call that the function makes behind the block.
+            (
+                "leaf = () => k\ntwig = () => leaf()\nx = () => do {\n  a = twig()\n  k = 5\n  b = twig()\n  return [a, b]\n}\nw = k => x()\nw(1)",
+                "[1, 5]",
+            ),
+            (
+                "leaf = () => k\ntwig = () => leaf()\nx = () => do {\n  a = twig()\n  b = do { k = 5; return twig() }\n  c = twig()\n  d = do { k = 7; return [twig(), leaf()] }\n  return [a, b, c, d, twig()]\n}\nw = k => [x(), twig()]\n[w(1), w(2)]",
+                "[[[1, 5, 1, [7, 7], 1], 1], [[2, 5, 2, [7, 7], 2], 2]]",
+            ),
+            (
+                "leaf = () => k\ntwig = () => leaf()\nf = () => [do { k = 5; return twig() }, do { k = 6; return twig() }]\nf()",
+                "[5, 6]",
+            ),
+            (
+                "leaf = () => k\ntwig = () => leaf()\nx = () => do { a = twig(); k = 5; return a }\nx()",
+                "in function \"x\": in function \"twig\": in function \"leaf\": unknown identifier: k at k",
+            ),
+            // So is a name that the function assigns outside of a block, which nothing that
+            // is in sight may have bound before.
+            (
+                "leaf = () => k\ntwig = () => leaf()\nx = () => [(k = 5), twig(), leaf()]\n[x(), x()]",
+                "[[5, 5, 5], [5, 5, 5]]",
+            ),
+            (
+                "leaf = () => k\ntwig = () => leaf()\nx = () => [twig(), (k = 5), twig(), leaf()]\nw = k => [x(), twig()]\n[w(1), w(2)]",
+                "in function \"w\": in function \"x\": k is already defined, and cannot be reassigned at k = 5",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_frame_that_starts_over_binds_its_parameters_anew() {
+        for (code, expected) in [
+            (
+                "leaf = () => k\ntwig = () => leaf()\nloop = (k, acc) => if k == 0 then acc else loop(k - 1, [...acc, twig()])\nloop(4, [])",
+                "[4, 3, 2, 1]",
+            ),
+            (
+                "leaf = () => k\ntwig = () => leaf()\nloop = (k, acc) => if k == 0 then acc else loop(k - 1, [...acc, twig(), leaf()])\nouter = () => loop(2, [])\n[outer(), outer()]",
+                "[[2, 2, 1, 1], [2, 2, 1, 1]]",
+            ),
+            // What the frames below it bind is what they bound before.
+            (
+                "leaf = () => k\ntwig = () => leaf()\nloop = (n, acc) => if n == 0 then acc else loop(n - 1, [...acc, twig()])\nk = 9\nloop(3, [])",
+                "[9, 9, 9]",
+            ),
+            (
+                "leaf = () => k\ntwig = () => leaf()\nloop = (n, acc) => if n == 0 then acc else loop(n - 1, [...acc, twig()])\nw = k => loop(2, [])\n[w(1), w(2)]",
+                "[[1, 1], [2, 2]]",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_the_top_level_binds_is_found_from_then_on() {
+        for (code, expected) in [
+            // A function that is made where nothing binds the name finds it when it is called.
+            (
+                "mk = () => (() => k)\nvia = () => mk()\nearly = via()\nk = 5\n[early(), via()()]",
+                "[5, 5]",
+            ),
+            // The statement that binds the name looked for it before, from further in.
+            (
+                "mk = () => (() => k)\nvia = () => mk()\n[typeof(via()), (k = 5), via()(), mk()()]",
+                "[function, 5, 5, 5]",
+            ),
+            (
+                "show = () => k\nvia = () => show()\n[(k = 1), via(), (j = 2), via(), show() + j]",
+                "[1, 1, 2, 1, 3]",
+            ),
+            (
+                "show = () => k\nvia = () => show()\nk = 1\n[via(), (k = 2), via()]",
+                "k is already defined, and cannot be reassigned at k = 2",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_nothing_binds_fails_where_it_is_read() {
+        for (code, expected) in [
+            (
+                "leaf = () => missing\ntwig = () => leaf()\ntwig()",
+                "in function \"twig\": in function \"leaf\": unknown identifier: missing at missing",
+            ),
+            // The frames that the name was found from before bind it no longer.
+            (
+                "leaf = n => if n == 0 then k else n\ntwig = n => leaf(n)\nrec = n => if n < 0 then 0 else twig(n) + rec(n - 1)\nw = k => rec(1)\n[w(5), rec(1)]",
+                "in function \"rec\": in function \"rec\": in function \"twig\": in function \"leaf\": unknown identifier: k at k",
+            ),
+            (
+                "leaf = () => pi\ntwig = () => leaf()\nrec = n => if n == 0 then twig() else rec(n - 1) + 0\nrec(3)",
+                "in function \"rec\": in function \"rec\": in function \"rec\": in function \"rec\": in function \"twig\": in function \"leaf\": unknown identifier: pi. Did you mean constants.pi? at pi",
+            ),
+            // A record that takes its key from the name, and a field of the inputs.
+            (
+                "leaf = () => {missing}\ntwig = () => leaf()\ntwig()",
+                "in function \"twig\": in function \"leaf\": unknown identifier: missing at ()",
+            ),
+            (
+                "leaf = () => #a\ntwig = () => leaf()\ntwig()",
+                "in function \"twig\": in function \"leaf\": inputs not found (required for #a syntax) at ()",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_lookup_goes_down_the_frames_once() {
+        // The function that reads is a hundred and one calls further in than the top level.
+        const DEEP: &str = "deep = d => if d == 0 then spin() else deep(d - 1) + 0\n";
+
+        for (code, expected, most) in [
+            // Every level of a recursion reads a name that the top level binds, and comes
+            // across the level below, which found it before.
+            (
+                "f = n => if n == 0 then 0 else g(n) + f(n - 1)\ng = n => n * 2\nf(300)"
+                    .to_string(),
+                "90300",
+                300,
+            ),
+            // A frame that reads the name again finds it without going down.
+            (
+                format!(
+                    "spin = () => late() + late() + late() + late() + late()\n{DEEP}late = () => 1\ndeep(100)"
+                ),
+                "5",
+                102,
+            ),
+            // So does every one of the frames that it calls, and of those that they call:
+            // they come across the frame that called them.
+            (
+                format!(
+                    "use = () => late()\nspin = () => use() + use() + use() + use() + use()\n{DEEP}late = () => 1\ndeep(100)"
+                ),
+                "5",
+                103 + 4,
+            ),
+            (
+                format!(
+                    "use = () => late()\nvia = () => use()\nspin = () => via() + via() + via() + via() + via()\n{DEEP}late = () => 1\ndeep(100)"
+                ),
+                "5",
+                104 + 2 * 4,
+            ),
+            // A function that is made takes what it can of what it reads with it.
+            (
+                format!(
+                    "make = n => (x => x + k + n)\nspin = () => make(1)(1) + make(2)(1) + make(3)(1)\n{DEEP}k = 10\ndeep(100)"
+                ),
+                "39",
+                103 + 2,
+            ),
+            // A frame that binds the name is as far as a lookup goes, whatever is below.
+            (
+                format!(
+                    "use = () => k\nvia = () => use()\nspin = () => via() + via() + via() + via() + via()\nbind = k => spin()\n{}k = 1\ndeep(100)",
+                    DEEP.replace("spin()", "bind(2)")
+                ),
+                "10",
+                3 + 2 * 4,
+            ),
+        ] {
+            let (frames, outcome) = searched(&code);
+
+            assert_eq!(outcome, expected, "{code}");
+            assert!(frames <= most, "{code}: {frames} frames");
         }
     }
 }

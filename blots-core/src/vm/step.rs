@@ -576,7 +576,7 @@ impl Vm {
     /// slot reference `reference` of its proto. A slot that was unbound when the closure was
     /// created is resolved late (see `Vm::capture_fallback`).
     fn capture(
-        &self,
+        &mut self,
         slot: usize,
         reference: usize,
         shadowable: bool,
