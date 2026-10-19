@@ -3,13 +3,12 @@ use crate::{
     environment::Environment,
     error::RuntimeError,
     heap::{Heap, HeapPointer, IterablePointer},
-    text::Text,
+    text::{Draft, Text},
     units,
     values::{FunctionArity, LambdaDef, ReifiedValue, Value, WHOLE_DIGITS, whole_digits},
     vm::Vm,
 };
 use anyhow::Result as AnyhowResult;
-use dyn_fmt::AsStrFormatExt;
 use indexmap::IndexMap;
 use std::{cell::RefCell, rc::Rc, sync::LazyLock};
 
@@ -898,19 +897,7 @@ impl BuiltInFunction {
             }
 
             Self::Format => {
-                let formatted = {
-                    let borrowed_heap = &heap.borrow();
-                    let format_str = args[0]
-                        .as_string(borrowed_heap)
-                        .map_err(|_| RuntimeError::from("first argument must be a string"))?;
-
-                    let format_args = &args[1..]
-                        .iter()
-                        .map(|v| v.stringify_for_display(borrowed_heap))
-                        .collect::<Vec<String>>();
-
-                    format_str.format(format_args)
-                };
+                let formatted = formatted(args, &heap.borrow())?;
 
                 Ok(heap.borrow_mut().insert_string(formatted))
             }
@@ -1207,11 +1194,16 @@ impl BuiltInFunction {
                     let format_str = args[0].as_string(borrowed_heap).map_err(|_| {
                         RuntimeError::from("first argument must be a formatting string if multiple arguments are given")
                     })?;
-                    let format_args = &args[1..]
-                        .iter()
-                        .map(|v| v.stringify_internal(borrowed_heap))
-                        .collect::<Vec<String>>();
-                    format_str.format(format_args)
+                    let mut format_args = args[1..].iter();
+                    let mut output = Draft::new();
+
+                    fill_template(format_str, &mut output, |output| {
+                        if let Some(value) = format_args.next() {
+                            output.push_str(&value.stringify_internal(borrowed_heap));
+                        }
+                    });
+
+                    output.as_str().to_owned()
                 };
 
                 // Print to stderr, to not pollute stdout
@@ -1619,6 +1611,70 @@ fn fold_numbers(
     }
 
     Ok((result, numbers.len()))
+}
+
+/// Write `template` behind the pieces of `draft`, with what `argument` writes in the place
+/// of every `{}`.
+///
+/// A brace that does not open a `{}` is left out, and the character behind it is written as
+/// it is, whatever it is: `{{` and `}{` come to `{`, `}}` to `}`, and `{x}` to `x`. A brace
+/// that ends the template is left out as well.
+fn fill_template(template: &str, draft: &mut Draft, mut argument: impl FnMut(&mut Draft)) {
+    let bytes = template.as_bytes();
+
+    // Where the characters start that were not written yet, and the first one that may be
+    // a brace: the ones from `written` to `at` are written as they are.
+    let mut written = 0;
+    let mut at = 0;
+
+    while let Some(&byte) = bytes.get(at) {
+        if byte != b'{' && byte != b'}' {
+            at += 1;
+            continue;
+        }
+
+        // A brace is one byte, so it has whole characters on both of its sides.
+        if written < at {
+            draft.push_str(&template[written..at]);
+        }
+
+        match bytes.get(at + 1) {
+            None => return,
+            Some(b'}') if byte == b'{' => {
+                argument(draft);
+                written = at + 2;
+                at = written;
+            }
+            Some(_) => {
+                written = at + 1;
+                at = written + 1;
+            }
+        }
+    }
+
+    if written < bytes.len() {
+        draft.push_str(&template[written..]);
+    }
+}
+
+/// What `format` makes of its arguments: the first one, a string, with each of the others
+/// in the place of a `{}` of it, the way it is displayed. An argument that has no `{}` to
+/// go to is left out, and so is a `{}` that has no argument.
+#[inline(never)]
+fn formatted(args: &[Value], heap: &Heap) -> Result<Text, RuntimeError> {
+    let template = args[0]
+        .as_string(heap)
+        .map_err(|_| RuntimeError::from("first argument must be a string"))?;
+    let mut rest = args[1..].iter();
+    let mut draft = Draft::new();
+
+    fill_template(template, &mut draft, |draft| {
+        if let Some(value) = rest.next() {
+            value.display_into(heap, draft);
+        }
+    });
+
+    Ok(Text::from(&draft))
 }
 
 /// What the standard library takes the sum of no numbers at all to be, which is where it
@@ -3053,5 +3109,114 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result, Value::Bool(false));
+    }
+
+    /// What [`fill_template`] makes of `template` with `arguments` for its `{}`s.
+    fn filled(template: &str, arguments: &[&str]) -> String {
+        let mut rest = arguments.iter();
+        let mut draft = Draft::new();
+
+        fill_template(template, &mut draft, |draft| {
+            if let Some(argument) = rest.next() {
+                draft.push_str(argument);
+            }
+        });
+
+        draft.as_str().to_owned()
+    }
+
+    #[test]
+    fn a_template_is_filled_the_way_the_formatting_crate_fills_it() {
+        use dyn_fmt::AsStrFormatExt;
+
+        // Every template of up to eight of these characters: the braces, and characters
+        // of one byte and of several.
+        let characters = ["{", "}", "a", "é"];
+        let mut templates = vec![String::new()];
+        let mut longest = templates.clone();
+
+        for _ in 0..8 {
+            longest = longest
+                .iter()
+                .flat_map(|template| characters.map(|character| format!("{template}{character}")))
+                .collect();
+            templates.extend(longest.iter().cloned());
+        }
+        assert_eq!(templates.len(), 87_381);
+
+        let mut filled_in = 0;
+        for template in &templates {
+            for arguments in [
+                &[][..],
+                &["1"],
+                &["1", "", "22"],
+                &["{}", "}", "{", "é", "x"],
+            ] {
+                let expected = template.format(arguments);
+
+                assert_eq!(
+                    filled(template, arguments),
+                    expected,
+                    "{template:?} with {arguments:?}"
+                );
+                filled_in += usize::from(expected.len() != template.len());
+            }
+        }
+
+        // Most templates are not what they come to.
+        assert!(filled_in > 300_000, "{filled_in} templates");
+    }
+
+    #[test]
+    fn a_template_is_filled_with_one_argument_for_each_pair_of_braces() {
+        for (template, arguments, expected) in [
+            ("", &["1"][..], ""),
+            ("plain", &["1"], "plain"),
+            ("{}", &["1"], "1"),
+            ("{}", &[], ""),
+            ("{} and {}", &["1", "2"], "1 and 2"),
+            ("{} and {}", &["1"], "1 and "),
+            ("{} and {}", &["1", "2", "3"], "1 and 2"),
+            ("{}{}{}", &["1", "2", "3"], "123"),
+            // A brace that opens no pair goes, and what follows it stays as it is.
+            ("{{}}{}", &["1", "2"], "{}1"),
+            ("{{{}}}x{y}", &["1", "2", "3"], "{1}xy"),
+            ("{{{}}}x{{}", &["1", "2", "3"], "{1}x{"),
+            ("{{}}x{{}{}}y{", &["1", "2", "3"], "{}x{{}y"),
+            ("{", &["1"], ""),
+            ("}", &["1"], ""),
+            ("a{", &["1"], "a"),
+            ("a}", &["1"], "a"),
+            ("}{}", &["1"], "{"),
+            ("{x}", &["1"], "x"),
+            ("{ }", &["1"], " "),
+            ("}}{}", &["1"], "}1"),
+            ("é{}é{é}日本{}", &["ü", "2"], "éüéé日本2"),
+        ] {
+            assert_eq!(
+                filled(template, arguments),
+                expected,
+                "{template:?} with {arguments:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_template_is_filled_beyond_the_room_of_a_draft() {
+        use dyn_fmt::AsStrFormatExt;
+
+        let piece = "0123456789 {} é ";
+        let argument = "-".repeat(50);
+
+        for pieces in [1, 5, 7, 8, 20, 400] {
+            let template = piece.repeat(pieces);
+            let arguments = vec![argument.as_str(); pieces / 2 + 1];
+
+            assert_eq!(
+                filled(&template, &arguments),
+                template.format(&arguments),
+                "{pieces} pieces"
+            );
+        }
     }
 }

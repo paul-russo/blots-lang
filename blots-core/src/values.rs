@@ -19,8 +19,81 @@ use crate::{
     intern::Symbol,
     list::List,
     record::Record,
-    text::Text,
+    text::{Draft, Text},
 };
+
+/// A comma and the three digits of every whole number below a thousand, with zeros in the
+/// place of the digits that a short one does not have: what three digits of a longer number
+/// are written as.
+static GROUPS: [[u8; 4]; 1000] = {
+    let mut groups = [[b','; 4]; 1000];
+    let mut group = 0;
+
+    while group < groups.len() {
+        groups[group][1] = b'0' + (group / 100) as u8;
+        groups[group][2] = b'0' + (group / 10 % 10) as u8;
+        groups[group][3] = b'0' + (group % 10) as u8;
+        group += 1;
+    }
+
+    groups
+};
+
+/// The whole number that `number` is, when it is one below `limit` in magnitude and not a
+/// zero with a sign.
+#[inline(always)]
+fn whole_below(number: f64, limit: u64) -> Option<i64> {
+    let whole = truncate(number);
+
+    // A fraction, a zero with a sign and what is no number have other bits than the whole
+    // number that they convert to.
+    (whole.unsigned_abs() < limit && (whole as f64).to_bits() == number.to_bits()).then_some(whole)
+}
+
+/// Write the digits of `whole` to the end of `room`, which has room for them, behind the
+/// sign of a negative one, and return where they start. When they are `grouped`, there is
+/// a comma between every three of them, counted from the last one.
+#[inline(always)]
+fn write_digits(whole: i64, grouped: bool, room: &mut [u8]) -> usize {
+    // What is written of a group: all of it, or the digits behind its comma.
+    let skipped = if grouped { 0 } else { 1 };
+    let width = GROUPS[0].len() - skipped;
+
+    let mut start = room.len();
+    let mut rest = whole.unsigned_abs();
+
+    // Three digits at a time, for as long as there are more in front of them.
+    while rest >= 1000 {
+        let group = &GROUPS[(rest % 1000) as usize];
+        rest /= 1000;
+
+        start -= width;
+        room[start..start + width].copy_from_slice(&group[skipped..]);
+    }
+
+    // The first digits are written without the zeros in front of them.
+    let group = &GROUPS[rest as usize];
+
+    start -= 1;
+    room[start] = group[3];
+
+    if rest >= 10 {
+        start -= 1;
+        room[start] = group[2];
+    }
+
+    if rest >= 100 {
+        start -= 1;
+        room[start] = group[1];
+    }
+
+    if whole < 0 {
+        start -= 1;
+        room[start] = b'-';
+    }
+
+    start
+}
 
 /// The most characters that [`whole_digits`] writes: the digits of the largest whole number
 /// below 2^53, and the sign of a negative one.
@@ -37,32 +110,7 @@ pub(crate) fn whole_digits(number: f64, room: &mut [u8; WHOLE_DIGITS]) -> Option
     /// The first whole number that has numbers next to it that are more than one apart.
     const LIMIT: u64 = 1 << 53;
 
-    let whole = truncate(number);
-    let magnitude = whole.unsigned_abs();
-
-    // A fraction, a zero with a sign and what is no number have other bits than the whole
-    // number that they convert to.
-    if magnitude >= LIMIT || (whole as f64).to_bits() != number.to_bits() {
-        return None;
-    }
-
-    let mut start = room.len();
-    let mut rest = magnitude;
-
-    loop {
-        start -= 1;
-        room[start] = b'0' + (rest % 10) as u8;
-        rest /= 10;
-
-        if rest == 0 {
-            break;
-        }
-    }
-
-    if whole < 0 {
-        start -= 1;
-        room[start] = b'-';
-    }
+    let start = write_digits(whole_below(number, LIMIT)?, false, room);
 
     // SAFETY: everything from `start` on was written, and is a digit or the sign.
     Some(unsafe { str::from_utf8_unchecked(&room[start..]) })
@@ -76,10 +124,34 @@ pub(crate) fn plain_number(number: f64) -> String {
     }
 }
 
+/// The most characters that [`grouped_digits`] writes: the fifteen digits of the largest
+/// whole number that is displayed with all of them, the four commas between their groups,
+/// and the sign of a negative one.
+pub(crate) const GROUPED_DIGITS: usize = 20;
+
+/// What [`format_display_number`] makes of `number`, when that is a whole number below 1e15
+/// in magnitude and not a zero with a sign: its digits in groups of three with commas
+/// between them, behind the sign of a negative one. They are written to the end of `room`.
+#[inline]
+pub(crate) fn grouped_digits(number: f64, room: &mut [u8; GROUPED_DIGITS]) -> Option<&str> {
+    /// The first whole number that is displayed in scientific notation.
+    const LIMIT: u64 = 1_000_000_000_000_000;
+
+    let start = write_digits(whole_below(number, LIMIT)?, true, room);
+
+    // SAFETY: everything from `start` on was written, and is a digit, a comma or the sign.
+    Some(unsafe { str::from_utf8_unchecked(&room[start..]) })
+}
+
 /// Format a number for display output, matching the JS displayNumber function:
 /// - Very small values (< 0.0001) or extremely large values (>= 1e15) use scientific notation
 /// - Standard numbers preserve up to 15 significant digits with thousand separators
 pub fn format_display_number(value: f64) -> String {
+    // A whole number that is displayed with all of its digits has nothing but them.
+    if let Some(digits) = grouped_digits(value, &mut [0; GROUPED_DIGITS]) {
+        return digits.to_owned();
+    }
+
     // Handle special values
     if value.is_nan() {
         return "NaN".to_string();
@@ -139,17 +211,13 @@ fn format_mantissa(mantissa: f64) -> String {
     s.to_string()
 }
 
-/// Format a standard number with thousand separators and up to 15 significant digits
+/// Format a standard number that is not whole with thousand separators and up to 15
+/// significant digits. A whole one is made of its digits as they are (see
+/// [`grouped_digits`]), which avoids floating point precision issues with large integers.
 fn format_standard(value: f64) -> String {
-    // For integers that fit in i64 range, handle them directly without float rounding
-    // This avoids floating point precision issues with large integers
-    if value.fract() == 0.0 && value.abs() < 9007199254740992.0 {
-        // Can be exactly represented as i64
-        let int_val = value as i64;
-        return format_integer_with_separators(int_val);
-    }
+    debug_assert!(value.fract() != 0.0);
 
-    // Round to 15 significant figures for non-integers
+    // Round to 15 significant figures
     let rounded = round_to_significant_figures(value, 15);
 
     // Format the number, preserving significant digits
@@ -201,34 +269,6 @@ fn format_float_significant(value: f64, max_sig_figs: usize) -> String {
         }
     } else {
         formatted
-    }
-}
-
-/// Format an integer with thousand separators (commas)
-fn format_integer_with_separators(value: i64) -> String {
-    let is_negative = value < 0;
-    let abs_str = value.abs().to_string();
-
-    let with_commas: String = abs_str
-        .chars()
-        .rev()
-        .enumerate()
-        .flat_map(|(i, c)| {
-            if i > 0 && i % 3 == 0 {
-                vec![',', c]
-            } else {
-                vec![c]
-            }
-        })
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-
-    if is_negative {
-        format!("-{}", with_commas)
-    } else {
-        with_commas
     }
 }
 
@@ -1445,6 +1485,26 @@ impl Value {
         self.stringify(heap, false, true)
     }
 
+    /// Write what [`Value::stringify_for_display`] returns behind the pieces of `draft`. A
+    /// value that is not made of others is written without a string in between.
+    pub(crate) fn display_into(&self, heap: &Heap, draft: &mut Draft) {
+        match self {
+            Value::Number(number) => {
+                let mut room = [0; GROUPED_DIGITS];
+
+                match grouped_digits(*number, &mut room) {
+                    Some(digits) => draft.push_str(digits),
+                    None => draft.push_str(&format_display_number(*number)),
+                }
+            }
+            Value::String(pointer) => draft.push_str(pointer.reify(heap).as_string().unwrap()),
+            Value::Bool(true) => draft.push_str("true"),
+            Value::Bool(false) => draft.push_str("false"),
+            Value::Null => draft.push_str("null"),
+            _ => draft.push_str(&self.stringify_for_display(heap)),
+        }
+    }
+
     fn stringify(&self, heap: &Heap, wrap_strings: bool, display_format: bool) -> String {
         match self {
             Value::String(p) => p
@@ -1730,6 +1790,106 @@ mod tests {
             }
 
             assert_eq!(plain_number(number), number.to_string(), "{number:e}");
+        }
+    }
+
+    /// The digits of `whole` with a comma between every three of them, counted from the
+    /// last one, behind the sign of a negative one: one character at a time.
+    fn grouped_one_by_one(whole: i64) -> String {
+        let digits = whole.unsigned_abs().to_string();
+        let mut grouped = String::new();
+
+        if whole < 0 {
+            grouped.push('-');
+        }
+
+        for (position, digit) in digits.chars().enumerate() {
+            if position > 0 && (digits.len() - position) % 3 == 0 {
+                grouped.push(',');
+            }
+            grouped.push(digit);
+        }
+
+        grouped
+    }
+
+    #[test]
+    fn the_groups_of_a_whole_number_are_its_digits_three_at_a_time() {
+        let limit = 1e15;
+        let numbers = whole_numbers();
+        let mut grouped = 0;
+
+        for number in numbers {
+            let mut room = [0; GROUPED_DIGITS];
+            let digits = grouped_digits(number, &mut room);
+
+            // A zero with a sign is displayed with the sign, and a number that has more
+            // than fifteen digits with an exponent.
+            if number.abs() >= limit || (number == 0.0 && number.is_sign_negative()) {
+                assert_eq!(digits, None, "{number:e}");
+            } else {
+                let expected = grouped_one_by_one(number as i64);
+
+                assert_eq!(digits, Some(expected.as_str()), "{number:e}");
+                assert_eq!(expected.replace(',', ""), number.to_string(), "{number:e}");
+                assert_eq!(format_display_number(number), expected, "{number:e}");
+                grouped += 1;
+            }
+        }
+
+        assert!(grouped > 7000, "{grouped} numbers");
+    }
+
+    #[test]
+    fn the_longest_groups_fill_their_room() {
+        let longest = -999_999_999_999_999.0;
+        let mut room = [0; GROUPED_DIGITS];
+
+        assert_eq!(
+            grouped_digits(longest, &mut room),
+            Some("-999,999,999,999,999")
+        );
+        assert_eq!("-999,999,999,999,999".len(), GROUPED_DIGITS);
+    }
+
+    #[test]
+    fn a_number_that_is_not_displayed_with_all_its_digits_has_no_groups() {
+        assert_eq!(grouped_digits(-0.0, &mut [0; GROUPED_DIGITS]), None);
+        assert_eq!(format_display_number(-0.0), "-0");
+
+        for (number, displayed) in [
+            (0.5, "0.5"),
+            (1234.5, "1,234.5"),
+            (999_999_999_999_999.5, "1,000,000,000,000,000"),
+            (1e15, "1e15"),
+            (1e15 + 1.0, "1e15"),
+            (9007199254740991.0, "9.00719925474099e15"),
+            (9007199254740992.0, "9.00719925474099e15"),
+            (9.223372036854776e18, "9.22337203685478e18"),
+            (1e300, "1e300"),
+            (0.00001, "1e-5"),
+            (f64::INFINITY, "Infinity"),
+            (f64::NAN, "NaN"),
+        ] {
+            assert_eq!(
+                grouped_digits(number, &mut [0; GROUPED_DIGITS]),
+                None,
+                "{number:e}"
+            );
+            assert_eq!(format_display_number(number), displayed, "{number:e}");
+
+            if !number.is_nan() {
+                assert_eq!(
+                    grouped_digits(-number, &mut [0; GROUPED_DIGITS]),
+                    None,
+                    "-{number:e}"
+                );
+                assert_eq!(
+                    format_display_number(-number),
+                    format!("-{displayed}"),
+                    "-{number:e}"
+                );
+            }
         }
     }
 

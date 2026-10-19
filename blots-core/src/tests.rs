@@ -4343,6 +4343,289 @@ mod number_string_tests {
     }
 }
 
+// `format` writes its arguments into the string that it returns, without a string of each in
+// between. What it returns is what it always returned: the template with the arguments the
+// way they are displayed.
+#[cfg(test)]
+mod formatted_string_tests {
+    use super::power_of_two_tests::{evaluate, numbers};
+    use crate::environment::Environment;
+    use crate::heap::Heap;
+    use crate::intern::Symbol;
+    use crate::values::{Value, format_display_number};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// What `code` comes to, with `xs` bound to `numbers`: a string, or the strings of a
+    /// list, or the message of an error.
+    fn strings(numbers: &[f64], code: &str) -> Vec<String> {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+        let list = numbers.iter().copied().map(Value::Number).collect();
+        let xs = heap.borrow_mut().insert_list(list);
+        bindings.insert(Symbol::intern("xs"), xs);
+
+        let value = match evaluate(code, &heap, &bindings) {
+            Ok(value) => value,
+            Err(error) => return vec![format!("error: {}", error.message)],
+        };
+        let heap = heap.borrow();
+
+        match value {
+            Value::List(_) => value
+                .as_list(&heap)
+                .unwrap()
+                .iter()
+                .map(|value| value.as_string(&heap).unwrap().to_string())
+                .collect(),
+            _ => vec![value.as_string(&heap).unwrap().to_string()],
+        }
+    }
+
+    fn formatted(code: &str) -> String {
+        let [string] = &strings(&[], code)[..] else {
+            panic!("{code} comes to a list");
+        };
+
+        string.clone()
+    }
+
+    /// The digits of a whole number that is displayed with all of them, in groups of
+    /// three.
+    fn grouped(number: f64) -> String {
+        let digits = number.abs().to_string();
+        let mut grouped = String::from(if number < 0.0 { "-" } else { "" });
+
+        for (position, digit) in digits.chars().enumerate() {
+            if position > 0 && (digits.len() - position) % 3 == 0 {
+                grouped.push(',');
+            }
+            grouped.push(digit);
+        }
+
+        grouped
+    }
+
+    #[test]
+    fn a_number_of_any_kind_is_formatted_the_way_it_is_displayed() {
+        let numbers = numbers();
+        let expected = numbers
+            .iter()
+            .map(|number| format_display_number(*number))
+            .collect::<Vec<_>>();
+
+        // A whole number that has no more than fifteen digits is displayed with all of
+        // them.
+        let mut whole = 0;
+        for (number, expected) in numbers.iter().zip(&expected) {
+            if number.fract() == 0.0
+                && number.abs() < 1e15
+                && number.to_bits() != (-0.0f64).to_bits()
+            {
+                assert_eq!(*expected, grouped(*number), "{number:e}");
+                whole += 1;
+            }
+        }
+        assert!(whole > 200, "{whole} whole numbers");
+
+        for (code, around) in [
+            ("map(xs, x => format(\"{}\", x))", ["", ""]),
+            ("map(xs, x => format(\"<{}>\", x))", ["<", ">"]),
+            (
+                "map(xs, x => format(\"{} is {}\", \"x\", x))",
+                ["x is ", ""],
+            ),
+            // As the value of a list and of a record, which are written around it.
+            ("map(xs, x => format(\"{}\", [x]))", ["[", "]"]),
+            ("map(xs, x => format(\"{}\", {is: x}))", ["{is: ", "}"]),
+            // Behind enough characters to take the string out of where its pieces are put
+            // together.
+            (
+                "map(xs, x => format(\"----------------------------------------------------------------------------------------------------------------{}\", x))",
+                [
+                    "----------------------------------------------------------------------------------------------------------------",
+                    "",
+                ],
+            ),
+        ] {
+            let actual = strings(&numbers, code);
+            assert_eq!(actual.len(), numbers.len(), "{code}");
+
+            for ((actual, expected), number) in actual.iter().zip(&expected).zip(&numbers) {
+                let [before, after] = around;
+                let expected = format!("{before}{expected}{after}");
+
+                assert_eq!(*actual, expected, "{number:e} ({code})");
+            }
+        }
+    }
+
+    #[test]
+    fn a_whole_number_is_formatted_with_its_digits_in_groups_of_three() {
+        for (code, expected) in [
+            ("format(\"{}\", 0)", "0"),
+            ("format(\"{}\", -0)", "-0"),
+            ("format(\"{}\", 7)", "7"),
+            ("format(\"{}\", -7)", "-7"),
+            ("format(\"{}\", 999)", "999"),
+            ("format(\"{}\", 1000)", "1,000"),
+            ("format(\"{}\", -1000)", "-1,000"),
+            ("format(\"{}\", 100000)", "100,000"),
+            ("format(\"{}\", 1234567)", "1,234,567"),
+            ("format(\"{}\", 1000000000)", "1,000,000,000"),
+            ("format(\"{}\", 4294967296)", "4,294,967,296"),
+            ("format(\"{}\", 999999999999999)", "999,999,999,999,999"),
+            ("format(\"{}\", -999999999999999)", "-999,999,999,999,999"),
+            // More digits than are displayed: the number is written with an exponent.
+            ("format(\"{}\", 1000000000000000)", "1e15"),
+            ("format(\"{}\", 9007199254740991)", "9.00719925474099e15"),
+            ("format(\"{}\", -9007199254740992)", "-9.00719925474099e15"),
+            ("format(\"{}\", 1e21)", "1e21"),
+            // A number that is not whole.
+            ("format(\"{}\", 1234.5)", "1,234.5"),
+            ("format(\"{}\", -1234567.25)", "-1,234,567.25"),
+            ("format(\"{}\", 999999999999999.5)", "1,000,000,000,000,000"),
+            ("format(\"{}\", 0.1 + 0.2)", "0.3"),
+            ("format(\"{}\", 0.00001)", "1e-5"),
+            ("format(\"{}\", 1 / 0)", "Infinity"),
+            ("format(\"{}\", -1 / 0)", "-Infinity"),
+            ("format(\"{}\", 0 / 0)", "NaN"),
+            (
+                "format(\"{} {} {}\", 1000, -2000.5, 3e20)",
+                "1,000 -2,000.5 3e20",
+            ),
+        ] {
+            assert_eq!(formatted(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_value_of_any_kind_is_formatted_the_way_it_is_displayed() {
+        for (code, expected) in [
+            ("format(\"{}\", \"text\")", "text"),
+            ("format(\"{}\", \"\")", ""),
+            ("format(\"{}\", \"{}\")", "{}"),
+            ("format(\"{}{}\", \"{}\", \"}\")", "{}}"),
+            ("format(\"{}\", \"é😀\")", "é😀"),
+            ("format(\"{}\", true)", "true"),
+            ("format(\"{}\", false)", "false"),
+            ("format(\"{}\", null)", "null"),
+            (
+                "format(\"{}{}{}{}\", true, false, null, \"s\")",
+                "truefalsenulls",
+            ),
+            ("format(\"{}\", [])", "[]"),
+            ("format(\"{}\", {})", "{}"),
+            (
+                "format(\"{}\", [1000, 2.5, \"a\", true, null, {a: 1000000}])",
+                "[1,000, 2.5, a, true, null, {a: 1,000,000}]",
+            ),
+            (
+                "format(\"{}\", {name: \"n\", list: [1, [2000]], none: null})",
+                "{name: n, list: [1, [2,000]], none: null}",
+            ),
+            ("format(\"{}\", x => x + 1000)", "(x) => x + 1000"),
+            ("format(\"{}\", sqrt)", "sqrt (built-in)"),
+            ("format(\"{}\", format)", "format (built-in)"),
+            (
+                "add = (a, b) => a + b\nformat(\"{} of {}\", add, [add(1000, 1), add])",
+                "(a, b) => a + b of [1,001, (a, b) => a + b]",
+            ),
+            // What a string was made from does not show.
+            (
+                "long = \"abcdefghijklmnopqrstuvwxyz\"\nformat(\"{}|{}|{}\", slice(long, 1, 25), long + long, slice(long, 0, 3))",
+                "bcdefghijklmnopqrstuvwxy|abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz|abc",
+            ),
+            // A template that was made is one like any other.
+            ("format(\"{}\" + \"-{}\", 1, 2)", "1-2"),
+            ("format(join([\"{\", \"}\"], \"\"), 1)", "1"),
+            ("format(format(\"{}{}\", \"{\", \"}\"), 1000)", "1,000"),
+        ] {
+            assert_eq!(formatted(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_template_takes_one_argument_for_each_pair_of_braces() {
+        for (code, expected) in [
+            ("format(\"\")", ""),
+            ("format(\"plain\")", "plain"),
+            ("format(\"plain\", 1, 2)", "plain"),
+            ("format(\"{}\")", ""),
+            ("format(\"{} and {}\", 1)", "1 and "),
+            ("format(\"{} and {}\", 1, 2, 3)", "1 and 2"),
+            ("format(\"{}{}{}\", 1, 2, 3)", "123"),
+            // A brace that opens no pair goes, and what follows it stays as it is.
+            ("format(\"{{}}{}\", 1, 2)", "{}1"),
+            ("format(\"{{{}}}x{y}\", 1, 2, 3)", "{1}xy"),
+            ("format(\"{{{}}}x{{}\", 1, 2, 3)", "{1}x{"),
+            ("format(\"{{}}x{{}{}}y{\", 1, 2, 3)", "{}x{{}y"),
+            ("format(\"{\", 1)", ""),
+            ("format(\"}\", 1)", ""),
+            ("format(\"}{}\", 1)", "{"),
+            ("format(\"{x}\", 1)", "x"),
+            ("format(\"é{}é{é}日本{}\", \"ü\", 2)", "éüéé日本2"),
+        ] {
+            assert_eq!(formatted(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_formatted_string_is_a_string_like_any_other() {
+        for (code, expected) in [
+            ("len(format(\"{} is {}\", 99999, 199998))", "17"),
+            ("format(\"{}\", 1000) == \"1,000\"", "true"),
+            ("format(\"{}\", 1000) + \"!\"", "1,000!"),
+            ("{[format(\"k{}\", 1)]: 2}.k1", "2"),
+            ("uppercase(format(\"{}-{}\", \"a\", true))", "A-TRUE"),
+            ("split(format(\"{}\", 1234567), \",\")", "[1, 234, 567]"),
+            ("to_number(format(\"{}\", 123))", "123"),
+            (
+                "reduce(range(6), (acc, i) => acc + format(\"{};\", i * 1000), \"\")",
+                "0;1,000;2,000;3,000;4,000;5,000;",
+            ),
+            ("map([1, 2000], x => format(\"<{}>\", x))", "[<1>, <2,000>]"),
+            // A string that is as long as a text keeps without a buffer, and longer ones.
+            (
+                "format(\"{}{}\", \"0123456789\", \"012345678901\")",
+                "0123456789012345678901",
+            ),
+            (
+                "format(\"{}{}\", \"0123456789\", \"0123456789012\")",
+                "01234567890123456789012",
+            ),
+            (
+                "len(format(\"{}{}{}{}\", [range(40)], range(40), {a: range(40)}, \"é\"))",
+                "459",
+            ),
+        ] {
+            let heap = Rc::new(RefCell::new(Heap::new()));
+            let bindings = Rc::new(Environment::new());
+
+            let value = evaluate(code, &heap, &bindings).unwrap();
+            assert_eq!(value.stringify_internal(&heap.borrow()), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_template_that_is_no_string_is_an_error() {
+        for code in [
+            "format(1, 2)",
+            "format(null)",
+            "format([\"{}\"], 1)",
+            "format({}, 1)",
+            "format(x => x, 1)",
+            "format(true, \"{}\")",
+        ] {
+            assert_eq!(
+                strings(&[], code),
+                ["error: in built-in function \"format\": first argument must be a string"],
+                "{code}"
+            );
+        }
+    }
+}
+
 // A condition computes on the way to its answer what its branches often compute again, and
 // the two operands of an operator can be one expression twice. The first value is kept and
 // taken where the expression is repeated, as long as its names still mean the same variables

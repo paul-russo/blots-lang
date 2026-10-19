@@ -201,8 +201,20 @@ impl Text {
     });
 
     /// A text of the characters of `text`.
+    #[inline]
     pub fn new(text: &str) -> Self {
-        Self::of(text, "", text.len(), 0)
+        if text.len() > INLINE_CAPACITY {
+            return Self::of(text, "", text.len(), 0);
+        }
+
+        // A short text is one piece, which is copied to where the text is.
+        let mut bytes = [0; INLINE_CAPACITY];
+        bytes[..text.len()].copy_from_slice(text.as_bytes());
+
+        Text(Repr::Inline {
+            len: text.len() as u8,
+            bytes,
+        })
     }
 
     /// `first` followed by `second`, as a text that shares its bytes with no other: a long
@@ -615,6 +627,80 @@ impl From<char> for Text {
 impl From<Text> for String {
     fn from(text: Text) -> Self {
         text.as_str().to_string()
+    }
+}
+
+/// The most bytes that a [`Draft`] holds where it is.
+const DRAFT_ROOM: usize = 120;
+
+/// A text that is being written, one piece behind the other. The pieces are kept where the
+/// draft is for as long as they fit there, so a text that is put together from a few short
+/// pieces takes no memory to write.
+pub(crate) struct Draft(Pieces);
+
+/// Where the pieces of a draft are.
+enum Pieces {
+    /// The first `len` of `bytes`.
+    Here { len: usize, bytes: [u8; DRAFT_ROOM] },
+
+    /// Pieces that outgrew the room a draft has for them.
+    Elsewhere(String),
+}
+
+impl Draft {
+    /// A draft without any pieces.
+    #[inline(always)]
+    pub(crate) fn new() -> Self {
+        Draft(Pieces::Here {
+            len: 0,
+            bytes: [0; DRAFT_ROOM],
+        })
+    }
+
+    /// Write `piece` behind the pieces that were written before.
+    #[inline]
+    pub(crate) fn push_str(&mut self, piece: &str) {
+        match &mut self.0 {
+            Pieces::Here { len, bytes } => match bytes.get_mut(*len..*len + piece.len()) {
+                Some(room) => {
+                    room.copy_from_slice(piece.as_bytes());
+                    *len += piece.len();
+                }
+                None => self.outgrow(piece),
+            },
+            Pieces::Elsewhere(pieces) => pieces.push_str(piece),
+        }
+    }
+
+    /// Write `piece` behind the pieces that were written before, which leave no room for it
+    /// where the draft is.
+    #[cold]
+    #[inline(never)]
+    fn outgrow(&mut self, piece: &str) {
+        let written = self.as_str();
+        let mut pieces = String::with_capacity((written.len() + piece.len()).max(2 * DRAFT_ROOM));
+
+        pieces.push_str(written);
+        pieces.push_str(piece);
+
+        self.0 = Pieces::Elsewhere(pieces);
+    }
+
+    /// The pieces that were written, one behind the other.
+    #[inline]
+    pub(crate) fn as_str(&self) -> &str {
+        match &self.0 {
+            // SAFETY: the first `len` bytes are those of the pieces, in the order in which
+            // they were written, and each piece is whole characters.
+            Pieces::Here { len, bytes } => unsafe { str::from_utf8_unchecked(&bytes[..*len]) },
+            Pieces::Elsewhere(pieces) => pieces,
+        }
+    }
+}
+
+impl From<&Draft> for Text {
+    fn from(draft: &Draft) -> Self {
+        Self::new(draft.as_str())
     }
 }
 
@@ -1213,5 +1299,77 @@ mod tests {
         let again = part.clone();
         drop(part);
         assert_eq!(again.as_str(), letters(5, 30));
+    }
+
+    fn is_here(draft: &Draft) -> bool {
+        matches!(draft.0, Pieces::Here { .. })
+    }
+
+    #[test]
+    fn a_draft_holds_its_pieces_one_behind_the_other() {
+        let draft = Draft::new();
+        assert_eq!(draft.as_str(), "");
+        assert!(is_here(&draft));
+        assert_eq!(Text::from(&draft), Text::EMPTY);
+
+        // Pieces of every length, up to where they leave the draft and beyond.
+        for piece_len in [0, 1, 2, 7, 22, 23, 59, 60, 61, 119, 120, 121, 500] {
+            let mut draft = Draft::new();
+            let mut written = String::new();
+
+            for index in 0..12 {
+                let piece = letters(index, piece_len);
+
+                draft.push_str(&piece);
+                written.push_str(&piece);
+
+                assert_eq!(draft.as_str(), written, "{piece_len} at a time");
+                assert_eq!(is_here(&draft), written.len() <= DRAFT_ROOM);
+
+                let text = Text::from(&draft);
+                assert_eq!(text.as_str(), written);
+                assert_eq!(is_inline(&text), written.len() <= INLINE_CAPACITY);
+            }
+        }
+    }
+
+    #[test]
+    fn a_draft_that_is_full_takes_nothing_and_then_leaves_where_it_is() {
+        let full = letters(0, DRAFT_ROOM);
+        let mut draft = Draft::new();
+
+        draft.push_str(&full);
+        assert!(is_here(&draft));
+        draft.push_str("");
+        assert!(is_here(&draft));
+        assert_eq!(draft.as_str(), full);
+
+        draft.push_str("é");
+        assert!(!is_here(&draft));
+        assert_eq!(draft.as_str(), format!("{full}é"));
+
+        draft.push_str("");
+        draft.push_str(&full);
+        assert_eq!(draft.as_str(), format!("{full}é{full}"));
+    }
+
+    #[test]
+    fn a_draft_keeps_characters_of_several_bytes_whole() {
+        // The characters cross the end of the room of a draft at every byte of theirs.
+        for lead in 0..4 {
+            let mut draft = Draft::new();
+            let mut written = letters(0, DRAFT_ROOM - 8 + lead);
+            draft.push_str(&written);
+
+            for piece in ["é", "😀", "ü", "日本", "x"] {
+                draft.push_str(piece);
+                written.push_str(piece);
+
+                assert_eq!(draft.as_str(), written);
+                assert_eq!(Text::from(&draft).as_str(), written);
+            }
+
+            assert!(!is_here(&draft));
+        }
     }
 }
