@@ -443,7 +443,11 @@ fn collect_late_names(expr: &SpannedExpr, in_callback: bool, out: &mut Vec<Symbo
             let mut bound: Vec<Symbol> = Vec::new();
             let mut read = Vec::new();
 
-            for statement in statements.iter().map(|s| &s.node).chain([&return_expr.node]) {
+            for statement in statements
+                .iter()
+                .map(|s| &s.node)
+                .chain([&return_expr.node])
+            {
                 collect_late_names(statement, in_callback, &mut read);
                 for name in read.drain(..) {
                     if !bound.contains(&name) {
