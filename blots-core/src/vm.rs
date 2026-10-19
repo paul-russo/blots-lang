@@ -33,10 +33,12 @@ use crate::{
     },
     intern::{Symbol, inputs_symbol},
     record::{Record, RecordBuilder},
+    text::Text,
     values::{CapturedScope, LambdaArg, LambdaDef, Value},
 };
 use std::{
     cell::{Cell, RefCell},
+    cmp::Ordering,
     hint::unreachable_unchecked,
     mem::{self, MaybeUninit},
     ptr,
@@ -192,6 +194,58 @@ fn less_eq(x: f64, y: f64) -> Option<bool> {
     } else {
         Some(false)
     }
+}
+
+/// The texts of two strings in the heap whose slots are `slots`, if that is where they are.
+///
+/// # Safety
+/// `slots` must point to the slots of a heap that are not written to while the texts are in
+/// use.
+#[inline(always)]
+unsafe fn texts_of<'a>(
+    slots: *const [HeapValue],
+    first: StringPointer,
+    second: StringPointer,
+) -> Option<(&'a Text, &'a Text)> {
+    // SAFETY: guaranteed by the caller.
+    let slots = unsafe { &*slots };
+
+    match (slots.get(first.index()), slots.get(second.index())) {
+        (Some(HeapValue::String(first)), Some(HeapValue::String(second))) => Some((first, second)),
+        _ => None,
+    }
+}
+
+/// Whether two strings are equal: they are when they have the same characters.
+///
+/// # Safety
+/// As for [`texts_of`].
+#[inline(never)]
+unsafe fn same_strings(
+    slots: *const [HeapValue],
+    first: StringPointer,
+    second: StringPointer,
+) -> Option<bool> {
+    // SAFETY: guaranteed by the caller.
+    let (first, second) = unsafe { texts_of(slots, first, second) }?;
+
+    Some(first == second)
+}
+
+/// How two strings are ordered: the way their characters are.
+///
+/// # Safety
+/// As for [`texts_of`].
+#[inline(never)]
+unsafe fn string_order(
+    slots: *const [HeapValue],
+    first: StringPointer,
+    second: StringPointer,
+) -> Option<Ordering> {
+    // SAFETY: guaranteed by the caller.
+    let (first, second) = unsafe { texts_of(slots, first, second) }?;
+
+    Some(first.cmp(second))
 }
 
 /// The register that `operand` names in the frame whose first register is `base` (see

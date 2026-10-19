@@ -11,7 +11,8 @@
 use super::{
     Builder, CALLBACK_CALL_DEPTH, DEPTH_MASK, ENTRY, Frame, MAX_CALL_DEPTH, NOT_TRUNCATED,
     PROFILED, TAIL_SHIFT, UNBOUND, Vm, copy_value, is_unbound, leaves_remainder, less, less_eq,
-    list_next, load_value, range_next, register, step::Flow, store_value, truncate, whole,
+    list_next, load_value, range_next, register, same_strings, step::Flow, store_value,
+    string_order, truncate, whole,
 };
 use crate::{
     bytecode::{Instr, Op, Proto, REGISTER_SCALE, RemainderTest, register_index},
@@ -175,17 +176,26 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 }};
             }
 
-            // `R[a] = R[b] <op> R[c]` for a comparison of two numbers that can be ordered.
+            // `R[a] = R[b] <op> R[c]` for a comparison of two numbers that can be ordered, or
+            // of two strings: `$strings` finds out about those what `$found` then stands for.
             macro_rules! comparison {
-                (|$x:ident, $y:ident| $holds:expr) => {{
-                    if let (Value::Number($x), Value::Number($y)) =
-                        (&*reg!(instr.b), &*reg!(instr.c))
+                (|$x:ident, $y:ident| $holds:expr, $strings:ident, |$found:ident| $string_holds:expr) => {{
+                    let (lhs, rhs) = (reg!(instr.b), reg!(instr.c));
+
+                    if let (Value::Number($x), Value::Number($y)) = (&*lhs, &*rhs)
                         && let Some(holds) = {
                             let ($x, $y) = (*$x, *$y);
                             $holds
                         }
                     {
                         store_value(reg!(instr.a), Value::Bool(holds));
+                        next!(1);
+                    }
+
+                    if let (Value::String(first), Value::String(second)) = (&*lhs, &*rhs)
+                        && let Some($found) = $strings(slots, *first, *second)
+                    {
+                        store_value(reg!(instr.a), Value::Bool($string_holds));
                         next!(1);
                     }
                 }};
@@ -216,18 +226,29 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 }};
             }
 
-            // A fused compare-and-branch of two numbers that can be ordered: `R[b] <op> R[c]`
-            // is followed by the jump to take when it does not hold.
+            // A fused compare-and-branch of two numbers that can be ordered, or of two strings
+            // (see `comparison`): `R[b] <op> R[c]` is followed by the jump to take when it
+            // does not hold.
             macro_rules! branch {
-                (|$x:ident, $y:ident| $holds:expr) => {{
-                    if let (Value::Number($x), Value::Number($y)) =
-                        (&*reg!(instr.b), &*reg!(instr.c))
+                (|$x:ident, $y:ident| $holds:expr, $strings:ident, |$found:ident| $string_holds:expr) => {{
+                    let (lhs, rhs) = (reg!(instr.b), reg!(instr.c));
+
+                    if let (Value::Number($x), Value::Number($y)) = (&*lhs, &*rhs)
                         && let Some(holds) = {
                             let ($x, $y) = (*$x, *$y);
                             $holds
                         }
                     {
                         if holds {
+                            next!(2);
+                        }
+                        jump!(ip.add(1));
+                    }
+
+                    if let (Value::String(first), Value::String(second)) = (&*lhs, &*rhs)
+                        && let Some($found) = $strings(slots, *first, *second)
+                    {
+                        if $string_holds {
                             next!(2);
                         }
                         jump!(ip.add(1));
@@ -412,12 +433,24 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 Op::Div => arithmetic!(|x, y| x / y),
                 Op::Mod => arithmetic!(|x, y| modulo(x, y)),
                 Op::Pow => arithmetic!(|x, y| x.powf(y)),
-                Op::Eq | Op::DotEq => comparison!(|x, y| Some(x == y)),
-                Op::Ne | Op::DotNe => comparison!(|x, y| Some(x != y)),
-                Op::Lt | Op::DotLt => comparison!(|x, y| less(x, y)),
-                Op::Le | Op::DotLe => comparison!(|x, y| less_eq(x, y)),
-                Op::Gt | Op::DotGt => comparison!(|x, y| less(y, x)),
-                Op::Ge | Op::DotGe => comparison!(|x, y| less_eq(y, x)),
+                Op::Eq | Op::DotEq => {
+                    comparison!(|x, y| Some(x == y), same_strings, |same| same)
+                }
+                Op::Ne | Op::DotNe => {
+                    comparison!(|x, y| Some(x != y), same_strings, |same| !same)
+                }
+                Op::Lt | Op::DotLt => {
+                    comparison!(|x, y| less(x, y), string_order, |order| order.is_lt())
+                }
+                Op::Le | Op::DotLe => {
+                    comparison!(|x, y| less_eq(x, y), string_order, |order| order.is_le())
+                }
+                Op::Gt | Op::DotGt => {
+                    comparison!(|x, y| less(y, x), string_order, |order| order.is_gt())
+                }
+                Op::Ge | Op::DotGe => {
+                    comparison!(|x, y| less_eq(y, x), string_order, |order| order.is_ge())
+                }
                 Op::And | Op::NaturalAnd => logical!(|x, y| x && y),
                 Op::Or | Op::NaturalOr => logical!(|x, y| x || y),
                 Op::Coalesce => {
@@ -456,12 +489,20 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 Op::KMod => k_arithmetic!(|x, y| modulo(x, y)),
                 Op::KPow => k_arithmetic!(|x, y| x.powf(y)),
 
-                Op::JmpNotEq => branch!(|x, y| Some(x == y)),
-                Op::JmpNotNe => branch!(|x, y| Some(x != y)),
-                Op::JmpNotLt => branch!(|x, y| less(x, y)),
-                Op::JmpNotLe => branch!(|x, y| less_eq(x, y)),
-                Op::JmpNotGt => branch!(|x, y| less(y, x)),
-                Op::JmpNotGe => branch!(|x, y| less_eq(y, x)),
+                Op::JmpNotEq => branch!(|x, y| Some(x == y), same_strings, |same| same),
+                Op::JmpNotNe => branch!(|x, y| Some(x != y), same_strings, |same| !same),
+                Op::JmpNotLt => {
+                    branch!(|x, y| less(x, y), string_order, |order| order.is_lt())
+                }
+                Op::JmpNotLe => {
+                    branch!(|x, y| less_eq(x, y), string_order, |order| order.is_le())
+                }
+                Op::JmpNotGt => {
+                    branch!(|x, y| less(y, x), string_order, |order| order.is_gt())
+                }
+                Op::JmpNotGe => {
+                    branch!(|x, y| less_eq(y, x), string_order, |order| order.is_ge())
+                }
                 Op::JmpNotEqK => branch_k!(|x, y| Some(x == y)),
                 Op::JmpNotNeK => branch_k!(|x, y| Some(x != y)),
                 Op::JmpNotLtK => branch_k!(|x, y| less(x, y)),

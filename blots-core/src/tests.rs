@@ -6205,6 +6205,110 @@ mod shared_string_tests {
         }
     }
 
+    #[test]
+    fn strings_are_compared_by_their_characters() {
+        let alphabet = "abcdefghijklmnopqrstuvwxyz";
+        let texts = [
+            String::new(),
+            "a".to_string(),
+            "b".to_string(),
+            "ab".to_string(),
+            "abc".to_string(),
+            "Z".to_string(),
+            "é".to_string(),
+            "日本".to_string(),
+            "😀".to_string(),
+            // As long as a string that is kept where its value is can be, and one longer.
+            alphabet[..22].to_string(),
+            alphabet[..23].to_string(),
+            alphabet.to_string(),
+            format!("{alphabet}a"),
+            format!("{alphabet}b"),
+            format!("{alphabet}é"),
+            alphabet.repeat(3),
+        ];
+
+        let session = Session::new();
+        let spelled: Vec<String> = texts.iter().map(|text| format!("\"{text}\"")).collect();
+        session
+            .evaluate(&format!(
+                "texts = [{}]\n\
+                 built = map(texts, text => slice(text + \"!\", 0, len(text)))\n\
+                 whole = (x, y) => [x == y, x != y, x < y, x <= y, x > y, x >= y]\n\
+                 dotted = (x, y) => [x .== y, x .!= y, x .< y, x .<= y, x .> y, x .>= y]\n\
+                 branches = (x, y) => [\n\
+                   if x == y then true else false, if x != y then true else false,\n\
+                   if x < y then true else false, if x <= y then true else false,\n\
+                   if x > y then true else false, if x >= y then true else false,\n\
+                 ]",
+                spelled.join(", ")
+            ))
+            .unwrap();
+
+        // A string that only has characters of one byte is as long as it has characters.
+        let plain = |text: &str| text.is_ascii();
+
+        for (i, x) in texts.iter().enumerate() {
+            for (j, y) in texts.iter().enumerate() {
+                let expected = format!(
+                    "[{}, {}, {}, {}, {}, {}]",
+                    x == y,
+                    x != y,
+                    x < y,
+                    x <= y,
+                    x > y,
+                    x >= y
+                );
+
+                for compare in ["whole", "dotted", "branches"] {
+                    let code = format!("{compare}(texts[{i}], texts[{j}])");
+                    assert_eq!(session.outcome(&code), expected, "{code}");
+
+                    if plain(x) && plain(y) {
+                        let code = format!("{compare}(built[{i}], texts[{j}])");
+                        assert_eq!(session.outcome(&code), expected, "{code}");
+                        let code = format!("{compare}(texts[{i}], built[{j}])");
+                        assert_eq!(session.outcome(&code), expected, "{code}");
+                    }
+                }
+            }
+        }
+
+        // A string is its own equal.
+        assert_eq!(
+            session.outcome("map(texts, text => [text == text, text < text, text >= text])[11]"),
+            "[true, false, true]"
+        );
+    }
+
+    #[test]
+    fn a_string_is_compared_with_other_values_as_before() {
+        for (code, expected) in [
+            ("\"a\" == 1", "false"),
+            ("\"a\" != null", "true"),
+            ("1 != \"1\"", "true"),
+            ("\"a\" .== [\"a\"]", "false"),
+            ("\"a\" < [\"a\", \"b\"]", "[false, true]"),
+            ("[\"a\", \"c\"] >= \"b\"", "[false, true]"),
+            ("[\"a\", \"c\"] == [\"a\", \"b\"]", "[true, false]"),
+            ("\"a\" < 1", "cannot compare string with number"),
+            ("1 < \"a\"", "cannot compare number with string"),
+            ("\"a\" <= null", "cannot compare string with null"),
+            ("\"a\" > true", "cannot compare string with boolean"),
+            ("\"a\" .>= 1", "cannot compare string with number"),
+            (
+                "if \"a\" < 1 then 1 else 0",
+                "cannot compare string with number",
+            ),
+            (
+                "(x => if x >= \"a\" then 1 else 0)({})",
+                "in anonymous function: cannot compare record with string",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
     /// The number of values that evaluating `code` adds to a heap.
     fn values_made(code: &str) -> usize {
         let session = Session::new();
