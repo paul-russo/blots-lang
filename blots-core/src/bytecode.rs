@@ -42,6 +42,11 @@ pub(crate) enum Op {
     /// Names that are bound before the chunk starts need no such check (see
     /// [`Proto::preloaded`]).
     EnsureGlobal,
+    /// Function frames only: `if R[a] is unbound { R[a] = lookup of N[bx] through the frame
+    /// chain }`, which is what `GetName` finds. What a frame finds for a name that it does
+    /// not bind itself is the same for as long as the frame is active, so the value is then
+    /// read straight from `R[a]` by the rest of the loop that keeps it there.
+    EnsureName,
     /// `R[a] = ` the value captured in slot `b`, which is that of slot reference `T[c]`. When
     /// the slot was unbound at closure creation this falls back to the frame's self-binding
     /// and then to a by-name lookup; `x == 1` skips the self-binding (a parameter or block
@@ -462,6 +467,7 @@ impl Op {
             | Op::LoadUnbound
             | Op::GetName
             | Op::EnsureGlobal
+            | Op::EnsureName
             | Op::GetCapture
             | Op::GetCaptureRef
             | Op::GetEnvParam

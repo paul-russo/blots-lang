@@ -8282,3 +8282,394 @@ mod rebound_name_tests {
         }
     }
 }
+
+// A function finds a name that it does not bind where it was called from, and the callback of
+// a loop that is compiled into the function finds it the same way on every pass. So the loop
+// looks the name up once, where it reads it first. Nothing may tell that from looking the
+// name up wherever it is read.
+#[cfg(test)]
+mod loop_name_tests {
+    use crate::ast::Expr;
+    use crate::bytecode::{Instr, Op};
+    use crate::compiler::compile_lambda;
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code`, up to the value of the last one.
+    fn evaluate(code: &str, heap: &Rc<RefCell<Heap>>) -> Result<Value, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+            result = evaluate_ast(
+                &expr,
+                Rc::clone(heap),
+                Rc::clone(&bindings),
+                0,
+                Rc::clone(&source),
+            )?;
+        }
+
+        Ok(result)
+    }
+
+    /// What the statements of `code` come to, rendered: the value, or the message of the
+    /// error and the part of `code` that it points at.
+    fn outcome(code: &str) -> String {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        match evaluate(code, &heap) {
+            Ok(value) => value.stringify_internal(&heap.borrow()),
+            Err(error) => {
+                let place = match error.span {
+                    Some(span) => &code[span.start_byte..span.end_byte],
+                    None => "nothing",
+                };
+
+                format!("{} at {place}", error.message)
+            }
+        }
+    }
+
+    /// The instructions of the function `code`.
+    fn instructions(code: &str) -> Vec<(usize, Instr)> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let [Statement::Expression(expr)] = &statements[..] else {
+            panic!("{code} is not a single expression");
+        };
+        let Expr::Lambda { args, body, .. } = &expr.node else {
+            panic!("{code} is not a function");
+        };
+        let proto = compile_lambda(&Rc::new(args.clone()), body, true).unwrap();
+
+        let mut instructions = Vec::new();
+        let mut pc = 0;
+        while pc < proto.code.len() {
+            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
+            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            instructions.push((pc, instr));
+            pc += 1 + instr.operand_words();
+        }
+
+        instructions
+    }
+
+    /// How many instructions with the operation `op` the function `code` compiles to.
+    fn count(code: &str, op: Op) -> usize {
+        instructions(code)
+            .iter()
+            .filter(|(_, instr)| instr.op == op)
+            .count()
+    }
+
+    /// The instructions that look a name up in the innermost loop of the function `code`:
+    /// how many of them run once, ahead of the passes, and how many run on every pass.
+    fn lookups_of_innermost_loop(code: &str) -> (usize, usize) {
+        let instructions = instructions(code);
+
+        // A loop is complete before the loop around it goes on to its next pass, so the first
+        // instruction that starts a next pass belongs to the innermost loop.
+        let (back, next) = instructions
+            .iter()
+            .copied()
+            .find(|(_, instr)| matches!(instr.op, Op::ForRangeNext | Op::ForListNext))
+            .expect("a loop that is compiled in place");
+        let start = (back as isize + 1 + next.sbx()) as usize;
+        let (entry, _) = instructions
+            .iter()
+            .copied()
+            .rfind(|(pc, instr)| {
+                *pc < start && matches!(instr.op, Op::ForRange | Op::ForList) && instr.a == next.a
+            })
+            .expect("the instruction that enters the loop");
+
+        let lookups = |from: usize, to: usize| {
+            instructions
+                .iter()
+                .filter(|(pc, instr)| {
+                    (from..to).contains(pc)
+                        && matches!(instr.op, Op::EnsureName | Op::GetName | Op::GetCapture)
+                })
+                .count()
+        };
+
+        (lookups(entry, start), lookups(start, back))
+    }
+
+    #[test]
+    fn a_loop_reads_a_name_as_what_its_function_finds_for_it() {
+        for (code, expected) in [
+            // In the function that called it: a parameter, a variable of a block, and a name
+            // that an assignment bound on the way.
+            (
+                "total = xs => reduce(xs, (acc, x) => acc + k, 0)\ncall = k => total([1, 2, 3])\ncall(10)",
+                "30",
+            ),
+            (
+                "f = xs => map(xs, x => x + k)\ng = () => do { k = 7; return f([1, 2]) }\ng()",
+                "[8, 9]",
+            ),
+            (
+                "f = xs => map(xs, x => x + k)\ng = () => [(k = 7), f([1, 2])]\ng()",
+                "[7, [8, 9]]",
+            ),
+            // At the top level of the program, where the name was bound after the function.
+            (
+                "total = xs => reduce(xs, (acc, x) => acc + w(x) + k, 0)\nw = x => x * 2 % 7\nk = 3\ntotal(range(10))",
+                "57",
+            ),
+            (
+                "f = xs => every(xs, x => x < limit) and some(xs, x => x == limit - 1)\nlimit = 4\nf([1, 2, 3])",
+                "true",
+            ),
+            // The function itself, and what it captured when it was made.
+            (
+                "k = xs => map(xs, x => if x == 0 then typeof(k) else x)\nk([0, 1])",
+                "[function, 1]",
+            ),
+            (
+                "tree = d => if d == 0 then [] else map(range(3), i => tree(d - 1))\ncount = t => reduce(t, (acc, c) => acc + count(c), 1)\ncount(tree(4))",
+                "121",
+            ),
+            (
+                "mk = n => (xs => map(xs, x => x + n))\na = mk(1)\nb = mk(100)\n[a([1, 2]), b([1, 2])]",
+                "[[2, 3], [101, 102]]",
+            ),
+            // In a loop of the loop, in a function and a record that a pass makes, and where
+            // the pass computes ahead.
+            (
+                "k = 1\nf = xs => map(xs, x => filter(xs, y => y + k > x))\nf([1, 2, 3])",
+                "[[1, 2, 3], [2, 3], [3]]",
+            ),
+            (
+                "k = 2\nf = xs => map(xs, x => [k, (y => y + k)(x), {k}, {k, x: x}.k])\nf([1, 2])",
+                "[[2, 3, {k: 2}, 2], [2, 4, {k: 2}, 2]]",
+            ),
+            (
+                "k = [10, 20]\nf = xs => map(xs, x => k[0] + x)\nf([1, 2])",
+                "[11, 12]",
+            ),
+            // A function that the pass calls finds the name where the loop does.
+            (
+                "g = () => k\nf = xs => map(xs, x => g() + k + x)\ncall = k => f([1, 2])\ncall(10)",
+                "[21, 22]",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_loop_looks_a_name_up_whenever_it_starts() {
+        for (code, expected) in [
+            // Every call of the function finds what its own caller has for the name.
+            (
+                "total = xs => reduce(xs, (acc, x) => acc + k, 0)\na = k => total([1, 2, 3])\nb = k => total([1, 2, 3])\n[a(10), b(100), a(1)]",
+                "[30, 300, 3]",
+            ),
+            (
+                "show = xs => map(xs, x => x + k)\nrec = k => if k == 0 then [] else [show([1]), ...rec(k - 1)]\nrec(3)",
+                "[[4], [3], [2]]",
+            ),
+            // So does every call of a function that calls itself in its last place.
+            (
+                "f = (xs, n) => if n == 0 then sum(map(xs, x => x * k)) else f(xs, n - 1)\nk = 4\nf([1, 2, 3], 5)",
+                "24",
+            ),
+            // Two loops of a function, and a loop that starts on every pass of another.
+            (
+                "k = 3\nf = xs => [map(xs, x => x + k), map(xs, x => x * k), sum(map(xs, x => k))]\nf([1, 2])",
+                "[[4, 5], [3, 6], 6]",
+            ),
+            (
+                "k = 3\nf = m => map(m, row => reduce(row, (acc, x) => acc + x * k, 0))\nf([[1, 2], [3, 4]])",
+                "[9, 21]",
+            ),
+            // What a loop starts from may have looked the name up for it: `inputs` is read by
+            // name everywhere. The loops that follow look it up for themselves.
+            (
+                "f = xs => [reduce(xs, (acc, x) => acc + x * inputs.a, inputs.a), map(xs, x => x + inputs.a), sum(map(range(inputs.a), i => i + inputs.a))]\ng = inputs => f([1, 2])\n[g({a: 10}), g({a: 2})]",
+                "[[40, [11, 12], 145], [8, [3, 4], 5]]",
+            ),
+            (
+                "f = xs => [filter(range(inputs.a), i => i < inputs.b), every(xs, x => x < inputs.a), map(xs, x => inputs.b)]\ng = v => do { inputs = {a: v, b: 2}; return f([3, 4]) }\n[g(3), g(5)]",
+                "[[[0, 1], false, [2, 2]], [[0, 1], true, [2, 2]]]",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_variable_of_the_function_is_not_looked_up() {
+        for (code, expected) in [
+            // The parameter of the callback, and that of the callback of a loop in the loop.
+            ("k = 100\nf = xs => map(xs, k => k + 1)\nf([1, 2])", "[2, 3]"),
+            (
+                "k = 3\nf = m => map(m, row => k + sum(map(row, k => k * 2)))\nf([[1, 2], [3]])",
+                "[9, 9]",
+            ),
+            // A variable of a block, from where the block binds it.
+            (
+                "k = 100\nf = xs => map(xs, x => do { a = k + x; k = a * 2; return k })\nf([1, 2])",
+                "[202, 204]",
+            ),
+            (
+                "f = xs => map(xs, x => do { t = k; k = t + x; u = map([1], y => y + k); return u[0] })\nk = 10\nf([1, 2])",
+                "[12, 13]",
+            ),
+            (
+                "f = xs => do { k = 5; return map(xs, x => x + k) }\nk = 100\nf([1, 2])",
+                "[6, 7]",
+            ),
+            // A name that an assignment may have bound in the function or in a block.
+            (
+                "f = xs => [(k = 5), map(xs, x => x + k)]\nf([1, 2])",
+                "[5, [6, 7]]",
+            ),
+            (
+                "f = xs => map(xs, x => do { r = [(q = x * 2), q + 1]; return r[1] + q })\nf([1, 2])",
+                "[5, 9]",
+            ),
+            (
+                "q = 1\nf = xs => map(xs, x => do { r = [(q = x * 2), q + 1]; return r[1] + q })\nf([1, 2])",
+                "in function \"f\": in built-in function \"map\": in anonymous function: q is already defined, and cannot be reassigned at q = x * 2",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_nothing_binds_fails_the_pass_that_reads_it() {
+        const IN_F: &str =
+            "in function \"f\": in built-in function \"map\": in anonymous function: ";
+
+        for (code, expected) in [
+            (
+                "f = xs => map(xs, x => x + missing)\nf([1])",
+                format!("{IN_F}unknown identifier: missing at missing"),
+            ),
+            (
+                "f = xs => map(xs, x => missing + x.a)\nf([1])",
+                format!("{IN_F}unknown identifier: missing at missing"),
+            ),
+            // What the pass does before it reads the name fails first.
+            (
+                "f = xs => map(xs, x => x.a + missing)\nf([1])",
+                format!("{IN_F}expected a record, but got a number at x"),
+            ),
+            // The name is read by one of the passes, or by none.
+            (
+                "f = xs => map(xs, x => if x > 1 then nope else 0)\nf([0, 1, 2])",
+                format!("{IN_F}unknown identifier: nope at nope"),
+            ),
+            (
+                "f = xs => map(xs, x => if x > 1 then nope else 0)\nf([0, 1])",
+                "[0, 0]".to_string(),
+            ),
+            (
+                "f = xs => map(xs, x => (if x > 1 then k else 0) + k)\nf([0, 1])",
+                format!("{IN_F}unknown identifier: k at k"),
+            ),
+            ("f = xs => map(xs, x => x + missing)\nf([])", "[]".to_string()),
+            (
+                "f = xs => reduce(xs, (acc, x) => acc + missing, 0)\nf([])",
+                "0".to_string(),
+            ),
+            // A record that takes its key from the name has no place of its own to fail at.
+            (
+                "f = xs => map(xs, x => {missing})\nf([1])",
+                format!("{IN_F}unknown identifier: missing at (xs, x => {{missing}})"),
+            ),
+            (
+                "f = xs => map(xs, x => [missing, {missing}])\nf([1])",
+                format!("{IN_F}unknown identifier: missing at missing"),
+            ),
+            // A name that is bound behind the loop is not bound in the loop.
+            (
+                "f = xs => map(xs, x => x + k)\ng = () => [f([1, 2]), (k = 7)]\ng()",
+                format!("in function \"g\": {IN_F}unknown identifier: k at k"),
+            ),
+            // More names than a loop keeps.
+            (
+                "f = xs => map(xs, x => x + a + b + c + d + e + g + h + i + j + k + l + m + n + o + p + q + r + s)\na = 1\nb = 1\nc = 1\nd = 1\ne = 1\ng = 1\nh = 1\ni = 1\nj = 1\nk = 1\nl = 1\nm = 1\nn = 1\no = 1\np = 1\nq = 1\nr = 1\nf([1, 2])",
+                format!("{IN_F}unknown identifier: s at s"),
+            ),
+            (
+                "f = xs => map(xs, x => x + a + b + c + d + e + g + h + i + j + k + l + m + n + o + p + q + r + s)\na = 1\nb = 1\nc = 1\nd = 1\ne = 1\ng = 1\nh = 1\ni = 1\nj = 1\nk = 1\nl = 1\nm = 1\nn = 1\no = 1\np = 1\nq = 1\nr = 1\ns = 1\nf([1, 2])",
+                "[19, 20]".to_string(),
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_loop_looks_a_name_up_once() {
+        for (code, expected) in [
+            // The name that a pass reads first is looked up ahead of the passes, and any
+            // other where a pass gets to it, which finds it there from then on.
+            ("xs => map(xs, x => x + k)", (1, 0)),
+            ("xs => map(xs, x => k[0] + x * k[1])", (1, 0)),
+            ("xs => reduce(xs, (acc, x) => acc + w(x) + k, 0)", (1, 1)),
+            ("xs => map(xs, x => if x > 1 then k else j)", (0, 2)),
+            // A loop in the loop asks for the name whenever it starts, as none of its passes
+            // may read it, and finds what a pass of the loop around it looked up before.
+            ("m => map(m, row => reduce(row, (acc, x) => acc + x * k, 0))", (1, 0)),
+            ("m => map(m, row => reduce(row, (acc, x) => acc + x * k, j))", (1, 0)),
+            // A variable is not looked up at all.
+            ("(xs, k) => map(xs, x => x + k)", (0, 0)),
+            ("xs => map(xs, k => k + 1)", (0, 0)),
+            ("xs => do { k = 5; return map(xs, x => x + k) }", (0, 0)),
+            ("xs => map(xs, x => do { t = x * 2; return t + 1 })", (0, 0)),
+        ] {
+            assert_eq!(lookups_of_innermost_loop(code), expected, "{code}");
+            assert_eq!(count(code, Op::GetName), 0, "{code}");
+        }
+
+        // What the loop starts from looks the name up for the passes, but not for the loop
+        // that follows.
+        let code = "xs => [reduce(xs, (acc, x) => acc + x * inputs.a, inputs.a), map(xs, x => x + inputs.a)]";
+
+        assert_eq!(count(code, Op::EnsureName), 2, "{code}");
+        assert_eq!(count(code, Op::GetName), 0, "{code}");
+
+        // A name that an assignment may have bound is looked up wherever it is read.
+        let code = "xs => [(k = 5), map(xs, x => x + k)]";
+
+        assert_eq!(lookups_of_innermost_loop(code), (0, 1), "{code}");
+        assert_eq!(count(code, Op::GetName), 1, "{code}");
+        assert_eq!(count(code, Op::EnsureName), 0, "{code}");
+    }
+
+    #[test]
+    fn a_loop_keeps_only_the_names_that_it_may_look_up() {
+        for (code, expected) in [
+            ("xs => map(xs, x => x + k)", 1),
+            ("xs => map(xs, x => x + k * k + j)", 2),
+            ("xs => [map(xs, x => x + k), map(xs, x => x * k)]", 2),
+            ("m => map(m, row => reduce(row, (acc, x) => acc + x * k, 0))", 1),
+            // Not a variable that is bound around the loop, or by the statements of a block
+            // before it is read.
+            ("(xs, k) => map(xs, x => x + k)", 0),
+            ("xs => do { k = 5; return map(xs, x => x + k) }", 0),
+            ("xs => map(xs, x => do { t = x * 2; u = t + 1; return t + u })", 0),
+            ("xs => map(xs, x => do { t = t0 * 2; return t + 1 })", 1),
+            ("xs => map(xs, x => do { t = t * 2; return t + 1 })", 1),
+        ] {
+            assert_eq!(count(code, Op::LoadUnbound), expected, "{code}");
+        }
+    }
+}

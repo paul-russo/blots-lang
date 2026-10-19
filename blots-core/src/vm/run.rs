@@ -405,7 +405,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     store_value(reg!(instr.a), UNBOUND);
                     next!(1);
                 }
-                Op::EnsureGlobal => {
+                Op::EnsureGlobal | Op::EnsureName => {
                     if !is_unbound(&*reg!(instr.a)) {
                         next!(1);
                     }

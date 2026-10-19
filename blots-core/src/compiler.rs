@@ -52,6 +52,10 @@ const MAX_SHAPE_KEYS: usize = 64;
 /// Upper bound on the number of late-bound names a chunk caches in registers.
 const MAX_CACHED_GLOBALS: usize = 256;
 
+/// Upper bound on the number of late-bound names that an inlined loop of a function caches
+/// in registers, each of which is cleared whenever the loop starts.
+const MAX_LOOP_NAMES: usize = 16;
+
 /// How many call-depth levels separate the caller of a higher-order built-in from the body of
 /// its callback: one for the built-in itself, one for the callback call, one for its body.
 const CALLBACK_DEPTH: i32 = 3;
@@ -187,7 +191,9 @@ enum Resolved {
     /// The name is bound to this register at this point of the program.
     Register(u16),
     /// The name is not bound by any enclosing scope of the chunk, so it resolves through the
-    /// boundary environment and is cached in this register.
+    /// boundary environment and is cached in this register. In a function, the name is not
+    /// bound by any enclosing scope of an inlined loop, and what the frame finds for it by
+    /// name is cached in this register for as long as the loop runs.
     Global(Symbol, u16),
     /// The name has to be looked up at runtime.
     Dynamic,
@@ -367,10 +373,13 @@ fn collect_block_assignment_exprs(
     }
 }
 
-/// Collect the names a chunk may read through its boundary environment, so each can be given a
-/// cache register up front. This over-approximates (names that turn out to be block variables
-/// simply leave their register unused); lambdas that are not inlined resolve their own names.
-fn collect_chunk_names(expr: &SpannedExpr, in_callback: bool, out: &mut Vec<Symbol>) {
+/// Collect the names that `expr` may read without binding them, so each can be given a cache
+/// register up front: those a chunk reads through its boundary environment, and those the
+/// body of an inlined callback (`in_callback`) reads through the frame it is inlined into.
+/// This over-approximates (a name that turns out to be a variable is told apart where it is
+/// read), except that a name is left out where a statement of a block has bound it; lambdas
+/// that are not inlined resolve their own names.
+fn collect_late_names(expr: &SpannedExpr, in_callback: bool, out: &mut Vec<Symbol>) {
     let mut add = |name: Symbol| {
         if out.len() < MAX_CACHED_GLOBALS && !out.contains(&name) {
             out.push(name);
@@ -398,7 +407,7 @@ fn collect_chunk_names(expr: &SpannedExpr, in_callback: bool, out: &mut Vec<Symb
         | Expr::Lambda { .. } => {}
         Expr::List(items) => {
             for item in items {
-                collect_chunk_names(&item.node, in_callback, out);
+                collect_late_names(&item.node, in_callback, out);
             }
         }
         Expr::Record(entries) => {
@@ -407,13 +416,13 @@ fn collect_chunk_names(expr: &SpannedExpr, in_callback: bool, out: &mut Vec<Symb
 
                 match &entry.key {
                     RecordKey::Dynamic(key) | RecordKey::Spread(key) => {
-                        collect_chunk_names(key, in_callback, out);
+                        collect_late_names(key, in_callback, out);
                     }
                     RecordKey::Static(_) | RecordKey::Shorthand(_) => {}
                 }
 
                 if matches!(entry.key, RecordKey::Static(_) | RecordKey::Dynamic(_)) {
-                    collect_chunk_names(&entry.value, in_callback, out);
+                    collect_late_names(&entry.value, in_callback, out);
                 }
             }
         }
@@ -422,47 +431,59 @@ fn collect_chunk_names(expr: &SpannedExpr, in_callback: bool, out: &mut Vec<Symb
             then_expr,
             else_expr,
         } => {
-            collect_chunk_names(condition, in_callback, out);
-            collect_chunk_names(then_expr, in_callback, out);
-            collect_chunk_names(else_expr, in_callback, out);
+            collect_late_names(condition, in_callback, out);
+            collect_late_names(then_expr, in_callback, out);
+            collect_late_names(else_expr, in_callback, out);
         }
         Expr::DoBlock {
             statements,
             return_expr,
         } => {
-            for statement in statements {
-                collect_chunk_names(&statement.node, in_callback, out);
+            // What a statement binds is a variable of the block for the ones that follow.
+            let mut bound: Vec<Symbol> = Vec::new();
+            let mut read = Vec::new();
+
+            for statement in statements.iter().map(|s| &s.node).chain([&return_expr.node]) {
+                collect_late_names(statement, in_callback, &mut read);
+                for name in read.drain(..) {
+                    if !bound.contains(&name) {
+                        add(name);
+                    }
+                }
+
+                if let Expr::Assignment { ident, .. } = &statement.node {
+                    bound.push(*ident);
+                }
             }
-            collect_chunk_names(&return_expr.node, in_callback, out);
         }
-        Expr::Assignment { value, .. } => collect_chunk_names(value, in_callback, out),
-        Expr::Output { expr } => collect_chunk_names(expr, in_callback, out),
+        Expr::Assignment { value, .. } => collect_late_names(value, in_callback, out),
+        Expr::Output { expr } => collect_late_names(expr, in_callback, out),
         Expr::Call { func, args } => {
             if let Some(inline) = inline_call(func, args) {
-                collect_chunk_names(inline.list, in_callback, out);
-                collect_chunk_names(inline.body, true, out);
+                collect_late_names(inline.list, in_callback, out);
+                collect_late_names(inline.body, true, out);
                 if let Some(init) = inline.init {
-                    collect_chunk_names(init, in_callback, out);
+                    collect_late_names(init, in_callback, out);
                 }
                 return;
             }
 
-            collect_chunk_names(func, in_callback, out);
+            collect_late_names(func, in_callback, out);
             for arg in args {
-                collect_chunk_names(arg, in_callback, out);
+                collect_late_names(arg, in_callback, out);
             }
         }
         Expr::Access { expr, index } => {
-            collect_chunk_names(expr, in_callback, out);
-            collect_chunk_names(index, in_callback, out);
+            collect_late_names(expr, in_callback, out);
+            collect_late_names(index, in_callback, out);
         }
-        Expr::DotAccess { expr, .. } => collect_chunk_names(expr, in_callback, out),
+        Expr::DotAccess { expr, .. } => collect_late_names(expr, in_callback, out),
         Expr::BinaryOp { left, right, .. } => {
-            collect_chunk_names(left, in_callback, out);
-            collect_chunk_names(right, in_callback, out);
+            collect_late_names(left, in_callback, out);
+            collect_late_names(right, in_callback, out);
         }
         Expr::UnaryOp { expr, .. } | Expr::PostfixOp { expr, .. } | Expr::Spread(expr) => {
-            collect_chunk_names(expr, in_callback, out);
+            collect_late_names(expr, in_callback, out);
         }
     }
 }
@@ -677,7 +698,7 @@ pub(crate) fn compile_chunk(
     let mut compiler = FnCompiler::new(true, Vec::new(), false, inline);
 
     let mut names = Vec::new();
-    collect_chunk_names(expr, false, &mut names);
+    collect_late_names(expr, false, &mut names);
     for name in names {
         let reg = compiler.alloc()?;
         compiler.globals.push((name, reg));
@@ -789,14 +810,16 @@ struct FnCompiler {
     /// Functions only: whether every parameter is required.
     simple_params: bool,
 
-    /// Chunk only: the cache register of each late-bound name.
+    /// The cache register of each late-bound name: of those that a chunk reads, for as long
+    /// as it runs, and of those that the inlined loops around the current point of a
+    /// function read, for as long as the loops run (see [`Self::inline_loop`]).
     globals: Vec<(Symbol, u16)>,
 
     /// Chunk only: the cache registers that are loaded before the chunk starts.
     preloaded: Vec<(u16, Symbol)>,
 
-    /// Chunk only: names whose cache register is known to be loaded at the current point.
-    /// The preloaded ones come first and stay for good.
+    /// The names whose cache register is known to be loaded at the current point. Those
+    /// that are preloaded come first and stay for good.
     ensured: Vec<Symbol>,
 
     /// Whether a call that names a built-in function may be compiled into something other
@@ -921,7 +944,10 @@ impl FnCompiler {
             simple_params,
             simple_arity,
             fast_arity,
-            cache_regs: self.globals.len(),
+            cache_regs: match self.is_chunk {
+                true => self.globals.len(),
+                false => 0,
+            },
             preloaded: self.preloaded,
             max_stack: self.max_reg as usize,
             body,
@@ -1149,11 +1175,10 @@ impl FnCompiler {
                 continue;
             }
 
-            if !self.is_chunk {
-                return match self.params.iter().position(|param| *param == name) {
-                    Some(index) => Resolved::Register(index as u16),
-                    None => Resolved::Dynamic,
-                };
+            if !self.is_chunk
+                && let Some(index) = self.params.iter().position(|param| *param == name)
+            {
+                return Resolved::Register(index as u16);
             }
 
             return match self.globals.iter().find(|(global, _)| *global == name) {
@@ -1248,7 +1273,7 @@ impl FnCompiler {
         }
     }
 
-    /// Make sure the cache register of a chunk-level name is loaded, raising the usual
+    /// Make sure the cache register of a late-bound name is loaded, raising the usual
     /// "unknown identifier" error at this point of the program otherwise.
     fn ensure_global(&mut self, name: Symbol, reg: u16, span: Span) {
         if self.ensured.contains(&name) {
@@ -1256,7 +1281,11 @@ impl FnCompiler {
         }
 
         let index = self.name(name);
-        self.emit_spanned(Instr::abx(Op::EnsureGlobal, reg, index), span);
+        let op = match self.is_chunk {
+            true => Op::EnsureGlobal,
+            false => Op::EnsureName,
+        };
+        self.emit_spanned(Instr::abx(op, reg, index), span);
         self.ensured.push(name);
     }
 
@@ -2747,9 +2776,54 @@ impl FnCompiler {
         Ok(())
     }
 
+    /// Give each name that the callback of an inlined loop of a function looks up through the
+    /// frame chain a cache register for as long as the loop runs: a name that no scope around
+    /// the loop binds, and that no assignment expression around it can come to bind. Returns
+    /// the number of cache registers that the loops around this one have.
+    ///
+    /// What the frame finds for such a name is the same wherever in the loop it looks, and
+    /// whenever: the frame has no variable of that name there, the function it runs keeps
+    /// its name and what it captured, the frames below are waiting for this one, and nothing
+    /// is assigned at the top level of the program while a function runs. So the name is
+    /// looked up where the loop reads it first, and the register counts among those that
+    /// hold the same value on every pass (see [`Self::is_plain`]).
+    ///
+    /// The registers start out unbound whenever the loop starts, and lie below its state.
+    fn cache_loop_names(&mut self, call: &InlineCall) -> CResult<usize> {
+        let before = self.globals.len();
+        if self.is_chunk {
+            return Ok(before);
+        }
+
+        let mut names = Vec::new();
+        collect_late_names(call.body, true, &mut names);
+        names.retain(|name| {
+            matches!(self.resolve(*name), Resolved::Dynamic) && !self.has_maybe_var(*name)
+        });
+        names.truncate(MAX_LOOP_NAMES);
+
+        for name in names {
+            let reg = self.alloc()?;
+            self.emit(Instr::abc(Op::LoadUnbound, reg, 0, 0));
+            self.globals.push((name, reg));
+        }
+
+        Ok(before)
+    }
+
+    /// Give up the cache registers of an inlined loop that has ended, which leaves `before`
+    /// of them (see [`Self::cache_loop_names`]).
+    fn release_loop_names(&mut self, before: usize) {
+        let released = self.globals.split_off(before);
+
+        self.ensured
+            .retain(|name| !released.iter().any(|(released, _)| released == name));
+    }
+
     /// Compile `map`/`filter`/`reduce`/`every`/`some` over a literal lambda as an inline loop.
     fn inline_loop(&mut self, span: Span, call: &InlineCall, dst: u16) -> CResult<()> {
         let mark = self.free_reg;
+        let cached = self.cache_loop_names(call)?;
         let is_reduce = call.builtin == BuiltInFunction::Reduce;
         let element_params = if is_reduce {
             &call.params[1..]
@@ -2972,6 +3046,7 @@ impl FnCompiler {
             ],
         });
 
+        self.release_loop_names(cached);
         self.free_reg = mark;
 
         Ok(())

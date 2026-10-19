@@ -149,6 +149,12 @@ impl Vm {
                     self.set_reg(a, value);
                 }
             }
+            Op::EnsureName => {
+                if is_unbound(&self.reg(a)) {
+                    let value = self.get_name(instr.bx(), false)?;
+                    self.set_reg(a, value);
+                }
+            }
             Op::GetCapture => {
                 let value = self.capture(b as usize, c as usize, instr.x == 1)?;
                 self.set_reg(a, value);
