@@ -402,23 +402,28 @@ impl Vm {
     /// built-in that folds a list of numbers, and would get as far as running it: the fold
     /// and the operand naming the register the call stores its result in.
     fn fold_after(&self, call: Instr, argument: u16) -> Option<(Fold, u16)> {
-        if call.op != Op::Call
-            || call.b != 1
-            || register_index(call.a) + 1 != register_index(argument)
-        {
+        let frame = self.top();
+
+        let function = match call.op {
+            // The function is the value in the register in front of the argument.
+            Op::Call if call.b == 1 && register_index(call.a) + 1 == register_index(argument) => {
+                // SAFETY: the compiler only emits register operands that lie within the frame.
+                unsafe { *register(frame.base, call.a) }
+            }
+            // The call names the function, which is a constant of the code.
+            Op::CallBuiltIn if call.x == 1 && call.a == argument => {
+                frame.proto().consts[call.b as usize]
+            }
+            _ => return None,
+        };
+        let Value::BuiltIn(built_in) = function else {
             return None;
-        }
+        };
 
         // A profiled call is reported, and one that is nested too deep fails.
-        let frame = self.top();
         if self.is_profiling() || frame.depth() > MAX_CALL_DEPTH {
             return None;
         }
-
-        // SAFETY: the compiler only emits register operands that lie within the frame.
-        let Value::BuiltIn(built_in) = (unsafe { *register(frame.base, call.a) }) else {
-            return None;
-        };
 
         Some((fold_of(built_in)?, call.c))
     }

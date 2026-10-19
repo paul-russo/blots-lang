@@ -2726,11 +2726,14 @@ mod list_arithmetic_tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    /// Evaluate the statements of `code` and render the value of the last one.
-    fn evaluate(code: &str) -> Result<String, crate::error::RuntimeError> {
+    /// Evaluate the statements of `code` as the next ones of the program that `heap` and
+    /// `bindings` are of, up to the value of the last one.
+    fn evaluate_in(
+        code: &str,
+        heap: &Rc<RefCell<Heap>>,
+        bindings: &Rc<Environment>,
+    ) -> Result<Value, crate::error::RuntimeError> {
         let pairs = get_pairs(code).map_err(|e| crate::error::RuntimeError::new(e.to_string()))?;
-        let heap = Rc::new(RefCell::new(Heap::new()));
-        let bindings = Rc::new(Environment::new());
 
         let mut result = Value::Null;
         for pair in pairs {
@@ -2744,13 +2747,22 @@ mod list_arithmetic_tests {
             if matches!(inner.as_rule(), Rule::expression | Rule::assignment) {
                 result = evaluate_pairs(
                     inner.into_inner(),
-                    Rc::clone(&heap),
-                    Rc::clone(&bindings),
+                    Rc::clone(heap),
+                    Rc::clone(bindings),
                     0,
                     code,
                 )?;
             }
         }
+
+        Ok(result)
+    }
+
+    /// Evaluate the statements of `code` and render the value of the last one.
+    fn evaluate(code: &str) -> Result<String, crate::error::RuntimeError> {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+        let result = evaluate_in(code, &heap, &bindings)?;
 
         Ok(result.stringify_internal(&heap.borrow()))
     }
@@ -2807,6 +2819,44 @@ mod list_arithmetic_tests {
                 expected,
             );
         }
+    }
+
+    #[test]
+    fn an_aggregate_of_a_chain_builds_no_list() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        // The number of values that the statements of `code` add to the heap, which nothing
+        // is taken out of in the meantime.
+        let added = |code: &str| {
+            let before = heap.borrow().len();
+            evaluate_in(code, &heap, &bindings).unwrap();
+
+            heap.borrow().len() - before
+        };
+
+        evaluate_in("xs = range(1, 1000)\nys = xs + 1", &heap, &bindings).unwrap();
+
+        for function in ["sum", "avg", "prod", "min", "max"] {
+            // The call names the function, or calls it as the value of a variable.
+            assert_eq!(
+                added(&format!("{function}((xs * 2 + 1) / 3 - ys)")),
+                0,
+                "{function}"
+            );
+
+            evaluate_in(&format!("the_{function} = {function}"), &heap, &bindings).unwrap();
+            assert_eq!(
+                added(&format!("the_{function}((xs * 2 + 1) / 3 - ys)")),
+                0,
+                "{function} as a value"
+            );
+        }
+
+        // The list is there to be counted when something else is made of the chain.
+        assert_eq!(added("(xs * 2 + 1) / 3 - ys"), 1);
+        assert_eq!(added("median((xs * 2 + 1) / 3 - ys)"), 1);
+        assert_eq!(added("len((xs * 2 + 1) / 3 - ys)"), 1);
     }
 
     #[test]
