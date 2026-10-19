@@ -8515,7 +8515,10 @@ mod loop_name_tests {
     fn a_variable_of_the_function_is_not_looked_up() {
         for (code, expected) in [
             // The parameter of the callback, and that of the callback of a loop in the loop.
-            ("k = 100\nf = xs => map(xs, k => k + 1)\nf([1, 2])", "[2, 3]"),
+            (
+                "k = 100\nf = xs => map(xs, k => k + 1)\nf([1, 2])",
+                "[2, 3]",
+            ),
             (
                 "k = 3\nf = m => map(m, row => k + sum(map(row, k => k * 2)))\nf([[1, 2], [3]])",
                 "[9, 9]",
@@ -8583,7 +8586,10 @@ mod loop_name_tests {
                 "f = xs => map(xs, x => (if x > 1 then k else 0) + k)\nf([0, 1])",
                 format!("{IN_F}unknown identifier: k at k"),
             ),
-            ("f = xs => map(xs, x => x + missing)\nf([])", "[]".to_string()),
+            (
+                "f = xs => map(xs, x => x + missing)\nf([])",
+                "[]".to_string(),
+            ),
             (
                 "f = xs => reduce(xs, (acc, x) => acc + missing, 0)\nf([])",
                 "0".to_string(),
@@ -8627,8 +8633,14 @@ mod loop_name_tests {
             ("xs => map(xs, x => if x > 1 then k else j)", (0, 2)),
             // A loop in the loop asks for the name whenever it starts, as none of its passes
             // may read it, and finds what a pass of the loop around it looked up before.
-            ("m => map(m, row => reduce(row, (acc, x) => acc + x * k, 0))", (1, 0)),
-            ("m => map(m, row => reduce(row, (acc, x) => acc + x * k, j))", (1, 0)),
+            (
+                "m => map(m, row => reduce(row, (acc, x) => acc + x * k, 0))",
+                (1, 0),
+            ),
+            (
+                "m => map(m, row => reduce(row, (acc, x) => acc + x * k, j))",
+                (1, 0),
+            ),
             // A variable is not looked up at all.
             ("(xs, k) => map(xs, x => x + k)", (0, 0)),
             ("xs => map(xs, k => k + 1)", (0, 0)),
@@ -8660,12 +8672,18 @@ mod loop_name_tests {
             ("xs => map(xs, x => x + k)", 1),
             ("xs => map(xs, x => x + k * k + j)", 2),
             ("xs => [map(xs, x => x + k), map(xs, x => x * k)]", 2),
-            ("m => map(m, row => reduce(row, (acc, x) => acc + x * k, 0))", 1),
+            (
+                "m => map(m, row => reduce(row, (acc, x) => acc + x * k, 0))",
+                1,
+            ),
             // Not a variable that is bound around the loop, or by the statements of a block
             // before it is read.
             ("(xs, k) => map(xs, x => x + k)", 0),
             ("xs => do { k = 5; return map(xs, x => x + k) }", 0),
-            ("xs => map(xs, x => do { t = x * 2; u = t + 1; return t + u })", 0),
+            (
+                "xs => map(xs, x => do { t = x * 2; u = t + 1; return t + u })",
+                0,
+            ),
             ("xs => map(xs, x => do { t = t0 * 2; return t + 1 })", 1),
             ("xs => map(xs, x => do { t = t * 2; return t + 1 })", 1),
         ] {
