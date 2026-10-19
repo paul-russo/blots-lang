@@ -90,7 +90,9 @@ pub(crate) enum Op {
     Where,
     Coalesce,
 
-    // `R[a] = R[b] <op> k`, where `k` is the number stored in the following code word.
+    // `R[a] = R[b] <op> k`, where `k` is the number stored in the following code word. A `k`
+    // that a remainder divides by is also operand `c` when it is a small whole number (see
+    // [`small_divisor`]).
     AddK,
     SubK,
     MulK,
@@ -571,6 +573,20 @@ pub(crate) fn exact_reciprocal(divisor: f64) -> Option<f64> {
     let exact = divisor.is_normal() && reciprocal.is_normal() && divisor.to_bits() & FRACTION == 0;
 
     exact.then_some(reciprocal)
+}
+
+/// The operand that a remainder by the number `divisor` has for it: the divisor, when that is
+/// a whole number above zero that an operand has room for, and zero otherwise.
+///
+/// What a whole number that is not negative leaves when it is divided by such a divisor is
+/// the remainder of two machine integers, and takes no look at the divisor to find that out.
+pub(crate) fn small_divisor(divisor: f64) -> u16 {
+    let small = divisor as u16;
+
+    match small as f64 == divisor {
+        true => small,
+        false => 0,
+    }
 }
 
 /// How a fused remainder test decides `x % divisor == remainder` for a whole number `x`

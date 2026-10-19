@@ -26,7 +26,7 @@ use crate::{
     bytecode::{
         CaptureSource, FAST_FRAME_SLOTS, FieldCache, Handler, Instr, LAST_USE_B, LAST_USE_C,
         LambdaTemplate, Literal, LocalVar, MAX_REGISTERS, Op, Proto, RECIPROCAL, RecordLayout,
-        RemainderTest, SelfRef, Wrap, binary_opcode, exact_reciprocal,
+        RemainderTest, SelfRef, Wrap, binary_opcode, exact_reciprocal, small_divisor,
     },
     environment::Environment,
     error::RuntimeError,
@@ -1568,7 +1568,12 @@ impl FnCompiler {
                 None => (const_op, constant, flags),
             };
 
-            let mut instr = Instr::abc(const_op, dst, left_reg, 0);
+            let divisor = match const_op {
+                Op::ModK => small_divisor(constant),
+                _ => 0,
+            };
+
+            let mut instr = Instr::abc(const_op, dst, left_reg, divisor);
             instr.x = flags;
             self.emit_spanned(instr, span);
             self.emit_number(constant);

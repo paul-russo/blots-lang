@@ -490,13 +490,77 @@ pub fn validate_portable_value(
     }
 }
 
+/// What [`truncate`] returns for a number it cannot convert the way `as i64` would.
+pub(crate) const NOT_TRUNCATED: i64 = i64::MIN;
+
+/// `number as i64` for every number whose conversion is not [`NOT_TRUNCATED`], at the cost of
+/// one machine instruction where the target has one: `as` also defines the result for NaN and
+/// for numbers beyond the range of an `i64`, which takes several more.
+#[inline(always)]
+pub(crate) fn truncate(number: f64) -> i64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::{_mm_cvttsd_si64, _mm_set_sd};
+
+        // SAFETY: SSE2 is part of the x86-64 baseline. The conversion yields `i64::MIN` for
+        // NaN and for numbers out of range.
+        unsafe { _mm_cvttsd_si64(_mm_set_sd(number)) }
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        number as i64
+    }
+}
+
+/// Whether `number` is the whole number `truncated`, which is what [`truncate`] made of it,
+/// and that is one below 2^32 that is not negative. A zero with a sign is not: what it
+/// leaves when it is divided has the sign as well.
+///
+/// Such a number is told by its bits, which no other number has: not a NaN, and not the
+/// number that a conversion out of range comes to.
+#[inline(always)]
+fn is_small_whole(number: f64, truncated: i64) -> bool {
+    truncated as u64 >> u32::BITS == 0 && (truncated as f64).to_bits() == number.to_bits()
+}
+
+/// What `number` leaves when it is divided by `divisor`, for a number that is whole, below
+/// 2^32 and not negative, and a divisor that is not zero.
+#[inline(always)]
+pub(crate) fn small_remainder(number: f64, divisor: u32) -> Option<f64> {
+    let dividend = truncate(number);
+    let small = divisor != 0 && is_small_whole(number, dividend);
+
+    small.then(|| (dividend as u32 % divisor) as f64)
+}
+
 /// The remainder of `x / y` with the sign of `x` (the `%` operator).
+///
+/// Two whole numbers below 2^32 of which neither is negative are by far the most common
+/// operands, and take the remainder of the machine for numbers of that size, which is the
+/// one that takes the least. Everything else is left to [`wide_modulo`].
+#[inline(always)]
+pub(crate) fn modulo(x: f64, y: f64) -> f64 {
+    let (dividend, divisor) = (truncate(x), truncate(y));
+
+    if (dividend | divisor) as u64 >> u32::BITS == 0
+        && (dividend as f64).to_bits() == x.to_bits()
+        && (divisor as f64).to_bits() == y.to_bits()
+        && divisor != 0
+    {
+        return (dividend as u32 % divisor as u32) as f64;
+    }
+
+    wide_modulo(x, y)
+}
+
+/// The remainder of `x / y` with the sign of `x`, for any two numbers.
 ///
 /// Operands that are both integers small enough for doubles to represent every integer of
 /// their magnitude take an exact integer remainder, which is several times faster than the
-/// general floating-point one and by far the most common case.
-#[inline(always)]
-pub(crate) fn modulo(x: f64, y: f64) -> f64 {
+/// general floating-point one.
+#[inline(never)]
+fn wide_modulo(x: f64, y: f64) -> f64 {
     const EXACT_INTEGERS: f64 = 9_007_199_254_740_992.0;
 
     if x.abs() < EXACT_INTEGERS && y.abs() < EXACT_INTEGERS {
@@ -2009,6 +2073,12 @@ mod tests {
             0.5,
             -0.5,
             2.5,
+            65_535.0,
+            65_536.0,
+            4_294_967_295.0,
+            -4_294_967_295.0,
+            4_294_967_296.0,
+            4_294_967_297.0,
             1e15,
             -1e15,
             9_007_199_254_740_991.0,
@@ -2053,6 +2123,74 @@ mod tests {
             };
 
             assert_eq!(modulo(x, y).to_bits(), (x % y).to_bits(), "{x} % {y}");
+        }
+
+        // The same over whole numbers that fit 32 bits, which have a remainder of their own.
+        for _ in 0..200_000 {
+            let (a, b, shape) = (next(), next(), next());
+            let x = (a as u32 >> (shape % 32)) as f64;
+            let y = (b as u32 >> ((shape >> 8) % 32)) as f64;
+
+            assert_eq!(modulo(x, y).to_bits(), (x % y).to_bits(), "{x} % {y}");
+        }
+    }
+
+    #[test]
+    fn a_small_whole_number_leaves_what_any_number_does_and_no_other_has_a_small_remainder() {
+        let divisors = [1, 2, 3, 7, 10, 97, 1000, 65_535, 65_536, u32::MAX];
+
+        for dividend in [
+            0,
+            1,
+            2,
+            3,
+            6,
+            7,
+            96,
+            97,
+            98,
+            65_535,
+            65_536,
+            u32::MAX - 1,
+            u32::MAX,
+        ] {
+            for divisor in divisors {
+                let (x, y) = (dividend as f64, divisor as f64);
+                let remainder = small_remainder(x, divisor).map(f64::to_bits);
+
+                assert_eq!(remainder, Some((x % y).to_bits()), "{x} % {y}");
+            }
+
+            // Nothing is left by a division by zero.
+            assert_eq!(small_remainder(dividend as f64, 0), None, "{dividend}");
+        }
+
+        // A number that is negative, not whole, too large or no number at all is left to the
+        // remainder that there is for any number, as is a zero with a sign.
+        for other in [
+            -0.0,
+            -1.0,
+            -7.0,
+            0.5,
+            6.5,
+            -6.5,
+            5e-324,
+            4_294_967_295.5,
+            4_294_967_296.0,
+            4_294_967_297.0,
+            -4_294_967_296.0,
+            9_007_199_254_740_992.0,
+            1e19,
+            -1e19,
+            1e300,
+            f64::MAX,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+        ] {
+            for divisor in divisors {
+                assert_eq!(small_remainder(other, divisor), None, "{other} % {divisor}");
+            }
         }
     }
 

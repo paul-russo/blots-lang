@@ -3756,7 +3756,7 @@ mod power_of_two_tests {
     /// Numbers of every kind: the ones at the edges, whole numbers around every power of two
     /// and halfway between them, and a couple of thousand whose bits are picked at random,
     /// which covers every sign and every exponent there is.
-    fn numbers() -> Vec<f64> {
+    pub(super) fn numbers() -> Vec<f64> {
         let mut numbers = vec![
             0.0,
             0.1,
@@ -3808,12 +3808,12 @@ mod power_of_two_tests {
 
     /// Whether nothing can tell `actual` from `expected`: they are the same number down to
     /// the sign of a zero, or neither of them is a number.
-    fn same(actual: f64, expected: f64) -> bool {
+    pub(super) fn same(actual: f64, expected: f64) -> bool {
         actual.to_bits() == expected.to_bits() || (actual.is_nan() && expected.is_nan())
     }
 
     /// The numbers in the list that `code` comes to, with `xs` bound to `numbers`.
-    fn over(numbers: &[f64], code: &str) -> Vec<f64> {
+    pub(super) fn over(numbers: &[f64], code: &str) -> Vec<f64> {
         let heap = Rc::new(RefCell::new(Heap::new()));
         let bindings = Rc::new(Environment::new());
         let list = numbers.iter().copied().map(Value::Number).collect();
@@ -4105,6 +4105,139 @@ mod power_of_two_tests {
                         assert_eq!(actual, expected, "{shape} of {dividend} by {power_of_two}");
                     }
                 }
+            }
+        }
+    }
+}
+
+// What a number leaves when it is divided by a number that the program spells out is found
+// the way that takes the least for that divisor: a small whole one divides a small whole
+// number as one machine integer divides another. Nothing may tell that from the remainder
+// that two numbers of any kind leave.
+#[cfg(test)]
+mod constant_divisor_tests {
+    use super::power_of_two_tests::{numbers, over, same};
+    use crate::bytecode::small_divisor;
+
+    #[test]
+    fn a_divisor_is_small_when_it_is_a_whole_number_above_zero_that_an_operand_holds() {
+        for (divisor, small) in [
+            (1.0, 1),
+            (2.0, 2),
+            (3.0, 3),
+            (97.0, 97),
+            (65_534.0, 65_534),
+            (65_535.0, 65_535),
+            (0.0, 0),
+            (-0.0, 0),
+            (-1.0, 0),
+            (-3.0, 0),
+            (0.5, 0),
+            (2.5, 0),
+            (65_534.5, 0),
+            (65_535.5, 0),
+            // Ones that no operand holds, whatever their lowest bits are.
+            (65_536.0, 0),
+            (65_539.0, 0),
+            (131_072.0, 0),
+            (4_294_967_299.0, 0),
+            (1e300, 0),
+            (f64::INFINITY, 0),
+            (f64::NEG_INFINITY, 0),
+            (f64::NAN, 0),
+        ] {
+            assert_eq!(small_divisor(divisor), small, "{divisor}");
+        }
+    }
+
+    #[test]
+    fn a_number_leaves_what_it_does_when_it_is_divided_by_a_number_of_any_kind() {
+        let numbers = numbers();
+
+        for divisor in [
+            1.0,
+            2.0,
+            3.0,
+            7.0,
+            10.0,
+            97.0,
+            1000.0,
+            65_535.0,
+            65_536.0,
+            65_537.0,
+            4_294_967_295.0,
+            4_294_967_296.0,
+            4_294_967_297.0,
+            9_007_199_254_740_991.0,
+            1e19,
+            1e300,
+            0.0,
+            0.5,
+            2.5,
+            1e-300,
+            -1.0,
+            -3.0,
+            -2.5,
+            -65_535.0,
+            -4_294_967_296.0,
+        ] {
+            let expected = numbers.iter().map(|number| number % divisor);
+
+            for code in [
+                // One number at a time: in a function, in a callback compiled in place, and
+                // by a divisor that is only known when the remainder is taken.
+                format!("rest = x => x % {divisor:e}\nmap(xs, rest)"),
+                format!("map(xs, x => x % {divisor:e})"),
+                format!("map(xs, x => (y => x % y)({divisor:e}))"),
+                // A whole list at once, by itself and in a run of operators.
+                format!("xs % {divisor:e}"),
+                format!("(xs * 1 % {divisor:e}) + 0"),
+            ] {
+                let actual = over(&numbers, &code);
+                assert_eq!(actual.len(), numbers.len(), "{code}");
+
+                for ((actual, expected), number) in
+                    actual.into_iter().zip(expected.clone()).zip(&numbers)
+                {
+                    // Adding zero in the last of the programs turns a negative zero around.
+                    let expected = if code.ends_with("+ 0") {
+                        expected + 0.0
+                    } else {
+                        expected
+                    };
+
+                    assert!(
+                        same(actual, expected),
+                        "{number:e} % {divisor:e} is {expected:e}, not {actual:e} ({code})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_small_whole_number_leaves_a_small_whole_number() {
+        // Every dividend up to one that is past the divisor a few times over, and the ones
+        // around the largest that is small.
+        let dividends = (0..=300)
+            .chain(65_530..=65_540)
+            .chain(4_294_967_290..=4_294_967_300_u64)
+            .map(|dividend| dividend as f64)
+            .collect::<Vec<_>>();
+
+        for divisor in [
+            1_u64, 2, 3, 5, 7, 10, 60, 97, 255, 256, 65_535, 65_536, 65_537,
+        ] {
+            let actual = over(&dividends, &format!("map(xs, x => x % {divisor})"));
+            let expected = dividends
+                .iter()
+                .map(|dividend| (*dividend as u64 % divisor) as f64);
+
+            for ((actual, expected), dividend) in actual.into_iter().zip(expected).zip(&dividends) {
+                assert!(
+                    same(actual, expected),
+                    "{dividend} % {divisor} is {expected}, not {actual}"
+                );
             }
         }
     }

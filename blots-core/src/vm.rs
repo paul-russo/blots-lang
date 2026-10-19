@@ -26,7 +26,7 @@ use crate::{
     compiler::{compile_lambda, compile_self_variant},
     environment::Environment,
     error::RuntimeError,
-    expressions::{OpSite, apply_binary_op, flatten_spread_value, modulo},
+    expressions::{NOT_TRUNCATED, OpSite, apply_binary_op, flatten_spread_value, modulo, truncate},
     functions::{BuiltInFunction, FunctionDef, check_lambda_arity, lambda_name},
     heap::{
         CONSTANTS, Heap, HeapPointer, HeapValue, IterablePointer, LambdaPointer, Pass, Roots,
@@ -364,29 +364,6 @@ unsafe fn list_next(slot: *mut Value, with_index: bool, first: bool) -> bool {
     }
 
     true
-}
-
-/// What [`truncate`] returns for a number it cannot convert the way `as i64` would.
-const NOT_TRUNCATED: i64 = i64::MIN;
-
-/// `number as i64` for every number whose conversion is not [`NOT_TRUNCATED`], at the cost of
-/// one machine instruction where the target has one: `as` also defines the result for NaN and
-/// for numbers beyond the range of an `i64`, which takes several more.
-#[inline(always)]
-fn truncate(number: f64) -> i64 {
-    #[cfg(target_arch = "x86_64")]
-    {
-        use std::arch::x86_64::{_mm_cvttsd_si64, _mm_set_sd};
-
-        // SAFETY: SSE2 is part of the x86-64 baseline. The conversion yields `i64::MIN` for
-        // NaN and for numbers out of range.
-        unsafe { _mm_cvttsd_si64(_mm_set_sd(number)) }
-    }
-
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        number as i64
-    }
 }
 
 /// The whole number that `number` is, when it is one that fits an `i64`.

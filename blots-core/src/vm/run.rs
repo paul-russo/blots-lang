@@ -17,7 +17,7 @@ use super::{
 use crate::{
     bytecode::{Instr, Op, Proto, REGISTER_SCALE, RemainderTest, register_index},
     error::RuntimeError,
-    expressions::modulo,
+    expressions::{modulo, small_remainder},
     heap::{Heap, HeapValue},
     values::{LambdaDef, Value},
 };
@@ -474,7 +474,18 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 Op::SubK => arithmetic_k!(|x, y| x - y),
                 Op::MulK => arithmetic_k!(|x, y| x * y),
                 Op::DivK => arithmetic_k!(|x, y| x / y),
-                Op::ModK => arithmetic_k!(|x, y| modulo(x, y)),
+                Op::ModK => {
+                    if let Value::Number(x) = &*reg!(instr.b) {
+                        // A divisor that is a small whole number is operand `c` as well,
+                        // which is zero for any other.
+                        let remainder = match small_remainder(*x, instr.c as u32) {
+                            Some(remainder) => remainder,
+                            None => modulo(*x, f64::from_bits(*ip.add(1))),
+                        };
+                        reg!(instr.a).write(Value::Number(remainder));
+                        next!(2);
+                    }
+                }
                 Op::PowK => arithmetic_k!(|x, y| x.powf(y)),
                 Op::EqK => comparison_k!(|x, y| Some(x == y)),
                 Op::NeK => comparison_k!(|x, y| Some(x != y)),
