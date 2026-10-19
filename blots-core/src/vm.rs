@@ -915,6 +915,16 @@ impl Vm {
         args: &[Value],
         call_depth: usize,
     ) -> Result<Value, RuntimeError> {
+        // A built-in function that calls a function once for every element of a list calls
+        // it the same way every time, and all but the first of those calls have nothing to
+        // find out about it.
+        if let FunctionDef::Lambda(lambda) = def
+            && call_depth <= MAX_CALL_DEPTH
+            && let Some(proto) = self.settled_code(lambda, this_value, args.len())
+        {
+            return self.enter_settled(proto, lambda, this_value, args, call_depth);
+        }
+
         def.check_arity(args.len())?;
 
         if call_depth > MAX_CALL_DEPTH {
@@ -965,6 +975,67 @@ impl Vm {
             proto,
             def: Rc::as_ptr(lambda),
             meta,
+            tail_ip: ptr::null(),
+        });
+
+        self.run()
+    }
+
+    /// The code that a call of `lambda` from native code through `this_value` runs with
+    /// `argc` arguments, when a look at the code the function already has is enough to tell:
+    /// the code was compiled from what the function is made of, the arguments are exactly
+    /// its parameters, which are all required, and no variant of the code could run in its
+    /// place (see [`Vm::select_variant`]). Profiling times every call, which this is not
+    /// the place for.
+    #[inline(always)]
+    fn settled_code(
+        &self,
+        lambda: &LambdaDef,
+        this_value: Value,
+        argc: usize,
+    ) -> Option<*const Proto> {
+        let code = lambda.scope.code.get()?;
+        let settled = code.simple_arity as usize == argc
+            && code.belongs_to(&lambda.body, &lambda.args)
+            && (code.self_refs.is_empty() || !matches!(this_value, Value::Lambda(_)))
+            && !self.is_profiling();
+
+        settled.then_some(Rc::as_ptr(code))
+    }
+
+    /// [`Vm::call_function`] for a call that [`Vm::settled_code`] found `proto` to be the
+    /// code of: one that takes its arguments as they are, at a depth that it can be made at.
+    #[inline(always)]
+    fn enter_settled(
+        &mut self,
+        proto: *const Proto,
+        lambda: &Rc<LambdaDef>,
+        this_value: Value,
+        args: &[Value],
+        call_depth: usize,
+    ) -> Result<Value, RuntimeError> {
+        // SAFETY: the definition, which the caller holds on to, keeps its code alive.
+        let code = unsafe { &*proto };
+        let base = self.entry_base();
+        self.ensure_stack(base + code.max_stack.max(args.len()));
+
+        // SAFETY: the stack was just sized to hold the frame's registers from `base` on,
+        // which the arguments are the first of, and `base` is above the slot that every
+        // frame leaves for the value its function is called through.
+        let base = unsafe {
+            let base = self.stack.as_mut_ptr().add(base);
+            base.sub(1).write(this_value);
+            ptr::copy_nonoverlapping(args.as_ptr(), base, args.len());
+
+            base
+        };
+
+        self.push_frame(Frame {
+            ip: code.code.as_ptr(),
+            base,
+            proto,
+            def: Rc::as_ptr(lambda),
+            meta: (call_depth + 1) as u64 | ENTRY,
             tail_ip: ptr::null(),
         });
 

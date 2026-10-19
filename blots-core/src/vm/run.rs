@@ -670,7 +670,9 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     }
                 }
                 Op::Return => {
-                    if (*frame).meta & (ENTRY | PROFILED) == 0 {
+                    let meta = (*frame).meta;
+
+                    if meta & (ENTRY | PROFILED) == 0 {
                         let value = reg!(instr.a);
 
                         // The result goes where the call instruction of the caller wants it,
@@ -682,6 +684,15 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                         copy_value(register(caller, target), value);
                         base = caller;
                         continue 'run;
+                    }
+
+                    if meta & PROFILED == 0 {
+                        // The frame was entered from native code, which is where the result
+                        // goes: the loop is done.
+                        let value = reg!(instr.a).read();
+                        (*vm).top = frame.sub(1);
+
+                        return Ok(value);
                     }
                 }
 
