@@ -185,7 +185,7 @@ impl Keys {
     #[inline]
     pub fn position(&self, count: usize, key: &str) -> Option<usize> {
         if count <= LINEAR_SEARCH_KEYS {
-            return self.first(count).iter().position(|own| **own == *key);
+            return self.first(count).iter().position(|own| same_key(own, key));
         }
 
         self.find(key).filter(|position| *position < count)
@@ -206,7 +206,7 @@ impl Keys {
             if entry >> 32 == hash >> 32 {
                 let position = (entry as u32 - 1) as usize;
                 // SAFETY: a slot holds the position of a key that the table has.
-                if **unsafe { &*self.start.as_ptr().add(position) } == *key {
+                if same_key(unsafe { &*self.start.as_ptr().add(position) }, key) {
                     return Some(position);
                 }
             }
@@ -309,7 +309,62 @@ impl fmt::Debug for Keys {
     }
 }
 
+/// The word whose lowest bytes are `bytes`, the first one lowest, and whose other bytes are
+/// zero. There are at most eight of them.
+///
+/// The bytes are read a few at a time from both ends, which takes no loop over them and no
+/// call to copy them: most keys are a word at most, and are hashed and compared as one.
+#[inline(always)]
+fn word_of(bytes: &[u8]) -> u64 {
+    let len = bytes.len();
+    debug_assert!(len <= size_of::<u64>());
+    let start = bytes.as_ptr();
+
+    // SAFETY: every read is of bytes of the slice: four from its start and the four that
+    // end it when it has at least four, its first, middle and last one otherwise.
+    unsafe {
+        if len >= 4 {
+            let low = u32::from_le(start.cast::<u32>().read_unaligned()) as u64;
+            let high = u32::from_le(start.add(len - 4).cast::<u32>().read_unaligned()) as u64;
+
+            low | high << ((len - 4) * 8)
+        } else if len > 0 {
+            let first = *start as u64;
+            let middle = *start.add(len / 2) as u64;
+            let last = *start.add(len - 1) as u64;
+
+            first | middle << (len / 2 * 8) | last << ((len - 1) * 8)
+        } else {
+            0
+        }
+    }
+}
+
+/// Whether `own`, a key of a table, is `key`.
+#[inline(always)]
+fn same_key(own: &Key, key: &str) -> bool {
+    let (own, key) = (own.as_bytes(), key.as_bytes());
+    if own.len() != key.len() {
+        return false;
+    }
+
+    match key.len() {
+        0..=8 => word_of(own) == word_of(key),
+        // SAFETY: both have at least eight bytes, which are read from their starts and
+        // as the eight that end them.
+        9..=16 => unsafe {
+            let last = key.len() - 8;
+            let word =
+                |bytes: &[u8], at: usize| bytes.as_ptr().add(at).cast::<u64>().read_unaligned();
+
+            word(own, 0) == word(key, 0) && word(own, last) == word(key, last)
+        },
+        _ => own == key,
+    }
+}
+
 /// The hash of a key: every character counts, eight at a time.
+#[inline]
 pub(crate) fn hash_key(key: &str) -> u64 {
     let bytes = key.as_bytes();
     let mut hash = bytes.len() as u64;
@@ -322,9 +377,7 @@ pub(crate) fn hash_key(key: &str) -> u64 {
 
     let rest = words.remainder();
     if !rest.is_empty() {
-        let mut word = [0; 8];
-        word[..rest.len()].copy_from_slice(rest);
-        hash = (hash.rotate_left(5) ^ u64::from_le_bytes(word)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        hash = (hash.rotate_left(5) ^ word_of(rest)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     }
 
     // Spread every bit over all of the hash (the finalizer of MurmurHash3): the lower bits
@@ -1405,6 +1458,57 @@ mod tests {
         }
         for name in numbered("x", 3000) {
             assert_eq!(table.position(3000, &name), None);
+        }
+    }
+
+    #[test]
+    fn the_word_of_a_few_bytes_has_the_first_of_them_lowest() {
+        let bytes = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+
+        for len in 0..=bytes.len() {
+            let mut padded = [0; 8];
+            padded[..len].copy_from_slice(&bytes[..len]);
+
+            assert_eq!(word_of(&bytes[..len]), u64::from_le_bytes(padded), "{len}");
+        }
+    }
+
+    #[test]
+    fn a_key_is_told_from_one_that_differs_in_any_of_its_bytes() {
+        let all: String = ('a'..='z').chain('A'..='Z').collect();
+
+        for len in 0..=40 {
+            let own = Key::from(&all[..len]);
+            assert!(same_key(&own, &all[..len]), "{len}");
+
+            // One byte longer, one byte shorter, and one that starts later.
+            assert!(!same_key(&own, &all[..len + 1]), "{len}");
+            if len > 0 {
+                assert!(!same_key(&own, &all[..len - 1]), "{len}");
+                assert!(!same_key(&own, &all[1..len + 1]), "{len}");
+            }
+
+            for at in 0..len {
+                let mut other = all[..len].to_string();
+                other.replace_range(at..at + 1, "-");
+
+                assert!(!same_key(&own, &other), "{len}, {at}");
+            }
+        }
+    }
+
+    #[test]
+    fn keys_of_every_length_are_found_in_small_and_large_tables() {
+        let all: String = ('a'..='z').chain('A'..='Z').collect();
+        let names: Vec<&str> = (0..=40).map(|len| &all[..len]).collect();
+
+        for count in [LINEAR_SEARCH_KEYS, names.len()] {
+            let table = Keys::interned(names[..count].iter().copied());
+
+            for (position, name) in names.iter().enumerate() {
+                let expected = (position < count).then_some(position);
+                assert_eq!(table.position(count, name), expected, "{name} in {count}");
+            }
         }
     }
 
