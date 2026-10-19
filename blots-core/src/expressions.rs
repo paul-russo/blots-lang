@@ -3,45 +3,25 @@ use crate::{
         BinaryOp, Commented, Expr, PostfixOp, RecordEntry, RecordKey, Span, Spanned, SpannedExpr,
         UnaryOp,
     },
+    compiler::compile_chunk,
     environment::Environment,
     error::RuntimeError,
-    functions::{BuiltInFunction, get_function_def, is_built_in_function},
-    heap::{Heap, HeapPointer, HeapValue, IterablePointer, RecordPointer},
+    functions::{BuiltInFunction, Invoke, get_function_def, is_built_in_function},
+    heap::{Heap, HeapPointer, HeapValue, IterablePointer},
     intern::Symbol,
+    list::List,
     parser::Rule,
     precedence::PRATT,
     values::{
-        CapturedScope, LambdaArg, LambdaDef,
-        Value::{self, Bool, List, Number, Spread},
+        LambdaArg,
+        Value::{self, Bool, Number},
         ValueType,
     },
+    vm::Vm,
 };
 use anyhow::{Result as AnyhowResult, anyhow};
-use indexmap::IndexMap;
 use pest::iterators::{Pair, Pairs};
 use std::{cell::RefCell, cmp::Ordering, collections::HashSet, rc::Rc};
-
-/// Resolve an identifier through the environment chain, producing the standard
-/// "unknown identifier" error (with a constants hint) when the name is unbound.
-fn lookup_identifier_value(
-    ident: Symbol,
-    bindings: &Environment,
-    span: Span,
-    source: &Rc<str>,
-) -> Result<Value, RuntimeError> {
-    bindings.get(ident).ok_or_else(|| {
-        use crate::heap::CONSTANTS;
-        let message = if CONSTANTS.contains_key(ident.as_str()) {
-            format!(
-                "unknown identifier: {}. Did you mean constants.{}?",
-                ident, ident
-            )
-        } else {
-            format!("unknown identifier: {}", ident)
-        };
-        RuntimeError::with_span(message, span, source.clone())
-    })
-}
 
 /// Helper to evaluate ordering comparisons with proper type error handling.
 /// Returns true if the ordering matches any of the expected orderings, false otherwise.
@@ -82,103 +62,59 @@ pub fn evaluate_pairs(
     evaluate_ast(&ast, heap, bindings, call_depth, source_rc)
 }
 
+/// [`evaluate_pairs`] for a statement of a program (see [`evaluate_statement`]).
+pub fn evaluate_statement_pairs(
+    pairs: Pairs<Rule>,
+    heap: Rc<RefCell<Heap>>,
+    bindings: Rc<Environment>,
+    source: &str,
+    held: &mut [&mut Value],
+) -> Result<Value, RuntimeError> {
+    let ast = pairs_to_expr(pairs)?;
+
+    evaluate_statement(&ast, heap, bindings, source.into(), held)
+}
+
 /// Helper function to flatten a spread value into the values it expands to. For list spreads
-/// this returns a shared handle to the existing elements; strings and records build a fresh
-/// (Rc-wrapped) vector of the expanded values.
-fn flatten_spread_value(
+/// this returns the list itself, which shares its elements with the one in the heap; strings
+/// and records build a fresh list of the expanded values.
+pub(crate) fn flatten_spread_value(
     spread_ptr: &IterablePointer,
     heap: &Rc<RefCell<Heap>>,
-) -> AnyhowResult<Rc<Vec<Value>>> {
+) -> AnyhowResult<List> {
     match spread_ptr {
         IterablePointer::List(list_ptr) => {
             let borrowed_heap = heap.borrow();
-            list_ptr.reify(&borrowed_heap).as_list_rc()
+            list_ptr.reify(&borrowed_heap).as_list().cloned()
         }
         IterablePointer::String(string_ptr) => {
-            let string = {
-                let borrowed_heap = heap.borrow();
-                string_ptr.reify(&borrowed_heap).as_string()?.to_string()
-            };
+            let mut heap = heap.borrow_mut();
+            let text = string_ptr.reify(&heap).as_text()?.clone();
+
             // Convert string to list of character values
-            Ok(Rc::new(
-                string
-                    .chars()
-                    .map(|c| heap.borrow_mut().insert_string(c.to_string()))
-                    .collect(),
-            ))
+            Ok(text.chars().map(|c| heap.insert_string(c)).collect())
         }
         IterablePointer::Record(record_ptr) => {
-            let entries = {
-                let borrowed_heap = heap.borrow();
-                record_ptr
-                    .reify(&borrowed_heap)
-                    .as_record()?
-                    .iter()
-                    .map(|(k, v)| (k.clone(), *v))
-                    .collect::<Vec<(String, Value)>>()
-            };
+            let mut heap = heap.borrow_mut();
+            let record = record_ptr.reify(&heap).as_record()?;
+            let (table, values) = (Rc::clone(record.table()), record.as_slice().to_vec());
+
             // Convert record to list of [key, value] pairs
-            Ok(Rc::new(
-                entries
-                    .into_iter()
-                    .map(|(k, v)| {
-                        let key = heap.borrow_mut().insert_string(k);
-                        heap.borrow_mut().insert_list(vec![key, v])
-                    })
-                    .collect(),
-            ))
+            Ok(table
+                .first(values.len())
+                .iter()
+                .zip(values)
+                .map(|(k, v)| {
+                    let key = heap.insert_string(&**k);
+                    heap.insert_list(vec![key, v])
+                })
+                .collect())
         }
     }
 }
 
-// Helper function for evaluating expressions inside do blocks with shadowing allowed
-fn evaluate_do_block_expr(
-    expr: &SpannedExpr,
-    heap: Rc<RefCell<Heap>>,
-    bindings: Rc<Environment>,
-    call_depth: usize,
-    source: Rc<str>,
-) -> Result<Value, RuntimeError> {
-    // For assignments in do blocks, skip the immutability check
-    if let Expr::Assignment { ident, value } = &expr.node {
-        // Still check for keywords
-        if matches!(
-            ident.as_str(),
-            "return" | "if" | "then" | "else" | "do" | "true" | "false" | "null" | "output"
-        ) {
-            return Err(RuntimeError::with_span(
-                format!("{} is a keyword, and cannot be reassigned", ident),
-                expr.span,
-                source.clone(),
-            ));
-        }
-
-        // Evaluate the value (allow shadowing - no check for existing binding)
-        let val = evaluate_ast(
-            value,
-            Rc::clone(&heap),
-            Rc::clone(&bindings),
-            call_depth,
-            source.clone(),
-        )?;
-
-        // Set lambda name if assigning a lambda. The lambda was just created, so the heap slot
-        // holds the only Rc and `make_mut` mutates it in place.
-        if let Value::Lambda(lambda_ptr) = val {
-            let mut borrowed_heap = heap.borrow_mut();
-            if let Some(HeapValue::Lambda(lambda_def)) = borrowed_heap.get_mut(lambda_ptr.index()) {
-                Rc::make_mut(lambda_def).name = Some(*ident);
-            }
-        }
-
-        bindings.insert(*ident, val);
-        return Ok(val);
-    }
-
-    // For all other expressions, use the regular evaluate_ast
-    evaluate_ast(expr, heap, bindings, call_depth, source.clone())
-}
-
+/// Evaluate an expression against `bindings`: the expression is compiled to bytecode and run on
+/// a fresh VM whose late-bound names resolve through `bindings`.
 pub fn evaluate_ast(
     expr: &SpannedExpr,
     heap: Rc<RefCell<Heap>>,
@@ -186,536 +122,32 @@ pub fn evaluate_ast(
     call_depth: usize,
     source: Rc<str>,
 ) -> Result<Value, RuntimeError> {
-    match &expr.node {
-        Expr::Number(n) => Ok(Number(*n)),
-        Expr::String(s) => Ok(heap.borrow_mut().insert_string(s.clone())),
-        Expr::Bool(b) => Ok(Bool(*b)),
-        Expr::Null => Ok(Value::Null),
-        Expr::Identifier(ident) => match ident.as_str() {
-            "infinity" => Ok(Number(f64::INFINITY)),
-            "inf" => Ok(Number(f64::INFINITY)),
-            "constants" => Ok(Value::Record(RecordPointer::new(0))),
-            _ => lookup_identifier_value(*ident, &bindings, expr.span, &source),
-        },
-        Expr::ParamSlot { name, index } => {
-            // Fast path: read the argument by position from the nearest call frame. The name
-            // fallback covers bodies evaluated outside their own call (e.g. a lambda body
-            // re-evaluated directly in tests).
-            if let Some(value) = bindings.get_param_slot(*index as usize) {
-                return Ok(value);
-            }
+    let mut vm = Vm::new(heap, Rc::clone(&bindings));
+    let chunk = compile_chunk(expr, vm.inlines_callbacks(), &bindings)?;
 
-            lookup_identifier_value(*name, &bindings, expr.span, &source)
-        }
-        Expr::CaptureSlot { name, index } => {
-            // Fast path: read the captured value by position. `None` means the capture was
-            // unbound at closure creation (a late-bound name) or no frame is active, so the
-            // name resolves through the environment chain exactly like a plain identifier.
-            if let Some(value) = bindings.get_capture_slot(*index as usize) {
-                return Ok(value);
-            }
+    vm.run_chunk(&chunk, source, call_depth)
+}
 
-            lookup_identifier_value(*name, &bindings, expr.span, &source)
-        }
-        Expr::InputReference(field) => {
-            // Desugar #field to inputs.field
-            let inputs_value = bindings
-                .get(crate::intern::inputs_symbol())
-                .ok_or(anyhow!("inputs not found (required for #{} syntax)", field))?;
+/// [`evaluate_ast`] for a statement of a program: an expression that is evaluated at the top
+/// level, against the `bindings` of the program, by a caller that keeps no value of the heap
+/// but those in `bindings` and `held`.
+///
+/// What a statement leaves behind in the heap while it is evaluated can then be reclaimed
+/// while it is evaluated, instead of piling up until it is done. That moves the values of
+/// the heap, like [`Heap::compact`] does between statements: `bindings` and `held` are
+/// rewritten to refer to what they did before, and any other value from before the call is
+/// as good as gone.
+pub fn evaluate_statement(
+    expr: &SpannedExpr,
+    heap: Rc<RefCell<Heap>>,
+    bindings: Rc<Environment>,
+    source: Rc<str>,
+    held: &mut [&mut Value],
+) -> Result<Value, RuntimeError> {
+    let mut vm = Vm::new(heap, Rc::clone(&bindings));
+    let chunk = compile_chunk(expr, vm.inlines_callbacks(), &bindings)?;
 
-            match inputs_value {
-                Value::Record(record_ptr) => {
-                    let borrowed_heap = heap.borrow();
-                    let record = record_ptr.reify(&borrowed_heap).as_record()?;
-                    // Return null if field doesn't exist (consistent with inputs.field behavior)
-                    Ok(record.get(field).copied().unwrap_or(Value::Null))
-                }
-                _ => Err(RuntimeError::with_span(
-                    format!("inputs must be a record to use #{} syntax", field),
-                    expr.span,
-                    source.clone(),
-                )),
-            }
-        }
-        Expr::BuiltIn(built_in) => Ok(Value::BuiltIn(*built_in)),
-        Expr::List(exprs) => {
-            let values = exprs
-                .iter()
-                .map(|e| {
-                    evaluate_ast(
-                        &e.node,
-                        Rc::clone(&heap),
-                        Rc::clone(&bindings),
-                        call_depth,
-                        source.clone(),
-                    )
-                })
-                .collect::<Result<Vec<Value>, RuntimeError>>()?;
-
-            // Flatten spreads
-            let mut flattened = Vec::new();
-
-            for value in values {
-                match value {
-                    Value::Spread(spread_ptr) => {
-                        let spread_values = flatten_spread_value(&spread_ptr, &heap)?;
-                        flattened.extend(spread_values.iter().copied());
-                    }
-                    _ => flattened.push(value),
-                }
-            }
-
-            Ok(heap.borrow_mut().insert_list(flattened))
-        }
-        Expr::Record(entries) => {
-            let mut record = IndexMap::new();
-
-            for commented_entry in entries {
-                let entry = &commented_entry.node;
-                match &entry.key {
-                    RecordKey::Static(key) => {
-                        let value = evaluate_ast(
-                            &entry.value,
-                            Rc::clone(&heap),
-                            Rc::clone(&bindings),
-                            call_depth,
-                            source.clone(),
-                        )?;
-                        record.insert(key.clone(), value);
-                    }
-                    RecordKey::Dynamic(key_expr) => {
-                        let key_value = evaluate_ast(
-                            key_expr,
-                            Rc::clone(&heap),
-                            Rc::clone(&bindings),
-                            call_depth,
-                            source.clone(),
-                        )?;
-                        let key = key_value.as_string(&heap.borrow())?.to_string();
-                        let value = evaluate_ast(
-                            &entry.value,
-                            Rc::clone(&heap),
-                            Rc::clone(&bindings),
-                            call_depth,
-                            source.clone(),
-                        )?;
-                        record.insert(key, value);
-                    }
-                    RecordKey::Shorthand(ident) => {
-                        let value = bindings
-                            .get(Symbol::intern(ident))
-                            .ok_or(anyhow!("unknown identifier: {}", ident))?;
-                        record.insert(ident.clone(), value);
-                    }
-                    RecordKey::Spread(spread_expr) => {
-                        let spread_value = evaluate_ast(
-                            spread_expr,
-                            Rc::clone(&heap),
-                            Rc::clone(&bindings),
-                            call_depth,
-                            source.clone(),
-                        )?;
-
-                        if let Spread(iterable) = spread_value {
-                            match iterable {
-                                IterablePointer::List(pointer) => {
-                                    let borrowed_heap = &heap.borrow();
-                                    pointer
-                                        .reify(borrowed_heap)
-                                        .as_list()?
-                                        .iter()
-                                        .enumerate()
-                                        .for_each(|(i, value)| {
-                                            record.insert(i.to_string(), *value);
-                                        });
-                                }
-                                IterablePointer::String(pointer) => {
-                                    let s = {
-                                        let borrowed_heap = &heap.borrow();
-                                        pointer.reify(borrowed_heap).as_string()?.to_string()
-                                    };
-
-                                    s.chars().enumerate().for_each(|(i, c)| {
-                                        record.insert(
-                                            i.to_string(),
-                                            heap.borrow_mut().insert_string(c.to_string()),
-                                        );
-                                    });
-                                }
-                                IterablePointer::Record(pointer) => {
-                                    let borrowed_heap = &heap.borrow();
-                                    let spread_record = pointer.reify(borrowed_heap).as_record()?;
-
-                                    for (k, v) in spread_record {
-                                        record.insert(k.clone(), *v);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            Ok(heap.borrow_mut().insert_record(record))
-        }
-        Expr::Lambda {
-            args,
-            body,
-            captures,
-        } => {
-            // Capture the current values of the lambda's free variables (precomputed at parse
-            // time), in slot order so `CaptureSlot` references can read them by index. Names
-            // that aren't bound yet stay `None` and resolve late through the call-site chain.
-            let mut captured_values = Vec::with_capacity(captures.len());
-            let mut any_bound = false;
-
-            for var in captures {
-                let value = bindings.get(*var);
-                any_bound |= value.is_some();
-                captured_values.push(value);
-            }
-
-            // When nothing was bound at definition time, an empty scope avoids pushing a
-            // useless captures layer onto the environment chain on every call.
-            let scope = if any_bound {
-                CapturedScope::new(captures.clone(), captured_values)
-            } else {
-                CapturedScope::default()
-            };
-
-            let lambda = heap.borrow_mut().insert_lambda(LambdaDef {
-                name: None,
-                args: Rc::new(args.clone()),
-                body: Rc::clone(body),
-                scope,
-                source: source.clone(),
-            });
-
-            Ok(lambda)
-        }
-        Expr::Assignment { ident, value } => {
-            if is_built_in_function(ident.as_str()) {
-                return Err(RuntimeError::with_span(
-                    format!(
-                        "{} is the name of a built-in function, and cannot be reassigned",
-                        ident
-                    ),
-                    expr.span,
-                    source.clone(),
-                ));
-            }
-
-            if matches!(
-                ident.as_str(),
-                "constants"
-                    | "if"
-                    | "then"
-                    | "else"
-                    | "true"
-                    | "false"
-                    | "null"
-                    | "inputs"
-                    | "and"
-                    | "or"
-            ) {
-                return Err(RuntimeError::with_span(
-                    format!("{} is a keyword, and cannot be reassigned", ident),
-                    expr.span,
-                    source.clone(),
-                ));
-            }
-
-            // Check if the variable already exists (immutability check)
-            if bindings.contains_key(*ident) {
-                return Err(RuntimeError::with_span(
-                    format!("{} is already defined, and cannot be reassigned", ident),
-                    expr.span,
-                    source.clone(),
-                ));
-            }
-
-            let val = evaluate_ast(
-                value,
-                Rc::clone(&heap),
-                Rc::clone(&bindings),
-                call_depth,
-                source.clone(),
-            )?;
-
-            // Set lambda name if assigning a lambda. The lambda was just created, so the heap
-            // slot holds the only Rc and `make_mut` mutates it in place.
-            if let Value::Lambda(lambda_ptr) = val {
-                let mut borrowed_heap = heap.borrow_mut();
-                if let Some(HeapValue::Lambda(lambda_def)) =
-                    borrowed_heap.get_mut(lambda_ptr.index())
-                {
-                    Rc::make_mut(lambda_def).name = Some(*ident);
-                }
-            }
-
-            bindings.insert(*ident, val);
-            Ok(val)
-        }
-        Expr::Output { expr: inner_expr } => {
-            // Output is just an annotation - evaluate the inner expression
-            evaluate_ast(
-                inner_expr,
-                Rc::clone(&heap),
-                Rc::clone(&bindings),
-                call_depth,
-                source.clone(),
-            )
-        }
-        Expr::Conditional {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            let cond_val = evaluate_ast(
-                condition,
-                Rc::clone(&heap),
-                Rc::clone(&bindings),
-                call_depth,
-                source.clone(),
-            )?;
-
-            if cond_val.as_bool()? {
-                evaluate_ast(then_expr, heap, bindings, call_depth, source.clone())
-            } else {
-                evaluate_ast(else_expr, heap, bindings, call_depth, source.clone())
-            }
-        }
-        Expr::DoBlock {
-            statements,
-            return_expr,
-        } => {
-            // Create new scope that extends current bindings (O(1) instead of clone)
-            let block_bindings = Rc::new(Environment::extend(Rc::clone(&bindings)));
-
-            // Execute statements with shadowing allowed (comments are ignored)
-            for stmt in statements {
-                evaluate_do_block_expr(
-                    &stmt.node,
-                    Rc::clone(&heap),
-                    Rc::clone(&block_bindings),
-                    call_depth,
-                    source.clone(),
-                )?;
-            }
-
-            // Return the final expression
-            evaluate_do_block_expr(
-                &return_expr.node,
-                heap,
-                block_bindings,
-                call_depth,
-                source.clone(),
-            )
-        }
-        Expr::Call { func, args } => {
-            let func_val = evaluate_ast(
-                func,
-                Rc::clone(&heap),
-                Rc::clone(&bindings),
-                call_depth,
-                source.clone(),
-            )?;
-            let arg_vals_raw = args
-                .iter()
-                .map(|arg| {
-                    evaluate_ast(
-                        arg,
-                        Rc::clone(&heap),
-                        Rc::clone(&bindings),
-                        call_depth,
-                        source.clone(),
-                    )
-                })
-                .collect::<Result<Vec<_>, RuntimeError>>()?;
-
-            // Flatten spread arguments. Most calls have none, so the evaluated values are passed
-            // through as-is rather than being copied into a second vector.
-            let arg_vals = if arg_vals_raw
-                .iter()
-                .any(|value| matches!(value, Value::Spread(_)))
-            {
-                let mut flattened = Vec::with_capacity(arg_vals_raw.len());
-
-                for value in arg_vals_raw {
-                    match value {
-                        Value::Spread(spread_ptr) => {
-                            let spread_values = flatten_spread_value(&spread_ptr, &heap)?;
-                            flattened.extend(spread_values.iter().copied());
-                        }
-                        _ => flattened.push(value),
-                    }
-                }
-
-                flattened
-            } else {
-                arg_vals_raw
-            };
-
-            if !func_val.is_lambda() && !func_val.is_built_in() {
-                return Err(RuntimeError::with_span(
-                    format!(
-                        "can't call a non-function: {}",
-                        func_val.stringify_internal(&heap.borrow())
-                    ),
-                    expr.span,
-                    source.clone(),
-                ));
-            }
-
-            let def = {
-                let borrowed_heap = &heap.borrow();
-                get_function_def(&func_val, borrowed_heap).ok_or_else(|| {
-                    anyhow!(
-                        "unknown function: {}",
-                        func_val.stringify_internal(borrowed_heap)
-                    )
-                })?
-            };
-
-            def.call(func_val, &arg_vals, heap, bindings, call_depth, &source)
-                .map_err(|e| e.with_call_site(expr.span, source.clone()))
-        }
-        Expr::Access { expr, index } => {
-            let val = evaluate_ast(
-                expr,
-                Rc::clone(&heap),
-                Rc::clone(&bindings),
-                call_depth,
-                source.clone(),
-            )?;
-            let idx_val = evaluate_ast(
-                index,
-                Rc::clone(&heap),
-                Rc::clone(&bindings),
-                call_depth,
-                source.clone(),
-            )?;
-
-            match val {
-                Value::Record(record) => {
-                    let borrowed_heap = &heap.borrow();
-                    let record = record.reify(borrowed_heap).as_record()?;
-                    let key = idx_val.as_string(borrowed_heap)?;
-                    Ok(record.get(key).copied().unwrap_or(Value::Null))
-                }
-                Value::List(list) => {
-                    let borrowed_heap = &heap.borrow();
-                    let list = list.reify(borrowed_heap).as_list()?;
-                    let raw_index = idx_val.as_number()? as i64;
-                    let index = if raw_index < 0 {
-                        let adjusted = list.len() as i64 + raw_index;
-                        if adjusted < 0 {
-                            return Ok(Value::Null);
-                        }
-                        adjusted as usize
-                    } else {
-                        raw_index as usize
-                    };
-                    Ok(list.get(index).copied().unwrap_or(Value::Null))
-                }
-                Value::String(string) => {
-                    let string = string.reify(&heap.borrow()).as_string()?.to_string();
-                    let char_count = string.chars().count();
-                    let raw_index = idx_val.as_number()? as i64;
-                    let index = if raw_index < 0 {
-                        let adjusted = char_count as i64 + raw_index;
-                        if adjusted < 0 {
-                            return Ok(Value::Null);
-                        }
-                        adjusted as usize
-                    } else {
-                        raw_index as usize
-                    };
-
-                    Ok(string
-                        .chars()
-                        .nth(index)
-                        .map(|c| heap.borrow_mut().insert_string(c.to_string()))
-                        .unwrap_or(Value::Null))
-                }
-                _ => Err(RuntimeError::with_span(
-                    format!(
-                        "expected a record, list, or string, but got a {}",
-                        val.get_type()
-                    ),
-                    expr.span,
-                    source.clone(),
-                )),
-            }
-        }
-        Expr::DotAccess { expr, field } => {
-            let val = evaluate_ast(
-                expr,
-                Rc::clone(&heap),
-                Rc::clone(&bindings),
-                call_depth,
-                source.clone(),
-            )?;
-            let borrowed_heap = &heap.borrow();
-
-            match val {
-                Value::Record(record) => {
-                    let record = record.reify(borrowed_heap).as_record()?;
-                    Ok(record.get(field).copied().unwrap_or(Value::Null))
-                }
-                _ => Err(RuntimeError::with_span(
-                    format!("expected a record, but got a {}", val.get_type()),
-                    expr.span,
-                    source.clone(),
-                )),
-            }
-        }
-        Expr::BinaryOp { op, left, right } => {
-            evaluate_binary_op_ast(*op, left, right, heap, bindings, call_depth, source.clone())
-        }
-        Expr::UnaryOp { op, expr } => {
-            let val = evaluate_ast(expr, heap, bindings, call_depth, source.clone())?;
-
-            match op {
-                UnaryOp::Negate => Ok(Number(-val.as_number()?)),
-                UnaryOp::Not | UnaryOp::Invert => Ok(Bool(!val.as_bool()?)),
-            }
-        }
-        Expr::PostfixOp { op, expr } => {
-            let val = evaluate_ast(expr, heap, bindings, call_depth, source.clone())?;
-
-            match op {
-                PostfixOp::Factorial => {
-                    let n = val.as_number()?;
-                    if n >= 0.0 && n == (n as u64) as f64 {
-                        Ok(Number(
-                            (1..(n as u64) + 1).map(|x| x as f64).product::<f64>(),
-                        ))
-                    } else {
-                        Err(RuntimeError::with_span(
-                            "factorial only works on non-negative integers".to_string(),
-                            expr.span,
-                            source.clone(),
-                        ))
-                    }
-                }
-            }
-        }
-        Expr::Spread(expr) => {
-            let val = evaluate_ast(expr, heap, bindings, call_depth, source.clone())?;
-
-            match val {
-                List(pointer) => Ok(Spread(IterablePointer::List(pointer))),
-                Value::String(pointer) => Ok(Spread(IterablePointer::String(pointer))),
-                Value::Record(pointer) => Ok(Spread(IterablePointer::Record(pointer))),
-                _ => Err(RuntimeError::with_span(
-                    "expected a list, record, or string".to_string(),
-                    expr.span,
-                    source.clone(),
-                )),
-            }
-        }
-    }
+    vm.run_chunk_compacting(&chunk, source, 0, held)
 }
 
 // Helper function to collect free variables in an expression
@@ -724,9 +156,7 @@ fn collect_free_variables(expr: &SpannedExpr, vars: &mut Vec<Symbol>, bound: &mu
         // Slot variants are name references just like plain identifiers; they appear inside
         // already-resolved nested lambda bodies and must still count as free variables of any
         // enclosing lambda so capture propagation keeps working.
-        Expr::Identifier(name)
-        | Expr::ParamSlot { name, .. }
-        | Expr::CaptureSlot { name, .. } => {
+        Expr::Identifier(name) | Expr::ParamSlot { name, .. } | Expr::CaptureSlot { name, .. } => {
             // `inputs` is excluded because it is a late-bound keyword: like the `#field`
             // shorthand, it must resolve against the calling document's inputs at call time,
             // never get captured into a lambda's scope or inlined during serialization.
@@ -844,8 +274,7 @@ fn resolve_lambda_expr(
             // Names with special evaluation rules keep their dynamic lookup: shadowed names
             // must see the do-block local, and the constant identifiers are handled before any
             // environment lookup at evaluation time.
-            if shadowed.contains(&name)
-                || matches!(name.as_str(), "infinity" | "inf" | "constants")
+            if shadowed.contains(&name) || matches!(name.as_str(), "infinity" | "inf" | "constants")
             {
                 return;
             }
@@ -957,6 +386,41 @@ fn resolve_lambda_expr(
     }
 }
 
+/// Build the node for a lambda from its parsed parameters and body.
+///
+/// The lambda's free variables (its captures) are computed here, once, so that creating a
+/// closure at runtime doesn't have to re-walk the body: parameters are bound and built-ins are
+/// resolved statically, so neither needs capturing. References to parameters and captures in
+/// the body are then resolved to slot indices, so calls read them by position instead of by
+/// hashed name lookup.
+pub(crate) fn lambda_expr(args: Vec<LambdaArg>, mut body: SpannedExpr, span: Span) -> SpannedExpr {
+    let mut bound = HashSet::new();
+    for arg in &args {
+        bound.insert(arg.get_name());
+    }
+
+    let mut free_vars = Vec::new();
+    collect_free_variables(&body, &mut free_vars, &mut bound);
+
+    let mut captures = Vec::new();
+    for var in free_vars {
+        if !is_built_in_function(var.as_str()) && !captures.contains(&var) {
+            captures.push(var);
+        }
+    }
+
+    resolve_lambda_body(&mut body, &args, &captures);
+
+    Spanned::new(
+        Expr::Lambda {
+            args,
+            body: Rc::new(body),
+            captures,
+        },
+        span,
+    )
+}
+
 // Validate that a value (especially lambdas) is portable for output
 pub fn validate_portable_value(
     value: &Value,
@@ -1026,42 +490,124 @@ pub fn validate_portable_value(
     }
 }
 
-// Evaluate binary operations on AST
-fn evaluate_binary_op_ast(
+/// What [`truncate`] returns for a number it cannot convert the way `as i64` would.
+pub(crate) const NOT_TRUNCATED: i64 = i64::MIN;
+
+/// `number as i64` for every number whose conversion is not [`NOT_TRUNCATED`], at the cost of
+/// one machine instruction where the target has one: `as` also defines the result for NaN and
+/// for numbers beyond the range of an `i64`, which takes several more.
+#[inline(always)]
+pub(crate) fn truncate(number: f64) -> i64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::{_mm_cvttsd_si64, _mm_set_sd};
+
+        // SAFETY: SSE2 is part of the x86-64 baseline. The conversion yields `i64::MIN` for
+        // NaN and for numbers out of range.
+        unsafe { _mm_cvttsd_si64(_mm_set_sd(number)) }
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        number as i64
+    }
+}
+
+/// Whether `number` is the whole number `truncated`, which is what [`truncate`] made of it,
+/// and that is one below 2^32 that is not negative. A zero with a sign is not: what it
+/// leaves when it is divided has the sign as well.
+///
+/// Such a number is told by its bits, which no other number has: not a NaN, and not the
+/// number that a conversion out of range comes to.
+#[inline(always)]
+fn is_small_whole(number: f64, truncated: i64) -> bool {
+    truncated as u64 >> u32::BITS == 0 && (truncated as f64).to_bits() == number.to_bits()
+}
+
+/// What `number` leaves when it is divided by `divisor`, for a number that is whole, below
+/// 2^32 and not negative, and a divisor that is not zero.
+#[inline(always)]
+pub(crate) fn small_remainder(number: f64, divisor: u32) -> Option<f64> {
+    let dividend = truncate(number);
+    let small = divisor != 0 && is_small_whole(number, dividend);
+
+    small.then(|| (dividend as u32 % divisor) as f64)
+}
+
+/// The remainder of `x / y` with the sign of `x` (the `%` operator).
+///
+/// Two whole numbers below 2^32 of which neither is negative are by far the most common
+/// operands, and take the remainder of the machine for numbers of that size, which is the
+/// one that takes the least. Everything else is left to [`wide_modulo`].
+#[inline(always)]
+pub(crate) fn modulo(x: f64, y: f64) -> f64 {
+    let (dividend, divisor) = (truncate(x), truncate(y));
+
+    if (dividend | divisor) as u64 >> u32::BITS == 0
+        && (dividend as f64).to_bits() == x.to_bits()
+        && (divisor as f64).to_bits() == y.to_bits()
+        && divisor != 0
+    {
+        return (dividend as u32 % divisor as u32) as f64;
+    }
+
+    wide_modulo(x, y)
+}
+
+/// The remainder of `x / y` with the sign of `x`, for any two numbers.
+///
+/// Operands that are both integers small enough for doubles to represent every integer of
+/// their magnitude take an exact integer remainder, which is several times faster than the
+/// general floating-point one.
+#[inline(never)]
+fn wide_modulo(x: f64, y: f64) -> f64 {
+    const EXACT_INTEGERS: f64 = 9_007_199_254_740_992.0;
+
+    if x.abs() < EXACT_INTEGERS && y.abs() < EXACT_INTEGERS {
+        // SAFETY: both operands were just checked to be finite and well within `i64`.
+        let (dividend, divisor) =
+            unsafe { (x.to_int_unchecked::<i64>(), y.to_int_unchecked::<i64>()) };
+
+        if dividend as f64 == x && divisor as f64 == y && divisor != 0 {
+            // A zero remainder keeps the sign of the dividend, as it does for `fmod`.
+            return ((dividend % divisor) as f64).copysign(x);
+        }
+    }
+
+    x % y
+}
+
+/// Where a binary operation sits in the program: the span of the whole operation and the
+/// source text that span refers to. Used for error reporting.
+pub(crate) struct OpSite<'a> {
+    pub span: Span,
+    pub source: &'a Rc<str>,
+}
+
+/// Apply a binary operator to two already-evaluated operands. `invoke` calls the function
+/// operand of `via`, `into` and `where`.
+pub(crate) fn apply_binary_op(
     op: BinaryOp,
-    left: &SpannedExpr,
-    right: &SpannedExpr,
-    heap: Rc<RefCell<Heap>>,
-    bindings: Rc<Environment>,
+    lhs: Value,
+    rhs: Value,
+    heap: &Rc<RefCell<Heap>>,
+    site: OpSite,
     call_depth: usize,
-    source: Rc<str>,
+    invoke: &mut Invoke,
 ) -> Result<Value, RuntimeError> {
-    let lhs = evaluate_ast(
-        left,
-        Rc::clone(&heap),
-        Rc::clone(&bindings),
-        call_depth,
-        source.clone(),
-    )?;
-    let rhs = evaluate_ast(
-        right,
-        Rc::clone(&heap),
-        Rc::clone(&bindings),
-        call_depth,
-        source.clone(),
-    )?;
+    let (op_span, source) = (site.span, site.source);
 
     // Fast path: arithmetic and comparisons between two plain numbers can never broadcast,
-    // touch the heap, or fail, so they skip the span bookkeeping and the broadcasting match
-    // below. Ordering comparisons fall through when a NaN is involved so the general path can
-    // report the "cannot compare" error exactly as before.
+    // touch the heap, or fail, so they skip the broadcasting match below. Ordering comparisons
+    // fall through when a NaN is involved so the general path can report the "cannot compare"
+    // error.
     if let (Number(a), Number(b)) = (lhs, rhs) {
         match op {
             BinaryOp::Add => return Ok(Number(a + b)),
             BinaryOp::Subtract => return Ok(Number(a - b)),
             BinaryOp::Multiply => return Ok(Number(a * b)),
             BinaryOp::Divide => return Ok(Number(a / b)),
-            BinaryOp::Modulo => return Ok(Number(a % b)),
+            BinaryOp::Modulo => return Ok(Number(modulo(a, b))),
             BinaryOp::Power => return Ok(Number(a.powf(b))),
             BinaryOp::Equal | BinaryOp::DotEqual => return Ok(Bool(a == b)),
             BinaryOp::NotEqual | BinaryOp::DotNotEqual => return Ok(Bool(a != b)),
@@ -1080,14 +626,6 @@ fn evaluate_binary_op_ast(
             _ => {}
         }
     }
-
-    // Create a combined span for the entire binary operation
-    let op_span = Span::new(
-        left.span.start_byte,
-        right.span.end_byte,
-        left.span.start_line,
-        left.span.start_col,
-    );
 
     // Handle dot operators first - they never broadcast
     match op {
@@ -1247,16 +785,8 @@ fn evaluate_binary_op_ast(
                             (l_list[idx], r_list[idx])
                         };
                         let value = match (l, r) {
-                            (Value::String(_), Value::String(_)) => {
-                                let (l_str, r_str) = {
-                                    let borrowed_heap = heap.borrow();
-                                    (
-                                        l.as_string(&borrowed_heap)?.to_string(),
-                                        r.as_string(&borrowed_heap)?.to_string(),
-                                    )
-                                };
-                                heap.borrow_mut()
-                                    .insert_string(format!("{}{}", l_str, r_str))
+                            (Value::String(l), Value::String(r)) => {
+                                heap.borrow_mut().join_strings(l, r)?
                             }
                             (Value::Number(_), Value::Number(_)) => {
                                 Number(l.as_number()? + r.as_number()?)
@@ -1319,7 +849,7 @@ fn evaluate_binary_op_ast(
                         let r_list = list_r.reify(&borrowed_heap).as_list()?;
                         let mut mapped_list = Vec::with_capacity(list_len);
                         for (l, r) in l_list.iter().zip(r_list.iter()) {
-                            mapped_list.push(Number(l.as_number()? % r.as_number()?));
+                            mapped_list.push(Number(modulo(l.as_number()?, r.as_number()?)));
                         }
                         mapped_list
                     };
@@ -1387,19 +917,10 @@ fn evaluate_binary_op_ast(
                             })?
                         };
 
-                        let value = def
-                            .call(
-                                r,
-                                &[l],
-                                Rc::clone(&heap),
-                                Rc::clone(&bindings),
-                                call_depth,
-                                &source,
-                            )
-                            .map_err(|e| {
-                                e.with_function_context("\"via\" callback")
-                                    .with_call_site(op_span, source_owned.clone())
-                            })?;
+                        let value = invoke(&def, r, &[l], call_depth).map_err(|e| {
+                            e.with_function_context("\"via\" callback")
+                                .with_call_site(op_span, source_owned.clone())
+                        })?;
                         mapped_list.push(value);
                     }
                     Ok(heap.borrow_mut().insert_list(mapped_list))
@@ -1541,16 +1062,8 @@ fn evaluate_binary_op_ast(
                         };
                         let value = if is_list_first {
                             match (item, scalar) {
-                                (Value::String(_), Value::String(_)) => {
-                                    let (v_str, s_str) = {
-                                        let borrowed_heap = heap.borrow();
-                                        (
-                                            item.as_string(&borrowed_heap)?.to_string(),
-                                            scalar.as_string(&borrowed_heap)?.to_string(),
-                                        )
-                                    };
-                                    heap.borrow_mut()
-                                        .insert_string(format!("{}{}", v_str, s_str))
+                                (Value::String(item), Value::String(scalar)) => {
+                                    heap.borrow_mut().join_strings(item, scalar)?
                                 }
                                 (Value::Number(_), Value::Number(_)) => {
                                     Number(item.as_number()? + scalar.as_number()?)
@@ -1569,16 +1082,8 @@ fn evaluate_binary_op_ast(
                             }
                         } else {
                             match (scalar, item) {
-                                (Value::String(_), Value::String(_)) => {
-                                    let (s_str, v_str) = {
-                                        let borrowed_heap = heap.borrow();
-                                        (
-                                            scalar.as_string(&borrowed_heap)?.to_string(),
-                                            item.as_string(&borrowed_heap)?.to_string(),
-                                        )
-                                    };
-                                    heap.borrow_mut()
-                                        .insert_string(format!("{}{}", s_str, v_str))
+                                (Value::String(scalar), Value::String(item)) => {
+                                    heap.borrow_mut().join_strings(scalar, item)?
                                 }
                                 (Value::Number(_), Value::Number(_)) => {
                                     Number(scalar.as_number()? + item.as_number()?)
@@ -1653,9 +1158,9 @@ fn evaluate_binary_op_ast(
                         let mut mapped_list = Vec::with_capacity(list_ref.len());
                         for v in list_ref.iter() {
                             let value = if is_list_first {
-                                Number(v.as_number()? % scalar.as_number()?)
+                                Number(modulo(v.as_number()?, scalar.as_number()?))
                             } else {
-                                Number(scalar.as_number()? % v.as_number()?)
+                                Number(modulo(scalar.as_number()?, v.as_number()?))
                             };
                             mapped_list.push(value);
                         }
@@ -1731,7 +1236,7 @@ fn evaluate_binary_op_ast(
                         // per element is slower.
                         let items = {
                             let borrowed_heap = heap.borrow();
-                            list.reify(&borrowed_heap).as_list_rc()?
+                            list.reify(&borrowed_heap).as_list()?.clone()
                         };
 
                         let mut mapped_list = Vec::with_capacity(list_len);
@@ -1742,16 +1247,8 @@ fn evaluate_binary_op_ast(
                             } else {
                                 &call_args[..1]
                             };
-                            let value = def
-                                .call(
-                                    scalar,
-                                    call_args,
-                                    Rc::clone(&heap),
-                                    Rc::clone(&bindings),
-                                    call_depth,
-                                    &source,
-                                )
-                                .map_err(|e| {
+                            let value =
+                                invoke(&def, scalar, call_args, call_depth).map_err(|e| {
                                     e.with_function_context("\"via\" callback")
                                         .with_call_site(op_span, source_owned.clone())
                                 })?;
@@ -1792,15 +1289,7 @@ fn evaluate_binary_op_ast(
                             })?
                         };
 
-                        def.call(
-                            scalar,
-                            &[list],
-                            Rc::clone(&heap),
-                            Rc::clone(&bindings),
-                            call_depth,
-                            &source,
-                        )
-                        .map_err(|e| {
+                        invoke(&def, scalar, &[list], call_depth).map_err(|e| {
                             e.with_function_context("\"into\" callback")
                                 .with_call_site(op_span, source.clone())
                         })
@@ -1844,7 +1333,7 @@ fn evaluate_binary_op_ast(
                         // per element is slower.
                         let items = {
                             let borrowed_heap = heap.borrow();
-                            list.reify(&borrowed_heap).as_list_rc()?
+                            list.reify(&borrowed_heap).as_list()?.clone()
                         };
 
                         let mut filtered_list = vec![];
@@ -1856,16 +1345,8 @@ fn evaluate_binary_op_ast(
                                 &call_args[..1]
                             };
 
-                            let result = def
-                                .call(
-                                    scalar,
-                                    call_args,
-                                    Rc::clone(&heap),
-                                    Rc::clone(&bindings),
-                                    call_depth,
-                                    &source,
-                                )
-                                .map_err(|e| {
+                            let result =
+                                invoke(&def, scalar, call_args, call_depth).map_err(|e| {
                                     e.with_function_context("\"where\" callback")
                                         .with_call_site(op_span, source_owned.clone())
                                 })?;
@@ -1937,17 +1418,10 @@ fn evaluate_binary_op_ast(
             BinaryOp::And | BinaryOp::NaturalAnd => Ok(Bool(lhs.as_bool()? && rhs.as_bool()?)),
             BinaryOp::Or | BinaryOp::NaturalOr => Ok(Bool(lhs.as_bool()? || rhs.as_bool()?)),
             BinaryOp::Add => {
-                if lhs.is_string() {
-                    let (l_str, r_str) = {
-                        (
-                            lhs.as_string(&heap.borrow())?.to_string(),
-                            rhs.as_string(&heap.borrow())?.to_string(),
-                        )
-                    };
+                if let Value::String(first) = lhs {
+                    let second = rhs.as_string_pointer()?;
 
-                    return Ok(heap
-                        .borrow_mut()
-                        .insert_string(format!("{}{}", l_str, r_str)));
+                    return Ok(heap.borrow_mut().join_strings(first, second)?);
                 }
 
                 Ok(Number(lhs.as_number()? + rhs.as_number()?))
@@ -1955,7 +1429,7 @@ fn evaluate_binary_op_ast(
             BinaryOp::Subtract => Ok(Number(lhs.as_number()? - rhs.as_number()?)),
             BinaryOp::Multiply => Ok(Number(lhs.as_number()? * rhs.as_number()?)),
             BinaryOp::Divide => Ok(Number(lhs.as_number()? / rhs.as_number()?)),
-            BinaryOp::Modulo => Ok(Number(lhs.as_number()? % rhs.as_number()?)),
+            BinaryOp::Modulo => Ok(Number(modulo(lhs.as_number()?, rhs.as_number()?))),
             BinaryOp::Power => Ok(Number(lhs.as_number()?.powf(rhs.as_number()?))),
             BinaryOp::Coalesce => {
                 if lhs == Value::Null {
@@ -1990,19 +1464,10 @@ fn evaluate_binary_op_ast(
                     ));
                 }
 
-                def.unwrap()
-                    .call(
-                        rhs,
-                        &[lhs],
-                        Rc::clone(&heap),
-                        Rc::clone(&bindings),
-                        call_depth,
-                        &source,
-                    )
-                    .map_err(|e| {
-                        e.with_function_context("\"via\" callback")
-                            .with_call_site(op_span, source.clone())
-                    })
+                invoke(&def.unwrap(), rhs, &[lhs], call_depth).map_err(|e| {
+                    e.with_function_context("\"via\" callback")
+                        .with_call_site(op_span, source.clone())
+                })
             }
             BinaryOp::Into => {
                 if !rhs.is_callable() {
@@ -2030,19 +1495,10 @@ fn evaluate_binary_op_ast(
                     ));
                 }
 
-                def.unwrap()
-                    .call(
-                        rhs,
-                        &[lhs],
-                        Rc::clone(&heap),
-                        Rc::clone(&bindings),
-                        call_depth,
-                        &source,
-                    )
-                    .map_err(|e| {
-                        e.with_function_context("\"into\" callback")
-                            .with_call_site(op_span, source.clone())
-                    })
+                invoke(&def.unwrap(), rhs, &[lhs], call_depth).map_err(|e| {
+                    e.with_function_context("\"into\" callback")
+                        .with_call_site(op_span, source.clone())
+                })
             }
             BinaryOp::Where => Err(RuntimeError::with_span(
                 "where operator requires a list on the left side".to_string(),
@@ -2358,39 +1814,9 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                         }
                     }
 
-                    let mut body =
-                        pairs_to_expr_inner(body_pairs.into_inner(), preserve_comments)?;
+                    let body = pairs_to_expr_inner(body_pairs.into_inner(), preserve_comments)?;
 
-                    // Precompute the lambda's free variables (its captures) so that closure
-                    // creation at runtime doesn't have to re-walk the body. Parameters are bound,
-                    // and built-ins are resolved statically, so neither needs capturing.
-                    let mut bound = HashSet::new();
-                    for arg in &args {
-                        bound.insert(arg.get_name());
-                    }
-
-                    let mut free_vars = Vec::new();
-                    collect_free_variables(&body, &mut free_vars, &mut bound);
-
-                    let mut captures = Vec::new();
-                    for var in free_vars {
-                        if !is_built_in_function(var.as_str()) && !captures.contains(&var) {
-                            captures.push(var);
-                        }
-                    }
-
-                    // Resolve parameter and capture references in the body to slot indices so
-                    // that calls read them by position instead of by hashed name lookup.
-                    resolve_lambda_body(&mut body, &args, &captures);
-
-                    Ok(Spanned::new(
-                        Expr::Lambda {
-                            args,
-                            body: Rc::new(body),
-                            captures,
-                        },
-                        span,
-                    ))
+                    Ok(lambda_expr(args, body, span))
                 }
                 Rule::conditional => {
                     let mut inner_pairs = primary.into_inner();
@@ -2630,6 +2056,142 @@ mod tests {
             0,
             &binding,
         )
+    }
+
+    #[test]
+    fn modulo_matches_the_floating_point_remainder_bit_for_bit() {
+        let edges = [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            2.0,
+            -2.0,
+            3.0,
+            7.0,
+            -7.0,
+            0.5,
+            -0.5,
+            2.5,
+            65_535.0,
+            65_536.0,
+            4_294_967_295.0,
+            -4_294_967_295.0,
+            4_294_967_296.0,
+            4_294_967_297.0,
+            1e15,
+            -1e15,
+            9_007_199_254_740_991.0,
+            -9_007_199_254_740_991.0,
+            9_007_199_254_740_992.0,
+            -9_007_199_254_740_992.0,
+            9_007_199_254_740_994.0,
+            1e300,
+            -1e300,
+            5e-324,
+            f64::MAX,
+            f64::MIN,
+            f64::MIN_POSITIVE,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+        ];
+
+        for x in edges {
+            for y in edges {
+                assert_eq!(modulo(x, y).to_bits(), (x % y).to_bits(), "{x} % {y}");
+            }
+        }
+
+        // A xorshift sweep over integers of every magnitude, with some fractions mixed in.
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        for _ in 0..200_000 {
+            let (a, b, shape) = (next(), next(), next());
+            let x = (a as i64 >> (shape % 64)) as f64;
+            let y = (b as i64 >> ((shape >> 8) % 64)) as f64;
+            let (x, y) = match (shape >> 16) % 8 {
+                0 => (x / 4.0, y),
+                1 => (x, y / 4.0),
+                _ => (x, y),
+            };
+
+            assert_eq!(modulo(x, y).to_bits(), (x % y).to_bits(), "{x} % {y}");
+        }
+
+        // The same over whole numbers that fit 32 bits, which have a remainder of their own.
+        for _ in 0..200_000 {
+            let (a, b, shape) = (next(), next(), next());
+            let x = (a as u32 >> (shape % 32)) as f64;
+            let y = (b as u32 >> ((shape >> 8) % 32)) as f64;
+
+            assert_eq!(modulo(x, y).to_bits(), (x % y).to_bits(), "{x} % {y}");
+        }
+    }
+
+    #[test]
+    fn a_small_whole_number_leaves_what_any_number_does_and_no_other_has_a_small_remainder() {
+        let divisors = [1, 2, 3, 7, 10, 97, 1000, 65_535, 65_536, u32::MAX];
+
+        for dividend in [
+            0,
+            1,
+            2,
+            3,
+            6,
+            7,
+            96,
+            97,
+            98,
+            65_535,
+            65_536,
+            u32::MAX - 1,
+            u32::MAX,
+        ] {
+            for divisor in divisors {
+                let (x, y) = (dividend as f64, divisor as f64);
+                let remainder = small_remainder(x, divisor).map(f64::to_bits);
+
+                assert_eq!(remainder, Some((x % y).to_bits()), "{x} % {y}");
+            }
+
+            // Nothing is left by a division by zero.
+            assert_eq!(small_remainder(dividend as f64, 0), None, "{dividend}");
+        }
+
+        // A number that is negative, not whole, too large or no number at all is left to the
+        // remainder that there is for any number, as is a zero with a sign.
+        for other in [
+            -0.0,
+            -1.0,
+            -7.0,
+            0.5,
+            6.5,
+            -6.5,
+            5e-324,
+            4_294_967_295.5,
+            4_294_967_296.0,
+            4_294_967_297.0,
+            -4_294_967_296.0,
+            9_007_199_254_740_992.0,
+            1e19,
+            -1e19,
+            1e300,
+            f64::MAX,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+        ] {
+            for divisor in divisors {
+                assert_eq!(small_remainder(other, divisor), None, "{other} % {divisor}");
+            }
+        }
     }
 
     #[test]

@@ -1,0 +1,3 @@
+parts = map(range(300000), i => "item-" + to_string(i))
+total = reduce(parts, (acc, s) => acc + len(s), 0)
+print(total + len(join(parts, ",")))

@@ -1,0 +1,6 @@
+iter = (cr, ci, zr, zi, i) =>
+  if i >= 50 then i
+  else if zr * zr + zi * zi > 4 then i
+  else iter(cr, ci, zr * zr - zi * zi + cr, 2 * zr * zi + ci, i + 1)
+n = 300
+print(sum(map(range(n * n), k => iter((k % n) / n * 3 - 2, floor(k / n) / n * 2 - 1, 0, 0, 0))))

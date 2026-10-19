@@ -1,9 +1,13 @@
 use crate::environment::Environment;
+use crate::list::{List, SharedBuffers};
+use crate::record::{Record, RecordBuilder, SharedValues};
+use crate::text::Text;
 use crate::values::{LambdaDef, PrimitiveValue, ReifiedIterableValue, Value};
 use anyhow::{Result, anyhow};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display, Formatter};
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::LazyLock;
 
@@ -40,11 +44,14 @@ pub static CONSTANTS: LazyLock<IndexMap<String, PrimitiveValue>> = LazyLock::new
 
 #[derive(Debug, Clone)]
 pub enum HeapValue {
-    /// List elements are shared via `Rc` so that iterating a list outside of a heap borrow
-    /// (e.g. higher-order builtins and broadcasting loops) clones a pointer, not the elements.
-    List(Rc<Vec<Value>>),
-    String(String),
-    Record(IndexMap<String, Value>),
+    /// A list can be copied without copying its elements, so that iterating it outside of a
+    /// heap borrow (e.g. higher-order builtins and broadcasting loops) is cheap.
+    List(List),
+
+    /// A string can be copied without copying its characters, and one that is made from
+    /// another one shares them where it can.
+    String(Text),
+    Record(Record),
 
     /// Lambda definitions are shared via `Rc` so that resolving a callee for a call expression
     /// hands out a pointer to the definition instead of copying it field by field.
@@ -61,30 +68,29 @@ impl HeapValue {
         }
     }
 
-    pub fn as_list(&self) -> Result<&Vec<Value>> {
+    /// The list this is. Callers that need to iterate it without holding a borrow of the
+    /// heap copy the list, which does not copy its elements.
+    pub fn as_list(&self) -> Result<&List> {
         match self {
             HeapValue::List(list) => Ok(list),
             _ => Err(anyhow!("expected a list, but got a {}", self.get_type())),
         }
     }
 
-    /// Cheap shared handle to a list's elements, for callers that need to iterate the list
-    /// without holding a borrow of the heap (the elements are not copied).
-    pub fn as_list_rc(&self) -> Result<Rc<Vec<Value>>> {
-        match self {
-            HeapValue::List(list) => Ok(Rc::clone(list)),
-            _ => Err(anyhow!("expected a list, but got a {}", self.get_type())),
-        }
-    }
-
     pub fn as_string(&self) -> Result<&str> {
+        self.as_text().map(Text::as_str)
+    }
+
+    /// The text of the string this is. Callers that need its characters without holding a
+    /// borrow of the heap copy the text, which does not copy the characters.
+    pub fn as_text(&self) -> Result<&Text> {
         match self {
-            HeapValue::String(string) => Ok(string),
+            HeapValue::String(text) => Ok(text),
             _ => Err(anyhow!("expected a list, but got a {}", self.get_type())),
         }
     }
 
-    pub fn as_record(&self) -> Result<&IndexMap<String, Value>> {
+    pub fn as_record(&self) -> Result<&Record> {
         match self {
             HeapValue::Record(record) => Ok(record),
             _ => Err(anyhow!("expected a list, but got a {}", self.get_type())),
@@ -123,7 +129,65 @@ impl HeapValue {
     }
 }
 
-#[derive(Debug, Clone)]
+/// The values outside of the heap that refer to it: a compaction pass keeps what they refer
+/// to, and tells them where it went.
+///
+/// A value that nothing is going to read again may be among them. Such a value is taken
+/// for one that is still in use, unless it refers to a slot that the heap does not have,
+/// in which case it is left as it is.
+pub(crate) trait Roots {
+    /// Show every value to `look`.
+    fn each(&self, look: &mut dyn FnMut(&[Value]));
+
+    /// Have `replace` put every value where it is by the one that refers to the same thing
+    /// after the pass.
+    fn rewrite(&mut self, replace: &mut dyn FnMut(&mut [Value]));
+}
+
+/// What whoever evaluates a program statement by statement holds on to between two of them.
+struct Held<'r, 'v> {
+    env: &'r Environment,
+    extra: &'r mut [&'v mut Value],
+}
+
+impl Roots for Held<'_, '_> {
+    fn each(&self, look: &mut dyn FnMut(&[Value])) {
+        self.env
+            .each_binding_value(&mut |value| look(std::slice::from_ref(value)));
+
+        for root in self.extra.iter() {
+            look(std::slice::from_ref(root));
+        }
+    }
+
+    fn rewrite(&mut self, replace: &mut dyn FnMut(&mut [Value])) {
+        self.env.rewrite_binding_values(&mut |mut value| {
+            replace(std::slice::from_mut(&mut value));
+            value
+        });
+
+        for root in self.extra.iter_mut() {
+            replace(std::slice::from_mut(root));
+        }
+    }
+}
+
+/// What a compaction pass did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Pass {
+    /// Nothing, because it could not rewrite everything where it is (see
+    /// [`Heap::compact_in_run`]).
+    Refused,
+
+    /// Nothing, because everything in the heap is still in use.
+    Kept,
+
+    /// It dropped what was not in use and moved the rest: everything that referred to the
+    /// heap has been rewritten.
+    Moved,
+}
+
+#[derive(Debug)]
 pub struct Heap {
     values: Vec<HeapValue>,
 
@@ -139,6 +203,14 @@ pub struct Heap {
     /// Growth factor used to derive `compact_threshold_bytes` from the surviving payload size;
     /// doubles after each unproductive pass (up to a cap) and resets after a productive one.
     compact_growth_factor: usize,
+
+    /// The number of values that the last pass went through, in the heap and outside of it,
+    /// which is about what the next one has to go through.
+    pass_values: usize,
+
+    /// The number of passes so far that were not refused.
+    #[cfg(test)]
+    passes: usize,
 }
 
 impl Heap {
@@ -148,13 +220,15 @@ impl Heap {
             approx_bytes: 0,
             compact_threshold_bytes: COMPACT_MIN_BYTES,
             compact_growth_factor: COMPACT_GROWTH_FACTOR,
+            pass_values: 0,
+            #[cfg(test)]
+            passes: 0,
         };
         s.insert_record(
             CONSTANTS
-                .clone()
-                .into_iter()
-                .map(|(k, v)| (k, v.into()))
-                .collect(),
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::from(*v)))
+                .collect::<Record>(),
         );
 
         s
@@ -162,6 +236,11 @@ impl Heap {
 
     pub fn insert(&mut self, value: HeapValue) -> usize {
         self.approx_bytes += approx_heap_value_bytes(&value);
+        match &value {
+            HeapValue::List(list) => self.approx_bytes += list.len() * size_of::<Value>(),
+            HeapValue::Record(record) => self.approx_bytes += record.len() * size_of::<Value>(),
+            HeapValue::String(_) | HeapValue::Lambda(_) => {}
+        }
         self.values.push(value);
 
         self.values.len() - 1
@@ -169,16 +248,93 @@ impl Heap {
 
     pub fn insert_list(&mut self, list: Vec<Value>) -> Value {
         Value::List(ListPointer::new(
-            self.insert(HeapValue::List(Rc::new(list))),
+            self.insert(HeapValue::List(List::new(list))),
         ))
     }
 
-    pub fn insert_string(&mut self, string: String) -> Value {
-        Value::String(StringPointer::new(self.insert(HeapValue::String(string))))
+    /// The list at `base` followed by `items`, as a list of its own. It takes time in
+    /// proportion to the number of `items` when the list was not extended before and its
+    /// elements have room behind them (see [`List::followed_by`]).
+    pub fn extend_list(&mut self, base: ListPointer, items: &[Value]) -> Result<Value> {
+        let list = base.reify(self).as_list()?;
+        let extended = list.followed_by(items);
+        let added = match extended.shares_buffer_with(list) {
+            true => items.len(),
+            false => extended.len(),
+        };
+
+        Ok(self.insert_sharing(extended, added))
     }
 
-    pub fn insert_record(&mut self, record: IndexMap<String, Value>) -> Value {
-        Value::Record(RecordPointer::new(self.insert(HeapValue::Record(record))))
+    /// The elements of the list at `base` at the positions in `range`, which have to exist,
+    /// as a list of its own. The elements are not copied.
+    pub fn slice_list(&mut self, base: ListPointer, range: Range<usize>) -> Result<Value> {
+        let part = base.reify(self).as_list()?.slice(range);
+
+        Ok(self.insert_sharing(part, 0))
+    }
+
+    /// Add a list of which only `added` elements are not also the elements of a list that
+    /// is in the heap already.
+    fn insert_sharing(&mut self, list: List, added: usize) -> Value {
+        self.approx_bytes += size_of::<HeapValue>() + added * size_of::<Value>();
+        self.values.push(HeapValue::List(list));
+
+        Value::List(ListPointer::new(self.values.len() - 1))
+    }
+
+    pub fn insert_string(&mut self, string: impl Into<Text>) -> Value {
+        Value::String(StringPointer::new(
+            self.insert(HeapValue::String(string.into())),
+        ))
+    }
+
+    /// The string at `first` followed by the one at `second`, as a string of its own. It
+    /// takes time in proportion to the length of the second one when the first one was not
+    /// followed before and its characters have room behind them (see [`Text::followed_by`]).
+    pub fn join_strings(&mut self, first: StringPointer, second: StringPointer) -> Result<Value> {
+        let base = first.reify(self).as_text()?;
+        let more = second.reify(self).as_text()?;
+
+        // A string that nothing is added to is the string that results.
+        if more.is_empty() {
+            return Ok(Value::String(first));
+        }
+        if base.is_empty() {
+            return Ok(Value::String(second));
+        }
+
+        let joined = base.followed_by(more);
+        let added = match joined.shares_buffer_with(base) {
+            true => more.len(),
+            false => joined.held_bytes(),
+        };
+
+        self.approx_bytes += size_of::<HeapValue>() + added;
+        self.values.push(HeapValue::String(joined));
+
+        Ok(Value::String(StringPointer::new(self.values.len() - 1)))
+    }
+
+    pub fn insert_record(&mut self, record: impl Into<Record>) -> Value {
+        Value::Record(RecordPointer::new(
+            self.insert(HeapValue::Record(record.into())),
+        ))
+    }
+
+    /// Add the record that `builder` assembled. It takes time in proportion to the number
+    /// of its entries that the builder was given one by one when it started with the
+    /// entries of a record and the others are under new keys (see [`RecordBuilder`]).
+    pub fn insert_built_record(&mut self, builder: RecordBuilder) -> Value {
+        // Only the values that the builder wrote are not also the values of a record that
+        // is in the heap already.
+        let added = builder.written();
+        let record = HeapValue::Record(builder.finish());
+
+        self.approx_bytes += approx_heap_value_bytes(&record) + added * size_of::<Value>();
+        self.values.push(record);
+
+        Value::Record(RecordPointer::new(self.values.len() - 1))
     }
 
     pub fn insert_lambda(&mut self, lambda: LambdaDef) -> Value {
@@ -187,12 +343,20 @@ impl Heap {
         ))
     }
 
+    #[inline]
     pub fn get(&self, id: usize) -> Option<&HeapValue> {
         self.values.get(id)
     }
 
+    #[inline]
     pub fn get_mut(&mut self, id: usize) -> Option<&mut HeapValue> {
         self.values.get_mut(id)
+    }
+
+    /// Every slot of the heap, in the order [`Heap::get`] numbers them.
+    #[inline]
+    pub(crate) fn slots(&self) -> &[HeapValue] {
+        &self.values
     }
 
     /// Number of slots currently in the heap: live values plus garbage not yet compacted away.
@@ -203,6 +367,18 @@ impl Heap {
     /// True only before the constants record has been inserted (i.e. never for a built `Heap`).
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
+    }
+
+    /// The estimate of the bytes that the values of the heap hold.
+    #[cfg(test)]
+    pub(crate) fn approx_bytes(&self) -> usize {
+        self.approx_bytes
+    }
+
+    /// The number of compaction passes so far that were not refused.
+    #[cfg(test)]
+    pub(crate) fn passes(&self) -> usize {
+        self.passes
     }
 
     /// Reclaim heap slots that are no longer reachable from the root environment's bindings,
@@ -217,10 +393,47 @@ impl Heap {
     /// `env` must be the root scope that owns its bindings; values reachable only from child
     /// scopes of an in-progress call are not kept alive.
     pub fn compact(&mut self, env: &Environment, extra_roots: &mut [&mut Value]) {
+        let mut roots = Held {
+            env,
+            extra: extra_roots,
+        };
+
+        self.pass(&mut roots, false);
+    }
+
+    /// [`Heap::compact`] in the middle of a run of a VM, which knows more places that refer
+    /// to the heap than an environment and tells them as `roots`: everything that is not
+    /// reachable from those (or the pinned constants record) is reclaimed.
+    ///
+    /// The run goes on with what it has, so the pass leaves alone what the run reads by its
+    /// address: the elements of every list stay where they are (see [`List::rewrite`]), and
+    /// so does every function definition. A definition that something else holds on to as
+    /// well cannot be rewritten where it is: the pass then leaves the heap as it is, and
+    /// says so.
+    pub(crate) fn compact_in_run(&mut self, roots: &mut dyn Roots) -> Pass {
+        self.pass(roots, true)
+    }
+
+    /// Whether the estimated heap payload has grown past the threshold that the previous
+    /// pass set, so that another pass is worthwhile.
+    #[inline(always)]
+    pub(crate) fn is_grown(&self) -> bool {
+        self.approx_bytes >= self.compact_threshold_bytes
+    }
+
+    /// The number of values that the last pass went through, in the heap and outside of it.
+    pub(crate) fn pass_values(&self) -> usize {
+        self.pass_values
+    }
+
+    /// A compaction pass that keeps what `roots` refer to, between runs or `in_run`.
+    fn pass(&mut self, roots: &mut dyn Roots, in_run: bool) -> Pass {
         let bytes_before = self.approx_bytes;
         let old_len = self.values.len();
         let mut reachable = vec![false; old_len];
         let mut worklist: Vec<usize> = Vec::new();
+        let mut shared = SharedBuffers::default();
+        let mut shared_values = SharedValues::default();
 
         fn mark(slot: usize, reachable: &mut [bool], worklist: &mut Vec<usize>) {
             if !reachable[slot] {
@@ -235,37 +448,48 @@ impl Heap {
             mark(0, &mut reachable, &mut worklist);
         }
 
-        for value in env.flatten().values() {
-            if let Some(slot) = value_slot(value) {
-                mark(slot, &mut reachable, &mut worklist);
-            }
-        }
+        // A root can be a value that nothing reads any more, which may then refer to a slot
+        // that the heap does not have (see `Roots`).
+        let mut outside = 0;
+        roots.each(&mut |values| {
+            outside += values.len();
 
-        for root in extra_roots.iter() {
-            if let Some(slot) = value_slot(root) {
-                mark(slot, &mut reachable, &mut worklist);
+            for value in values {
+                if let Some(slot) = value_slot(value)
+                    && slot < old_len
+                {
+                    mark(slot, &mut reachable, &mut worklist);
+                }
             }
-        }
+        });
 
         // Trace reachability: a slot's children are the values stored in its list elements,
         // record fields, or lambda captured scope.
         while let Some(slot) = worklist.pop() {
             match &self.values[slot] {
-                HeapValue::List(items) => {
-                    for item in items.iter() {
+                HeapValue::List(list) => {
+                    // Lists that share their elements only have them looked at once.
+                    for item in list.unmarked(&mut shared).into_iter().flatten() {
                         if let Some(child) = value_slot(item) {
                             mark(child, &mut reachable, &mut worklist);
                         }
                     }
                 }
                 HeapValue::Record(record) => {
-                    for item in record.values() {
+                    // Records that share their values only have them looked at once.
+                    for item in record.unmarked(&mut shared_values) {
                         if let Some(child) = value_slot(item) {
                             mark(child, &mut reachable, &mut worklist);
                         }
                     }
                 }
                 HeapValue::Lambda(def) => {
+                    // A run has the addresses of the definitions it is calling, and reads
+                    // what they captured there. Nothing has moved yet.
+                    if in_run && Rc::strong_count(def) + Rc::weak_count(def) > 1 {
+                        return Pass::Refused;
+                    }
+
                     for (_, item) in def.scope.iter() {
                         if let Some(child) = value_slot(item) {
                             mark(child, &mut reachable, &mut worklist);
@@ -281,8 +505,8 @@ impl Heap {
         // live data and should not be re-traversed again soon.
         let live_slots = reachable.iter().filter(|live| **live).count();
         if live_slots == old_len {
-            self.retune_after_pass(bytes_before, bytes_before, old_len, old_len);
-            return;
+            self.retune_after_pass(bytes_before, bytes_before, old_len, old_len, outside);
+            return Pass::Kept;
         }
 
         // Move live values down over dead ones, recording where each old slot moved. New indices
@@ -311,19 +535,32 @@ impl Heap {
             live_bytes += approx_heap_value_bytes(value);
 
             match value {
-                HeapValue::List(items) => {
-                    for item in Rc::make_mut(items).iter_mut() {
-                        *item = remap_value(*item, &remap);
-                    }
+                HeapValue::List(list) => {
+                    // SAFETY: a pass runs while nothing else refers to the heap (see above),
+                    // and this loop rewrites every list that is left.
+                    let rewritten = unsafe {
+                        list.rewrite(&mut shared, &mut |item| remap_value(item, &remap), in_run)
+                    };
+                    live_bytes += rewritten * size_of::<Value>();
                 }
                 HeapValue::Record(record) => {
-                    for item in record.values_mut() {
-                        *item = remap_value(*item, &remap);
-                    }
+                    // SAFETY: as for lists: this loop rewrites every record that is left.
+                    let rewritten = unsafe {
+                        record.rewrite(
+                            &mut shared_values,
+                            // Most records have their values to themselves and rewrite
+                            // them right here, where a call per value would cost as much
+                            // as the rewriting.
+                            #[inline(always)]
+                            |item| remap_value(item, &remap),
+                        )
+                    };
+                    live_bytes += rewritten * size_of::<Value>();
                 }
                 HeapValue::Lambda(def) => {
                     // The heap is the only holder of this Rc during compaction (callers do not
-                    // retain `FunctionDef`s across statements), so `make_mut` rewrites in place.
+                    // retain `FunctionDef`s across statements, and a pass in a run found that
+                    // out while it traced), so `make_mut` rewrites in place.
                     Rc::make_mut(def)
                         .scope
                         .rewrite_values(&mut |item| remap_value(item, &remap));
@@ -333,12 +570,23 @@ impl Heap {
         }
 
         // Rewrite the roots so they point at the slots their values moved to.
-        env.rewrite_binding_values(&mut |value| remap_value(value, &remap));
-        for root in extra_roots.iter_mut() {
-            **root = remap_value(**root, &remap);
-        }
+        roots.rewrite(&mut |values| {
+            for value in values {
+                if value_slot(value).is_some_and(|slot| slot < old_len) {
+                    *value = remap_value(*value, &remap);
+                }
+            }
+        });
 
-        self.retune_after_pass(bytes_before, live_bytes, old_len, self.values.len());
+        self.retune_after_pass(
+            bytes_before,
+            live_bytes,
+            old_len,
+            self.values.len(),
+            outside,
+        );
+
+        Pass::Moved
     }
 
     /// Update the size estimate and the next compaction trigger after a pass.
@@ -348,12 +596,18 @@ impl Heap {
     /// little means the heap is mostly live data, so the trigger backs off geometrically:
     /// otherwise a large, growing, mostly-live program would pay for a full re-traversal every
     /// time its size doubles.
+    ///
+    /// A pass also goes through the `outside` values that refer to the heap, however little
+    /// the heap holds. The next one waits until the heap has grown by as much as they take,
+    /// so that what a statement keeps outside of the heap while it runs (the list that a
+    /// long loop is making, say) is not gone through for every little bit of garbage.
     fn retune_after_pass(
         &mut self,
         bytes_before: usize,
         live_bytes: usize,
         slots_before: usize,
         live_slots: usize,
+        outside: usize,
     ) {
         if std::env::var_os("BLOTS_COMPACT_DEBUG").is_some() {
             eprintln!(
@@ -375,7 +629,14 @@ impl Heap {
         self.approx_bytes = live_bytes;
         self.compact_threshold_bytes = live_bytes
             .saturating_mul(self.compact_growth_factor)
+            .max(live_bytes.saturating_add(outside.saturating_mul(size_of::<Value>())))
             .max(COMPACT_MIN_BYTES);
+        self.pass_values = slots_before + outside + live_bytes / size_of::<Value>();
+
+        #[cfg(test)]
+        {
+            self.passes += 1;
+        }
     }
 
     /// Run [`Heap::compact`] only when the estimated heap payload has grown past the adaptive
@@ -393,16 +654,17 @@ impl Heap {
 }
 
 /// Rough estimate of the memory a heap value holds (slot struct plus payload). Only used to
-/// decide when compaction is worthwhile, so it favors being cheap over being exact: string text
-/// and record keys are approximated, and a list payload shared by several slots is counted once
-/// per referencing slot.
+/// decide when compaction is worthwhile, so it favors being cheap over being exact: record
+/// keys are approximated, and a string that shares its characters counts its share of them.
+/// The elements of a list and the values of a record are not part of it: lists and records
+/// can share them, so they are counted where it is known how many of them are new.
 fn approx_heap_value_bytes(value: &HeapValue) -> usize {
     use std::mem::size_of;
 
     let payload = match value {
-        HeapValue::List(items) => items.len() * size_of::<Value>(),
-        HeapValue::String(string) => string.len(),
-        HeapValue::Record(record) => record.len() * (size_of::<String>() + size_of::<Value>() + 16),
+        HeapValue::List(_) => 0,
+        HeapValue::String(text) => text.held_bytes(),
+        HeapValue::Record(_) => 16,
         HeapValue::Lambda(def) => 64 + def.scope.len() * (size_of::<Value>() + size_of::<usize>()),
     };
 
@@ -425,6 +687,7 @@ fn value_slot(value: &Value) -> Option<usize> {
 
 /// The same value with its heap pointer (if any) remapped through `remap`, which maps old slot
 /// indices to post-compaction indices.
+#[inline(always)]
 fn remap_value(value: Value, remap: &[usize]) -> Value {
     match value {
         Value::List(p) => Value::List(ListPointer::new(remap[p.index()])),
@@ -450,6 +713,32 @@ impl Default for Heap {
     }
 }
 
+/// A copy of a heap has lists of its own: a compaction pass rewrites the elements of the
+/// lists in its heap where they are, which a list of another heap must not see. The same
+/// goes for the values of records, which a copy of a record has to itself anyway.
+impl Clone for Heap {
+    fn clone(&self) -> Self {
+        let values = self
+            .values
+            .iter()
+            .map(|value| match value {
+                HeapValue::List(list) => HeapValue::List(List::new(list.to_vec())),
+                other => other.clone(),
+            })
+            .collect();
+
+        Self {
+            values,
+            approx_bytes: self.approx_bytes,
+            compact_threshold_bytes: self.compact_threshold_bytes,
+            compact_growth_factor: self.compact_growth_factor,
+            pass_values: self.pass_values,
+            #[cfg(test)]
+            passes: self.passes,
+        }
+    }
+}
+
 pub trait HeapPointer<'h> {
     fn reify(&self, heap: &'h Heap) -> &'h HeapValue;
     fn reify_mut(&self, heap: &'h mut Heap) -> &'h mut HeapValue;
@@ -462,11 +751,11 @@ macro_rules! define_pointer {
         pub struct $name(usize);
 
         impl $name {
-            pub fn new(index: usize) -> Self {
+            pub const fn new(index: usize) -> Self {
                 $name(index)
             }
 
-            pub fn index(&self) -> usize {
+            pub const fn index(&self) -> usize {
                 self.0
             }
         }
