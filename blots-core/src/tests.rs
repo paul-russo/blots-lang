@@ -7090,6 +7090,72 @@ mod shared_record_tests {
     }
 
     #[test]
+    fn a_record_tells_keys_of_every_length_that_start_alike_apart() {
+        let session = Session::new();
+        session
+            .evaluate(
+                "name = n => reduce(range(n), (acc, i) => acc + to_string(i % 10), \"\")\n\
+                 few = reduce(range(8), (acc, n) => {...acc, [name(n * 5)]: n}, {})\n\
+                 many = reduce(range(42), (acc, n) => {...acc, [name(n)]: n}, {})\n\
+                 marked = {[\"é\"]: 1, e: 2, [\"ééé\"]: 3, [\"éééé\"]: 4, [\"ééééé\"]: 5, \
+                 [\"😀😀\"]: 6, [\"😀\"]: 7}",
+            )
+            .unwrap();
+
+        let list = |items: Vec<String>| format!("[{}]", items.join(", "));
+        let found = |number: Option<usize>| match number {
+            Some(number) => number.to_string(),
+            None => "null".to_string(),
+        };
+
+        // A key of every number of characters from none to more than a short string has,
+        // each of which starts with the ones before it.
+        assert_eq!(
+            session.outcome("map(range(44), n => many[name(n)])"),
+            list((0..44).map(|n| found((n < 42).then_some(n))).collect())
+        );
+        assert_eq!(
+            session.outcome("map(range(44), n => few[name(n)])"),
+            list(
+                (0..44)
+                    .map(|n| found((n % 5 == 0 && n < 40).then_some(n / 5)))
+                    .collect()
+            )
+        );
+        assert_eq!(
+            session.outcome("map(range(42), n => many[name(n) + \"-\"])"),
+            list(vec![found(None); 42])
+        );
+        assert_eq!(
+            session.outcome("map(keys(many), k => many[k])"),
+            list((0..42).map(|n| found(Some(n))).collect())
+        );
+
+        // Characters of more than one byte, in keys that are made where they are looked up.
+        for (code, expected) in [
+            ("map(keys(marked), k => marked[k])", "[1, 2, 3, 4, 5, 6, 7]"),
+            (
+                "[marked[\"é\" + \"\"], marked[\"é\" + \"é\"], marked[\"éé\" + \"é\"]]",
+                "[1, null, 3]",
+            ),
+            (
+                "[marked[\"ééé\" + \"é\"], marked[\"ééé\" + \"éé\"], marked[\"ééé\" + \"ééé\"]]",
+                "[4, 5, null]",
+            ),
+            (
+                "[marked[\"e\" + \"\"], marked[\"ééé\" + \"e\"], marked[\"e\" + \"ééé\"]]",
+                "[2, null, null]",
+            ),
+            (
+                "[marked[\"😀\" + \"\"], marked[\"😀\" + \"😀\"], marked[\"😀\" + \"é\"]]",
+                "[7, 6, null]",
+            ),
+        ] {
+            assert_eq!(session.outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
     fn records_that_share_their_values_survive_compaction() {
         let session = Session::new();
 

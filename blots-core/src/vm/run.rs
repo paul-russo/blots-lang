@@ -884,10 +884,8 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                         && let Some(HeapValue::Record(record)) = heap_value!(pointer)
                         && let Some(HeapValue::String(key)) = heap_value!(key)
                     {
-                        match record.position(key.as_str()) {
-                            Some(position) => {
-                                load_value(reg!(instr.a), record.as_slice().as_ptr().add(position));
-                            }
+                        match record.value_under(key) {
+                            Some(value) => load_value(reg!(instr.a), value),
                             None => store_value(reg!(instr.a), Value::Null),
                         }
                         next!(1);

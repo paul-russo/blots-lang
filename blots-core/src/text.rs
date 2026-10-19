@@ -266,6 +266,25 @@ impl Text {
         self.len() == 0
     }
 
+    /// The bytes of a text of at most eight bytes as one word, the first byte lowest and
+    /// zeros for the bytes that it does not have, and the number of bytes that it has.
+    #[inline(always)]
+    pub(crate) fn as_word(&self) -> Option<(u64, usize)> {
+        const WORD: usize = size_of::<u64>();
+        const _: () = assert!(INLINE_CAPACITY >= WORD);
+
+        match &self.0 {
+            // The bytes behind those of the text are zero.
+            Repr::Inline { len, bytes } if *len as usize <= WORD => {
+                let mut word = [0; WORD];
+                word.copy_from_slice(&bytes[..WORD]);
+
+                Some((u64::from_le_bytes(word), *len as usize))
+            }
+            _ => None,
+        }
+    }
+
     /// Whether every character is known to take one byte, so that the characters are where
     /// their positions say. A text that this does not hold for may still be made of such
     /// characters only.

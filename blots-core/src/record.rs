@@ -20,7 +20,7 @@
 //!   (see [`RecordBuilder`]). Like the keys, the values of a record that is built one key
 //!   at a time are copied once per doubling of their number.
 
-use crate::{list::AddressHasher, values::Value};
+use crate::{list::AddressHasher, text::Text, values::Value};
 use indexmap::IndexMap;
 use std::{
     alloc::{Layout, alloc, dealloc, handle_alloc_error},
@@ -70,11 +70,18 @@ pub struct Keys {
     /// The number of keys that the room was allocated for, which is at least `capacity`.
     allocated: usize,
 
-    /// Where the keys are, for tables with room for more than [`LINEAR_SEARCH_KEYS`]: the
-    /// upper half of a slot is the upper half of the hash of a key, the lower half is the
-    /// position of the key plus one. A key is in the first free slot from the one its hash
-    /// picks, going around at the end; at most half of the slots are ever taken.
-    slots: Box<[Cell<u64>]>,
+    /// The head of every key (see [`short_head`]), in the order of the keys, and
+    /// [`NO_KEY`] where the table has room for a key that it does not have yet: there is
+    /// room for `capacity` heads, and for [`LINEAR_SEARCH_KEYS`] at least. A key is looked
+    /// for among the heads. Its characters are only read when it is a long one, to make
+    /// sure of it.
+    heads: Box<[Cell<u64>]>,
+
+    /// Where the keys are, for tables with room for more than [`LINEAR_SEARCH_KEYS`]: a
+    /// slot holds the position of a key plus one, and zero while it is free. A key is in
+    /// the first free slot from the one its hash picks, going around at the end; at most
+    /// half of the slots are ever taken, and there is a power of two of them.
+    slots: Box<[Cell<u32>]>,
 
     /// Whether this is the canonical table of its key list (see [`Keys::interned`]). Such a
     /// table has no room for more keys, so it stays the table of that list.
@@ -114,6 +121,7 @@ impl Keys {
             capacity,
             filled: Cell::new(0),
             allocated,
+            heads: vec![Cell::new(NO_KEY); capacity.max(LINEAR_SEARCH_KEYS)].into_boxed_slice(),
             slots: slots.into_boxed_slice(),
             interned,
             forks: RefCell::new(Vec::new()),
@@ -134,7 +142,7 @@ impl Keys {
 
             let table = Keys::with_room(list.len(), true);
             for key in &list {
-                table.push(Rc::clone(key));
+                table.push(Rc::clone(key), head_of(key.as_bytes()));
             }
 
             let table = Rc::new(table);
@@ -184,54 +192,134 @@ impl Keys {
     /// The position of `key` among the first `count` keys, which the table has to have.
     #[inline]
     pub fn position(&self, count: usize, key: &str) -> Option<usize> {
-        if count <= LINEAR_SEARCH_KEYS {
-            return self.first(count).iter().position(|own| same_key(own, key));
-        }
-
-        self.find(key).filter(|position| *position < count)
+        self.position_by(count, key.as_bytes(), head_of(key.as_bytes()))
     }
 
-    /// The position of `key` in a table that has slots.
-    fn find(&self, key: &str) -> Option<usize> {
-        let hash = hash_key(key);
-        let mask = self.slots.len() - 1;
-        let mut slot = hash as usize & mask;
+    /// The position of `key`, whose head is `head`, among the first `count` keys, which the
+    /// table has to have.
+    #[inline]
+    fn position_by(&self, count: usize, key: &[u8], head: u64) -> Option<usize> {
+        match key.len() <= HEAD_BYTES {
+            true => self.position_of_short(count, head),
+            false => self.position_of_long(count, key, head),
+        }
+    }
+
+    /// The position, among the first `count` keys, of the key of at most [`HEAD_BYTES`]
+    /// bytes whose head is `head`. No other key has that head.
+    #[inline(always)]
+    fn position_of_short(&self, count: usize, head: u64) -> Option<usize> {
+        self.position_where(count, head, |_| true)
+    }
+
+    /// The position of `key`, which has more than [`HEAD_BYTES`] bytes and whose head is
+    /// `head`, among the first `count` keys, which the table has to have.
+    fn position_of_long(&self, count: usize, key: &[u8], head: u64) -> Option<usize> {
+        assert!(
+            count <= self.filled.get(),
+            "a table has the keys it is asked for"
+        );
+
+        // SAFETY: the table has a key wherever this is asked, as it has `count` of them.
+        self.position_where(count, head, |position| unsafe {
+            self.has_at(position, key)
+        })
+    }
+
+    /// The position, among the first `count` keys, of the key with this `head` that
+    /// `is_sought`. That is asked about the positions of keys that the table has, among
+    /// the first `count` ones where there are no more keys than are searched linearly.
+    #[inline(always)]
+    fn position_where(
+        &self,
+        count: usize,
+        head: u64,
+        is_sought: impl Fn(usize) -> bool,
+    ) -> Option<usize> {
+        if count <= LINEAR_SEARCH_KEYS {
+            // SAFETY: a table has room for the heads of as many keys as are searched
+            // linearly, at least.
+            let heads = unsafe {
+                &*self
+                    .heads
+                    .as_ptr()
+                    .cast::<[Cell<u64>; LINEAR_SEARCH_KEYS]>()
+            };
+
+            for (position, own) in heads.iter().enumerate() {
+                if own.get() == head {
+                    // The keys from here on are not among the first `count`, and neither
+                    // is the one that is sought if it is one of them.
+                    if position >= count {
+                        return None;
+                    }
+                    if is_sought(position) {
+                        return Some(position);
+                    }
+                }
+            }
+
+            return None;
+        }
+
+        // A table with more keys than that has room for them, and so has slots.
+        let Some(mask) = self.slots.len().checked_sub(1) else {
+            keys_are_missing();
+        };
+        let mut slot = mixed(head) as usize & mask;
 
         loop {
-            let entry = self.slots[slot].get();
+            // SAFETY: the table has a power of two of slots, which `mask` is one less
+            // than, so it keeps `slot` among them.
+            let entry = unsafe { self.slots.get_unchecked(slot) }.get();
             if entry == 0 {
                 return None;
             }
 
-            if entry >> 32 == hash >> 32 {
-                let position = (entry as u32 - 1) as usize;
-                // SAFETY: a slot holds the position of a key that the table has.
-                if same_key(unsafe { &*self.start.as_ptr().add(position) }, key) {
-                    return Some(position);
-                }
+            let position = entry as usize - 1;
+            // SAFETY: a slot holds the position of a key that the table has, and with it
+            // that of the head of the key.
+            if unsafe { self.heads.get_unchecked(position) }.get() == head && is_sought(position) {
+                return (position < count).then_some(position);
             }
 
             slot = (slot + 1) & mask;
         }
     }
 
-    /// Add `key`, which the table has room for and does not have yet.
-    fn push(&self, key: Key) {
+    /// Whether the key at `position` is `key`, which has more than [`HEAD_BYTES`] bytes.
+    ///
+    /// # Safety
+    /// The table must have a key at `position`.
+    #[inline(always)]
+    unsafe fn has_at(&self, position: usize, key: &[u8]) -> bool {
+        // SAFETY: the table has a key at `position`, which nothing writes to.
+        is_long_key(
+            unsafe { &*self.start.as_ptr().add(position) }.as_bytes(),
+            key,
+        )
+    }
+
+    /// Add `key`, whose head is `head` and which the table has room for and does not have
+    /// yet.
+    fn push(&self, key: Key, head: u64) {
         let position = self.filled.get();
         assert!(
             position < self.capacity,
             "a table has room for the key it is given"
         );
 
+        self.heads[position].set(head);
+
         if !self.slots.is_empty() {
-            let hash = hash_key(&key);
             let mask = self.slots.len() - 1;
-            let mut slot = hash as usize & mask;
+            let mut slot = mixed(head) as usize & mask;
             while self.slots[slot].get() != 0 {
                 slot = (slot + 1) & mask;
             }
 
-            self.slots[slot].set((hash >> 32) << 32 | (position as u64 + 1));
+            // The position fits: a table has room for fewer keys than a slot counts.
+            self.slots[slot].set(position as u32 + 1);
         }
 
         // SAFETY: the table has room for a key at `position`, which is behind every key
@@ -243,6 +331,11 @@ impl Keys {
     /// The table that has the first `count` keys of this one and then `key`, which is not
     /// one of them. It is this table when the key is where it has to be or can be put there.
     pub fn followed_by(self: &Rc<Self>, count: usize, key: &str) -> Rc<Keys> {
+        self.followed_by_key(count, key, head_of(key.as_bytes()))
+    }
+
+    /// As [`Keys::followed_by`], for a key whose head is `head`.
+    fn followed_by_key(self: &Rc<Self>, count: usize, key: &str, head: u64) -> Rc<Keys> {
         let filled = self.filled.get();
         assert!(
             count <= filled,
@@ -250,12 +343,20 @@ impl Keys {
         );
 
         if count < filled {
-            // SAFETY: the table has a key at `count`.
-            if **unsafe { &*self.start.as_ptr().add(count) } == *key {
+            // A key of at most as many bytes as its head holds is the only one with that
+            // head. A longer one is compared with the key that has the head.
+            let is_there = self.heads[count].get() == head
+                && match key.len() <= HEAD_BYTES {
+                    true => true,
+                    // SAFETY: the table has a key at `count`.
+                    false => unsafe { self.has_at(count, key.as_bytes()) },
+                };
+
+            if is_there {
                 return Rc::clone(self);
             }
         } else if filled < self.capacity {
-            self.push(Key::from(key));
+            self.push(Key::from(key), head);
             return Rc::clone(self);
         }
 
@@ -275,10 +376,10 @@ impl Keys {
         // it has: a record that grows key by key has its keys copied once per doubling.
         let capacity = ((count + 1) * 2).max(MIN_GROWING_CAPACITY);
         let table = Keys::with_room(capacity, false);
-        for shared in self.first(count) {
-            table.push(Rc::clone(shared));
+        for (shared, head) in self.first(count).iter().zip(&self.heads) {
+            table.push(Rc::clone(shared), head.get());
         }
-        table.push(Key::from(key));
+        table.push(Key::from(key), head);
         let table = Rc::new(table);
 
         if forks.len() == KEPT_FORKS {
@@ -340,55 +441,134 @@ fn word_of(bytes: &[u8]) -> u64 {
     }
 }
 
-/// Whether `own`, a key of a table, is `key`.
+/// The number of bytes that the head of a key holds.
+const HEAD_BYTES: usize = size_of::<u64>();
+
+/// What the highest byte of the head of a key of fewer than [`HEAD_BYTES`] bytes has set,
+/// next to the number of bytes of the key.
+const SHORT_KEY: u64 = 0xF8;
+
+/// The highest byte of the head of a key of more than [`HEAD_BYTES`] bytes.
+const LONG_KEY: u64 = 0xF5;
+
+/// The head of no key: that of a key without bytes that has one. It stands where a table
+/// has room for the head of a key that it does not have yet.
+const NO_KEY: u64 = SHORT_KEY << (u64::BITS - u8::BITS) | 1;
+
+/// What the head of a key of so many bytes has next to the bytes of the key: its highest
+/// byte for a key of fewer than [`HEAD_BYTES`] bytes, and nothing for one of just as many.
+const HEAD_MARKS: [u64; HEAD_BYTES + 1] = {
+    let mut marks = [0; HEAD_BYTES + 1];
+
+    let mut len = 0;
+    while len < HEAD_BYTES {
+        marks[len] = (SHORT_KEY | len as u64) << (u64::BITS - u8::BITS);
+        len += 1;
+    }
+
+    marks
+};
+
+/// The head of a key of `len` bytes, which are [`HEAD_BYTES`] at most and the lowest bytes
+/// of `word`, the first one lowest. The other bytes of `word` are zero.
+///
+/// The head of a key is a word that tells it from the other keys of a table at a glance:
+///
+/// - a key of at most [`HEAD_BYTES`] bytes has its bytes there, and one of fewer bytes
+///   also their number, in the highest byte, which is one that no character has (the bytes
+///   of UTF-8 stay below [`LONG_KEY`]). No other key has that head;
+/// - a longer key has a hash of its bytes there, under [`LONG_KEY`] as the highest byte.
+///   Another long key may have the same head, which is rare enough: the bytes of a long
+///   key are only compared with a key that is almost certain to be the same.
 #[inline(always)]
-fn same_key(own: &Key, key: &str) -> bool {
-    let (own, key) = (own.as_bytes(), key.as_bytes());
+pub(crate) fn short_head(word: u64, len: usize) -> u64 {
+    debug_assert!(len <= HEAD_BYTES);
+
+    word | HEAD_MARKS[len]
+}
+
+/// The head of `key` (see [`short_head`]).
+#[inline(always)]
+fn head_of(key: &[u8]) -> u64 {
+    match key.len() {
+        len if len < HEAD_BYTES => short_head(word_of(key), len),
+        // SAFETY: the key has just the eight bytes that are read.
+        HEAD_BYTES => unsafe { word_at(key, 0) },
+        _ => long_head(key),
+    }
+}
+
+/// The head of `key`, which has more than [`HEAD_BYTES`] bytes: every byte counts, eight at
+/// a time, and so does their number.
+fn long_head(key: &[u8]) -> u64 {
+    let last = key.len() - HEAD_BYTES;
+
+    // SAFETY: the key has eight bytes from every position up to `last`. The last eight
+    // reach back over bytes that were counted already where fewer than eight are left.
+    let hash = unsafe {
+        let mut hash = mixed(word_at(key, 0) ^ key.len() as u64);
+
+        let mut at = HEAD_BYTES;
+        while at < last {
+            hash = mixed(hash ^ word_at(key, at));
+            at += HEAD_BYTES;
+        }
+
+        mixed(hash ^ word_at(key, last))
+    };
+
+    hash >> u8::BITS | LONG_KEY << (u64::BITS - u8::BITS)
+}
+
+/// The eight bytes of `bytes` from `at` on as a word, the first one lowest.
+///
+/// # Safety
+/// The bytes must be there.
+#[inline(always)]
+unsafe fn word_at(bytes: &[u8], at: usize) -> u64 {
+    debug_assert!(at + HEAD_BYTES <= bytes.len());
+
+    // SAFETY: the eight bytes from `at` on are bytes of the slice.
+    u64::from_le(unsafe { bytes.as_ptr().add(at).cast::<u64>().read_unaligned() })
+}
+
+/// Whether `own` is `key`, which has more than [`HEAD_BYTES`] bytes.
+#[inline(always)]
+fn is_long_key(own: &[u8], key: &[u8]) -> bool {
+    debug_assert!(key.len() > HEAD_BYTES);
+
     if own.len() != key.len() {
         return false;
     }
 
     match key.len() {
-        0..=8 => word_of(own) == word_of(key),
         // SAFETY: both have at least eight bytes, which are read from their starts and
         // as the eight that end them.
-        9..=16 => unsafe {
-            let last = key.len() - 8;
-            let word =
-                |bytes: &[u8], at: usize| bytes.as_ptr().add(at).cast::<u64>().read_unaligned();
+        len if len <= 2 * HEAD_BYTES => unsafe {
+            let last = len - HEAD_BYTES;
 
-            word(own, 0) == word(key, 0) && word(own, last) == word(key, last)
+            word_at(own, 0) == word_at(key, 0) && word_at(own, last) == word_at(key, last)
         },
         _ => own == key,
     }
 }
 
-/// The hash of a key: every character counts, eight at a time.
-#[inline]
-pub(crate) fn hash_key(key: &str) -> u64 {
-    let bytes = key.as_bytes();
-    let mut hash = bytes.len() as u64;
+/// A word that every bit of `word` has a say in all over: the two halves of its product
+/// with a constant, one over the other. The lower bits of what this makes of the head of
+/// a key pick the slot of the key.
+#[inline(always)]
+fn mixed(word: u64) -> u64 {
+    let product = u128::from(word) * 0x9E37_79B9_7F4A_7C15_u128;
 
-    let mut words = bytes.chunks_exact(8);
-    for word in &mut words {
-        let word = u64::from_le_bytes(word.try_into().expect("a chunk of eight bytes"));
-        hash = (hash.rotate_left(5) ^ word).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    }
+    product as u64 ^ (product >> u64::BITS) as u64
+}
 
-    let rest = words.remainder();
-    if !rest.is_empty() {
-        hash = (hash.rotate_left(5) ^ word_of(rest)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    }
-
-    // Spread every bit over all of the hash (the finalizer of MurmurHash3): the lower bits
-    // pick the slot, the upper ones tell keys in the same slot apart.
-    hash ^= hash >> 33;
-    hash = hash.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
-    hash ^= hash >> 33;
-    hash = hash.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
-    hash ^= hash >> 33;
-
-    hash
+/// A record that has more keys than its table, which the keys of a record are the first of,
+/// is not one that was made here.
+#[cold]
+#[inline(never)]
+fn keys_are_missing() -> ! {
+    panic!("a table has the keys it is asked for")
 }
 
 /// The values of records that are made by adding to each other, in the order of their
@@ -740,6 +920,31 @@ impl Record {
     #[inline]
     pub fn position(&self, key: &str) -> Option<usize> {
         self.keys.position(self.len(), key)
+    }
+
+    /// The value under the key that `text` spells.
+    ///
+    /// A text of a few bytes has them at hand as the head of the key, which is all that
+    /// such a key takes to find. So this is how a key that was computed is looked up: for
+    /// most keys it comes to no call and no look at the characters of any key.
+    #[inline(never)]
+    pub fn value_under(&self, text: &Text) -> Option<&Value> {
+        let Some((word, len)) = text.as_word() else {
+            return self.value_under_long(text);
+        };
+
+        let position = self
+            .keys
+            .position_of_short(self.len(), short_head(word, len))?;
+
+        // SAFETY: the record has a value for each of its keys, which the key is one of.
+        Some(unsafe { &*self.start.as_ptr().add(position) })
+    }
+
+    /// As [`Record::value_under`], for a key that is not all in its head.
+    #[inline(never)]
+    fn value_under_long(&self, key: &str) -> Option<&Value> {
+        self.get(key)
     }
 
     pub fn get(&self, key: &str) -> Option<&Value> {
@@ -1182,11 +1387,12 @@ impl RecordBuilder {
     /// Add an entry that at most `more` entries follow.
     fn put(&mut self, key: &str, value: Value, more: usize) {
         let len = self.len();
+        let head = head_of(key.as_bytes());
 
-        match self.keys.position(len, key) {
+        match self.keys.position_by(len, key.as_bytes(), head) {
             Some(position) => self.replace(position, value, more),
             None => {
-                self.keys = self.keys.followed_by(len, key);
+                self.keys = self.keys.followed_by_key(len, key, head);
                 self.push(value, more);
             }
         }
@@ -1473,27 +1679,267 @@ mod tests {
         }
     }
 
+    /// Keys of every number of bytes up to those of a head and a few more, made of the
+    /// characters with the lowest and the highest bytes that the characters of one, two,
+    /// three and four bytes have.
+    fn keys_of_a_few_characters() -> Vec<String> {
+        let characters = [
+            "\0",
+            "\u{1}",
+            "a",
+            "\u{7f}",
+            "\u{80}",
+            "\u{7ff}",
+            "\u{800}",
+            "\u{ffff}",
+            "\u{10000}",
+            "\u{10ffff}",
+        ];
+
+        let mut keys = vec![String::new()];
+        let mut longest = keys.clone();
+        for _ in 0..4 {
+            longest = longest
+                .iter()
+                .flat_map(|key| characters.map(|character| format!("{key}{character}")))
+                .collect();
+            keys.extend(longest.iter().cloned());
+        }
+
+        // The keys that are nothing but the lowest byte, and nothing but an ordinary one.
+        for len in 5..=HEAD_BYTES + 2 {
+            keys.push("\0".repeat(len));
+            keys.push("a".repeat(len));
+        }
+
+        keys
+    }
+
     #[test]
-    fn a_key_is_told_from_one_that_differs_in_any_of_its_bytes() {
-        let all: String = ('a'..='z').chain('A'..='Z').collect();
+    fn the_head_of_a_key_of_a_word_at_most_is_that_of_no_other_key() {
+        let keys = keys_of_a_few_characters();
+        let mut seen: HashMap<u64, &str> = HashMap::new();
 
-        for len in 0..=40 {
-            let own = Key::from(&all[..len]);
-            assert!(same_key(&own, &all[..len]), "{len}");
+        for key in &keys {
+            let head = head_of(key.as_bytes());
+            let highest = head >> (u64::BITS - u8::BITS);
 
-            // One byte longer, one byte shorter, and one that starts later.
-            assert!(!same_key(&own, &all[..len + 1]), "{len}");
-            if len > 0 {
-                assert!(!same_key(&own, &all[..len - 1]), "{len}");
-                assert!(!same_key(&own, &all[1..len + 1]), "{len}");
+            assert_ne!(head, NO_KEY, "{key:?}");
+            assert_eq!(key.len() > HEAD_BYTES, highest == LONG_KEY, "{key:?}");
+            assert_eq!(key.len() < HEAD_BYTES, highest >= SHORT_KEY, "{key:?}");
+
+            if key.len() <= HEAD_BYTES {
+                let mut word = [0; HEAD_BYTES];
+                word[..key.len()].copy_from_slice(key.as_bytes());
+                assert_eq!(
+                    head,
+                    short_head(u64::from_le_bytes(word), key.len()),
+                    "{key:?}"
+                );
+
+                if let Some(other) = seen.insert(head, key) {
+                    panic!("{key:?} has the head of {other:?}");
+                }
             }
+        }
+
+        assert!(seen.len() > 5000);
+    }
+
+    /// `key` with a byte that it does not have instead of the one at `at`.
+    fn with_another_byte_at(key: &[u8], at: usize) -> Vec<u8> {
+        let mut other = key.to_vec();
+        other[at] = b'-';
+
+        other
+    }
+
+    #[test]
+    fn every_byte_of_a_long_key_and_their_number_count_for_its_head() {
+        let all: Vec<u8> = (b'a'..=b'z').chain(b'A'..=b'Z').collect();
+
+        for len in HEAD_BYTES + 1..=40 {
+            let key = &all[..len];
+            let head = long_head(key);
+
+            assert_eq!(head, head_of(key), "{len}");
+            assert_eq!(head >> (u64::BITS - u8::BITS), LONG_KEY, "{len}");
+            assert_ne!(head, long_head(&all[..len + 1]), "{len}");
+            assert_ne!(head, long_head(&all[1..len + 1]), "{len}");
 
             for at in 0..len {
-                let mut other = all[..len].to_string();
-                other.replace_range(at..at + 1, "-");
+                let other = with_another_byte_at(key, at);
 
-                assert!(!same_key(&own, &other), "{len}, {at}");
+                assert_ne!(head, long_head(&other), "{len}, {at}");
             }
+        }
+
+        // The same byte over and over is another key for every number of them.
+        let lengths = HEAD_BYTES + 1..200;
+        let heads: std::collections::HashSet<u64> = lengths
+            .clone()
+            .map(|len| long_head("a".repeat(len).as_bytes()))
+            .collect();
+        assert_eq!(heads.len(), lengths.len());
+    }
+
+    #[test]
+    fn a_long_key_is_told_from_one_that_differs_in_any_of_its_bytes() {
+        let all: Vec<u8> = (b'a'..=b'z').chain(b'A'..=b'Z').collect();
+
+        for len in HEAD_BYTES + 1..=40 {
+            let key = &all[..len];
+            assert!(is_long_key(key, key), "{len}");
+
+            // One byte longer, one byte shorter, and one that starts later.
+            assert!(!is_long_key(&all[..len + 1], key), "{len}");
+            assert!(!is_long_key(&all[..len - 1], key), "{len}");
+            assert!(!is_long_key(&all[1..len + 1], key), "{len}");
+
+            for at in 0..len {
+                let other = with_another_byte_at(key, at);
+
+                assert!(!is_long_key(&other, key), "{len}, {at}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_key_is_not_found_for_one_that_differs_in_any_of_its_bytes() {
+        let all: String = ('a'..='z').chain('A'..='Z').collect();
+        let others = numbered("another-key-", 2 * LINEAR_SEARCH_KEYS);
+
+        for len in 0..=40 {
+            let own = &all[..len];
+
+            // On its own, and among enough keys to be looked up by its slot.
+            for others in [&others[..0], &others[..]] {
+                let keys = std::iter::once(own).chain(others.iter().map(String::as_str));
+                let table = Keys::interned(keys);
+                let count = table.len();
+
+                assert_eq!(table.position(count, own), Some(0), "{len}");
+
+                // One byte longer, one byte shorter, and one that starts later.
+                assert_eq!(table.position(count, &all[..len + 1]), None, "{len}");
+                if len > 0 {
+                    assert_eq!(table.position(count, &all[..len - 1]), None, "{len}");
+                    assert_eq!(table.position(count, &all[1..len + 1]), None, "{len}");
+                }
+
+                for at in 0..len {
+                    let mut other = own.to_string();
+                    other.replace_range(at..at + 1, "-");
+
+                    assert_eq!(table.position(count, &other), None, "{len}, {at}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn keys_of_a_few_characters_of_any_kind_are_found_where_they_are() {
+        let keys = keys_of_a_few_characters();
+
+        // A few of them at a time, which are searched one by one, and all of them.
+        for table in keys
+            .chunks(LINEAR_SEARCH_KEYS)
+            .step_by(97)
+            .chain([&keys[..]])
+        {
+            let record: Record = table
+                .iter()
+                .enumerate()
+                .map(|(position, key)| (key.as_str(), Value::Number(position as f64)))
+                .collect();
+            assert_eq!(record.len(), table.len());
+
+            for (position, key) in table.iter().enumerate() {
+                let value = Value::Number(position as f64);
+
+                assert_eq!(record.position(key), Some(position), "{key:?}");
+                assert_eq!(record.value_under(&Text::new(key)), Some(&value), "{key:?}");
+            }
+        }
+
+        // What a few of them do not have is not found among them.
+        let few: Record = keys[..LINEAR_SEARCH_KEYS]
+            .iter()
+            .map(|key| (key.as_str(), Value::Null))
+            .collect();
+        for key in &keys[LINEAR_SEARCH_KEYS..] {
+            assert_eq!(few.position(key), None, "{key:?}");
+            assert_eq!(few.value_under(&Text::new(key)), None, "{key:?}");
+        }
+    }
+
+    #[test]
+    fn a_text_finds_the_value_under_the_key_that_it_spells() {
+        // Keys of every length that a text has at hand, and of more.
+        let all: String = ('a'..='z').chain('A'..='Z').collect();
+        let names: Vec<&str> = (0..=40).map(|len| &all[..len]).collect();
+
+        for count in [
+            0,
+            1,
+            LINEAR_SEARCH_KEYS,
+            LINEAR_SEARCH_KEYS + 1,
+            names.len(),
+        ] {
+            let record: Record = names[..count]
+                .iter()
+                .enumerate()
+                .map(|(position, name)| (*name, Value::Number(position as f64)))
+                .collect();
+
+            for (position, name) in names.iter().enumerate() {
+                let expected = (position < count).then_some(Value::Number(position as f64));
+
+                assert_eq!(
+                    record.value_under(&Text::new(name)),
+                    expected.as_ref(),
+                    "{name} in {count}"
+                );
+                assert_eq!(record.get(name), expected.as_ref(), "{name} in {count}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_text_finds_no_value_under_a_key_that_only_the_table_of_a_record_has() {
+        let all = numbered("k", 40);
+        let table = Keys::interned(all.iter().map(String::as_str));
+
+        for count in [0, 1, 5, LINEAR_SEARCH_KEYS, LINEAR_SEARCH_KEYS + 1, 20, 40] {
+            let record = Record::new(Rc::clone(&table), numbers(0..count).into_boxed_slice());
+
+            for (position, name) in all.iter().enumerate() {
+                let expected = (position < count).then_some(Value::Number(position as f64));
+
+                assert_eq!(
+                    record.value_under(&Text::new(name)),
+                    expected.as_ref(),
+                    "{name} in {count}"
+                );
+                assert_eq!(record.get(name), expected.as_ref(), "{name} in {count}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_table_with_room_has_none_of_the_keys_that_it_has_room_for() {
+        // A table that was made by adding a key to others has room for more keys.
+        let base = Keys::interned(["room-a"].into_iter());
+        let table = base.followed_by(1, "b");
+        assert!(table.len() < table.capacity);
+
+        for key in keys_of_a_few_characters() {
+            let expected = match key.as_str() {
+                "b" => Some(1),
+                _ => None,
+            };
+
+            assert_eq!(table.position(table.len(), &key), expected, "{key:?}");
         }
     }
 
