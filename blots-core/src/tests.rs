@@ -7345,3 +7345,515 @@ mod built_in_call_tests {
         }
     }
 }
+
+// A statement gives up what it leaves behind in the heap while it runs: the heap is compacted
+// between two of its instructions, and the run goes on with everything where the pass put
+// it. Nothing but the size of the heap may tell that from a run without passes.
+#[cfg(test)]
+mod in_run_compaction_tests {
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::{evaluate_ast, evaluate_statement};
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::{Heap, HeapValue};
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// `junk(n)` comes to `2 * n` and leaves `n` lists behind in the heap, which is enough
+    /// for a pass from a few ten thousand on.
+    const JUNK: &str = "junk = n => sum(map(range(n), i => len([i, i + 1])))\n";
+
+    /// A program that is evaluated a statement at a time, with nothing reclaimed between
+    /// two statements.
+    struct Session {
+        heap: Rc<RefCell<Heap>>,
+        bindings: Rc<Environment>,
+
+        /// Whether a statement may have the heap compacted while it runs.
+        compacts: bool,
+    }
+
+    impl Session {
+        fn new(compacts: bool) -> Self {
+            Self {
+                heap: Rc::new(RefCell::new(Heap::new())),
+                bindings: Rc::new(Environment::new()),
+                compacts,
+            }
+        }
+
+        /// Evaluate the statements of `code`, up to the value of the last one. The caller
+        /// holds on to `held` in the meantime.
+        fn evaluate_holding(
+            &self,
+            code: &str,
+            held: &mut [&mut Value],
+        ) -> Result<Value, RuntimeError> {
+            let statements = parse_program(code).expect("a program the fast parser reads");
+            let source: Rc<str> = code.into();
+
+            let mut result = Value::Null;
+            for statement in statements {
+                let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement
+                else {
+                    continue;
+                };
+
+                let (heap, bindings) = (Rc::clone(&self.heap), Rc::clone(&self.bindings));
+                result = match self.compacts {
+                    true => evaluate_statement(&expr, heap, bindings, Rc::clone(&source), held)?,
+                    false => evaluate_ast(&expr, heap, bindings, 0, Rc::clone(&source))?,
+                };
+            }
+
+            Ok(result)
+        }
+
+        fn evaluate(&self, code: &str) -> Result<Value, RuntimeError> {
+            self.evaluate_holding(code, &mut [])
+        }
+
+        fn render(&self, value: Value) -> String {
+            value.stringify_internal(&self.heap.borrow())
+        }
+
+        /// What the statements of `code` come to, rendered: the value, or the error with
+        /// the place it points at.
+        fn outcome(&self, code: &str) -> String {
+            match self.evaluate(code) {
+                Ok(value) => self.render(value),
+                Err(error) => format!("{} at {:?}", error.message, error.span),
+            }
+        }
+
+        /// The number of values in the heap, in use or not.
+        fn slots(&self) -> usize {
+            self.heap.borrow().len()
+        }
+
+        /// The number of passes over the heap so far.
+        fn passes(&self) -> usize {
+            self.heap.borrow().passes()
+        }
+    }
+
+    /// What `code` comes to, which is the same with passes in its statements as without.
+    /// Returns the number of values that either way leaves in the heap.
+    fn agree(code: &str) -> (String, usize, usize) {
+        let (compacting, plain) = (Session::new(true), Session::new(false));
+        let outcome = compacting.outcome(code);
+
+        assert_eq!(outcome, plain.outcome(code), "{code}");
+
+        (outcome, compacting.slots(), plain.slots())
+    }
+
+    /// [`agree`] for a program that leaves a lot behind, most of which the passes in its
+    /// statements have to reclaim. Returns what the program comes to.
+    fn reclaims(code: &str) -> String {
+        let (outcome, compacted, plain) = agree(code);
+
+        assert!(
+            compacted * 4 < plain,
+            "{code}: {compacted} values are left of {plain}"
+        );
+
+        outcome
+    }
+
+    #[test]
+    fn a_statement_gives_up_what_it_leaves_behind_while_it_runs() {
+        let session = Session::new(true);
+
+        assert_eq!(
+            session.outcome("sum(map(range(300000), i => len([i, i + 1])))"),
+            "600000"
+        );
+        assert!(session.slots() < 100_000, "{} values", session.slots());
+
+        let plain = Session::new(false);
+
+        assert_eq!(
+            plain.outcome("sum(map(range(300000), i => len([i, i + 1])))"),
+            "600000"
+        );
+        assert!(plain.slots() > 300_000, "{} values", plain.slots());
+    }
+
+    #[test]
+    fn a_pass_in_a_run_keeps_what_the_variables_of_the_program_lead_to() {
+        let program = [
+            JUNK,
+            "xs = map(range(200), i => [i, \"s\" + to_string(i)])",
+            "r = {a: xs, b: {c: \"deep\"}, d: [xs[3], xs[4]]}",
+            "f = x => x + len(xs)",
+            "n = junk(100000)",
+            "[n, sum(map(xs, x => x[0])), xs[199][1], r.b.c, len(r.a), r.d[1] == xs[4], f(1)]",
+        ]
+        .join("\n");
+
+        assert_eq!(
+            reclaims(&program),
+            "[200000, 19900, s199, deep, 200, [true, true], 201]"
+        );
+    }
+
+    #[test]
+    fn a_pass_in_a_run_keeps_what_the_statement_has_in_its_registers() {
+        for (code, expected) in [
+            // The operands of an operator, and the arguments of a call.
+            ("[1, 2] + junk(60000) + [3, 4]", "[120004, 120006]"),
+            ("len([[1], [2]]) + junk(60000)", "120002"),
+            (
+                "max(len(\"abc\" + \"def\"), junk(60000) * 0) + len([junk(60000)])",
+                "7",
+            ),
+            (
+                "(xs => (ys => [xs, ys, junk(60000)])([3, \"four\"]))([1, \"two\"])",
+                "[[1, two], [3, four], 120000]",
+            ),
+            // The arguments that are spread into a call.
+            (
+                "((a, b, c, d) => [d, c, b, a])(...[[1], \"two\"], junk(60000), ...[[3]])",
+                "[[3], 120000, two, [1]]",
+            ),
+            // The branches of a conditional, and what `do` binds.
+            (
+                "if junk(60000) > 0 then [junk(60000), \"then\"] else [\"else\"]",
+                "[120000, then]",
+            ),
+            (
+                "do {\n  a = [1, \"one\"]\n  b = junk(60000)\n  c = {two: [2]}\n  d = junk(60000)\n  return [a, b, c, d]\n}",
+                "[[1, one], 120000, {two: [2]}, 120000]",
+            ),
+        ] {
+            assert_eq!(reclaims(&format!("{JUNK}{code}")), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_pass_in_a_run_keeps_the_lists_and_records_that_are_being_built() {
+        for (code, expected) in [
+            (
+                "[[1, 2], junk(60000), \"three\", {a: [4]}, junk(60000), [5]]",
+                "[[1, 2], 120000, three, {a: [4]}, 120000, [5]]",
+            ),
+            (
+                "[...[[1], [2]], junk(60000), ...[[3]], junk(60000), ...\"ab\", ...{k: [4]}]",
+                "[[1], [2], 120000, [3], 120000, a, b, [k, [4]]]",
+            ),
+            (
+                "map(range(4), i => [i, junk(30000), to_string(i)])",
+                "[[0, 60000, 0], [1, 60000, 1], [2, 60000, 2], [3, 60000, 3]]",
+            ),
+            (
+                "filter(map(range(6), i => [i, to_string(i)]), x => junk(20000) > 0 and x[0] % 2 == 1)",
+                "[[1, 1], [3, 3], [5, 5]]",
+            ),
+            (
+                "{a: [1, 2], b: junk(60000), c: \"x\", d: {e: [junk(60000)]}}",
+                "{a: [1, 2], b: 120000, c: x, d: {e: [120000]}}",
+            ),
+            // A key that was computed waits for its value.
+            (
+                "{a: [1], [\"k\" + to_string(1)]: junk(60000), [\"k\" + to_string(2)]: [junk(60000)]}",
+                "{a: [1], k1: 120000, k2: [120000]}",
+            ),
+            // A record that starts with the entries of another one reads its values.
+            (
+                "(r => {...r, c: junk(60000), a: [junk(60000), r.b], d: r.a})({a: [1], b: \"two\"})",
+                "{a: [120000, two], b: two, c: 120000, d: [1]}",
+            ),
+            (
+                "{...{a: [1]}, ...[[2], junk(60000)], ...\"x\", b: junk(60000)}",
+                "{a: [1], 0: x, 1: 120000, b: 120000}",
+            ),
+        ] {
+            assert_eq!(reclaims(&format!("{JUNK}{code}")), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_pass_in_a_run_leaves_the_elements_of_a_list_where_a_loop_reads_them() {
+        let lists = "xs = map(range(60), i => [i, to_string(i)])\n";
+
+        for (code, expected) in [
+            ("sum(map(xs, x => junk(2000) + x[0]))", "241770"),
+            (
+                "reduce(xs, (acc, x) => acc + junk(2000) + len(x[1]), 0)",
+                "240110",
+            ),
+            (
+                "len(filter(xs, (x, i) => junk(2000) > 0 and x[0] == i and i % 2 == 0))",
+                "30",
+            ),
+            ("every(xs, x => junk(2000) > x[0])", "true"),
+            ("some(xs, x => junk(2000) < x[0])", "false"),
+            // A list that only the loop has, and one that reads the elements of another.
+            (
+                "sum(map(map(range(60), i => [i, [i]]), x => junk(2000) + x[1][0]))",
+                "241770",
+            ),
+            (
+                "sum(map(slice(xs, 10, 50), x => junk(2000) + x[0]))",
+                "161180",
+            ),
+            (
+                "sum(map([...xs, [100, \"more\"]], x => junk(2000) + x[0]))",
+                "245870",
+            ),
+            // A loop inside of another one, over the same list.
+            (
+                "sum(map(xs, x => sum(map(xs, y => junk(40) + x[0] + y[0]))))",
+                "500400",
+            ),
+            // The list is still what it was, for every one that reads its elements.
+            (
+                "[sum(map(xs, x => junk(2000) + x[0])), xs[59], slice(xs, 58, 60), len(xs)]",
+                "[241770, [59, 59], [[58, 58], [59, 59]], 60]",
+            ),
+        ] {
+            assert_eq!(
+                reclaims(&format!("{JUNK}{lists}{code}")),
+                expected,
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pass_in_a_run_keeps_what_the_functions_that_are_running_have() {
+        for (code, expected) in [
+            // Every call that is waiting has values of its own.
+            (
+                "g = n => if n == 0 then [] else do {\n  mine = [n, \"s\" + to_string(n)]\n  rest = g(n - 1)\n  extra = junk(4000)\n  return [mine[1], extra, ...rest]\n}\nh = g(30)\n[len(h), h[0], h[1], h[58], h[59]]",
+                "[60, s30, 8000, s1, 8000]",
+            ),
+            // A call that takes the place of its caller.
+            (
+                "loop = (n, acc) => if n == 0 then acc else loop(n - 1, [...acc, [junk(4000) + n]])\nr = loop(30, [])\n[len(r), r[0], r[29]]",
+                "[30, [8030], [8001]]",
+            ),
+            (
+                "even = (n, acc) => if n == 0 then acc else odd(n - 1, [junk(4000), ...acc])\nodd = (n, acc) => if n == 0 then acc else even(n - 1, [\"odd\", ...acc])\nr = even(60, [])\n[len(r), r[0], r[1]]",
+                "[60, odd, 8000]",
+            ),
+            // What a function captured is read where its definition has it.
+            (
+                "make = k => do {\n  ks = [k, k + 1]\n  return x => junk(2000) + sum(ks) + x\n}\nfs = map(range(60), k => make(k))\nsum(map(fs, f => f(1)))",
+                "243660",
+            ),
+            (
+                "counter = (xs, tag) => n => if n == 0 then [tag, len(xs)] else counter([...xs, junk(4000)], tag)(n - 1)\ncounter([], \"t\")(30)",
+                "[t, 30]",
+            ),
+            (
+                "add = a => b => c => [a, b, c, junk(40000)]\nadd([1])(\"two\")({c: 3})",
+                "[[1], two, {c: 3}, 80000]",
+            ),
+        ] {
+            assert_eq!(reclaims(&format!("{JUNK}{code}")), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_pass_in_a_run_keeps_a_definition_that_was_renamed_while_it_ran() {
+        let program = [
+            JUNK,
+            "make = k => do {",
+            "  f = n => do {",
+            "    g = f",
+            "    extra = junk(60000)",
+            "    return [k[0] + n, extra, g == f, typeof(g)]",
+            "  }",
+            "  return f",
+            "}",
+            "make([7])(1)",
+        ]
+        .join("\n");
+
+        assert_eq!(reclaims(&program), "[8, 120000, true, function]");
+    }
+
+    #[test]
+    fn a_pass_in_a_run_makes_the_string_of_a_literal_again() {
+        for (code, expected) in [
+            // A literal of a function is made into a string by every call of the function,
+            // and one of a loop by the first pass through the loop.
+            (
+                "pair = i => to_string(i % 2) + \"b\"\nreduce(range(150000), (acc, i) => if pair(i) == \"1b\" then acc + 1 else acc, 0)",
+                "75000",
+            ),
+            (
+                "words = [\"x\", \"yy\"]\nreduce(range(150000), (acc, i) => acc + len(words[i % 2] + \"-suffix\"), 0)",
+                "1275000",
+            ),
+            (
+                "tag = i => if i % 2 == 0 then \"even\" else \"odd\"\nlen(filter(range(150000), i => tag(i) + \"!\" == \"odd!\"))",
+                "75000",
+            ),
+        ] {
+            assert_eq!(reclaims(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_pass_in_a_run_leaves_what_keeps_growing_able_to_grow_in_place() {
+        // Each of these would take a time that grows with the square of the number of steps
+        // if a pass left the list, the string or the record without the room behind it.
+        for (code, expected) in [
+            (
+                "len(reduce(range(300000), (acc, i) => [...acc, i], []))",
+                "300000",
+            ),
+            (
+                "len(reduce(range(300000), (acc, i) => acc + \"x\", \"\"))",
+                "300000",
+            ),
+            (
+                "reduce(range(80000), (acc, i) => {...acc, [\"k\" + to_string(i)]: i}, {}).k79999",
+                "79999",
+            ),
+        ] {
+            assert_eq!(reclaims(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_pass_in_a_run_waits_for_the_built_in_function_that_is_calling_back() {
+        for (code, expected) in [
+            // The function sorts copies of the elements, which no pass may move.
+            (
+                "xs = map(range(300), i => [i * 7 % 300, to_string(i)])\nsorted = sort_by(xs, x => junk(400) * 0 + x[0])\n[len(sorted), sorted[0], sorted[299], junk(60000)]",
+                "[300, [0, 0], [299, 257], 120000]",
+            ),
+            (
+                "groups = group_by(range(300), i => to_string(junk(400) * 0 + i % 3))\n[len(groups[\"0\"]), groups[\"2\"][99], junk(60000)]",
+                "[100, 299, 120000]",
+            ),
+            // A function that is called through a variable is called back as well.
+            (
+                "step = x => junk(400) * 0 + x[0]\nxs = map(range(300), i => [i])\n[sum(map(xs, step)), junk(60000)]",
+                "[44850, 120000]",
+            ),
+        ] {
+            assert_eq!(reclaims(&format!("{JUNK}{code}")), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_pass_in_a_run_leaves_errors_as_they_are() {
+        for (code, expected) in [
+            (
+                "map(range(150000), i => if i == 149999 then [i].x else len([i]))",
+                "expected a record",
+            ),
+            (
+                "junk = n => sum(map(range(n), i => len([i, i + 1])))\n[junk(60000), len(junk(60000))]",
+                "argument must be a list or string",
+            ),
+            (
+                "junk = n => sum(map(range(n), i => len([i, i + 1])))\nf = xs => junk(60000) + xs.missing.deeper\nf({a: [1]})",
+                "",
+            ),
+        ] {
+            let (outcome, ..) = agree(code);
+
+            assert!(outcome.contains(" at "), "{code}: {outcome}");
+            assert!(outcome.contains(expected), "{code}: {outcome}");
+        }
+    }
+
+    #[test]
+    fn a_pass_in_a_run_tells_whoever_holds_values_where_they_went() {
+        let session = Session::new(true);
+
+        session.evaluate(JUNK).unwrap();
+        let mut front = session.evaluate("map(range(1000), i => [i])").unwrap();
+        let mut list = session
+            .evaluate_holding("[[1, 2], \"three\"]", &mut [&mut front])
+            .unwrap();
+        let mut record = session
+            .evaluate_holding("{a: [4], b: \"five\"}", &mut [&mut front, &mut list])
+            .unwrap();
+        let mut number = Value::Number(6.0);
+        let before = (list, record);
+
+        assert_eq!(session.render(front).len(), 6890);
+
+        // The caller lets go of the first list.
+        let result = session
+            .evaluate_holding("junk(100000)", &mut [&mut list, &mut number, &mut record])
+            .unwrap();
+
+        assert_eq!(result, Value::Number(200000.0));
+        assert!(session.slots() < 50_000, "{} values", session.slots());
+
+        // What was in front of the values is gone, so they have moved.
+        assert_ne!((list, record), before);
+        assert_eq!(session.render(list), "[[1, 2], three]");
+        assert_eq!(session.render(record), "{a: [4], b: five}");
+        assert_eq!(number, Value::Number(6.0));
+    }
+
+    #[test]
+    fn a_pass_in_a_run_is_given_up_for_a_definition_that_something_else_holds() {
+        let session = Session::new(true);
+
+        session.evaluate(JUNK).unwrap();
+        let Value::Lambda(pointer) = session.evaluate("f = x => x + 1\nf").unwrap() else {
+            panic!("f is a function");
+        };
+        let held = match session.heap.borrow().get(pointer.index()) {
+            Some(HeapValue::Lambda(def)) => Rc::clone(def),
+            other => panic!("expected a function, got {other:?}"),
+        };
+
+        // The definition cannot be rewritten where it is, so everything stays where it is.
+        assert_eq!(session.outcome("junk(100000) + f(1)"), "200002");
+        assert!(session.slots() > 100_000, "{} values", session.slots());
+        assert_eq!(held.name.map(|name| name.to_string()), Some("f".into()));
+
+        drop(held);
+
+        assert_eq!(session.outcome("junk(100000) + f(1)"), "200002");
+        assert!(session.slots() < 50_000, "{} values", session.slots());
+    }
+
+    #[test]
+    fn a_statement_that_keeps_everything_is_not_gone_through_over_and_over() {
+        // Nothing of this is garbage: the passes that find that out have to become rare
+        // enough to take a small part of the time, whatever the size of the heap.
+        let session = Session::new(true);
+
+        assert_eq!(
+            session.outcome("xs = map(range(200000), i => [i, [i]])\n[len(xs), xs[199999][1][0]]"),
+            "[200000, 199999]"
+        );
+        assert!(session.slots() > 400_000, "{} values", session.slots());
+
+        if !cfg!(blots_compact_always) {
+            assert!(session.passes() <= 4, "{} passes", session.passes());
+        }
+    }
+
+    #[test]
+    fn a_list_that_a_loop_is_making_is_not_gone_through_for_every_bit_of_garbage() {
+        // The list is outside of the heap until it is complete, and a pass goes through all
+        // of it: as it gets longer, more garbage has to be worth a pass.
+        let session = Session::new(true);
+
+        assert_eq!(
+            session.outcome("sum(map(range(1000000), i => len([i])))"),
+            "1000000"
+        );
+        assert!(session.slots() < 500_000, "{} values", session.slots());
+
+        if !cfg!(blots_compact_always) {
+            let passes = session.passes();
+
+            assert!((5..25).contains(&passes), "{passes} passes");
+        }
+    }
+}

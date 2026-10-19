@@ -23,7 +23,8 @@ mod highlighter;
 use blots_core::ast::{Expr, Spanned};
 use blots_core::environment::Environment;
 use blots_core::expressions::{
-    evaluate_ast, evaluate_pairs, pairs_to_expr_with_comments, validate_portable_value,
+    evaluate_statement, evaluate_statement_pairs, pairs_to_expr_with_comments,
+    validate_portable_value,
 };
 use blots_core::fast_parser::{Statement, parse_program};
 use blots_core::formatter::format_expr;
@@ -151,12 +152,12 @@ fn evaluate_statements(
     for statement in statements {
         match statement {
             Statement::Expression(expr) => {
-                let result = evaluate_ast(
+                let result = evaluate_statement(
                     &expr,
                     Rc::clone(heap),
                     Rc::clone(bindings),
-                    0,
                     Rc::clone(&source),
+                    &mut [],
                 );
 
                 if let Err(error) = result {
@@ -169,12 +170,12 @@ fn evaluate_statements(
                 expr,
                 assigns,
             } => {
-                let result = evaluate_ast(
+                let result = evaluate_statement(
                     &expr,
                     Rc::clone(heap),
                     Rc::clone(bindings),
-                    0,
                     Rc::clone(&source),
+                    &mut [],
                 );
 
                 if assigns {
@@ -218,12 +219,12 @@ fn evaluate_source(
             if let Some(inner_pair) = pair.into_inner().next() {
                 match inner_pair.as_rule() {
                     Rule::expression => {
-                        let result = evaluate_pairs(
+                        let result = evaluate_statement_pairs(
                             inner_pair.into_inner(),
                             Rc::clone(heap),
                             Rc::clone(bindings),
-                            0,
                             source,
+                            &mut [],
                         );
 
                         if let Err(error) = result {
@@ -234,12 +235,12 @@ fn evaluate_source(
                     Rule::output_declaration => {
                         let inner_pairs_clone = inner_pair.clone().into_inner();
 
-                        let result = evaluate_pairs(
+                        let result = evaluate_statement_pairs(
                             inner_pair.clone().into_inner(),
                             Rc::clone(heap),
                             Rc::clone(bindings),
-                            0,
                             source,
+                            &mut [],
                         );
 
                         for pair in inner_pairs_clone {
@@ -711,12 +712,12 @@ fn main() -> ! {
                 if let Some(inner_pair) = pair.into_inner().next() {
                     match inner_pair.as_rule() {
                         Rule::expression => {
-                            let result = evaluate_pairs(
+                            let result = evaluate_statement_pairs(
                                 inner_pair.into_inner(),
                                 Rc::clone(&heap),
                                 Rc::clone(&bindings),
-                                0,
                                 &accumulated_input,
+                                &mut [],
                             );
 
                             match result {
@@ -740,12 +741,12 @@ fn main() -> ! {
                             let inner_pairs_clone = inner_pair.clone().into_inner();
 
                             // Evaluate the entire output declaration
-                            let result = evaluate_pairs(
+                            let result = evaluate_statement_pairs(
                                 inner_pair.clone().into_inner(),
                                 Rc::clone(&heap),
                                 Rc::clone(&bindings),
-                                0,
                                 &accumulated_input,
+                                &mut [],
                             );
 
                             // Extract the output name from the declaration

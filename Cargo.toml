@@ -20,7 +20,7 @@ license = "MIT"
 blots-core = { path = "blots-core", version = "0.15.0" }
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(wasm_bindgen_unstable_test_coverage)', 'cfg(blots_vm_step_only)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(wasm_bindgen_unstable_test_coverage)', 'cfg(blots_vm_step_only)', 'cfg(blots_compact_always)'] }
 
 # Optimize the whole program as one unit. Release builds take about twice as long, but the
 # binary is a fifth smaller, which is most of what starting it costs, and a little faster.

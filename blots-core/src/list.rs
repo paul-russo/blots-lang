@@ -230,14 +230,21 @@ impl List {
     /// A list that something else still holds on to keeps reading what it always read: the
     /// lists of the pass then get a buffer of their own.
     ///
+    /// A pass in the middle of a run is one that the elements are `pinned` in: a loop of the
+    /// run that is going through a list has the addresses of its elements, and finds them
+    /// there after the pass, replaced. Every element then stays where it is, whatever room
+    /// that leaves unused in front of it, and whoever else reads it.
+    ///
     /// # Safety
     /// Every list that survives the pass has to be rewritten in it, with the `shared` that
     /// [`List::unmarked`] filled in for exactly those lists, and every other list that the
-    /// pass had a hold of has to be gone by then.
+    /// pass had a hold of has to be gone by then. Where the elements are `pinned`, nothing
+    /// but the lists of the pass may read them.
     pub(crate) unsafe fn rewrite(
         &mut self,
         shared: &mut SharedBuffers,
         replace: &mut impl FnMut(Value) -> Value,
+        pinned: bool,
     ) -> usize {
         let state = shared.buffers.get_mut(&Rc::as_ptr(&self.buffer));
 
@@ -272,7 +279,7 @@ impl List {
             None => (position..position + self.len, 1),
         };
 
-        let moved = if Rc::strong_count(&self.buffer) > lists {
+        let moved = if !pinned && Rc::strong_count(&self.buffer) > lists {
             // Something outside of the pass reads the elements too.
             let items = buffer[covered.clone()]
                 .iter()
@@ -300,7 +307,8 @@ impl List {
 
             let mut dropped = 0;
 
-            if buffer.capacity() >= TRIMMED_CAPACITY
+            if !pinned
+                && buffer.capacity() >= TRIMMED_CAPACITY
                 && buffer.capacity() / TRIMMED_FACTOR >= covered.len()
             {
                 buffer.drain(..covered.start);
@@ -671,6 +679,15 @@ mod tests {
 
     /// A compaction pass over `lists`, of which all survive: every number is doubled.
     fn double(lists: &mut [List]) -> usize {
+        pass(lists, false)
+    }
+
+    /// The same pass in the middle of a run, which the elements are pinned in.
+    fn double_in_place(lists: &mut [List]) -> usize {
+        pass(lists, true)
+    }
+
+    fn pass(lists: &mut [List], pinned: bool) -> usize {
         let mut shared = SharedBuffers::default();
         for list in lists.iter() {
             let _ = list.unmarked(&mut shared);
@@ -678,8 +695,9 @@ mod tests {
 
         lists
             .iter_mut()
-            // SAFETY: every list of the pass is rewritten.
-            .map(|list| unsafe { list.rewrite(&mut shared, &mut doubled) })
+            // SAFETY: every list of the pass is rewritten, and the tests that pin the
+            // elements read them through nothing else while the pass runs.
+            .map(|list| unsafe { list.rewrite(&mut shared, &mut doubled, pinned) })
             .sum()
     }
 
@@ -759,6 +777,58 @@ mod tests {
             capacity(&lists[0]) < 100,
             "{} elements of room for 20",
             capacity(&lists[0])
+        );
+    }
+
+    #[test]
+    fn a_pass_in_a_run_leaves_the_elements_where_they_are() {
+        let whole = list(0..1000);
+        let mut lists = [whole.slice(500..510), whole.slice(505..520)];
+        drop(whole);
+        let (first, second) = (lists[0].as_ptr(), lists[1].as_ptr());
+
+        assert_eq!(double_in_place(&mut lists), 20);
+        assert_eq!(lists[0].as_ptr(), first);
+        assert_eq!(lists[1].as_ptr(), second);
+        assert_eq!(lists[0][0], Value::Number(1000.0));
+        assert_eq!(lists[1][14], Value::Number(1038.0));
+        assert!(capacity(&lists[0]) >= 1000);
+
+        // The pass between runs that follows gives up the room.
+        assert_eq!(double(&mut lists), 20);
+        assert_eq!(lists[0][0], Value::Number(2000.0));
+        assert!(capacity(&lists[0]) < 100);
+    }
+
+    #[test]
+    fn a_pass_in_a_run_still_lets_the_last_list_be_followed_in_place() {
+        let base = roomy(0..4, 16);
+        let longer = base.followed_by(&numbers(4..6));
+        let mut lists = [base];
+        drop(longer);
+        let first = lists[0].as_ptr();
+
+        assert_eq!(double_in_place(&mut lists), 4);
+        assert_eq!(lists[0].as_ptr(), first);
+
+        let again = lists[0].followed_by(&[Value::Null]);
+        assert!(again.shares_buffer_with(&lists[0]));
+        assert_eq!(again[3], Value::Number(6.0));
+        assert_eq!(again[4], Value::Null);
+    }
+
+    #[test]
+    fn a_pass_in_a_run_replaces_the_elements_that_something_else_reads_too() {
+        let held = roomy(0..3, 8);
+        let mut lists = [held.clone()];
+
+        assert_eq!(double_in_place(&mut lists), 3);
+
+        assert!(lists[0].shares_buffer_with(&held));
+        assert_eq!(lists[0].as_ptr(), held.as_ptr());
+        assert_eq!(
+            held.as_slice(),
+            [Value::Number(0.0), Value::Number(2.0), Value::Number(4.0)]
         );
     }
 

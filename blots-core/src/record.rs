@@ -1209,6 +1209,38 @@ impl RecordBuilder {
         }
     }
 
+    /// The values of the entries so far, in the order of their keys: what the builder
+    /// refers to, for a compaction pass that it is to survive.
+    pub(crate) fn values(&self) -> &[Value] {
+        match &self.values {
+            Room::Own(values) => values,
+            Room::Shared(values, len) => values.first(*len),
+        }
+    }
+
+    /// For a compaction pass that the builder survives: replace the value of every entry
+    /// so far by what `replace` makes of it.
+    ///
+    /// A builder that reads the values of a block gets values of its own for that. The
+    /// records of the pass that read the block have left it by then, with what the pass
+    /// made of their values (see [`Record::rewrite`]): a hold that is not one of theirs
+    /// keeps a block as it was, and the builder has one.
+    pub(crate) fn rewrite(&mut self, replace: &mut impl FnMut(Value) -> Value) {
+        if let Room::Shared(values, len) = &self.values {
+            let mut own = Vec::with_capacity(*len + self.expected);
+            own.extend_from_slice(values.first(*len));
+
+            self.values = Room::Own(own);
+        }
+
+        let Room::Own(values) = &mut self.values else {
+            unreachable!("the builder has its values to itself by now");
+        };
+        for value in values.iter_mut() {
+            *value = replace(*value);
+        }
+    }
+
     pub fn finish(self) -> Record {
         let values = match self.values {
             Room::Shared(values, len) => return Record::sharing(self.keys, values, len),

@@ -878,8 +878,9 @@ impl Drop for FieldCache {
 ///
 /// A string never changes, so the one that a literal was evaluated to once is what it
 /// evaluates to again, for as long as that string is where it was put. Nothing moves or
-/// removes the values of the heap while a run of a VM lasts (see `Vm::run_number`), so that
-/// is at least until the run is over.
+/// removes the values of the heap while a run of a VM goes by the same number (see
+/// `Vm::run_number`), so that is at least for as long as that number is the one of the run
+/// in progress.
 #[derive(Debug)]
 pub(crate) struct Literal {
     /// The number of the run that the string was made in, or zero, which no run has.

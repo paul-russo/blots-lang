@@ -62,6 +62,19 @@ pub fn evaluate_pairs(
     evaluate_ast(&ast, heap, bindings, call_depth, source_rc)
 }
 
+/// [`evaluate_pairs`] for a statement of a program (see [`evaluate_statement`]).
+pub fn evaluate_statement_pairs(
+    pairs: Pairs<Rule>,
+    heap: Rc<RefCell<Heap>>,
+    bindings: Rc<Environment>,
+    source: &str,
+    held: &mut [&mut Value],
+) -> Result<Value, RuntimeError> {
+    let ast = pairs_to_expr(pairs)?;
+
+    evaluate_statement(&ast, heap, bindings, source.into(), held)
+}
+
 /// Helper function to flatten a spread value into the values it expands to. For list spreads
 /// this returns the list itself, which shares its elements with the one in the heap; strings
 /// and records build a fresh list of the expanded values.
@@ -113,6 +126,28 @@ pub fn evaluate_ast(
     let chunk = compile_chunk(expr, vm.inlines_callbacks(), &bindings)?;
 
     vm.run_chunk(&chunk, source, call_depth)
+}
+
+/// [`evaluate_ast`] for a statement of a program: an expression that is evaluated at the top
+/// level, against the `bindings` of the program, by a caller that keeps no value of the heap
+/// but those in `bindings` and `held`.
+///
+/// What a statement leaves behind in the heap while it is evaluated can then be reclaimed
+/// while it is evaluated, instead of piling up until it is done. That moves the values of
+/// the heap, like [`Heap::compact`] does between statements: `bindings` and `held` are
+/// rewritten to refer to what they did before, and any other value from before the call is
+/// as good as gone.
+pub fn evaluate_statement(
+    expr: &SpannedExpr,
+    heap: Rc<RefCell<Heap>>,
+    bindings: Rc<Environment>,
+    source: Rc<str>,
+    held: &mut [&mut Value],
+) -> Result<Value, RuntimeError> {
+    let mut vm = Vm::new(heap, Rc::clone(&bindings));
+    let chunk = compile_chunk(expr, vm.inlines_callbacks(), &bindings)?;
+
+    vm.run_chunk_compacting(&chunk, source, 0, held)
 }
 
 // Helper function to collect free variables in an expression

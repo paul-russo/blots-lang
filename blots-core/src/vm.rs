@@ -29,7 +29,8 @@ use crate::{
     expressions::{OpSite, apply_binary_op, flatten_spread_value, modulo},
     functions::{BuiltInFunction, FunctionDef, check_lambda_arity, lambda_name},
     heap::{
-        CONSTANTS, Heap, HeapPointer, HeapValue, IterablePointer, LambdaPointer, StringPointer,
+        CONSTANTS, Heap, HeapPointer, HeapValue, IterablePointer, LambdaPointer, Pass, Roots,
+        StringPointer,
     },
     intern::{Symbol, inputs_symbol},
     record::{Record, RecordBuilder},
@@ -576,6 +577,112 @@ thread_local! {
 /// and not what a definition that no run looked at has for one either.
 const NOT_RUNNING: u64 = u64::MAX;
 
+/// A number that no run on this thread had yet (see [`Vm::run_number`]).
+fn next_run_number() -> u64 {
+    RUNS.with(|runs| {
+        let number = runs.get() + 1;
+        runs.set(number);
+        number
+    })
+}
+
+/// What stands in for [`Heap::is_grown`] in a build with `blots_compact_always`, which is one
+/// for testing [`Vm::compact`]: the heap is compacted after every instruction that may have
+/// added to it, however little there is to reclaim. Many values take long to go through, in
+/// the heap or outside of it, so it is compacted once in as many instructions as keep the
+/// passes from taking all of the time.
+fn pass_is_due_anyway(heap: &Heap) -> bool {
+    /// The number of values that a pass may go through for every instruction.
+    const VALUES_PER_INSTRUCTION: usize = 64;
+
+    thread_local! {
+        /// The number of instructions since the last pass.
+        static WAITED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    let waited = WAITED.get() + 1;
+    let due = waited * VALUES_PER_INSTRUCTION >= heap.pass_values();
+    WAITED.set(if due { 0 } else { waited });
+
+    due
+}
+
+/// Everything outside of the heap that refers to it while a run is between two instructions
+/// of its only instruction loop (see [`Vm::compact`]).
+struct InRun<'v> {
+    /// The value stack up to the last register of the active frames. Some of the registers
+    /// hold values that nothing is going to read again, which is what [`Roots`] allows for.
+    registers: &'v mut [Value],
+    builders: &'v mut [Builder],
+    retired: &'v mut [Rc<LambdaDef>],
+    env: &'v Environment,
+    held: &'v mut [Value],
+}
+
+impl Roots for InRun<'_> {
+    fn each(&self, look: &mut dyn FnMut(&[Value])) {
+        look(self.registers);
+
+        for builder in self.builders.iter() {
+            match builder {
+                Builder::List(items) => look(items),
+                Builder::Record { entries, key } => {
+                    look(entries.values());
+                    if let Some(key) = key {
+                        look(&[Value::String(*key)]);
+                    }
+                }
+            }
+        }
+
+        for def in self.retired.iter() {
+            for (_, value) in def.scope.iter() {
+                look(std::slice::from_ref(value));
+            }
+        }
+
+        self.env
+            .each_binding_value(&mut |value| look(std::slice::from_ref(value)));
+        look(self.held);
+    }
+
+    fn rewrite(&mut self, replace: &mut dyn FnMut(&mut [Value])) {
+        let mut replaced = |mut value: Value| {
+            replace(std::slice::from_mut(&mut value));
+            value
+        };
+
+        for def in self.retired.iter_mut() {
+            let def = Rc::get_mut(def).expect("a retired definition is the VM's own");
+            def.scope.rewrite_values(&mut replaced);
+        }
+        self.env.rewrite_binding_values(&mut replaced);
+
+        for builder in self.builders.iter_mut() {
+            match builder {
+                Builder::List(items) => {
+                    for item in items.iter_mut() {
+                        *item = replaced(*item);
+                    }
+                }
+                Builder::Record { entries, key } => {
+                    entries.rewrite(&mut replaced);
+
+                    // The key that is waiting for its value is a string of the heap.
+                    if let Some(staged) = key
+                        && let Value::String(moved) = replaced(Value::String(*staged))
+                    {
+                        *staged = moved;
+                    }
+                }
+            }
+        }
+
+        replace(self.registers);
+        replace(self.held);
+    }
+}
+
 pub struct Vm {
     heap: Rc<RefCell<Heap>>,
 
@@ -616,7 +723,23 @@ pub struct Vm {
     /// thread have the same number. So what a definition holds for the run in progress (see
     /// [`crate::values::Entry`]) was found out during it, and nothing but this VM could
     /// have changed the definition since.
+    ///
+    /// A run that has the heap compacted goes on under another number: what was found out
+    /// under the old one includes where values of the heap were (see
+    /// [`crate::bytecode::Literal`]).
     run_number: u64,
+
+    /// The number of instruction loops in progress: one for whoever started the run, and one
+    /// for every built-in function (or operator) that the loop before it called and that is
+    /// calling a function back.
+    loops: usize,
+
+    /// Whether the heap may be compacted in the middle of a run (see [`Vm::compact`]).
+    compacts: bool,
+
+    /// What whoever started a run that may have the heap compacted holds on to in the heap,
+    /// besides the bindings of the environment.
+    held: Vec<Value>,
 
     #[cfg(not(target_arch = "wasm32"))]
     profiling: bool,
@@ -654,6 +777,9 @@ impl Vm {
             retired: Vec::new(),
             orphans: Vec::new(),
             run_number: NOT_RUNNING,
+            loops: 0,
+            compacts: false,
+            held: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             profiling: crate::functions::is_profiling_enabled(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -754,6 +880,30 @@ impl Vm {
         self.run()
     }
 
+    /// [`Vm::run_chunk`] for a caller that holds on to nothing in the heap but the bindings
+    /// of the environment and `held`: the heap may then be compacted while the chunk runs
+    /// (see [`Vm::compact`]), which rewrites `held` in place like [`Heap::compact`] does.
+    pub fn run_chunk_compacting(
+        &mut self,
+        chunk: &Rc<Proto>,
+        source: Rc<str>,
+        call_depth: usize,
+        held: &mut [&mut Value],
+    ) -> Result<Value, RuntimeError> {
+        self.held.clear();
+        self.held.extend(held.iter().map(|value| **value));
+        self.compacts = self.env.owns_bindings();
+
+        let result = self.run_chunk(chunk, source, call_depth);
+
+        self.compacts = false;
+        for (value, kept) in held.iter_mut().zip(self.held.drain(..)) {
+            **value = kept;
+        }
+
+        result
+    }
+
     /// Call a function value from native code: from a built-in or operator that was handed a
     /// callback, or from an embedder. `call_depth` is the depth of the caller.
     pub fn call_function(
@@ -825,16 +975,14 @@ impl Vm {
 
         // The frame to run is the only one when the caller is not this VM: a run starts.
         if self.frame_count() == 1 {
-            self.run_number = RUNS.with(|runs| {
-                let number = runs.get() + 1;
-                runs.set(number);
-                number
-            });
+            self.run_number = next_run_number();
         }
 
         // SAFETY: the innermost frame was set up by `run_chunk` or `call_function`: its code
         // is alive, its registers lie within the value stack and its parameters are bound.
+        self.loops += 1;
         let result = unsafe { run::execute(self) };
+        self.loops -= 1;
 
         if result.is_err() {
             self.builders.truncate(builders);
@@ -844,6 +992,84 @@ impl Vm {
         }
 
         result
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Compaction of the heap in the middle of a run
+    // ---------------------------------------------------------------------------------------
+
+    /// Whether the instruction loop should have the heap compacted now that it is between
+    /// two instructions: the heap has grown enough for a pass to be worthwhile, whoever
+    /// started the run allows for one, and no native code is waiting for a function that
+    /// it called back to return, with values of its own to carry on with.
+    #[inline(always)]
+    fn compaction_is_due(&self, heap: &Heap) -> bool {
+        if cfg!(blots_compact_always) {
+            return self.compacts && self.loops == 1 && pass_is_due_anyway(heap);
+        }
+
+        heap.is_grown() && self.compacts && self.loops == 1
+    }
+
+    /// Compact the heap in the middle of a run: a statement that leaves a lot behind while
+    /// it runs gives it up while it runs, and makes what is next out of the same memory.
+    ///
+    /// A pass moves the values of the heap, so everything that refers to one of them has to
+    /// be told where it went. Between two instructions of the only instruction loop in
+    /// progress, that is what [`InRun`] lists and nothing else: an instruction that is done
+    /// has left its values in registers and in the lists and records that are being built,
+    /// and whoever started the run has said what it holds on to (see
+    /// [`Vm::run_chunk_compacting`]).
+    ///
+    /// What the run has the address of stays where it is. The elements of a list that a
+    /// loop is going through are rewritten in place (see [`List::rewrite`]), and the list
+    /// is in a register of the loop. The definition of a function that a frame is running
+    /// is kept by the value that the function was called through, in the register below
+    /// the frame's first one, or else it is retired; neither kind is moved (see
+    /// [`Heap::compact_in_run`]).
+    ///
+    /// What the run remembers about where values of the heap are (see
+    /// [`crate::bytecode::Literal`]) goes with the number that it gives up for a new one.
+    ///
+    /// [`List::rewrite`]: crate::list::List::rewrite
+    #[cold]
+    #[inline(never)]
+    fn compact(&mut self) {
+        // A retired definition that something else got hold of cannot be rewritten: the
+        // run goes on without passes, since it is not going to let go of the definition.
+        if self
+            .retired
+            .iter_mut()
+            .any(|def| Rc::get_mut(def).is_none())
+        {
+            self.compacts = false;
+            return;
+        }
+
+        // Every register of every active frame, whether the frame has written it yet or
+        // not (see `Roots`): a frame further in can end below one that is waiting for it.
+        let registers = self
+            .active_frames()
+            .iter()
+            .map(|frame| self.slot_index(frame.base) + frame.proto().max_stack)
+            .max()
+            .unwrap_or(0)
+            .min(self.stack.len());
+
+        let mut roots = InRun {
+            registers: &mut self.stack[..registers],
+            builders: &mut self.builders,
+            retired: &mut self.retired,
+            env: &self.env,
+            held: &mut self.held,
+        };
+
+        match self.heap.borrow_mut().compact_in_run(&mut roots) {
+            // The definitions that are shared stay shared for as long as the run lasts.
+            Pass::Refused => self.compacts = false,
+            Pass::Kept => {}
+            Pass::Moved => self.run_number = next_run_number(),
+        }
     }
 
     // ---------------------------------------------------------------------------------------

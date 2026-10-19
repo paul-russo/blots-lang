@@ -89,7 +89,8 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
     unsafe {
         let heap: *const Heap = (*vm).heap.as_ptr();
 
-        // The slots of the heap, looked up again whenever `Vm::step` may have added to them.
+        // The slots of the heap, looked up again whenever `Vm::step` may have added to them
+        // or a compaction pass may have moved what they hold.
         let mut slots: *const [HeapValue] = (*heap).slots();
         let mut frame: *mut Frame = (*vm).top;
         let mut ip: *const u64 = (*frame).ip;
@@ -841,6 +842,13 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 Ok(Flow::Continue) => {}
                 Ok(Flow::Finished(value)) => return Ok(value),
                 Err(error) => return Err(error),
+            }
+
+            // Only `Vm::step` adds to the heap, so this is where the heap is found to have
+            // grown, and between two instructions is where it can be compacted: everything
+            // the run goes on with is where the VM can find it.
+            if (*vm).compaction_is_due(&*heap) {
+                (*vm).compact();
             }
 
             frame = (*vm).top;
