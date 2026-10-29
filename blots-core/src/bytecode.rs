@@ -238,7 +238,8 @@ pub(crate) enum Op {
     /// `R[a] = [R[b], ..., R[b+c-1]]`, flattening spread values.
     NewListSpread,
     /// Start building a list. `x` selects a capacity hint: 1 = the length of the list
-    /// `R[a+1]`, 2 = the element count `R[a+1]` of an inlined range.
+    /// `R[a+1]`, 2 = the element count `R[a+1]` of an inlined range, 3 = the number of
+    /// entries of the record `R[a+1]`.
     ListBegin,
     /// Append `R[a], ..., R[a+b-1]` to the list being built, flattening spread values.
     ListAppend,
@@ -306,6 +307,23 @@ pub(crate) enum Op {
     /// List iteration back-edge: `if R[a] != R[a+4] { R[a+2] = *R[a]; R[a+3] += 1 (only when
     /// x == 1); R[a] += 1; pc += sbx }`.
     ForListNext,
+    /// Start an inlined iteration over the entries of `R[a+1]`, in place of a call of
+    /// `keys`, `values` or `entries` whose list a loop would go through: checks the call
+    /// depth and that the value is a record, the way that call does, then sets the position
+    /// `R[a]` of the next entry to that of the first one. A record never changes, so its
+    /// entries are what the list would have been made of, in the same order.
+    IterRecord,
+    /// Record iteration entry: when `R[a]` is the number of entries of `R[a+1]`, `pc += sbx`.
+    /// Otherwise `R[a+2] = ` the part of the entry at position `R[a]` that the loop goes
+    /// through, `R[a+3] = R[a]` when the loop wants the position, and `R[a] += 1`. `x` says
+    /// which part that is, and whether the position is wanted (see [`EntryPart::operand`]).
+    ForRecord,
+    /// Record iteration back-edge: like `ForRecord`, but jumps (by `sbx`) when there IS a
+    /// next entry and falls through when the record is exhausted.
+    ForRecordNext,
+    /// `R[a] = ` the part `x` (an [`EntryPart`]) of the entry that the record loop whose
+    /// state starts at `R[b]` went on to last.
+    LoadEntry,
     /// Raise the "maximum call depth" error an out-of-line callback call would have produced
     /// when the frame is too deep: the callback is called `b` levels further in than the
     /// frame is. Executed once, before the first iteration.
@@ -449,7 +467,8 @@ impl Op {
             | Op::Ceil
             | Op::Round
             | Op::Trunc
-            | Op::Len => A | B,
+            | Op::Len
+            | Op::LoadEntry => A | B,
 
             Op::Call
             | Op::CallBuiltIn
@@ -507,6 +526,9 @@ impl Op {
             | Op::IterList
             | Op::ForList
             | Op::ForListNext
+            | Op::IterRecord
+            | Op::ForRecord
+            | Op::ForRecordNext
             | Op::ListPush => A,
 
             Op::Jmp
@@ -571,6 +593,46 @@ pub(crate) const LAST_USE_B: u8 = 1;
 
 /// The same for operand register `c`.
 pub(crate) const LAST_USE_C: u8 = 2;
+
+/// What a loop that goes through the entries of a record is given of each of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum EntryPart {
+    /// The value, which is what `values` lists.
+    Value = 0,
+
+    /// The key as a string of its own, which is what `keys` lists.
+    Key = 1,
+
+    /// A list of the key and the value, which is what `entries` lists.
+    Pair = 2,
+}
+
+impl EntryPart {
+    /// Operand `x` of the iteration instructions of a loop that goes through this part of
+    /// each entry, and that wants the position of the entry as well when `with_index` says
+    /// so.
+    pub const fn operand(self, with_index: bool) -> u8 {
+        (self as u8) << 1 | with_index as u8
+    }
+
+    /// The part that operand `x` of a record iteration instruction stands for, and whether
+    /// the loop wants the position of each entry.
+    #[inline(always)]
+    pub const fn of_operand(x: u8) -> (Self, bool) {
+        (Self::of(x >> 1), x & 1 == 1)
+    }
+
+    /// The part that operand `x` of a `LoadEntry` stands for.
+    #[inline(always)]
+    pub const fn of(x: u8) -> Self {
+        match x {
+            0 => Self::Value,
+            1 => Self::Key,
+            _ => Self::Pair,
+        }
+    }
+}
 
 /// Set in `x` of a `MulK` that stands for a division: the program divides by the reciprocal
 /// of the number operand, which is a power of two. Dividing by a power of two and
@@ -905,7 +967,9 @@ impl Drop for FieldCache {
     }
 }
 
-/// What the code remembers about the string that was made for one of its string literals.
+/// What the code remembers about the string that was made for one of its string literals,
+/// and what a table of keys remembers about the string that was made for one of its keys
+/// (see [`crate::record::Keys::string_of`]).
 ///
 /// A string never changes, so the one that a literal was evaluated to once is what it
 /// evaluates to again, for as long as that string is where it was put. Nothing moves or

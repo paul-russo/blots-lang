@@ -10792,3 +10792,501 @@ mod operator_loop_tests {
         }
     }
 }
+
+// A loop over the list that `keys`, `values` or `entries` makes of a record goes through the
+// entries of the record instead, and a function that only ever reads `e[0]` and `e[1]` of
+// the list that `entries` makes for an entry is given the value alone. Nothing may tell that
+// from the list being made: not what the loop comes to, not what an error says and points
+// at, and not how deep the calls of a program go.
+#[cfg(test)]
+mod record_loop_tests {
+    use crate::ast::Expr;
+    use crate::bytecode::{EntryPart, Instr, Op};
+    use crate::compiler::compile_lambda;
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::{evaluate_ast, evaluate_statement};
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code`, up to the value of the last one, with the heap
+    /// compacted while a statement runs (`compacts`) or left alone.
+    fn evaluate(
+        code: &str,
+        heap: &Rc<RefCell<Heap>>,
+        compacts: bool,
+    ) -> Result<Value, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+
+            let (heap, bindings) = (Rc::clone(heap), Rc::clone(&bindings));
+            result = match compacts {
+                true => evaluate_statement(&expr, heap, bindings, Rc::clone(&source), &mut [])?,
+                false => evaluate_ast(&expr, heap, bindings, 0, Rc::clone(&source))?,
+            };
+        }
+
+        Ok(result)
+    }
+
+    /// What the statements of `code` come to, rendered: the value, or the message of the
+    /// error and the part of `code` that it points at. Returns the number of passes over
+    /// the heap as well.
+    fn run(code: &str, compacts: bool) -> (String, usize) {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        let outcome = match evaluate(code, &heap, compacts) {
+            Ok(value) => value.stringify_internal(&heap.borrow()),
+            Err(error) => {
+                let place = match error.span {
+                    Some(span) => &code[span.start_byte..span.end_byte],
+                    None => "nothing",
+                };
+
+                format!("{} at {place}", error.message)
+            }
+        };
+
+        (outcome, heap.borrow().passes())
+    }
+
+    /// What `code` comes to, which is the same with passes over the heap in its statements
+    /// as without.
+    fn outcome(code: &str) -> String {
+        let (outcome, _) = run(code, true);
+
+        assert_eq!(outcome, run(code, false).0, "{code}");
+
+        outcome
+    }
+
+    /// `code` with each call of `keys`, `values` or `entries` spread into a list literal,
+    /// which a loop goes through as the list that it is.
+    fn as_list(code: &str) -> String {
+        let bytes = code.as_bytes();
+        let mut spelled = String::new();
+        let mut at = 0;
+
+        while let Some(c) = code[at..].chars().next() {
+            let starts_name =
+                at == 0 || !(bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_');
+            let name = ["keys(", "values(", "entries("]
+                .into_iter()
+                .find(|name| starts_name && code[at..].starts_with(name));
+            let close = name.and_then(|name| {
+                let mut depth = 0;
+                (at + name.len() - 1..code.len()).find(|&end| {
+                    match bytes[end] {
+                        b'(' => depth += 1,
+                        b')' => depth -= 1,
+                        _ => {}
+                    }
+                    depth == 0
+                })
+            });
+
+            let (Some(name), Some(close)) = (name, close) else {
+                spelled.push(c);
+                at += c.len_utf8();
+                continue;
+            };
+
+            let open = at + name.len();
+            spelled.push_str("[...");
+            spelled.push_str(&code[at..open]);
+            spelled.push_str(&as_list(&code[open..close]));
+            spelled.push_str(")]");
+            at = close + 1;
+        }
+
+        spelled
+    }
+
+    /// `outcome` with the part of the code that an error points at spelled without the
+    /// calls of `keys`, `values` and `entries`, and without the list literals that
+    /// [`as_list`] spreads them into. A call is located at its arguments, so the part that
+    /// an operation is located at starts somewhere else when what is on its left is spread
+    /// into a list.
+    fn unlisted(outcome: &str) -> String {
+        let Some((message, place)) = outcome.rsplit_once(" at ") else {
+            return outcome.to_string();
+        };
+
+        let place = ["[...", "keys", "values", "entries", "]"]
+            .into_iter()
+            .fold(place.to_string(), |place, spelling| {
+                place.replace(spelling, "")
+            });
+
+        format!("{message} at {place}")
+    }
+
+    /// What `code` comes to, which is what it comes to when the lists that it goes through
+    /// are made.
+    fn as_made(code: &str) -> String {
+        let outcome = outcome(code);
+
+        assert_eq!(
+            unlisted(&outcome),
+            unlisted(&self::outcome(&as_list(code))),
+            "{code}"
+        );
+
+        outcome
+    }
+
+    /// The instructions of the function `code`.
+    fn instructions(code: &str) -> Vec<Instr> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let [Statement::Expression(expr)] = &statements[..] else {
+            panic!("{code} is not a single expression");
+        };
+        let Expr::Lambda { args, body, .. } = &expr.node else {
+            panic!("{code} is not a function");
+        };
+        let proto = compile_lambda(&Rc::new(args.clone()), body, true).unwrap();
+
+        let mut instructions = Vec::new();
+        let mut pc = 0;
+        while pc < proto.code.len() {
+            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
+            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            instructions.push(instr);
+            pc += 1 + instr.operand_words();
+        }
+
+        instructions
+    }
+
+    /// What `body` comes to in a function that has called itself `depth` times before it
+    /// gets there, without the functions that an error went through on its way out.
+    fn at_depth(body: &str, depth: usize) -> String {
+        let code = format!(
+            "g = x => x + 1\nd = k => if k <= 0 then {body} else [d(k - 1)][0]\nd({depth})"
+        );
+
+        outcome(&code)
+            .trim_start_matches("in function \"d\": ")
+            .to_string()
+    }
+
+    #[test]
+    fn a_loop_goes_through_the_entries_of_a_record_without_a_list() {
+        let calls = [Op::CallBuiltIn, Op::IterPrep, Op::ForList];
+
+        // The part of each entry that the loop goes through, and whether a list of a key and a
+        // value is made for the entries that a filter keeps.
+        for (code, part, kept_pairs) in [
+            ("r => map(keys(r), k => k)", EntryPart::Key, false),
+            (
+                "r => map(values(r), (v, i) => v * i)",
+                EntryPart::Value,
+                false,
+            ),
+            (
+                "r => (keys(r) where (k => k != \"a\"))",
+                EntryPart::Key,
+                false,
+            ),
+            ("r => map(entries(r), e => e)", EntryPart::Pair, false),
+            ("r => map(entries(r), e => len(e))", EntryPart::Pair, false),
+            ("r => map(entries(r), e => e[2])", EntryPart::Pair, false),
+            ("r => map(entries(r), e => {e})", EntryPart::Pair, false),
+            ("r => map(entries(r), e => g(e[0]))", EntryPart::Pair, false),
+            (
+                "r => map(entries(r), e => (() => e[0]))",
+                EntryPart::Pair,
+                false,
+            ),
+            (
+                "r => map(entries(r), e => do { e = 1; return e })",
+                EntryPart::Pair,
+                false,
+            ),
+            (
+                "r => (entries(r) via (e => (e[0] via (k => k))))",
+                EntryPart::Pair,
+                false,
+            ),
+            (
+                "r => map(entries(r), (e, e) => e[0])",
+                EntryPart::Pair,
+                false,
+            ),
+            // A function that only takes the entries apart is given the value.
+            (
+                "r => reduce(entries(r), (s, e) => s + e[1] + len(e[0]), 0)",
+                EntryPart::Value,
+                false,
+            ),
+            (
+                "r => map(entries(r), (e, i) => [e[0], e[1], i])",
+                EntryPart::Value,
+                false,
+            ),
+            (
+                "r => (entries(r) via (e => {[e[0]]: e[1]}))",
+                EntryPart::Value,
+                false,
+            ),
+            (
+                "r => map(entries(r), e => map(entries(e[1]), f => e[0] + f[0]))",
+                EntryPart::Value,
+                false,
+            ),
+            (
+                "r => filter(entries(r), e => e[1] > 1)",
+                EntryPart::Value,
+                true,
+            ),
+            (
+                "r => (entries(r) where (e => e[0] != \"a\"))",
+                EntryPart::Value,
+                true,
+            ),
+        ] {
+            let instructions = instructions(code);
+            let (parts, loads): (Vec<&Instr>, Vec<&Instr>) = instructions
+                .iter()
+                .filter(|instr| matches!(instr.op, Op::ForRecord | Op::LoadEntry))
+                .partition(|instr| instr.op == Op::ForRecord);
+
+            assert!(
+                instructions.iter().any(|instr| instr.op == Op::IterRecord),
+                "{code}"
+            );
+            assert_eq!(EntryPart::of_operand(parts[0].x).0, part, "{code}");
+            assert_eq!(
+                loads.iter().any(|load| load.x == EntryPart::Pair as u8),
+                kept_pairs,
+                "{code}"
+            );
+            for op in calls {
+                assert!(
+                    !instructions[..3].iter().any(|instr| instr.op == op),
+                    "{code}: {op:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_loop_over_the_entries_of_a_record_comes_to_what_one_over_their_list_does() {
+        let records = "r = {a: 1, b: 2, c: 3}\nn = {a: {b: 1}, c: {d: 2, e: 3}}\n\
+                       u = {[\"é\"]: 1, [\"日本\"]: 2, [\"a key that is long\"]: 3}\n";
+
+        for (code, expected) in [
+            // What a loop gives its function of each entry.
+            ("map(keys(r), k => k)", "[a, b, c]"),
+            ("map(keys(r), (k, i) => k + to_string(i))", "[a0, b1, c2]"),
+            ("map(values(r), v => v * 2)", "[2, 4, 6]"),
+            ("map(values(r), (v, i) => v * i)", "[0, 2, 6]"),
+            ("map(entries(r), e => e)", "[[a, 1], [b, 2], [c, 3]]"),
+            ("map(entries(r), e => e[0])", "[a, b, c]"),
+            ("map(entries(r), e => e[1])", "[1, 2, 3]"),
+            (
+                "map(entries(r), e => [e[1], e[0]])",
+                "[[1, a], [2, b], [3, c]]",
+            ),
+            ("map(entries(r), e => e[1.0] + e[1])", "[2, 4, 6]"),
+            (
+                "map(entries(r), (e, i) => e[0] + to_string(e[1] + i))",
+                "[a1, b3, c5]",
+            ),
+            (
+                "map(entries(u), e => e[0] + to_string(e[1]))",
+                "[é1, 日本2, a key that is long3]",
+            ),
+            ("map(keys(u), k => len(k))", "[2, 6, 18]"),
+            // What each higher-order function and operator makes of it.
+            ("filter(entries(r), e => e[1] > 1)", "[[b, 2], [c, 3]]"),
+            ("filter(entries(r), e => e[0] != \"b\")", "[[a, 1], [c, 3]]"),
+            ("filter(keys(r), k => k != \"a\")", "[b, c]"),
+            ("filter(values(r), v => v % 2 == 1)", "[1, 3]"),
+            ("reduce(entries(r), (acc, e) => acc + e[1], 0)", "6"),
+            (
+                "reduce(entries(r), (acc, e) => {...acc, [e[0]]: e[1] * 10}, {})",
+                "{a: 10, b: 20, c: 30}",
+            ),
+            ("reduce(keys(r), (acc, k) => acc + k, \"\")", "abc"),
+            ("reduce(values(r), (acc, v) => acc * v, 1)", "6"),
+            ("reduce(entries(r), (acc, e, i) => acc + e[1] * i, 0)", "8"),
+            ("every(entries(r), e => e[1] > 0)", "true"),
+            ("some(entries(r), e => e[0] == \"c\")", "true"),
+            ("every(keys(r), k => k != \"b\")", "false"),
+            ("some(values(r), v => v > 5)", "false"),
+            ("entries(r) via (e => e[0])", "[a, b, c]"),
+            ("keys(r) where (k => k > \"a\")", "[b, c]"),
+            ("values(r) via ((v, i) => v + i)", "[1, 3, 5]"),
+            ("entries(r) where (e => e[1] != 2)", "[[a, 1], [c, 3]]"),
+            (
+                "entries(r) where ((e, i) => i > 0) via (e => e[0])",
+                "[b, c]",
+            ),
+            // A record without entries calls nothing.
+            ("map(keys({}), k => k + missing)", "[]"),
+            ("reduce(entries({}), (a, e) => a + e[1], 0)", "0"),
+            ("entries({}) where (e => missing)", "[]"),
+            ("every(values({}), v => v)", "true"),
+            // A function that does more with the list of an entry than take it apart.
+            ("map(entries(r), e => len(e))", "[2, 2, 2]"),
+            ("map(entries(r), e => e[2])", "[null, null, null]"),
+            (
+                "map(entries(r), e => e[-1] + e[-2])",
+                "in built-in function \"map\": in anonymous function: expected a number, but got a string",
+            ),
+            (
+                "map(entries(r), e => [...e, e[0]])",
+                "[[a, 1, a], [b, 2, b], [c, 3, c]]",
+            ),
+            (
+                "map(entries(r), e => {e})",
+                "[{e: [a, 1]}, {e: [b, 2]}, {e: [c, 3]}]",
+            ),
+            ("map(entries(r), e => typeof(e))", "[list, list, list]"),
+            ("map(entries(r), e => (p => p[0])(e))", "[a, b, c]"),
+            (
+                "map(entries(r), e => e via (x => x))",
+                "[[a, 1], [b, 2], [c, 3]]",
+            ),
+            (
+                "g = () => e[0] + \"!\"\nmap(entries(r), e => g())",
+                "[a!, b!, c!]",
+            ),
+            (
+                "g = () => to_string(e[1])\nmap(entries(r), e => e[0] + g())",
+                "[a1, b2, c3]",
+            ),
+            (
+                "fs = map(entries(r), e => (() => e[0] + to_string(e[1])))\nmap(fs, f => f())",
+                "[a1, b2, c3]",
+            ),
+            (
+                "map(entries(r), e => do { e = [9, 8]; return e[0] })",
+                "[9, 9, 9]",
+            ),
+            (
+                "map(entries(r), e => map([[7, 8]], e => e[0]))",
+                "[[7], [7], [7]]",
+            ),
+            ("map(entries(r), (e, e) => e[0])", "[a, b, c]"),
+            // Loops in the function, and what the function computes ahead of them.
+            (
+                "map(entries(n), e => map(entries(e[1]), f => e[0] + f[0] + to_string(f[1])))",
+                "[[ab1], [cd2, ce3]]",
+            ),
+            (
+                "map(entries(r), e => reduce(range(3), (s, j) => s + e[1] * j, 0))",
+                "[3, 6, 9]",
+            ),
+            (
+                "map(entries(r), e => filter(keys(n), k => k + e[0] != \"ca\"))",
+                "[[a], [a, c], [a, c]]",
+            ),
+            ("map(values(n), v => keys(v))", "[[b], [d, e]]"),
+            (
+                "map(entries(r), e => if e[0] == \"a\" then e[0] + \"!\" else e[1])",
+                "[a!, 2, 3]",
+            ),
+            (
+                "reduce(range(3), (acc, i) => acc + reduce(keys(r), (s, k) => s + k, \"\"), \"\")",
+                "abcabcabc",
+            ),
+            // Records whose tables have more keys than they do, and records that share one.
+            (
+                "big = {...r, d: 4}\n[map(keys(r), k => k), map(entries(big), e => e[0])]",
+                "[[a, b, c], [a, b, c, d]]",
+            ),
+            (
+                "rs = map(range(3), i => {a: i, b: i * 2})\nmap(rs, x => reduce(entries(x), (s, e) => s + e[0] + to_string(e[1]), \"\"))",
+                "[a0b0, a1b2, a2b4]",
+            ),
+            // In a function, for any record it is given.
+            (
+                "f = x => map(entries(x), e => e[0] + to_string(e[1]))\n[f(r), f({z: 0}), f({})]",
+                "[[a1, b2, c3], [z0], []]",
+            ),
+            (
+                "f = x => (keys(x) where (k => k != \"b\"))\n[f(r), f({b: 1})]",
+                "[[a, c], []]",
+            ),
+        ] {
+            let outcome = as_made(&format!("{records}{code}"));
+
+            assert!(outcome.starts_with(expected), "{code}: {outcome}");
+        }
+    }
+
+    #[test]
+    fn an_error_is_where_the_list_of_the_entries_would_have_put_it() {
+        for code in [
+            // What is no record.
+            "map(keys(5), k => k)",
+            "map(values(\"s\"), v => v)",
+            "reduce(entries([1]), (a, e) => a, 0)",
+            "entries(null) via (e => e)",
+            "keys(missing) where (k => true)",
+            "f = x => map(entries(x), e => e[0])\n[f({a: 1}), f(5)]",
+            "f = x => (values(x) via (v => v))\n[f({a: 1}), f([1])]",
+            // The list is made before the initial value is evaluated.
+            "reduce(keys(5), (a, k) => a, missing)",
+            "reduce(keys({a: 1}), (a, k) => a, missing)",
+            // What goes wrong in the function.
+            "map(entries({a: 1, b: \"x\"}), e => e[1] + 1)",
+            "map(keys({a: 1}), k => k * 2)",
+            "filter(entries({a: 1}), e => e[1])",
+            "every(values({a: 1}), v => v)",
+            "entries({a: 1}) where (e => e[1])",
+            "keys({a: 1}) via (k => k.x)",
+            "map(entries({a: {b: 1}}), e => map(entries(e[1]), f => f[1] + e[0]))",
+            "map(entries({a: 1}), e => map(entries(e[1]), f => f))",
+            "map(entries({a: 1}), e => sum([]) + e[1])",
+        ] {
+            as_made(code);
+        }
+    }
+
+    #[test]
+    fn a_loop_over_the_entries_of_a_record_is_as_deep_as_the_list_and_its_function() {
+        for body in [
+            "map(keys({a: 1}), k => k)",
+            "map(keys({a: 1}), k => g(len(k)))",
+            "reduce(entries({a: 1}), (s, e) => s + e[1], 0)",
+            "filter(entries({a: 1, b: 2}), e => e[1] > 1)",
+            "entries({a: 1}) via (e => e[0])",
+            "values({a: 1}) via (v => g(v))",
+            "keys({}) where (k => k)",
+            "keys(5) where (k => k)",
+            "map(entries({a: {b: 1}}), e => map(keys(e[1]), k => k + e[0]))",
+        ] {
+            for depth in 994..=1000 {
+                assert_eq!(
+                    unlisted(&at_depth(body, depth)),
+                    unlisted(&at_depth(&as_list(body), depth)),
+                    "{body} at {depth}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_key_is_made_into_a_string_again_after_a_pass_over_the_heap() {
+        let code = "r = reduce(range(50), (acc, i) => {...acc, [\"k\" + to_string(i)]: i}, {})\n\
+                    sum(map(range(2000), i => len(reduce(entries(r), (s, e) => s + e[0], \"\")) + len(filter(keys(r), k => k + to_string(i) != \"k1\"))))";
+        let (outcome, passes) = run(code, true);
+
+        assert_eq!(outcome, "380000");
+        assert_eq!(run(code, false), (outcome, 0));
+        assert!(passes > 0, "no pass");
+    }
+}

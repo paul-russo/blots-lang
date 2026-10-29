@@ -11,12 +11,12 @@
 
 use super::{
     Builder, DEPTH_MASK, ENTRY, Frame, MAX_CALL_DEPTH, NOT_TRUNCATED, PROFILED, TAIL_SHIFT,
-    UNBOUND, Vm, copy_value, is_unbound, leaves_remainder, less, less_eq, list_next, load_value,
-    range_next, register, same_strings, set_state, step::Flow, store_value, string_order, truncate,
-    whole,
+    UNBOUND, Vm, copy_value, entry_next, is_unbound, known_key, leaves_remainder, less, less_eq,
+    list_next, load_value, range_next, register, same_strings, set_state, step::Flow, store_value,
+    string_order, truncate, whole,
 };
 use crate::{
-    bytecode::{Instr, Op, Proto, REGISTER_SCALE, RemainderTest, register_index},
+    bytecode::{EntryPart, Instr, Op, Proto, REGISTER_SCALE, RemainderTest, register_index},
     error::RuntimeError,
     expressions::{modulo, small_remainder},
     heap::{Heap, HeapValue, IterablePointer},
@@ -978,6 +978,77 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     if list_next(reg!(instr.a), instr.x == 1, false) {
                         jump!(ip);
                     }
+                    next!(1);
+                }
+                Op::IterRecord => {
+                    let state = reg!(instr.a);
+
+                    if ((*frame).meta & DEPTH_MASK) as usize <= MAX_CALL_DEPTH
+                        && let Value::Record(pointer) = &*state.add(1)
+                        && let Some(HeapValue::Record(_)) = heap_value!(pointer)
+                    {
+                        set_state(state, 0);
+                        next!(1);
+                    }
+                }
+                Op::ForRecord => {
+                    let state = reg!(instr.a);
+
+                    if let Value::Record(pointer) = &*state.add(1)
+                        && let Some(HeapValue::Record(record)) = heap_value!(pointer)
+                        && let Some(more) = entry_next(state, record, instr.x, (*vm).run_number)
+                    {
+                        if more {
+                            next!(1);
+                        }
+                        jump!(ip);
+                    }
+
+                    // A key that has no string yet in this run gets one, and the list of a
+                    // key and a value is made for each entry.
+                    publish!();
+                    if (*vm).next_entry(state, instr.x) {
+                        added!();
+                        next!(1);
+                    }
+                    jump!(ip);
+                }
+                Op::ForRecordNext => {
+                    let state = reg!(instr.a);
+
+                    if let Value::Record(pointer) = &*state.add(1)
+                        && let Some(HeapValue::Record(record)) = heap_value!(pointer)
+                        && let Some(more) = entry_next(state, record, instr.x, (*vm).run_number)
+                    {
+                        if more {
+                            jump!(ip);
+                        }
+                        next!(1);
+                    }
+
+                    publish!();
+                    if (*vm).next_entry(state, instr.x) {
+                        added!();
+                        jump!(ip);
+                    }
+                    next!(1);
+                }
+                Op::LoadEntry => {
+                    let state = reg!(instr.b);
+
+                    if instr.x == EntryPart::Key as u8
+                        && let Value::Record(pointer) = &*state.add(1)
+                        && let Some(HeapValue::Record(record)) = heap_value!(pointer)
+                        && let Some(key) = known_key(state, record, (*vm).run_number)
+                    {
+                        load_value(reg!(instr.a), key);
+                        next!(1);
+                    }
+
+                    publish!();
+                    let value = (*vm).load_entry(state, EntryPart::of(instr.x));
+                    store_value(reg!(instr.a), value);
+                    added!();
                     next!(1);
                 }
 

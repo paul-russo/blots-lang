@@ -12,7 +12,7 @@ use super::{
 };
 use crate::{
     ast::BinaryOp,
-    bytecode::{Instr, Op, RECIPROCAL, RemainderTest, register_index},
+    bytecode::{EntryPart, Instr, Op, RECIPROCAL, RemainderTest, register_index},
     error::RuntimeError,
     values::Value,
 };
@@ -596,6 +596,31 @@ impl Vm {
                 if unsafe { list_next(self.reg_ptr(a), instr.x == 1, false) } {
                     self.skip(instr.sbx());
                 }
+            }
+            Op::IterRecord => {
+                // SAFETY: the loop state registers lie within the frame.
+                let record = unsafe { *self.reg_ptr(a).add(1) };
+                self.check_record(record)?;
+
+                // SAFETY: as above.
+                unsafe { set_state(self.reg_ptr(a), 0) };
+            }
+            Op::ForRecord => {
+                // SAFETY: the loop state was set up by `IterRecord`.
+                if !unsafe { self.next_entry(self.reg_ptr(a), instr.x) } {
+                    self.skip(instr.sbx());
+                }
+            }
+            Op::ForRecordNext => {
+                // SAFETY: as in `ForRecord`.
+                if unsafe { self.next_entry(self.reg_ptr(a), instr.x) } {
+                    self.skip(instr.sbx());
+                }
+            }
+            Op::LoadEntry => {
+                // SAFETY: the loop whose state the instruction names is at an entry.
+                let value = unsafe { self.load_entry(self.reg_ptr(b), EntryPart::of(instr.x)) };
+                self.set_reg(a, value);
             }
         }
 

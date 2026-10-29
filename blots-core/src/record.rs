@@ -20,11 +20,11 @@
 //!   (see [`RecordBuilder`]). Like the keys, the values of a record that is built one key
 //!   at a time are copied once per doubling of their number.
 
-use crate::{list::AddressHasher, text::Text, values::Value};
+use crate::{bytecode::Literal, list::AddressHasher, text::Text, values::Value};
 use indexmap::IndexMap;
 use std::{
     alloc::{Layout, alloc, dealloc, handle_alloc_error},
-    cell::{Cell, RefCell},
+    cell::{Cell, OnceCell, RefCell},
     collections::{HashMap, hash_map::Entry},
     fmt,
     hash::BuildHasherDefault,
@@ -90,6 +90,11 @@ pub struct Keys {
     /// The tables that were made from the first keys of this one and a key that could not
     /// be added to it, most recent last.
     forks: RefCell<Vec<Fork>>,
+
+    /// What is remembered about the string that was made for each key, which a loop over
+    /// the keys of a record finds again (see [`Keys::string_of`]). There is room for
+    /// `capacity` of them once a string was made for a key.
+    strings: OnceCell<Box<[Literal]>>,
 }
 
 /// A table that was made from another one.
@@ -125,6 +130,7 @@ impl Keys {
             slots: slots.into_boxed_slice(),
             interned,
             forks: RefCell::new(Vec::new()),
+            strings: OnceCell::new(),
         }
     }
 
@@ -187,6 +193,26 @@ impl Keys {
     #[inline]
     pub fn key(&self, position: usize) -> Option<&Key> {
         self.first(self.filled.get()).get(position)
+    }
+
+    /// What is remembered about the string that was made for the key at `position`, which
+    /// the table has. Every record with that key there has it under the same characters,
+    /// so the string that was made for one of them is the string of each.
+    #[inline(always)]
+    pub(crate) fn string_of(&self, position: usize) -> &Literal {
+        let strings = match self.strings.get() {
+            Some(strings) => strings,
+            None => self.make_room_for_strings(),
+        };
+
+        &strings[position]
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn make_room_for_strings(&self) -> &[Literal] {
+        self.strings
+            .get_or_init(|| (0..self.capacity).map(|_| Literal::new()).collect())
     }
 
     /// The position of `key` among the first `count` keys, which the table has to have.

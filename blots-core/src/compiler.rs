@@ -17,16 +17,17 @@
 //! into inline loops: the callback's parameters become registers of the enclosing frame and no
 //! call frame is pushed per element. The loop reproduces everything the out-of-line call would
 //! have done that a program can observe (call-depth accounting, argument checks, error
-//! context), and `range(...)` sources are iterated without materialising the list.
+//! context), and `range(...)`, `keys(...)`, `values(...)` and `entries(...)` sources are
+//! iterated without materialising the list.
 
 use crate::{
     ast::{
         BinaryOp, Commented, Expr, PostfixOp, RecordEntry, RecordKey, Span, SpannedExpr, UnaryOp,
     },
     bytecode::{
-        CaptureSource, FAST_FRAME_SLOTS, FieldCache, Handler, Instr, LAST_USE_B, LAST_USE_C,
-        LambdaTemplate, Literal, LocalVar, MAX_REGISTERS, Op, Proto, RECIPROCAL, RecordLayout,
-        RemainderTest, SelfRef, Wrap, binary_opcode, exact_reciprocal, small_divisor,
+        CaptureSource, EntryPart, FAST_FRAME_SLOTS, FieldCache, Handler, Instr, LAST_USE_B,
+        LAST_USE_C, LambdaTemplate, Literal, LocalVar, MAX_REGISTERS, Op, Proto, RECIPROCAL,
+        RecordLayout, RemainderTest, SelfRef, Wrap, binary_opcode, exact_reciprocal, small_divisor,
     },
     environment::Environment,
     error::RuntimeError,
@@ -331,6 +332,149 @@ fn range_call(list: &SpannedExpr) -> Option<&[SpannedExpr]> {
     }
 
     Some(args)
+}
+
+/// A call that lists the entries of a record, whose list an inlined loop goes through.
+struct EntriesCall<'e> {
+    built_in: BuiltInFunction,
+
+    /// What the list is made of.
+    part: EntryPart,
+    record: &'e SpannedExpr,
+}
+
+/// What `list` lists of the entries of which record, when it is a plain `keys(record)`,
+/// `values(record)` or `entries(record)` call.
+fn entries_call(list: &SpannedExpr) -> Option<EntriesCall<'_>> {
+    let Expr::Call { func, args } = &list.node else {
+        return None;
+    };
+    let Expr::BuiltIn(built_in) = &func.node else {
+        return None;
+    };
+
+    let part = match built_in {
+        BuiltInFunction::Keys => EntryPart::Key,
+        BuiltInFunction::Values => EntryPart::Value,
+        BuiltInFunction::Entries => EntryPart::Pair,
+        _ => return None,
+    };
+
+    match &args[..] {
+        [record] if !matches!(record.node, Expr::Spread(_)) => Some(EntriesCall {
+            built_in: *built_in,
+            part,
+            record,
+        }),
+        _ => None,
+    }
+}
+
+/// The part of an entry that the element at `index` of the list `entries` makes of it is,
+/// when `index` is a literal position of one: the key comes first and the value second.
+fn pair_part(index: &SpannedExpr) -> Option<EntryPart> {
+    match index.node {
+        Expr::Number(0.0) => Some(EntryPart::Key),
+        Expr::Number(1.0) => Some(EntryPart::Value),
+        _ => None,
+    }
+}
+
+/// Whether the callback of `call`, which goes through `entries` of a record, only ever
+/// reads the key or the value of the list that it is given for an entry, as `name[0]` or
+/// `name[1]`: nothing else can tell that the list is not made, so the loop gives the
+/// callback the value alone (see `Op::LoadEntry`).
+///
+/// A list that is not read in one of those two ways is made, and so is one that something
+/// may find by name: a function that is called looks up the names it does not bind
+/// through the frame of its caller, and a lambda takes what the name is bound to with it.
+/// The body may call built-in functions that call no function, and loops that are inlined
+/// themselves.
+fn takes_entries_apart(call: &InlineCall, name: Symbol) -> bool {
+    let distinct = call.params.iter().enumerate().all(|(index, param)| {
+        call.params[..index]
+            .iter()
+            .all(|other| other.get_name() != param.get_name())
+    });
+
+    distinct && !is_constant_name(name) && only_takes_apart(call.body, name)
+}
+
+/// Whether `expr` reads `name` only as `name[0]` or `name[1]`, and nothing that it does can
+/// find `name` otherwise (see [`takes_entries_apart`]).
+fn only_takes_apart(expr: &SpannedExpr, name: Symbol) -> bool {
+    let apart = |expr: &SpannedExpr| only_takes_apart(expr, name);
+
+    match &expr.node {
+        Expr::Number(_)
+        | Expr::String(_)
+        | Expr::Bool(_)
+        | Expr::Null
+        | Expr::InputReference(_)
+        | Expr::BuiltIn(_) => true,
+        Expr::Identifier(_) | Expr::ParamSlot { .. } | Expr::CaptureSlot { .. } => {
+            variable_name(expr) != Some(name)
+        }
+        Expr::Access {
+            expr: object,
+            index,
+        } => match variable_name(object) == Some(name) && pair_part(index).is_some() {
+            true => true,
+            false => apart(object) && apart(index),
+        },
+        Expr::List(items) => items.iter().all(|item| apart(&item.node)),
+        Expr::Record(entries) => entries.iter().all(|entry| {
+            let entry = &entry.node;
+
+            match &entry.key {
+                RecordKey::Static(_) => apart(&entry.value),
+                RecordKey::Dynamic(key) => apart(key) && apart(&entry.value),
+                RecordKey::Spread(key) => apart(key),
+                RecordKey::Shorthand(key) => key.as_str() != name.as_str(),
+            }
+        }),
+        Expr::Conditional {
+            condition,
+            then_expr,
+            else_expr,
+        } => apart(condition) && apart(then_expr) && apart(else_expr),
+        Expr::DoBlock {
+            statements,
+            return_expr,
+        } => {
+            statements
+                .iter()
+                .all(|statement| match &statement.node.node {
+                    Expr::Assignment { ident, value } => *ident != name && apart(value),
+                    _ => apart(&statement.node),
+                })
+                && apart(&return_expr.node)
+        }
+        Expr::Call { func, args } => {
+            if let Some(inline) = inline_call(func, args) {
+                return inline.params.iter().all(|param| param.get_name() != name)
+                    && apart(inline.list)
+                    && inline.init.is_none_or(apart)
+                    && apart(inline.body);
+            }
+
+            match &func.node {
+                Expr::BuiltIn(built_in) if !built_in.takes_callback() => args.iter().all(apart),
+                _ => false,
+            }
+        }
+        Expr::BinaryOp { op, left, right } => {
+            !matches!(op, BinaryOp::Via | BinaryOp::Into | BinaryOp::Where)
+                && apart(left)
+                && apart(right)
+        }
+        Expr::DotAccess { expr: operand, .. }
+        | Expr::UnaryOp { expr: operand, .. }
+        | Expr::PostfixOp { expr: operand, .. }
+        | Expr::Output { expr: operand }
+        | Expr::Spread(operand) => apart(operand),
+        Expr::Lambda { .. } | Expr::Assignment { .. } => false,
+    }
 }
 
 /// Collect the names assigned by assignment expressions that execute directly in the scope
@@ -898,6 +1042,12 @@ struct FnCompiler {
 
     /// How many more nodes are searched for expressions to share.
     shared_search: usize,
+
+    /// The first state register of each inlined loop around the current point that goes
+    /// through `entries` of a record without making the list of a key and a value that its
+    /// callback is given for an entry (see [`takes_entries_apart`]). The element register of
+    /// such a loop holds the value alone.
+    apart: Vec<u16>,
 }
 
 /// An expression that a condition evaluates and that one of its branches evaluates again:
@@ -953,6 +1103,7 @@ impl FnCompiler {
             hoisted: Vec::new(),
             shared: Vec::new(),
             shared_search: SHARED_SEARCH_NODES,
+            apart: Vec::new(),
         }
     }
 
@@ -1472,6 +1623,10 @@ impl FnCompiler {
             }
         }
 
+        if let Some((state, EntryPart::Value)) = self.entry_access(expr) {
+            return Ok(state + 2);
+        }
+
         let reg = self.alloc()?;
         self.expr_into(expr, reg)?;
 
@@ -1524,6 +1679,18 @@ impl FnCompiler {
             && let Some(reg) = self.shared_reg(expr)
         {
             self.emit(Instr::abc(Op::Move, dst, reg, 0));
+
+            return Ok(());
+        }
+
+        if let Some((state, part)) = self.entry_access(expr) {
+            if part == EntryPart::Value {
+                self.emit(Instr::abc(Op::Move, dst, state + 2, 0));
+            } else {
+                let mut load = Instr::abc(Op::LoadEntry, dst, state, 0);
+                load.x = part as u8;
+                self.emit(load);
+            }
 
             return Ok(());
         }
@@ -2679,6 +2846,32 @@ impl FnCompiler {
         }
     }
 
+    /// The first state register of the loop, and the part of its entry, that `expr` reads
+    /// when it is `name[0]` or `name[1]` for the parameter `name` of an inlined loop that
+    /// takes the entries of a record apart (see [`takes_entries_apart`]).
+    fn entry_access(&self, expr: &SpannedExpr) -> Option<(u16, EntryPart)> {
+        if self.apart.is_empty() {
+            return None;
+        }
+
+        let Expr::Access {
+            expr: object,
+            index,
+        } = &expr.node
+        else {
+            return None;
+        };
+        let part = pair_part(index)?;
+        let Resolved::Register(reg) = self.place(object) else {
+            return None;
+        };
+
+        self.apart
+            .iter()
+            .find(|state| **state + 2 == reg)
+            .map(|state| (*state, part))
+    }
+
     /// The register holding the value of `expr`, when it was computed ahead of the loop that
     /// is being compiled.
     fn hoisted_reg(&self, expr: &SpannedExpr) -> Option<u16> {
@@ -2886,7 +3079,9 @@ impl FnCompiler {
 
     /// Compile `map`/`filter`/`reduce`/`every`/`some` over a literal lambda as an inline loop,
     /// and `via`/`where` with a literal lambda on the right as one that runs when what is on
-    /// the left is a list. `span` is where the call is, or the operation.
+    /// the left is a list. `span` is where the call is, or the operation. A loop over a
+    /// `range`, `keys`, `values` or `entries` call goes through what the call would list
+    /// without making the list.
     fn inline_loop(&mut self, span: Span, call: &InlineCall, dst: u16) -> CResult<()> {
         let mark = self.free_reg;
         let cached = self.cache_loop_names(call)?;
@@ -2907,12 +3102,34 @@ impl FnCompiler {
         };
         let wants_index = element_params.len() == 2;
         let range_args = range_call(call.list);
+        let entries = match range_args {
+            Some(_) => None,
+            None => entries_call(call.list),
+        };
+
+        // What the loop is given of each entry of a record. A callback that only takes
+        // apart the list of a key and a value that `entries` makes for an entry is given the
+        // value, and no such list is made.
+        let apart = entries
+            .as_ref()
+            .is_some_and(|entries| entries.part == EntryPart::Pair)
+            && takes_entries_apart(call, element_params[0].get_name());
+        let part = match &entries {
+            Some(_) if apart => Some(EntryPart::Value),
+            Some(entries) => Some(entries.part),
+            None => None,
+        };
 
         // Loop state registers, laid out the way the iteration instructions expect:
-        //   list:  [cursor, list, element, index, end]
-        //   range: [next, end, start, element, index]
+        //   list:   [cursor, list, element, index, end]
+        //   range:  [next, end, start, element, index]
+        //   record: [position, record, element, index]
         let state = self.free_reg;
-        for _ in 0..5 {
+        let state_regs = match &entries {
+            Some(_) => 4,
+            None => 5,
+        };
+        for _ in 0..state_regs {
             self.alloc()?;
         }
         let (element_reg, index_reg) = if range_args.is_some() {
@@ -2921,7 +3138,22 @@ impl FnCompiler {
             (state + 2, state + 3)
         };
 
-        if let Some(range_args) = range_args {
+        if let Some(entries) = &entries {
+            // The call that lists the entries is made before anything else is evaluated,
+            // and all that it comes to here is what it checks.
+            self.expr_into(entries.record, state + 1)?;
+
+            let prep = self.emit(Instr::abc(Op::IterRecord, state, 0, 0));
+            let context = format!("built-in function \"{}\"", entries.built_in.name());
+            self.handlers.push(Handler {
+                start: prep as u32,
+                end: self.here() as u32,
+                wraps: vec![
+                    Wrap::FunctionContext(Rc::from(context)),
+                    Wrap::CallSite(call.list.span),
+                ],
+            });
+        } else if let Some(range_args) = range_args {
             let args_mark = self.free_reg;
             let first = self.free_reg;
             for arg in range_args {
@@ -2960,9 +3192,10 @@ impl FnCompiler {
         let region_start = self.here();
 
         // A built-in function fails when it is given anything but a list. An operator does
-        // something else with that, which is compiled behind the loop.
+        // something else with that, which is compiled behind the loop. A range and the
+        // entries of a record are lists whenever there is no error.
         let mut to_operator = None;
-        if range_args.is_none() {
+        if range_args.is_none() && entries.is_none() {
             match call.operator {
                 Some(_) => to_operator = Some(self.emit_jump(Op::IterList, state)),
                 None => {
@@ -2971,10 +3204,17 @@ impl FnCompiler {
             }
         }
 
-        let (entry_op, next_op) = if range_args.is_some() {
-            (Op::ForRange, Op::ForRangeNext)
-        } else {
-            (Op::ForList, Op::ForListNext)
+        // The iteration instructions, their operand `x`, and the capacity hint of a list
+        // that gets an element per pass.
+        let (entry_op, next_op, mode, hint) = match (range_args, part) {
+            (Some(_), _) => (Op::ForRange, Op::ForRangeNext, wants_index as u8, 2),
+            (None, Some(part)) => (
+                Op::ForRecord,
+                Op::ForRecordNext,
+                part.operand(wants_index),
+                3,
+            ),
+            (None, None) => (Op::ForList, Op::ForListNext, wants_index as u8, 1),
         };
 
         if matches!(call.builtin, BuiltInFunction::Map | BuiltInFunction::Filter) {
@@ -2982,13 +3222,13 @@ impl FnCompiler {
             // up front; filtering starts empty like the built-in does.
             let mut begin = Instr::abc(Op::ListBegin, state, 0, 0);
             if call.builtin == BuiltInFunction::Map {
-                begin.x = if range_args.is_some() { 2 } else { 1 };
+                begin.x = hint;
             }
             self.emit(begin);
         }
 
         let mut entry = Instr::abx(entry_op, state, 0);
-        entry.x = wants_index as u8;
+        entry.x = mode;
         let to_exit = self.emit(entry);
 
         self.emit(Instr::abc(Op::CallbackDepth, 0, call_depth, 0));
@@ -3019,6 +3259,11 @@ impl FnCompiler {
         }
         self.scopes.last_mut().expect("callback scope").param_regs = param_regs;
 
+        let taken_apart = self.apart.len();
+        if apart {
+            self.apart.push(state);
+        }
+
         // The first pass through the body starts here. It begins by computing what every pass
         // would compute the same way, and the passes after it start behind that.
         let body_start = self.here();
@@ -3043,7 +3288,19 @@ impl FnCompiler {
                 let result = self.expr_any(call.body)?;
                 body_end = self.here();
                 let skip = self.emit_jump(Op::JmpIfFalse, result);
-                self.emit(Instr::abc(Op::ListPush, element_reg, 0, 0));
+
+                // An entry that is kept is the list of its key and its value after all.
+                let kept = match apart {
+                    true => {
+                        let pair = self.alloc()?;
+                        let mut load = Instr::abc(Op::LoadEntry, pair, state, 0);
+                        load.x = EntryPart::Pair as u8;
+                        self.emit(load);
+                        pair
+                    }
+                    false => element_reg,
+                };
+                self.emit(Instr::abc(Op::ListPush, kept, 0, 0));
                 self.patch_jump(skip, self.here());
             }
             BuiltInFunction::Reduce => {
@@ -3079,9 +3336,10 @@ impl FnCompiler {
         self.free_reg = body_mark;
         self.ensured.truncate(ensured);
         self.hoisted.truncate(hoisted);
+        self.apart.truncate(taken_apart);
 
         let mut next = Instr::abx(next_op, state, 0);
-        next.x = wants_index as u8;
+        next.x = mode;
         let back = self.emit(next);
         self.patch_jump(back, loop_start);
 

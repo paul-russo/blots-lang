@@ -23,8 +23,8 @@ mod step;
 use crate::{
     ast::{BinaryOp, Span},
     bytecode::{
-        CaptureSource, FAST_FRAME_SLOTS, Instr, Proto, REGISTER_SCALE, RemainderTest, Wrap,
-        register_index,
+        CaptureSource, EntryPart, FAST_FRAME_SLOTS, Instr, Proto, REGISTER_SCALE, RemainderTest,
+        Wrap, register_index,
     },
     compiler::{compile_lambda, compile_self_variant},
     environment::Environment,
@@ -366,6 +366,67 @@ unsafe fn list_next(slot: *mut Value, with_index: bool, first: bool) -> bool {
     }
 
     true
+}
+
+/// Advance the inlined loop over the entries of `record` whose state starts at `slot` (see
+/// `Op::IterRecord`), for the iteration instruction with operand `x`, without adding to the
+/// heap: `Some(true)` when it stored the part of the next entry that the loop goes through
+/// (and its position, if the loop wants one), `Some(false)` when the record has no more
+/// entries, and `None` when the part has to be made (see [`Vm::next_entry`]). A key is the
+/// string that was made for it in run `run`, if one was.
+///
+/// The loop keeps the position of the next entry and not its address: a compaction pass may
+/// move the values of a record (see [`Record::rewrite`]), and leaves each where its key is.
+///
+/// # Safety
+/// `slot` must point to loop state registers set up by `Op::IterRecord`.
+#[inline(always)]
+unsafe fn entry_next(slot: *mut Value, record: &Record, x: u8, run: u64) -> Option<bool> {
+    let (part, with_index) = EntryPart::of_operand(x);
+
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let position = state(slot) as usize;
+        if position >= record.len() {
+            return Some(false);
+        }
+
+        let element = match part {
+            EntryPart::Value => record.as_slice().as_ptr().add(position),
+            EntryPart::Key => {
+                let string = record.table().string_of(position);
+                if string.run() != run {
+                    return None;
+                }
+
+                string.value()
+            }
+            EntryPart::Pair => return None,
+        };
+
+        load_value(slot.add(2), element);
+        if with_index {
+            slot.add(3).write(Value::Number(position as f64));
+        }
+        update_state(slot, position as u64 + 1);
+    }
+
+    Some(true)
+}
+
+/// The string that was made in run `run` for the key of the entry that the record loop
+/// whose state starts at `slot` went on to last, if one was.
+///
+/// # Safety
+/// `slot` must point to the state registers of a record loop that is at an entry of
+/// `record`, which is the record it goes through.
+#[inline(always)]
+unsafe fn known_key(slot: *const Value, record: &Record, run: u64) -> Option<*const Value> {
+    // SAFETY: guaranteed by the caller. The loop counts the entries that it went on to.
+    let position = unsafe { state(slot) } as usize - 1;
+    let string = record.table().string_of(position);
+
+    (string.run() == run).then(|| string.value())
 }
 
 /// The whole number that `number` is, when it is one that fits an `i64`.
@@ -2444,7 +2505,8 @@ impl Vm {
 
     /// Start building a list. `hint` selects the capacity: 1 = the length of the list in
     /// `source`, 2 = the element count of an inlined range in `source` (stored as the bit
-    /// pattern of a number, like all loop counters).
+    /// pattern of a number, like all loop counters), 3 = the number of entries of the record
+    /// in `source`.
     #[inline(never)]
     fn list_begin(&mut self, hint: u8, source: *const Value) {
         let capacity = match hint {
@@ -2459,6 +2521,14 @@ impl Vm {
             // SAFETY: as above.
             2 => match unsafe { *source } {
                 Value::Number(count) => count.to_bits() as usize,
+                _ => 0,
+            },
+            // SAFETY: as above.
+            3 => match unsafe { *source } {
+                Value::Record(pointer) => match self.heap.borrow().get(pointer.index()) {
+                    Some(HeapValue::Record(record)) => record.len(),
+                    _ => 0,
+                },
                 _ => 0,
             },
             _ => 0,
@@ -2738,6 +2808,103 @@ impl Vm {
         let items = pointer.reify(&heap).as_list().ok()?.as_ptr_range();
 
         Some((items.start, items.end))
+    }
+
+    /// Check that an inlined iteration over the entries of `record` may start, the way the
+    /// call of `keys`, `values` or `entries` that it replaces would: such a call is made at
+    /// the depth of the frame, and of a record.
+    #[inline(never)]
+    fn check_record(&self, record: Value) -> Result<(), RuntimeError> {
+        if self.top().depth() > MAX_CALL_DEPTH {
+            return Err(RuntimeError::new(format!(
+                "maximum call depth of {} exceeded",
+                MAX_CALL_DEPTH
+            )));
+        }
+
+        record.as_record(&self.heap.borrow())?;
+
+        Ok(())
+    }
+
+    /// The part `part` of the entry at `position` of `record`, which is a record, when it
+    /// has an entry there. A key is a string, as it is in the list that `keys` makes: the
+    /// one that was made for it before in this run, or else a new one. The list of a key and
+    /// its value is a new one.
+    fn entry_part(&self, record: Value, position: usize, part: EntryPart) -> Option<Value> {
+        let Value::Record(pointer) = record else {
+            unreachable!("a record loop goes through a record");
+        };
+
+        let mut heap = self.heap.borrow_mut();
+        let Some(HeapValue::Record(record)) = heap.get(pointer.index()) else {
+            unreachable!("a record loop goes through a record");
+        };
+
+        let value = *record.as_slice().get(position)?;
+        if part == EntryPart::Value {
+            return Some(value);
+        }
+
+        let table = Rc::clone(record.table());
+        let string = table.string_of(position);
+        let key = match string.run() == self.run_number {
+            // SAFETY: the string was made in this run, so it holds a value.
+            true => unsafe { string.value().read() },
+            false => {
+                let key = heap.insert_string(Text::new(&table.first(position + 1)[position]));
+                string.remember(self.run_number, key);
+                key
+            }
+        };
+
+        Some(match part {
+            EntryPart::Pair => heap.insert_list(vec![key, value]),
+            _ => key,
+        })
+    }
+
+    /// Advance the inlined loop over the entries of a record whose state starts at `slot`
+    /// (see `Op::IterRecord`), for the iteration instruction with operand `x`: when the
+    /// record has another entry, store the part of it that the loop goes through (and its
+    /// position, if the loop wants one) and report `true`.
+    ///
+    /// # Safety
+    /// `slot` must point to loop state registers set up by `Op::IterRecord`.
+    #[inline(never)]
+    unsafe fn next_entry(&mut self, slot: *mut Value, x: u8) -> bool {
+        let (part, with_index) = EntryPart::of_operand(x);
+
+        // SAFETY: the caller guarantees that the registers are the state of a record loop.
+        unsafe {
+            let position = state(slot) as usize;
+            let Some(element) = self.entry_part(*slot.add(1), position, part) else {
+                return false;
+            };
+
+            store_value(slot.add(2), element);
+            if with_index {
+                slot.add(3).write(Value::Number(position as f64));
+            }
+            update_state(slot, position as u64 + 1);
+        }
+
+        true
+    }
+
+    /// The part `part` of the entry that the record loop whose state starts at `slot` went
+    /// on to last.
+    ///
+    /// # Safety
+    /// `slot` must point to the state registers of a record loop that is at an entry.
+    #[inline(never)]
+    unsafe fn load_entry(&mut self, slot: *const Value, part: EntryPart) -> Value {
+        // SAFETY: the caller guarantees that the registers are the state of a record loop,
+        // which counts the entries that it went on to.
+        let (position, record) = unsafe { (state(slot) as usize, *slot.add(1)) };
+
+        self.entry_part(record, position - 1, part)
+            .expect("a record keeps the entry that a loop is at")
     }
 
     /// Check the arguments of an inlined `range` call the way the built-in does, returning the
