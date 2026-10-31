@@ -781,6 +781,19 @@ pub enum ValueType {
 }
 
 impl ValueType {
+    /// Every type, in the order of their discriminants.
+    pub(crate) const ALL: [ValueType; 9] = [
+        ValueType::Number,
+        ValueType::List,
+        ValueType::Spread,
+        ValueType::Bool,
+        ValueType::Lambda,
+        ValueType::BuiltIn,
+        ValueType::String,
+        ValueType::Record,
+        ValueType::Null,
+    ];
+
     /// What the type is called.
     pub fn name(&self) -> &'static str {
         match self {

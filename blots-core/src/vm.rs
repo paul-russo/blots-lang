@@ -414,6 +414,12 @@ unsafe fn entry_next(slot: *mut Value, record: &Record, x: u8, run: u64) -> Opti
     Some(true)
 }
 
+/// Whether `value` is of the type whose discriminant is `tag` (see `Op::IsType`).
+#[inline(always)]
+fn is_of_type(value: &Value, tag: u8) -> bool {
+    value.get_type() as u8 == tag
+}
+
 /// The string that was made in run `run` for the key of the entry that the record loop
 /// whose state starts at `slot` went on to last, if one was.
 ///
@@ -2858,6 +2864,18 @@ impl Vm {
         let items = pointer.reify(&heap).as_list().ok()?.as_ptr_range();
 
         Some((items.start, items.end))
+    }
+
+    /// Check the call depth the way the call of `typeof` that a test of the type of a value
+    /// stands for does (see `Op::IsType`).
+    #[inline(never)]
+    fn typeof_depth(&self) -> Result<(), RuntimeError> {
+        if self.top().depth() > MAX_CALL_DEPTH {
+            let name = built_in_name(BuiltInFunction::Typeof);
+            return Err(self.at_call_site(depth_exceeded(&name)));
+        }
+
+        Ok(())
     }
 
     /// Check that an inlined iteration over the entries of `record` may start, the way the

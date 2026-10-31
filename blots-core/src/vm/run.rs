@@ -11,12 +11,14 @@
 
 use super::{
     Builder, DEPTH_MASK, ENTRY, Frame, MAX_CALL_DEPTH, NOT_TRUNCATED, PROFILED, TAIL_SHIFT,
-    UNBOUND, Vm, copy_value, entry_next, is_unbound, known_key, leaves_remainder, less, less_eq,
-    list_next, load_value, range_next, register, same_strings, set_state, step::Flow, store_value,
-    string_order, truncate, whole,
+    UNBOUND, Vm, copy_value, entry_next, is_of_type, is_unbound, known_key, leaves_remainder, less,
+    less_eq, list_next, load_value, range_next, register, same_strings, set_state, step::Flow,
+    store_value, string_order, truncate, whole,
 };
 use crate::{
-    bytecode::{EntryPart, Instr, Op, Proto, REGISTER_SCALE, RemainderTest, register_index},
+    bytecode::{
+        EntryPart, Instr, NOT_OF_TYPE, Op, Proto, REGISTER_SCALE, RemainderTest, register_index,
+    },
     error::RuntimeError,
     expressions::{modulo, small_remainder},
     heap::{Heap, HeapValue, IterablePointer},
@@ -1040,6 +1042,22 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                         next!(1);
                     }
                     jump!(ip);
+                }
+                Op::IsType => {
+                    if ((*frame).meta & DEPTH_MASK) as usize <= MAX_CALL_DEPTH {
+                        let holds = is_of_type(&*reg!(instr.b), instr.x) != (instr.c == 1);
+                        store_value(reg!(instr.a), Value::Bool(holds));
+                        next!(1);
+                    }
+                }
+                Op::JmpNotType => {
+                    if ((*frame).meta & DEPTH_MASK) as usize <= MAX_CALL_DEPTH {
+                        let negated = instr.x & NOT_OF_TYPE != 0;
+                        if is_of_type(&*reg!(instr.a), instr.x & !NOT_OF_TYPE) != negated {
+                            next!(1);
+                        }
+                        jump!(ip);
+                    }
                 }
                 Op::LoadEntry => {
                     let state = reg!(instr.b);

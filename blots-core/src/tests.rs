@@ -11966,3 +11966,235 @@ mod record_update_tests {
         }
     }
 }
+
+// A comparison of `typeof(x)` with a string that is spelled out tests the type of `x` without
+// making the string that `typeof` comes to. Nothing may tell that from the call: not what the
+// comparison comes to, not what an error says and points at, and not how deep the calls of a
+// program go.
+#[cfg(test)]
+mod type_test_tests {
+    use crate::ast::Expr;
+    use crate::bytecode::{Instr, Op};
+    use crate::compiler::compile_lambda;
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code`, up to the value of the last one.
+    fn evaluate(code: &str, heap: &Rc<RefCell<Heap>>) -> Result<Value, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+            result = evaluate_ast(
+                &expr,
+                Rc::clone(heap),
+                Rc::clone(&bindings),
+                0,
+                Rc::clone(&source),
+            )?;
+        }
+
+        Ok(result)
+    }
+
+    /// What the statements of `code` come to, rendered: the value, or the message of the
+    /// error and the part of `code` that it points at.
+    fn outcome(code: &str) -> String {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        match evaluate(code, &heap) {
+            Ok(value) => value.stringify_internal(&heap.borrow()),
+            Err(error) => {
+                let place = match error.span {
+                    Some(span) => &code[span.start_byte..span.end_byte],
+                    None => "nothing",
+                };
+
+                format!("{} at {place}", error.message)
+            }
+        }
+    }
+
+    /// `code`, in which each call of `typeof` is followed by `__`, with its types tested
+    /// (`tested`) or with the strings of the types made and compared: `[typeof(x)][0]` is no
+    /// call of `typeof`.
+    fn spelled(code: &str, tested: bool) -> String {
+        match tested {
+            true => code.replace(")__", ")"),
+            false => code.replace("typeof(", "[typeof(").replace(")__", ")][0]"),
+        }
+    }
+
+    /// What `outcome` says, with the calls of `typeof` that [`spelled`] made strings of
+    /// spelled as calls again.
+    fn unspelled(outcome: &str) -> String {
+        outcome.replace("[typeof(", "typeof(").replace(")][0]", ")")
+    }
+
+    /// What `code` comes to (see [`spelled`]), which is what it comes to when the strings of
+    /// the types are made and compared.
+    fn as_compared(code: &str) -> String {
+        let outcome = outcome(&spelled(code, true));
+
+        assert!(code.contains(")__"), "{code} has no type to test");
+        assert_eq!(
+            outcome,
+            unspelled(&self::outcome(&spelled(code, false))),
+            "{code}"
+        );
+
+        outcome
+    }
+
+    /// What `body` comes to in a function that has called itself `depth` times before it
+    /// gets there, without the functions that an error went through on its way out.
+    fn at_depth(body: &str, depth: usize) -> String {
+        let code = format!("d = k => if k <= 0 then {body} else [d(k - 1)][0]\nd({depth})");
+
+        outcome(&code)
+            .trim_start_matches("in function \"d\": ")
+            .to_string()
+    }
+
+    /// The operations of the instructions of the function `code`.
+    fn operations(code: &str) -> Vec<Op> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let [Statement::Expression(expr)] = &statements[..] else {
+            panic!("{code} is not a single expression");
+        };
+        let Expr::Lambda { args, body, .. } = &expr.node else {
+            panic!("{code} is not a function");
+        };
+        let proto = compile_lambda(&Rc::new(args.clone()), body, true).unwrap();
+
+        let mut operations = Vec::new();
+        let mut pc = 0;
+        while pc < proto.code.len() {
+            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
+            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            operations.push(instr.op);
+            pc += 1 + instr.operand_words();
+        }
+
+        operations
+    }
+
+    #[test]
+    fn a_type_that_is_compared_with_a_string_is_tested() {
+        for (code, tested) in [
+            ("x => typeof(x) == \"number\"", true),
+            ("x => \"list\" != typeof(x)", true),
+            ("x => if typeof(x) == \"string\" then 1 else 2", true),
+            ("x => if \"record\" != typeof(x) then 1 else 2", true),
+            ("x => typeof(x) == \"Number\"", true),
+            // A call that is not compared with a string that is spelled out stays a call.
+            ("x => typeof(x)", false),
+            ("(x, s) => typeof(x) == s", false),
+            ("x => typeof(x) == 5", false),
+            ("x => typeof(x) < \"number\"", false),
+            ("x => typeof(x) == \"num\" + \"ber\"", false),
+            ("x => typeof(x, x) == \"number\"", false),
+            ("xs => typeof(...xs) == \"number\"", false),
+        ] {
+            let operations = operations(code);
+
+            assert_eq!(
+                operations
+                    .iter()
+                    .any(|op| matches!(op, Op::IsType | Op::JmpNotType)),
+                tested,
+                "{code}: {operations:?}"
+            );
+            assert_eq!(
+                operations
+                    .iter()
+                    .any(|op| matches!(op, Op::Call | Op::CallBuiltIn | Op::CallList)),
+                !tested,
+                "{code}: {operations:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tested_type_comes_to_what_the_compared_string_does() {
+        let values =
+            "[1, -0.5, \"s\", \"\", true, false, null, [], [1], {}, {a: 1}, x => x, sqrt, map]";
+        let names = [
+            "number",
+            "string",
+            "boolean",
+            "null",
+            "list",
+            "record",
+            "function",
+            "built-in function",
+            "spread",
+            "Number",
+            "",
+            "number ",
+        ];
+
+        for name in names {
+            for code in [
+                format!("map({values}, x => typeof(x)__ == \"{name}\")"),
+                format!("map({values}, x => \"{name}\" != typeof(x)__)"),
+                format!("map({values}, x => if typeof(x)__ == \"{name}\" then 1 else 0)"),
+                format!("map({values}, x => if \"{name}\" != typeof(x)__ then 1 else 0)"),
+                format!("filter({values}, x => typeof(x)__ != \"{name}\")"),
+                format!("f = v => if typeof(v)__ == \"{name}\" then v else null\nmap({values}, f)"),
+            ] {
+                as_compared(&code);
+            }
+        }
+
+        for (code, expected) in [
+            (
+                "f = v => if typeof(v)__ == \"number\" then v else if typeof(v)__ == \"string\" then len(v) else -1\nmap([3, \"ab\", null], f)",
+                "[3, 2, -1]",
+            ),
+            (
+                "typeof(missing)__ == \"number\"",
+                "unknown identifier: missing at missing",
+            ),
+            (
+                "if typeof(1 + \"a\")__ != \"list\" then 1 else 0",
+                "expected a number, but got a string",
+            ),
+        ] {
+            let outcome = as_compared(code);
+
+            assert!(outcome.starts_with(expected), "{code}: {outcome}");
+        }
+    }
+
+    #[test]
+    fn a_type_is_tested_as_deep_as_typeof_is_called() {
+        for body in [
+            "typeof(1)__ == \"number\"",
+            "\"list\" != typeof([])__",
+            "if typeof(k)__ == \"number\" then 1 else 0",
+            "if typeof(k)__ != \"string\" then 1 else 0",
+            "map([1, 2], x => typeof(x)__ == \"number\")",
+            "filter([1, \"a\"], x => typeof(x)__ != \"string\")",
+        ] {
+            for depth in 994..=1000 {
+                assert_eq!(
+                    at_depth(&spelled(body, true), depth),
+                    unspelled(&at_depth(&spelled(body, false), depth)),
+                    "{body} at {depth}"
+                );
+            }
+        }
+    }
+}

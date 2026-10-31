@@ -7,12 +7,12 @@
 //! this way.
 
 use super::{
-    Builder, MAX_CALL_DEPTH, UNBOUND, Vm, depth_exceeded, is_unbound, list_next, range_next,
-    register, set_state, store_value,
+    Builder, MAX_CALL_DEPTH, UNBOUND, Vm, depth_exceeded, is_of_type, is_unbound, list_next,
+    range_next, register, set_state, store_value,
 };
 use crate::{
     ast::BinaryOp,
-    bytecode::{EntryPart, Instr, Op, RECIPROCAL, RemainderTest, register_index},
+    bytecode::{EntryPart, Instr, NOT_OF_TYPE, Op, RECIPROCAL, RemainderTest, register_index},
     error::RuntimeError,
     values::Value,
 };
@@ -623,6 +623,18 @@ impl Vm {
             }
             Op::JmpNotFinite => {
                 if !matches!(self.reg(a), Value::Number(number) if number.is_finite()) {
+                    self.skip(instr.sbx());
+                }
+            }
+            Op::IsType => {
+                self.typeof_depth()?;
+                let holds = is_of_type(&self.reg(b), instr.x) != (c == 1);
+                self.set_reg(a, Value::Bool(holds));
+            }
+            Op::JmpNotType => {
+                self.typeof_depth()?;
+                let negated = instr.x & NOT_OF_TYPE != 0;
+                if is_of_type(&self.reg(a), instr.x & !NOT_OF_TYPE) == negated {
                     self.skip(instr.sbx());
                 }
             }

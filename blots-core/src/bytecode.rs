@@ -330,6 +330,13 @@ pub(crate) enum Op {
     LoadEntry,
     /// `pc += sbx` unless `R[a]` is a finite number.
     JmpNotFinite,
+    /// `R[a] = (typeof(R[b]) == ` the name of type `x` `)`, or `!=` that name when `c` is 1,
+    /// without making a string of the name (see [`TYPE_NAMED_NOTHING`]). Checks the call
+    /// depth first, the way the call of `typeof` that it stands for does.
+    IsType,
+    /// `pc += sbx` unless `typeof(R[a]) == ` the name of type `x & 127` (or `!=` it when
+    /// `x & 128`), with the check of `IsType`.
+    JmpNotType,
     /// Raise the "maximum call depth" error an out-of-line callback call would have produced
     /// when the frame is too deep: the callback is called `b` levels further in than the
     /// frame is. Executed once, before the first iteration.
@@ -475,7 +482,8 @@ impl Op {
             | Op::Round
             | Op::Trunc
             | Op::Len
-            | Op::LoadEntry => A | B,
+            | Op::LoadEntry
+            | Op::IsType => A | B,
 
             Op::Call
             | Op::CallBuiltIn
@@ -515,6 +523,7 @@ impl Op {
             | Op::JmpNotEqNull
             | Op::JmpNotNeNull
             | Op::JmpNotFinite
+            | Op::JmpNotType
             | Op::JmpIfFalse
             | Op::Return
             | Op::Closure
@@ -601,6 +610,13 @@ pub(crate) const LAST_USE_B: u8 = 1;
 
 /// The same for operand register `c`.
 pub(crate) const LAST_USE_C: u8 = 2;
+
+/// Operand `x` of `IsType` and `JmpNotType` for a string that no type is called: no value
+/// is of that type.
+pub(crate) const TYPE_NAMED_NOTHING: u8 = 127;
+
+/// Set in `x` of a `JmpNotType` that tests for a type that a value is not of.
+pub(crate) const NOT_OF_TYPE: u8 = 128;
 
 /// What a loop that goes through the entries of a record is given of each of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

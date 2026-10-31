@@ -26,8 +26,9 @@ use crate::{
     },
     bytecode::{
         CaptureSource, EntryPart, FAST_FRAME_SLOTS, FieldCache, Handler, Instr, LAST_USE_B,
-        LAST_USE_C, LambdaTemplate, Literal, LocalVar, MAX_REGISTERS, Op, Proto, RECIPROCAL,
-        RecordLayout, RemainderTest, SelfRef, Wrap, binary_opcode, exact_reciprocal, small_divisor,
+        LAST_USE_C, LambdaTemplate, Literal, LocalVar, MAX_REGISTERS, NOT_OF_TYPE, Op, Proto,
+        RECIPROCAL, RecordLayout, RemainderTest, SelfRef, TYPE_NAMED_NOTHING, Wrap, binary_opcode,
+        exact_reciprocal, small_divisor,
     },
     environment::Environment,
     error::RuntimeError,
@@ -35,7 +36,7 @@ use crate::{
     heap::RecordPointer,
     intern::Symbol,
     record::Keys,
-    values::{LambdaArg, Value},
+    values::{LambdaArg, Value, ValueType},
 };
 use indexmap::IndexSet;
 use std::{borrow::Borrow, cell::OnceCell, collections::HashMap, hash::Hash, rc::Rc};
@@ -2047,6 +2048,22 @@ impl FnCompiler {
             return self.inline_loop(span, &inline, dst);
         }
 
+        // A string that is spelled out that the type of a value is compared with is tested
+        // for without making the string of the type.
+        if self.inline
+            && matches!(op, BinaryOp::Equal | BinaryOp::NotEqual)
+            && let Some((call, arg, tag)) = type_test(left, right)
+        {
+            let arg_reg = self.expr_any(arg)?;
+            let negated = (op == BinaryOp::NotEqual) as u16;
+            let mut instr = Instr::abc(Op::IsType, dst, arg_reg, negated);
+            instr.x = tag;
+            self.emit_spanned(instr, call.span);
+            self.free_reg = mark;
+
+            return Ok(());
+        }
+
         if let Some(null_op) = null_compare_opcode(op)
             && let Some((operand, null_first)) = null_operand(left, right)
         {
@@ -2131,6 +2148,21 @@ impl FnCompiler {
             && let Some((jump_op, jump_const_op)) = compare_jump_opcodes(*op)
         {
             let span = binary_span(left, right);
+
+            if self.inline
+                && matches!(op, BinaryOp::Equal | BinaryOp::NotEqual)
+                && let Some((call, arg, tag)) = type_test(left, right)
+            {
+                let arg_reg = self.expr_any(arg)?;
+                let mut instr = Instr::abx(Op::JmpNotType, arg_reg, 0);
+                instr.x = match op {
+                    BinaryOp::NotEqual => tag | NOT_OF_TYPE,
+                    _ => tag,
+                };
+                self.free_reg = mark;
+
+                return Ok(vec![self.emit_spanned(instr, call.span)]);
+            }
 
             if let Some(null_op) = null_jump_opcode(*op)
                 && let Some((operand, null_first)) = null_operand(left, right)
@@ -4231,6 +4263,39 @@ fn compare_jump_opcodes(op: BinaryOp) -> Option<(Op, Op)> {
         BinaryOp::GreaterEq => (Op::JmpNotGe, Op::JmpNotGeK),
         _ => return None,
     })
+}
+
+/// The call of `typeof`, its argument and the type (an operand `x` of `Op::IsType`) that
+/// `left == right` compares it with, when one side of the comparison is `typeof(arg)` and the
+/// other a string that is spelled out. The string that `typeof` comes to is equal to that
+/// one exactly where the argument is of the type of that name.
+fn type_test<'e>(
+    left: &'e SpannedExpr,
+    right: &'e SpannedExpr,
+) -> Option<(&'e SpannedExpr, &'e SpannedExpr, u8)> {
+    let typeof_arg = |expr: &'e SpannedExpr| match &expr.node {
+        Expr::Call { func, args }
+            if matches!(func.node, Expr::BuiltIn(BuiltInFunction::Typeof)) =>
+        {
+            match &args[..] {
+                [arg] if !matches!(arg.node, Expr::Spread(_)) => Some(arg),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+
+    let (call, arg, name) = match (&left.node, &right.node) {
+        (_, Expr::String(name)) => (left, typeof_arg(left)?, name),
+        (Expr::String(name), _) => (right, typeof_arg(right)?, name),
+        _ => return None,
+    };
+    let tag = ValueType::ALL
+        .iter()
+        .find(|value_type| value_type.name() == name)
+        .map_or(TYPE_NAMED_NOTHING, |value_type| *value_type as u8);
+
+    Some((call, arg, tag))
 }
 
 /// The comparison that holds exactly where `op` does not, for numbers that are not NaN.
