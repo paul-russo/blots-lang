@@ -204,11 +204,53 @@ impl Environment {
         }
     }
 
+    /// Whether every scope in this chain owns its bindings, which is what
+    /// [`Environment::rewrite_binding_values`] takes.
+    pub fn owns_bindings(&self) -> bool {
+        matches!(self.local, LocalBindings::Owned(_))
+            && self
+                .parent
+                .as_ref()
+                .is_none_or(|parent| parent.owns_bindings())
+    }
+
+    /// Show every binding value in this scope chain to `look`, including the ones that a
+    /// binding of the same name in a scope further in hides.
+    ///
+    /// Used by heap compaction to find what the environment refers to: those are the values
+    /// that [`Environment::rewrite_binding_values`] rewrites.
+    pub fn each_binding_value(&self, look: &mut impl FnMut(&Value)) {
+        match &self.local {
+            LocalBindings::Owned(map) => map.borrow().values().for_each(&mut *look),
+            LocalBindings::Frame {
+                self_binding,
+                values,
+                captures,
+                spill,
+                ..
+            } => {
+                values.iter().for_each(&mut *look);
+                if let Some((_, value)) = self_binding {
+                    look(value);
+                }
+                for (_, value) in captures.iter() {
+                    look(value);
+                }
+                spill.borrow().values().for_each(&mut *look);
+            }
+        }
+
+        if let Some(parent) = &self.parent {
+            parent.each_binding_value(look);
+        }
+    }
+
     /// Rewrite every binding value in this scope chain in place.
     ///
     /// Used by heap compaction to remap heap pointers held by the root environment. Every scope
-    /// in the chain must own its bindings; call frames only exist inside in-progress lambda
-    /// calls, which never span a compaction point.
+    /// in the chain must own its bindings (see [`Environment::owns_bindings`]): a pass between
+    /// two statements is given the root scope, and a run that is given the call frame of a
+    /// lambda for its environment does not compact the heap.
     pub fn rewrite_binding_values(&self, rewrite: &mut impl FnMut(Value) -> Value) {
         match &self.local {
             LocalBindings::Owned(map) => {

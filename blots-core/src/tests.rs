@@ -2633,6 +2633,47 @@ mod slot_frame_tests {
     }
 
     #[test]
+    fn test_self_call_with_spread_arguments() {
+        // A function that calls itself knows how many arguments it passes, unless one of them
+        // is a spread: those are only counted once they are spread.
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        for definition in [
+            "last = (n, acc) => if n == 0 then acc else last(...[n - 1, acc + n])",
+            "inner = (n, acc) => if n == 0 then acc else 1 + inner(n - 1, ...[acc])",
+            "surplus = (n, acc) => if n == 0 then acc else surplus(...[n - 1, acc, 1])",
+        ] {
+            parse_and_evaluate(
+                definition,
+                Some(Rc::clone(&heap)),
+                Some(Rc::clone(&bindings)),
+            )
+            .unwrap();
+        }
+
+        let result = parse_and_evaluate(
+            "last(...[100, 0]) + 10000 * inner(10, 5)",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        assert_eq!(result, Value::Number(5050.0 + 150000.0));
+
+        let error = parse_and_evaluate(
+            "surplus(1, 0)",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("takes exactly 2 arguments, but 3 were given"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn test_deserialized_function_with_unresolved_body_is_callable() {
         // Deserialized lambdas re-parse their body outside any lambda parse arm, so their
         // identifiers stay unresolved and must keep working through the dynamic name lookup.
@@ -2669,5 +2710,9080 @@ mod slot_frame_tests {
         )
         .unwrap();
         assert_eq!(result, Value::Number(134.0));
+    }
+}
+
+// Tests pinning arithmetic over whole lists: a run of operators is evaluated in one pass over
+// the elements and may feed an aggregate function directly, and none of that is allowed to be
+// observable.
+#[cfg(test)]
+mod list_arithmetic_tests {
+    use crate::environment::Environment;
+    use crate::expressions::evaluate_pairs;
+    use crate::heap::Heap;
+    use crate::parser::{Rule, get_pairs};
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code` as the next ones of the program that `heap` and
+    /// `bindings` are of, up to the value of the last one.
+    fn evaluate_in(
+        code: &str,
+        heap: &Rc<RefCell<Heap>>,
+        bindings: &Rc<Environment>,
+    ) -> Result<Value, crate::error::RuntimeError> {
+        let pairs = get_pairs(code).map_err(|e| crate::error::RuntimeError::new(e.to_string()))?;
+
+        let mut result = Value::Null;
+        for pair in pairs {
+            if pair.as_rule() != Rule::statement {
+                continue;
+            }
+
+            let Some(inner) = pair.into_inner().next() else {
+                continue;
+            };
+            if matches!(inner.as_rule(), Rule::expression | Rule::assignment) {
+                result = evaluate_pairs(
+                    inner.into_inner(),
+                    Rc::clone(heap),
+                    Rc::clone(bindings),
+                    0,
+                    code,
+                )?;
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Evaluate the statements of `code` and render the value of the last one.
+    fn evaluate(code: &str) -> Result<String, crate::error::RuntimeError> {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+        let result = evaluate_in(code, &heap, &bindings)?;
+
+        Ok(result.stringify_internal(&heap.borrow()))
+    }
+
+    fn assert_evaluates_to(code: &str, expected: &str) {
+        assert_eq!(evaluate(code).unwrap(), expected, "{code}");
+    }
+
+    #[test]
+    fn chains_match_the_operators_applied_one_at_a_time() {
+        assert_evaluates_to(
+            "xs = range(1, 6)\n(xs * 2 + 1) / 4",
+            "[0.75, 1.25, 1.75, 2.25, 2.75]",
+        );
+        assert_evaluates_to("xs = range(1, 6)\n10 - xs * xs % 7", "[9, 6, 8, 8, 6]");
+        assert_evaluates_to(
+            "xs = range(1, 6)\n2 ^ (xs - 1) - xs / 2",
+            "[0.5, 1, 2.5, 6, 13.5]",
+        );
+        assert_evaluates_to(
+            "xs = [1, 2, 3]\nys = [10, 20, 30]\n(xs + ys) * ys - xs / ys",
+            "[109.9, 439.9, 989.9]",
+        );
+    }
+
+    #[test]
+    fn chains_longer_than_a_block_of_elements_are_complete() {
+        assert_evaluates_to(
+            "xs = range(1000)\nys = xs * 2 + 1\n[len(ys), ys[0], ys[127], ys[128], ys[999]]",
+            "[1000, 1, 255, 257, 1999]",
+        );
+        assert_evaluates_to("xs = range(1000)\nsum(xs * 2 + 1)", "1000000");
+        assert_evaluates_to("xs = range(1000)\nsum((xs + xs) * xs % 7)", "2000");
+    }
+
+    #[test]
+    fn aggregates_of_chains_match_aggregates_of_lists() {
+        let cases = [
+            ("sum", "35"),
+            ("avg", "7"),
+            ("prod", "10395"),
+            ("min", "3"),
+            ("max", "11"),
+            ("median", "7"),
+            ("len", "5"),
+        ];
+        for (function, expected) in cases {
+            assert_evaluates_to(
+                &format!("xs = range(1, 6)\n{function}(xs * 2 + 1)"),
+                expected,
+            );
+            assert_evaluates_to(
+                &format!("xs = range(1, 6)\nys = xs * 2 + 1\n{function}(ys)"),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn an_aggregate_of_a_chain_builds_no_list() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        // The number of values that the statements of `code` add to the heap, which nothing
+        // is taken out of in the meantime.
+        let added = |code: &str| {
+            let before = heap.borrow().len();
+            evaluate_in(code, &heap, &bindings).unwrap();
+
+            heap.borrow().len() - before
+        };
+
+        evaluate_in("xs = range(1, 1000)\nys = xs + 1", &heap, &bindings).unwrap();
+
+        for function in ["sum", "avg", "prod", "min", "max"] {
+            // The call names the function, or calls it as the value of a variable.
+            assert_eq!(
+                added(&format!("{function}((xs * 2 + 1) / 3 - ys)")),
+                0,
+                "{function}"
+            );
+
+            evaluate_in(&format!("the_{function} = {function}"), &heap, &bindings).unwrap();
+            assert_eq!(
+                added(&format!("the_{function}((xs * 2 + 1) / 3 - ys)")),
+                0,
+                "{function} as a value"
+            );
+        }
+
+        // The list is there to be counted when something else is made of the chain.
+        assert_eq!(added("(xs * 2 + 1) / 3 - ys"), 1);
+        assert_eq!(added("median((xs * 2 + 1) / 3 - ys)"), 1);
+        assert_eq!(added("len((xs * 2 + 1) / 3 - ys)"), 1);
+    }
+
+    #[test]
+    fn aggregates_follow_floating_point_conventions() {
+        assert_evaluates_to("sum([0.1, 0.2, 0.3] * 1)", "0.6000000000000001");
+        assert_evaluates_to("max([1, 2, 3] * (0 / 0))", "-inf");
+        assert_evaluates_to("min([1, 2, 3] * (0 / 0))", "inf");
+        assert_evaluates_to("sum([1, 2, 3] * infinity - infinity)", "NaN");
+        assert_evaluates_to("1 / sum([0] * -1)", "-inf");
+        assert_evaluates_to("1 / prod([0, 5] * -1 + 0)", "-inf");
+    }
+
+    #[test]
+    fn operands_of_a_chain_keep_their_values() {
+        assert_evaluates_to(
+            "xs = [1, 2, 3]\nys = xs * 2 + 1\nzs = ys - xs\n[xs, ys, zs, sum(ys * 2 + xs)]",
+            "[[1, 2, 3], [3, 5, 7], [2, 3, 4], 36]",
+        );
+        assert_evaluates_to(
+            "f = t => do { a = t * 2; b = a + 1; c = (a - b) * 3 + a; return [sum(b * 2 + a), c, a, t] }\nf([1, 2, 3])",
+            "[42, [-1, 1, 3], [2, 4, 6], [1, 2, 3]]",
+        );
+    }
+
+    #[test]
+    fn empty_lists_reach_the_aggregate_as_lists() {
+        assert_evaluates_to("[] * 2 + 1", "[]");
+
+        let error = evaluate("sum([] * 2 + 1)").unwrap_err().to_string();
+        assert!(
+            error.contains("sum requires at least one number"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn values_that_are_not_numbers_take_the_general_path() {
+        assert_evaluates_to("[\"a\", \"b\"] + [\"c\", \"d\"]", "[ac, bd]");
+        assert_evaluates_to("[1, \"b\"] + [2, \"d\"]", "[3, bd]");
+
+        let error = evaluate("xs = [1, 2, \"x\"]\nsum(xs * 2 + 1)")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("expected a number, but got a string"),
+            "{error}"
+        );
+
+        let error = evaluate("xs = [1, 2, 3]\nsum((xs * 2 + 1) - [1, null, 3])")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("expected a number, but got a null"),
+            "{error}"
+        );
+
+        let error = evaluate("xs = [1, 2, 3]\nxs * 2 + [1, 2]")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("lists must be the same length"), "{error}");
+
+        let error = evaluate("xs = [1, 2, 3]\nsum(xs * 2 + 1, 4)")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("expected a number, but got a list"),
+            "{error}"
+        );
+    }
+}
+
+// Programs far larger than anyone writes by hand (generated code, tables pasted in as
+// literals) must not run into the sizes of the instruction operands.
+#[cfg(test)]
+mod large_program_tests {
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code` and render the value of the last one.
+    fn evaluate(code: &str) -> Result<String, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+            result = evaluate_ast(
+                &expr,
+                Rc::clone(&heap),
+                Rc::clone(&bindings),
+                0,
+                Rc::clone(&source),
+            )?;
+        }
+
+        Ok(result.stringify_internal(&heap.borrow()))
+    }
+
+    fn assert_evaluates_to(code: &str, expected: &str) {
+        assert_eq!(evaluate(code).unwrap(), expected);
+    }
+
+    fn joined(count: usize, item: impl Fn(usize) -> String) -> String {
+        (0..count).map(item).collect::<Vec<_>>().join(", ")
+    }
+
+    #[test]
+    fn a_call_takes_more_arguments_than_a_function_has_registers() {
+        for count in [255, 256, 257, 1000, 70_000] {
+            let args = joined(count, |i| i.to_string());
+            let total = count * (count - 1) / 2;
+
+            assert_evaluates_to(&format!("sum({args})"), &total.to_string());
+            assert_evaluates_to(
+                &format!("f = (first, ...rest) => first + sum(rest)\nf({args})"),
+                &total.to_string(),
+            );
+            assert_evaluates_to(&format!("sum({args}, ...[1, 2])"), &(total + 3).to_string());
+        }
+    }
+
+    #[test]
+    fn a_call_with_many_arguments_is_checked_like_any_other() {
+        let args = joined(300, |i| i.to_string());
+
+        let error = evaluate(&format!("f = (a, b) => a + b\nf({args})"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("takes exactly 2 arguments, but 300 were given"),
+            "{error}"
+        );
+
+        let error = evaluate(&format!("typeof({args})"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("takes exactly 1 arguments, but 300 were given"),
+            "{error}"
+        );
+
+        let error = evaluate(&format!("f = 5\nf({args})"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("can't call a non-function: 5"), "{error}");
+    }
+
+    #[test]
+    fn a_function_with_many_parameters_calls_itself() {
+        for count in [2, 3, 64, 65, 66, 127, 128, 129, 255, 256, 257, 300] {
+            // Every call passes the parameters after the first on rotated by one place.
+            let rest = count - 1;
+            let turns = 5;
+            let params = joined(rest, |i| format!("p{i}"));
+            let rotated = joined(rest, |i| format!("p{}", (i + 1) % rest));
+            let args = joined(rest, |i| i.to_string());
+            let expected = format!("[{}]", joined(rest, |i| ((i + turns) % rest).to_string()));
+
+            // In tail position the call replaces the frame; as an operand it cannot.
+            for call in [
+                format!("f(n - 1, {rotated})"),
+                format!("f(n - 1, {rotated}) + 0"),
+            ] {
+                assert_evaluates_to(
+                    &format!(
+                        "f = (n, {params}) => if n == 0 then [{params}] else {call}\nf({turns}, {args})"
+                    ),
+                    &expected,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_function_refers_to_many_strings_and_names() {
+        // Every string and name is used twice: before and after the function has seen all of
+        // them.
+        for count in [3, 16, 17, 18, 40, 5000] {
+            let there_and_back = |item: &dyn Fn(usize) -> String| {
+                let there = joined(count, item);
+                let back = joined(count, |i| item(count - 1 - i));
+                format!("[{there}, {back}]")
+            };
+
+            assert_evaluates_to(
+                &there_and_back(&|i| format!("\"s{i}\"")),
+                &there_and_back(&|i| format!("s{i}")),
+            );
+
+            let fields = joined(count, |i| format!("f{i}: {i}"));
+            assert_evaluates_to(
+                &format!(
+                    "r = {{{fields}}}\n{}",
+                    there_and_back(&|i| format!("r.f{i}"))
+                ),
+                &there_and_back(&|i| i.to_string()),
+            );
+
+            let definitions = (0..count)
+                .map(|i| format!("v{i} = {i} * 2\n"))
+                .collect::<String>();
+            assert_evaluates_to(
+                &format!("{definitions}{}", there_and_back(&|i| format!("v{i}"))),
+                &there_and_back(&|i| (i * 2).to_string()),
+            );
+        }
+    }
+
+    #[test]
+    fn a_function_builds_more_records_than_it_has_layouts() {
+        let count = 70_000;
+
+        let rows = joined(count, |i| format!("{{id: {i}, half: {i} / 2}}"));
+        assert_evaluates_to(
+            &format!("rows = [{rows}]\n[len(rows), rows[0].id, rows[69999].id, rows[69999].half]"),
+            "[70000, 0, 69999, 34999.5]",
+        );
+
+        // Each row takes two layouts, and the last one that is left goes to either the record
+        // or the record inside it, depending on how many came before.
+        let nested = joined(count, |i| format!("{{id: {i}, at: {{x: {i}, y: 1}}}}"));
+        for before in ["", "{z: 0}, "] {
+            assert_evaluates_to(
+                &format!(
+                    "rows = [{before}{nested}]\nlast = rows[-1]\n[rows[-37233], rows[-37232], last.at.x - last.id, last.at]"
+                ),
+                "[{id: 32767, at: {x: 32767, y: 1}}, {id: 32768, at: {x: 32768, y: 1}}, 0, {x: 69999, y: 1}]",
+            );
+        }
+
+        let distinct = joined(count, |i| format!("{{k{i}: {i}, k{i}: {i} + 1}}"));
+        assert_evaluates_to(
+            &format!(
+                "rows = [{distinct}]\n[len(rows), rows[1], rows[65535], rows[65536], rows[69999].k69999]"
+            ),
+            "[70000, {k1: 2}, {k65535: 65536}, {k65536: 65537}, 70000]",
+        );
+    }
+}
+
+// A function that ends in a call to itself starts over in the frame it has, and computes the
+// arguments of that call right into its parameters where it can. Every argument still has to
+// see the parameters as they were when the call began.
+#[cfg(test)]
+mod tail_call_tests {
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code` and render the value of the last one.
+    fn evaluate(code: &str) -> Result<String, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+            result = evaluate_ast(
+                &expr,
+                Rc::clone(&heap),
+                Rc::clone(&bindings),
+                0,
+                Rc::clone(&source),
+            )?;
+        }
+
+        Ok(result.stringify_internal(&heap.borrow()))
+    }
+
+    fn assert_evaluates_to(code: &str, expected: &str) {
+        assert_eq!(evaluate(code).unwrap(), expected, "{code}");
+    }
+
+    #[test]
+    fn arguments_read_the_parameters_of_the_call_they_are_in() {
+        for (call, expected) in [
+            // Parameters trade places, in pairs and in a circle.
+            ("f(n - 1, b, a, c)", "[2, 1, 3]"),
+            ("f(n - 1, c, a, b)", "[1, 2, 3]"),
+            ("f(n - 1, b, c, a)", "[1, 2, 3]"),
+            ("f(n - 1, c, b, a)", "[3, 2, 1]"),
+            // An argument reads a parameter that an earlier argument replaces.
+            ("f(n - 1, a + 1, a * 10, c)", "[4, 30, 3]"),
+            ("f(n - 1, a + 1, b, a + c)", "[4, 2, 9]"),
+            ("f(n - 1, b, a + b, c)", "[5, 8, 3]"),
+            ("f(n - 1, a + b, a, c)", "[7, 4, 3]"),
+            ("f(n - 1, a + b + c, a - b, b - c)", "[11, -3, 7]"),
+            ("f(n - 1, a, a, a)", "[1, 1, 1]"),
+            ("f(n - 1, c, c, c)", "[3, 3, 3]"),
+            // An argument reads its own parameter more than once.
+            ("f(n - 1, (a + 1) * a, b, c)", "[42, 2, 3]"),
+            ("f(n - 1, a, [b, b + 1][b - b], c * c - c)", "[1, 2, 870]"),
+            (
+                "f(n - 1, if a > b then a - b else b - a, max(a, b), c)",
+                "[1, 2, 3]",
+            ),
+            // The count itself moves on before the others have read it.
+            ("f(n - 1, a + n, b * n, c - n)", "[7, 12, -3]"),
+        ] {
+            assert_evaluates_to(
+                &format!("f = (n, a, b, c) => if n == 0 then [a, b, c] else {call}\nf(3, 1, 2, 3)"),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn code_that_runs_for_an_argument_reads_the_parameters_of_the_call() {
+        for (argument, expected) in [
+            // A callee looks the caller's parameter up by name.
+            ("peek()", "[3, 2]"),
+            ("peek() + peek()", "[3, 4]"),
+            ("twice(1)", "[3, 5]"),
+            // A callback and a closure read the parameter where they are written.
+            ("sum(map([1, 2], x => x + a))", "[3, 7]"),
+            ("reduce([1, 2], (total, x) => total + x * a, b)", "[3, 9]"),
+            ("(() => a)()", "[3, 2]"),
+            ("a into (x => x + a)", "[3, 4]"),
+            ("sum([1, 2] via (x => x * a))", "[3, 6]"),
+            ("do { twice_a = a + a; return twice_a + 1 }", "[3, 5]"),
+        ] {
+            assert_evaluates_to(
+                &format!(
+                    "peek = () => a\ntwice = x => x + a * 2\nf = (n, a, b) => if n == 0 then [a, b] else f(n - 1, a + 1, {argument})\nf(3, 0, 0)"
+                ),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn every_parameter_of_a_wide_function_is_replaced_at_once() {
+        for count in [1, 2, 3, 63, 64, 65, 66, 70, 130, 254] {
+            // Each parameter takes on the sum of itself and its neighbour, and the last one
+            // that of itself and the first.
+            let turns = 3;
+            let params = (0..count).map(|i| format!("p{i}")).collect::<Vec<_>>();
+            let sums = (0..count)
+                .map(|i| format!("p{i} + p{}", (i + 1) % count))
+                .collect::<Vec<_>>();
+            let start = (0..count).map(|i| i.to_string()).collect::<Vec<_>>();
+
+            let mut values = (0..count).collect::<Vec<_>>();
+            for _ in 0..turns {
+                values = (0..count)
+                    .map(|i| values[i] + values[(i + 1) % count])
+                    .collect();
+            }
+
+            let expected = values.iter().map(usize::to_string).collect::<Vec<_>>();
+            assert_evaluates_to(
+                &format!(
+                    "f = (n, {params}) => if n == 0 then [{params}] else f(n - 1, {sums})\nf({turns}, {start})",
+                    params = params.join(", "),
+                    sums = sums.join(", "),
+                    start = start.join(", "),
+                ),
+                &format!("[{}]", expected.join(", ")),
+            );
+        }
+    }
+
+    #[test]
+    fn a_call_that_is_too_deep_fails_with_the_arguments_in_place() {
+        // The call that goes beyond the depth limit is an ordinary one, whichever way its
+        // arguments were computed.
+        for call in ["f(n - 1, a + 1, b)", "f(n - 1, b, a)", "f(n - 1, a + b, a)"] {
+            let definition = format!("f = (n, a, b) => if n == 0 then [a, b] else {call}");
+
+            assert!(evaluate(&format!("{definition}\nf(999, 0, 1)")).is_ok());
+
+            let error = evaluate(&format!("{definition}\nf(1001, 0, 1)"))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("maximum call depth"), "{error}");
+        }
+    }
+}
+
+// The callback of a loop that is compiled in place starts by computing what is the same on
+// every pass once, ahead of the passes. Nothing may tell that from computing it on every pass.
+#[cfg(test)]
+mod loop_invariant_tests {
+    use crate::bytecode::{Instr, Op};
+    use crate::compiler::compile_chunk;
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::values::Value;
+    use crate::vm::Vm;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code` and render the value of the last one.
+    fn evaluate(code: &str) -> Result<String, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+            result = evaluate_ast(
+                &expr,
+                Rc::clone(&heap),
+                Rc::clone(&bindings),
+                0,
+                Rc::clone(&source),
+            )?;
+        }
+
+        Ok(result.stringify_internal(&heap.borrow()))
+    }
+
+    fn assert_evaluates_to(code: &str, expected: &str) {
+        assert_eq!(evaluate(code).unwrap(), expected, "{code}");
+    }
+
+    fn assert_fails_with(code: &str, expected: &str) {
+        let error = evaluate(code).unwrap_err().to_string();
+        assert!(error.contains(expected), "{code}: {error}");
+    }
+
+    /// The instructions that read an element or a field in the innermost loop of the
+    /// statement `code`: how many of them run once, ahead of the passes, and how many run on
+    /// every pass.
+    fn reads_of_innermost_loop(code: &str) -> (usize, usize) {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let [Statement::Expression(expr)] = &statements[..] else {
+            panic!("{code} is not a single expression");
+        };
+        let chunk = compile_chunk(expr, true, &Environment::new()).unwrap();
+
+        let mut instructions = Vec::new();
+        let mut pc = 0;
+        while pc < chunk.code.len() {
+            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
+            let instr = unsafe { Instr::decode(chunk.code[pc]) };
+            instructions.push((pc, instr));
+            pc += 1 + instr.operand_words();
+        }
+
+        // A loop is complete before the loop around it goes on to its next pass, so the first
+        // instruction that starts a next pass belongs to the innermost loop.
+        let (back, next) = instructions
+            .iter()
+            .copied()
+            .find(|(_, instr)| matches!(instr.op, Op::ForRangeNext | Op::ForListNext))
+            .expect("a loop that is compiled in place");
+        let start = (back as isize + 1 + next.sbx()) as usize;
+        let (entry, _) = instructions
+            .iter()
+            .copied()
+            .rfind(|(pc, instr)| {
+                *pc < start && matches!(instr.op, Op::ForRange | Op::ForList) && instr.a == next.a
+            })
+            .expect("the instruction that enters the loop");
+
+        let reads = |from: usize, to: usize| {
+            instructions
+                .iter()
+                .filter(|(pc, instr)| {
+                    (from..to).contains(pc) && matches!(instr.op, Op::Index | Op::GetField)
+                })
+                .count()
+        };
+
+        (reads(entry, start), reads(start, back))
+    }
+
+    /// Evaluate the statement `code` against what `bindings` holds, with its loops compiled
+    /// in place or with their callbacks called like any function, and render what comes of
+    /// it: the value, or the error with the place it points at.
+    fn outcome(
+        code: &str,
+        heap: &Rc<RefCell<Heap>>,
+        bindings: &Rc<Environment>,
+        inline: bool,
+    ) -> String {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let [Statement::Expression(expr)] = &statements[..] else {
+            panic!("{code} is not a single expression");
+        };
+
+        let result = compile_chunk(expr, inline, bindings).and_then(|chunk| {
+            Vm::new(Rc::clone(heap), Rc::clone(bindings)).run_chunk(&chunk, code.into(), 0)
+        });
+
+        match result {
+            Ok(value) => value.stringify_internal(&heap.borrow()),
+            Err(error) => format!("{} at {:?}", error.message, error.span),
+        }
+    }
+
+    // A call evaluates what it calls, then what it passes from left to right, and only then
+    // finds out whether it can call that. Here every part of a call is, independently of the
+    // others, the same on every pass or not, and something that fails or not, so that what a
+    // loop ends in tells the order in which the parts were evaluated. A callback that is
+    // called like any function computes nothing ahead of the passes, which makes it what a
+    // loop compiled in place has to agree with.
+    #[test]
+    fn a_call_in_a_callback_evaluates_its_parts_in_order() {
+        const CALLEES: [&str; 14] = [
+            "h",
+            "nope_f",
+            "r.f",
+            "r.g",
+            "r.zz",
+            "z.f",
+            "fl[j]",
+            "fl[x]",
+            "x.f",
+            "max",
+            "5",
+            "((p, q) => p - q)",
+            "(if x > 0 then h else r.f)",
+            "u",
+        ];
+        const ARGS: [&str; 8] = [
+            "1",
+            "m[0][1]",
+            "z[0]",
+            "nope",
+            "x",
+            "x.f",
+            "m[x][0]",
+            "...[1, 2]",
+        ];
+        const PLACES: [&str; 8] = [
+            "C",
+            "C + m[1][1]",
+            "m[1][1] + C",
+            "z[1] + C",
+            "x + C",
+            "x.g + C",
+            "max(C, z[1])",
+            "if C > z[1] then 1 else 2",
+        ];
+        const LOOPS: [&str; 4] = [
+            "map([0, 1], x => B)",
+            "reduce(range(2), (acc, x) => acc + B, 0)",
+            "filter([0, 1], x => B)",
+            "map([], x => B)",
+        ];
+
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+        for definition in [
+            "m = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]",
+            "z = null",
+            "r = {a: 2, f: (p, q) => p - q, g: 5}",
+            "fl = [(p, q) => p + q, (p, q) => p * q]",
+            "h = (p, q) => p * 10 + q",
+            "u = p => p + 1",
+            "j = 1",
+        ] {
+            let bound = outcome(definition, &heap, &bindings, true);
+            assert!(!bound.contains(" at "), "{definition}: {bound}");
+        }
+
+        let mut lists_of_args = vec![String::new()];
+        for first in ARGS {
+            lists_of_args.push(first.to_string());
+            for second in ARGS {
+                lists_of_args.push(format!("{first}, {second}"));
+            }
+        }
+
+        let mut outcomes = std::collections::HashSet::new();
+        for callee in CALLEES {
+            for args in &lists_of_args {
+                let call = format!("{callee}({args})");
+                for place in PLACES {
+                    let body = place.replace('C', &call);
+                    for form in LOOPS {
+                        let code = form.replace('B', &body);
+                        let called = outcome(&code, &heap, &bindings, false);
+                        let in_place = outcome(&code, &heap, &bindings, true);
+
+                        assert_eq!(in_place, called, "{code}");
+                        outcomes.insert(called.split(" at ").next().unwrap().to_string());
+                    }
+                }
+            }
+        }
+
+        // The programs end in many different ways, or the order would not show.
+        assert!(outcomes.len() >= 30, "{} outcomes", outcomes.len());
+    }
+
+    #[test]
+    fn what_is_the_same_on_every_pass_is_read_once() {
+        for (code, expected) in [
+            // The row is read ahead of the loop over its columns.
+            (
+                "map(range(2), i => reduce(range(2), (acc, j) => acc + m[i][j] * 10, 0))",
+                (1, 1),
+            ),
+            (
+                "map(range(2), i => map(range(2), j => reduce(range(2), (acc, k) => acc + a[i][k] * b[k][j], 0)))",
+                (1, 3),
+            ),
+            // So are the fields and elements on the way to what differs, and what does not
+            // differ at all.
+            ("map(xs, x => r.a.b[x])", (2, 1)),
+            ("map(xs, x => x + r.a.b[1])", (3, 0)),
+            ("map(xs, x => r.a.b[1] * 10 + r.c[x])", (4, 1)),
+            ("filter(xs, x => x > r.limit)", (1, 0)),
+            ("map(xs, x => max(m[0], x))", (1, 0)),
+            ("map(xs, x => if x > m[0] then m[1] else x)", (1, 1)),
+            // A function that is called by name is looked up ahead of the passes as well, and
+            // what it is given follows that.
+            ("map(xs, x => f(m[0], x))", (1, 0)),
+            // Nothing is read ahead of something the pass does first that may fail.
+            ("map(xs, x => x[0] + m[0])", (0, 2)),
+            ("map(xs, x => f(x) + m[0])", (0, 1)),
+            ("map(xs, x => (x.f)(m[0]))", (0, 2)),
+            // Nor is what differs from pass to pass.
+            ("map(xs, x => x.a + x.b)", (0, 2)),
+            ("reduce(xs, (acc, x) => acc[0] + x, [0])", (0, 1)),
+            ("map(xs, (x, i) => m[i] + m[x])", (0, 2)),
+        ] {
+            assert_eq!(reads_of_innermost_loop(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn what_a_callback_reads_from_outside_is_the_same_on_every_pass() {
+        for (code, expected) in [
+            // A row of a matrix, under a loop over its columns.
+            (
+                "m = [[1, 2], [3, 4]]\nmap(range(2), i => reduce(range(2), (acc, j) => acc + m[i][j] * 10, 0))",
+                "[30, 70]",
+            ),
+            (
+                "f = (m, k) => map(range(2), i => reduce(range(2), (acc, j) => acc + m[i][j] * k, 0))\nf([[1, 2], [3, 4]], 10)",
+                "[30, 70]",
+            ),
+            // Fields and elements, on either side of what differs.
+            (
+                "r = {a: {b: [5, 6]}}\nmap([0, 1], i => r.a.b[1] * 10 + r.a.b[i])",
+                "[65, 66]",
+            ),
+            (
+                "r = {a: {b: [5, 6]}}\nmap([0, 1], i => r.a.b[i] * 10 + r.a.b[1])",
+                "[56, 66]",
+            ),
+            (
+                "r = {k: \"b\", b: 3}\nmap([1, 2], x => r[r.k] - x)",
+                "[2, 1]",
+            ),
+            // The whole body, and the whole condition.
+            ("a = [7, 8]\nmap([1, 2], x => a[1])", "[8, 8]"),
+            ("a = [7, 8]\nfilter([1, 2], x => a[0] < a[1])", "[1, 2]"),
+            ("a = [7, 8]\nevery([1, 2], x => a[0] > a[1])", "false"),
+            ("a = [7, 8]\nsome([1, 2], x => a[0] + 1 == a[1])", "true"),
+            ("a = [7, 8]\nreduce([1, 2], (acc, x) => a[1], 0)", "8"),
+            // An argument of a call, a condition, and the list of a loop in the body.
+            ("a = [7, 8]\nmap([1, 2], x => max(a[0], x * 4))", "[7, 8]"),
+            (
+                "a = [7, 8]\nmap([6, 9], x => if a[1] > x then a[0] else x)",
+                "[7, 9]",
+            ),
+            (
+                "m = [[1, 2], [3, 4]]\nmap([10, 20], x => map(m[1], y => y + x))",
+                "[[13, 14], [23, 24]]",
+            ),
+            (
+                "m = [[1, 2], [3, 4]]\nmap([10, 20], x => reduce(m[0], (acc, y) => acc + y + x, m[1][1]))",
+                "[27, 47]",
+            ),
+        ] {
+            assert_evaluates_to(code, expected);
+        }
+    }
+
+    #[test]
+    fn a_list_computed_ahead_of_the_passes_is_not_written_by_them() {
+        assert_evaluates_to(
+            "a = [1, 2, 3]\nmap([1, 2], x => sum(a * 2 + x))",
+            "[15, 18]",
+        );
+        assert_evaluates_to(
+            "a = [1, 2, 3]\nmap([1, 2], x => a * 2 + x)",
+            "[[3, 5, 7], [4, 6, 8]]",
+        );
+        assert_evaluates_to(
+            "a = [1, 2, 3]\nmap([1, 2], x => (a * 2 + a) * x - 1)",
+            "[[2, 5, 8], [5, 11, 17]]",
+        );
+    }
+
+    #[test]
+    fn a_variable_of_the_loop_is_not_taken_for_one_bound_outside() {
+        // The parameter of the callback hides a variable of the same name.
+        assert_evaluates_to(
+            "i = 1\nmap([[10, 20], [30, 40]], a => map(range(2), i => a[i]))",
+            "[[10, 20], [30, 40]]",
+        );
+        // A variable of a block is bound anew on every pass of the loop around the block.
+        assert_evaluates_to(
+            "map([1, 2], x => do { a = [x, x * 2]; return map([0, 1], j => a[1] + a[j]) })",
+            "[[3, 4], [6, 8]]",
+        );
+        assert_evaluates_to(
+            "a = [100, 200]\nmap([1, 2], x => do { a = [x, x * 2]; return a[1] + x })",
+            "[3, 6]",
+        );
+        // A variable that is bound again before the loop has its last value in the loop.
+        assert_evaluates_to(
+            "do { t = [1, 2]; t = t * 10; return map([0, 1], i => t[1] + i) }",
+            "[20, 21]",
+        );
+        // The accumulator differs from pass to pass.
+        assert_evaluates_to("reduce([1, 2, 3], (acc, x) => [acc[0] + x], [0])", "[6]");
+    }
+
+    #[test]
+    fn a_loop_without_passes_computes_nothing() {
+        for (code, expected) in [
+            ("map([], x => missing[0] + x)", "[]"),
+            ("map(range(0), x => null[0])", "[]"),
+            ("filter([], x => null.f)", "[]"),
+            ("reduce([], (acc, x) => \"s\" - 1, 7)", "7"),
+            ("every(range(2, 2), x => 1[0])", "true"),
+            ("some([], x => 1[0])", "false"),
+            (
+                "a = 5\nmap([1, 2], x => map(range(0), y => a[0] + y))",
+                "[[], []]",
+            ),
+        ] {
+            assert_evaluates_to(code, expected);
+        }
+    }
+
+    #[test]
+    fn the_first_thing_to_fail_in_a_pass_is_what_fails() {
+        for (code, expected) in [
+            ("map([1], x => x[0] + null[0])", "but got a number"),
+            ("map([1], x => null[0] + x[0])", "but got a null"),
+            (
+                "map([1], x => x.f + null[0])",
+                "expected a record, but got a number",
+            ),
+            ("map([1], x => (x + 1) * null[0])", "but got a null"),
+            ("map([1], x => (\"s\" - x) * null[0])", "but got a string"),
+            ("map([1], x => null[x] + \"s\"[null])", "but got a null"),
+            ("map([1], x => max(x.f, null.g))", "but got a number"),
+            ("map([1], x => max(null.g, x.f))", "but got a null"),
+            (
+                "map([1], x => if x.f > null.g then 1 else 2)",
+                "but got a number",
+            ),
+            (
+                "map([1], x => if null.g > x.f then 1 else 2)",
+                "but got a null",
+            ),
+            (
+                "map([1], x => map(x.f, y => y) + null.g)",
+                "but got a number",
+            ),
+            (
+                "map([1], x => reduce(null.g, (acc, y) => y, x.f))",
+                "but got a null",
+            ),
+            (
+                "map([1], x => reduce(range(x.f), (acc, y) => y, null.g))",
+                "but got a number",
+            ),
+            (
+                "map([1], x => missing + null.g)",
+                "unknown identifier: missing",
+            ),
+            ("map([1], x => null.g + missing)", "but got a null"),
+        ] {
+            assert_fails_with(code, expected);
+        }
+    }
+
+    #[test]
+    fn what_fails_ahead_of_the_passes_fails_as_part_of_the_callback() {
+        assert_fails_with(
+            "map([1, 2], x => null[0] + x)",
+            "in built-in function \"map\": in anonymous function: expected a record, list, or string, but got a null",
+        );
+        assert_fails_with(
+            "f = xs => reduce(xs, (acc, x) => acc + null.g, 0)\nf([1])",
+            "in function \"f\": in built-in function \"reduce\": in anonymous function: expected a record, but got a null",
+        );
+        assert_fails_with(
+            "map([1], x => filter([1], y => missing[0] > y))",
+            "in built-in function \"map\": in anonymous function: in built-in function \"filter\": in anonymous function: unknown identifier: missing",
+        );
+    }
+}
+
+// A power of two divides a number without a division. The quotient is the product with its
+// reciprocal, and what a whole number leaves is in its lowest bits, so a condition that asks
+// about the remainder reads them and never computes it. Nothing may tell either from dividing.
+#[cfg(test)]
+mod power_of_two_tests {
+    use crate::bytecode::{Instr, Op};
+    use crate::compiler::compile_chunk;
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::intern::Symbol;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code` against `bindings`, up to the value of the last one.
+    pub(super) fn evaluate(
+        code: &str,
+        heap: &Rc<RefCell<Heap>>,
+        bindings: &Rc<Environment>,
+    ) -> Result<Value, RuntimeError> {
+        let statements =
+            parse_program(code).unwrap_or_else(|| panic!("the fast parser does not read {code}"));
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+            result = evaluate_ast(
+                &expr,
+                Rc::clone(heap),
+                Rc::clone(bindings),
+                0,
+                Rc::clone(&source),
+            )?;
+        }
+
+        Ok(result)
+    }
+
+    /// What the statements of `code` come to, rendered: the value, or the error with the
+    /// place it points at.
+    fn outcome(code: &str) -> String {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        match evaluate(code, &heap, &bindings) {
+            Ok(value) => value.stringify_internal(&heap.borrow()),
+            Err(error) => format!("{} at {:?}", error.message, error.span),
+        }
+    }
+
+    /// The operations of the instructions that the expression `code` compiles to.
+    fn operations(code: &str) -> Vec<Op> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let [Statement::Expression(expr)] = &statements[..] else {
+            panic!("{code} is not a single expression");
+        };
+        let chunk = compile_chunk(expr, true, &Environment::new()).unwrap();
+
+        let mut operations = Vec::new();
+        let mut pc = 0;
+        while pc < chunk.code.len() {
+            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
+            let instr = unsafe { Instr::decode(chunk.code[pc]) };
+            operations.push(instr.op);
+            pc += 1 + instr.operand_words();
+        }
+
+        operations
+    }
+
+    /// Numbers of every kind: the ones at the edges, whole numbers around every power of two
+    /// and halfway between them, and a couple of thousand whose bits are picked at random,
+    /// which covers every sign and every exponent there is.
+    pub(super) fn numbers() -> Vec<f64> {
+        let mut numbers = vec![
+            0.0,
+            0.1,
+            0.5,
+            1.0 / 3.0,
+            1e15,
+            1e16,
+            1e19,
+            1e300,
+            f64::EPSILON,
+            f64::MIN_POSITIVE,
+            f64::MIN_POSITIVE / 2.0,
+            f64::MIN_POSITIVE * 1.5,
+            f64::from_bits(1),
+            f64::from_bits(2),
+            f64::from_bits(3),
+            f64::MAX,
+            f64::MAX / 2.0,
+            f64::INFINITY,
+            f64::NAN,
+        ];
+
+        for whole in 0..=70 {
+            numbers.extend([whole as f64, whole as f64 + 0.5, whole as f64 + 0.25]);
+        }
+
+        for exponent in 0..=70 {
+            let power = 2f64.powi(exponent);
+            numbers.extend([-3.0, -2.0, -1.0, -0.5, 0.5, 1.0, 2.0, 3.0].map(|near| power + near));
+            numbers.push(power * 1.5);
+        }
+
+        let mut bits = 0x9E37_79B9_7F4A_7C15_u64;
+        for _ in 0..2000 {
+            bits ^= bits << 13;
+            bits ^= bits >> 7;
+            bits ^= bits << 17;
+            numbers.push(f64::from_bits(bits));
+
+            // The same, as a whole number of every size that there is a remainder to read from.
+            numbers.push((bits >> (bits % 64)) as f64);
+        }
+
+        let negated = numbers.iter().map(|number| -number).collect::<Vec<_>>();
+        numbers.extend(negated);
+
+        numbers
+    }
+
+    /// Whether nothing can tell `actual` from `expected`: they are the same number down to
+    /// the sign of a zero, or neither of them is a number.
+    pub(super) fn same(actual: f64, expected: f64) -> bool {
+        actual.to_bits() == expected.to_bits() || (actual.is_nan() && expected.is_nan())
+    }
+
+    /// The numbers in the list that `code` comes to, with `xs` bound to `numbers`.
+    pub(super) fn over(numbers: &[f64], code: &str) -> Vec<f64> {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+        let list = numbers.iter().copied().map(Value::Number).collect();
+        let xs = heap.borrow_mut().insert_list(list);
+        bindings.insert(Symbol::intern("xs"), xs);
+
+        let value = evaluate(code, &heap, &bindings).unwrap();
+        let heap = heap.borrow();
+
+        value
+            .as_list(&heap)
+            .unwrap()
+            .iter()
+            .map(|value| value.as_number().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn a_division_by_a_power_of_two_is_a_multiplication() {
+        let divides = |code: &str| {
+            let operations = operations(code);
+
+            (
+                operations.contains(&Op::DivK),
+                operations.contains(&Op::MulK),
+            )
+        };
+
+        for divisor in [
+            "2",
+            "4",
+            "8",
+            "0.5",
+            "0.25",
+            "1",
+            "1024",
+            "4503599627370496",
+            "2.2250738585072014e-308",
+            "4.49423283715579e307",
+        ] {
+            assert_eq!(
+                divides(&format!("x / {divisor}")),
+                (false, true),
+                "{divisor}"
+            );
+        }
+
+        // A number that is no power of two, and a power of two whose reciprocal is not one
+        // that multiplying by gets the same out of: these are still divided by.
+        for divisor in [
+            "3",
+            "10",
+            "0.1",
+            "6",
+            "0",
+            "1e308",
+            "5e-324",
+            "1.1125369292536007e-308",
+            "8.98846567431158e307",
+        ] {
+            assert_eq!(
+                divides(&format!("x / {divisor}")),
+                (true, false),
+                "{divisor}"
+            );
+        }
+    }
+
+    #[test]
+    fn it_comes_to_the_number_that_dividing_comes_to() {
+        let numbers = numbers();
+
+        for exponent in [
+            -1074, -1073, -1023, -1022, -1021, -52, -3, -2, -1, 0, 1, 2, 3, 10, 31, 32, 52, 53, 63,
+            64, 1021, 1022, 1023,
+        ] {
+            let divisor = 2f64.powi(exponent);
+            let expected = numbers.iter().map(|number| number / divisor);
+
+            for code in [
+                // One number at a time, in a function and in a callback compiled in place.
+                format!("halve = x => x / {divisor:e}\nmap(xs, halve)"),
+                format!("map(xs, x => x / {divisor:e})"),
+                // A whole list at once, by itself and in a run of operators.
+                format!("xs / {divisor:e}"),
+                format!("(xs * 1 / {divisor:e}) + 0"),
+            ] {
+                let actual = over(&numbers, &code);
+                assert_eq!(actual.len(), numbers.len(), "{code}");
+
+                for ((actual, expected), number) in
+                    actual.into_iter().zip(expected.clone()).zip(&numbers)
+                {
+                    // Adding zero in the last of the programs turns a negative zero around.
+                    let expected = if code.ends_with("+ 0") {
+                        expected * 1.0 + 0.0
+                    } else {
+                        expected
+                    };
+
+                    assert!(
+                        same(actual, expected),
+                        "{number:e} / {divisor:e} is {expected:e}, not {actual:e} ({code})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn what_is_not_a_number_is_divided() {
+        assert_eq!(outcome("[6, 8, 1] / 2"), "[3, 4, 0.5]");
+        assert_eq!(outcome("sum([6, 8, 1] / 4)"), "3.75");
+        assert_eq!(outcome("xs = [6, 8, 1]\n(xs + 2) / 2 - 1"), "[3, 4, 0.5]");
+
+        // What cannot be divided fails the way it does for any other divisor.
+        for dividend in [
+            "\"a\"",
+            "null",
+            "true",
+            "[1, \"a\"]",
+            "[1, null, 3]",
+            "{a: 1}",
+            "(x => x)",
+            "[[1, 2], [3, \"a\"]]",
+        ] {
+            for shape in [
+                "x = {dividend}\nx / {divisor}",
+                "f = x => x / {divisor}\nf({dividend})",
+                "x = {dividend}\n1 + x / {divisor} * 3",
+                "x = {dividend}\nsum(x / {divisor})",
+                "map([{dividend}], x => x / {divisor})",
+            ] {
+                let program = |divisor: &str| {
+                    shape
+                        .replace("{dividend}", dividend)
+                        .replace("{divisor}", divisor)
+                };
+
+                // A divisor of the same length, as the error points at the whole division.
+                for (power_of_two, other) in [("2", "3"), ("8", "7"), ("0.5", "0.3")] {
+                    let (expected, actual) =
+                        (outcome(&program(other)), outcome(&program(power_of_two)));
+
+                    assert!(
+                        expected.contains("expected a number"),
+                        "{shape}: {expected}"
+                    );
+                    assert_eq!(actual, expected, "{shape} of {dividend} by {power_of_two}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_condition_on_the_remainder_by_a_power_of_two_computes_no_remainder() {
+        let fused = |condition: &str| {
+            let operations = operations(&format!("if {condition} then 1 else 2"));
+
+            (
+                operations.contains(&Op::JmpNotRemEq),
+                operations.contains(&Op::JmpNotRemNe),
+                operations.contains(&Op::ModK),
+            )
+        };
+
+        for (divisor, remainder) in [
+            ("2", "0"),
+            ("2", "1"),
+            ("1", "0"),
+            ("4", "3"),
+            ("1024", "512"),
+            ("4503599627370496", "4503599627370495"),
+        ] {
+            assert_eq!(
+                fused(&format!("x % {divisor} == {remainder}")),
+                (true, false, false),
+                "{divisor} {remainder}"
+            );
+            assert_eq!(
+                fused(&format!("(x + 1) % {divisor} != {remainder}")),
+                (false, true, false),
+                "{divisor} {remainder}"
+            );
+        }
+
+        // Every other remainder is computed: by what is no power of two or too large a one,
+        // one that a power of two never leaves, and one that is ordered rather than matched.
+        for condition in [
+            "x % 3 == 0",
+            "x % 6 != 2",
+            "x % 0 == 0",
+            "x % 0.5 == 0",
+            "x % 1.5 == 1",
+            "x % 9007199254740992 == 0",
+            "x % 2 == 2",
+            "x % 2 == 0.5",
+            "x % 4 != 4",
+            "x % 2 < 1",
+            "x % 2 >= 1",
+            "x % y == 0",
+            "x % 2 == y",
+            "2 % x == 0",
+            "0 == x % 2",
+        ] {
+            let (equal, unequal, _) = fused(condition);
+            assert!(!equal && !unequal, "{condition}");
+        }
+    }
+
+    #[test]
+    fn the_condition_holds_for_the_numbers_that_leave_the_remainder() {
+        let numbers = numbers();
+
+        for exponent in [0, 1, 2, 3, 4, 10, 31, 32, 33, 51, 52] {
+            let divisor = 2f64.powi(exponent);
+            let remainders = [0.0, 1.0, 2.0, 3.0, divisor / 2.0, divisor - 1.0]
+                .into_iter()
+                .filter(|remainder| *remainder < divisor && remainder.fract() == 0.0);
+
+            for remainder in remainders {
+                for (operator, equal) in [("==", true), ("!=", false)] {
+                    let condition = format!("x % {divisor} {operator} {remainder}");
+
+                    for code in [
+                        format!("map(xs, x => if {condition} then 1 else 0)"),
+                        format!("test = x => if {condition} then 1 else 0\nmap(xs, test)"),
+                        format!(
+                            "test = (x, n) => if n == 0 then 0 else if {condition} then 1 else test(x, n - 1)\nmap(xs, x => test(x, 2))"
+                        ),
+                    ] {
+                        let actual = over(&numbers, &code);
+                        assert_eq!(actual.len(), numbers.len(), "{code}");
+
+                        for (actual, number) in actual.into_iter().zip(&numbers) {
+                            let left = number % divisor;
+
+                            assert_eq!(
+                                actual == 1.0,
+                                (left == remainder) == equal,
+                                "{number:e} % {divisor} is {left}, to be {operator} {remainder} ({code})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn what_is_not_a_number_has_its_remainder_taken_and_compared() {
+        // What has no remainder, and a remainder that is no condition (the list of answers
+        // that a list comes to), fail the way they do with a divisor that the remainder is
+        // computed for.
+        for dividend in [
+            "\"a\"",
+            "null",
+            "true",
+            "[1, 2, 3]",
+            "[4, 8]",
+            "[]",
+            "[1, \"a\"]",
+            "[[1, 2], [3, 4]]",
+            "{a: 1}",
+            "(x => x)",
+        ] {
+            for shape in [
+                "x = {dividend}\nif x % {divisor} {operator} 0 then 1 else 2",
+                "f = x =>\n  if x == 1 then 0\n  else if x % {divisor} {operator} 0 then 1\n  else 2\nf({dividend})",
+                "f = x => if x % {divisor} {operator} 0 then 1 else 2\nf({dividend})",
+                "f = (x, n) => if n == 0 then 0 else if x % {divisor} {operator} 0 then f(x, n - 1) else f(x, n - 1)\nf({dividend}, 3)",
+                "map([1, {dividend}], x => if x % {divisor} {operator} 0 then 1 else 2)",
+                "x = {dividend}\nmap([1, 2], y => if x % {divisor} {operator} 0 then y else -y)",
+                "filter([{dividend}], x => if x % {divisor} {operator} 0 then true else false)",
+            ] {
+                for operator in ["==", "!="] {
+                    let program = |divisor: &str| {
+                        shape
+                            .replace("{dividend}", dividend)
+                            .replace("{divisor}", divisor)
+                            .replace("{operator}", operator)
+                    };
+
+                    for (power_of_two, other) in [("2", "3"), ("4", "5"), ("8", "7")] {
+                        let (expected, actual) =
+                            (outcome(&program(other)), outcome(&program(power_of_two)));
+
+                        assert!(expected.contains("expected a "), "{shape}: {expected}");
+                        assert_eq!(actual, expected, "{shape} of {dividend} by {power_of_two}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+// What a number leaves when it is divided by a number that the program spells out is found
+// the way that takes the least for that divisor: a small whole one divides a small whole
+// number as one machine integer divides another. Nothing may tell that from the remainder
+// that two numbers of any kind leave.
+#[cfg(test)]
+mod constant_divisor_tests {
+    use super::power_of_two_tests::{numbers, over, same};
+    use crate::bytecode::small_divisor;
+
+    #[test]
+    fn a_divisor_is_small_when_it_is_a_whole_number_above_zero_that_an_operand_holds() {
+        for (divisor, small) in [
+            (1.0, 1),
+            (2.0, 2),
+            (3.0, 3),
+            (97.0, 97),
+            (65_534.0, 65_534),
+            (65_535.0, 65_535),
+            (0.0, 0),
+            (-0.0, 0),
+            (-1.0, 0),
+            (-3.0, 0),
+            (0.5, 0),
+            (2.5, 0),
+            (65_534.5, 0),
+            (65_535.5, 0),
+            // Ones that no operand holds, whatever their lowest bits are.
+            (65_536.0, 0),
+            (65_539.0, 0),
+            (131_072.0, 0),
+            (4_294_967_299.0, 0),
+            (1e300, 0),
+            (f64::INFINITY, 0),
+            (f64::NEG_INFINITY, 0),
+            (f64::NAN, 0),
+        ] {
+            assert_eq!(small_divisor(divisor), small, "{divisor}");
+        }
+    }
+
+    #[test]
+    fn a_number_leaves_what_it_does_when_it_is_divided_by_a_number_of_any_kind() {
+        let numbers = numbers();
+
+        for divisor in [
+            1.0,
+            2.0,
+            3.0,
+            7.0,
+            10.0,
+            97.0,
+            1000.0,
+            65_535.0,
+            65_536.0,
+            65_537.0,
+            4_294_967_295.0,
+            4_294_967_296.0,
+            4_294_967_297.0,
+            9_007_199_254_740_991.0,
+            1e19,
+            1e300,
+            0.0,
+            0.5,
+            2.5,
+            1e-300,
+            -1.0,
+            -3.0,
+            -2.5,
+            -65_535.0,
+            -4_294_967_296.0,
+        ] {
+            let expected = numbers.iter().map(|number| number % divisor);
+
+            for code in [
+                // One number at a time: in a function, in a callback compiled in place, and
+                // by a divisor that is only known when the remainder is taken.
+                format!("rest = x => x % {divisor:e}\nmap(xs, rest)"),
+                format!("map(xs, x => x % {divisor:e})"),
+                format!("map(xs, x => (y => x % y)({divisor:e}))"),
+                // A whole list at once, by itself and in a run of operators.
+                format!("xs % {divisor:e}"),
+                format!("(xs * 1 % {divisor:e}) + 0"),
+            ] {
+                let actual = over(&numbers, &code);
+                assert_eq!(actual.len(), numbers.len(), "{code}");
+
+                for ((actual, expected), number) in
+                    actual.into_iter().zip(expected.clone()).zip(&numbers)
+                {
+                    // Adding zero in the last of the programs turns a negative zero around.
+                    let expected = if code.ends_with("+ 0") {
+                        expected + 0.0
+                    } else {
+                        expected
+                    };
+
+                    assert!(
+                        same(actual, expected),
+                        "{number:e} % {divisor:e} is {expected:e}, not {actual:e} ({code})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_small_whole_number_leaves_a_small_whole_number() {
+        // Every dividend up to one that is past the divisor a few times over, and the ones
+        // around the largest that is small.
+        let dividends = (0..=300)
+            .chain(65_530..=65_540)
+            .chain(4_294_967_290..=4_294_967_300_u64)
+            .map(|dividend| dividend as f64)
+            .collect::<Vec<_>>();
+
+        for divisor in [
+            1_u64, 2, 3, 5, 7, 10, 60, 97, 255, 256, 65_535, 65_536, 65_537,
+        ] {
+            let actual = over(&dividends, &format!("map(xs, x => x % {divisor})"));
+            let expected = dividends
+                .iter()
+                .map(|dividend| (*dividend as u64 % divisor) as f64);
+
+            for ((actual, expected), dividend) in actual.into_iter().zip(expected).zip(&dividends) {
+                assert!(
+                    same(actual, expected),
+                    "{dividend} % {divisor} is {expected}, not {actual}"
+                );
+            }
+        }
+    }
+}
+
+// The string of a whole number is its digits, which are written without asking how few of
+// them tell the number from the ones next to it. Nothing may tell that string from the one
+// that a number of any kind gets.
+#[cfg(test)]
+mod number_string_tests {
+    use super::power_of_two_tests::{evaluate, numbers};
+    use crate::environment::Environment;
+    use crate::heap::Heap;
+    use crate::intern::Symbol;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// The strings in the list that `code` comes to, with `xs` bound to `numbers`.
+    fn strings(numbers: &[f64], code: &str) -> Vec<String> {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+        let list = numbers.iter().copied().map(Value::Number).collect();
+        let xs = heap.borrow_mut().insert_list(list);
+        bindings.insert(Symbol::intern("xs"), xs);
+
+        let value = evaluate(code, &heap, &bindings).unwrap();
+        let heap = heap.borrow();
+
+        value
+            .as_list(&heap)
+            .unwrap()
+            .iter()
+            .map(|value| value.as_string(&heap).unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_number_of_any_kind_becomes_the_string_that_it_is_written_as() {
+        let numbers = numbers();
+        let expected = numbers
+            .iter()
+            .map(|number| number.to_string())
+            .collect::<Vec<_>>();
+
+        for (code, around) in [
+            // By the function itself, in a callback, and in a function of the program.
+            ("map(xs, to_string)", ["", ""]),
+            ("map(xs, x => to_string(x))", ["", ""]),
+            ("written = x => to_string(x)\nmap(xs, written)", ["", ""]),
+            // As the value of a list and of a record, which are written around it.
+            ("map(xs, x => to_string([x]))", ["[", "]"]),
+            ("map(xs, x => to_string({is: x}))", ["{is: ", "}"]),
+        ] {
+            let actual = strings(&numbers, code);
+            assert_eq!(actual.len(), numbers.len(), "{code}");
+
+            for ((actual, expected), number) in actual.iter().zip(&expected).zip(&numbers) {
+                let [before, after] = around;
+                let expected = format!("{before}{expected}{after}");
+
+                assert_eq!(*actual, expected, "{number:e} ({code})");
+            }
+        }
+    }
+
+    #[test]
+    fn a_whole_number_keeps_every_digit_in_its_string() {
+        for (code, expected) in [
+            ("to_string(0)", "0"),
+            ("to_string(-0)", "-0"),
+            ("to_string(7)", "7"),
+            ("to_string(-7)", "-7"),
+            ("to_string(10)", "10"),
+            ("to_string(1000000)", "1000000"),
+            ("to_string(4294967296)", "4294967296"),
+            ("to_string(9007199254740991)", "9007199254740991"),
+            ("to_string(-9007199254740991)", "-9007199254740991"),
+            ("to_string(9007199254740992)", "9007199254740992"),
+            ("to_string(9007199254740993)", "9007199254740992"),
+            ("to_string(1e21)", "1000000000000000000000"),
+            ("to_string(1.5)", "1.5"),
+            ("to_string(0.1 + 0.2)", "0.30000000000000004"),
+            ("to_string(1 / 0)", "inf"),
+            ("to_string(-1 / 0)", "-inf"),
+            // A string that is as long as a text keeps without a buffer, and one longer.
+            (
+                "\"number \" + to_string(12345678901234)",
+                "number 12345678901234",
+            ),
+            (
+                "\"number \" + to_string(1234567890123456)",
+                "number 1234567890123456",
+            ),
+            ("to_string(12) + to_string(34)", "1234"),
+        ] {
+            let heap = Rc::new(RefCell::new(Heap::new()));
+            let bindings = Rc::new(Environment::new());
+
+            let value = evaluate(code, &heap, &bindings).unwrap();
+            assert_eq!(value.as_string(&heap.borrow()).unwrap(), expected, "{code}");
+        }
+    }
+}
+
+// `format` writes its arguments into the string that it returns, without a string of each in
+// between. What it returns is what it always returned: the template with the arguments the
+// way they are displayed.
+#[cfg(test)]
+mod formatted_string_tests {
+    use super::power_of_two_tests::{evaluate, numbers};
+    use crate::environment::Environment;
+    use crate::heap::Heap;
+    use crate::intern::Symbol;
+    use crate::values::{Value, format_display_number};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// What `code` comes to, with `xs` bound to `numbers`: a string, or the strings of a
+    /// list, or the message of an error.
+    fn strings(numbers: &[f64], code: &str) -> Vec<String> {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+        let list = numbers.iter().copied().map(Value::Number).collect();
+        let xs = heap.borrow_mut().insert_list(list);
+        bindings.insert(Symbol::intern("xs"), xs);
+
+        let value = match evaluate(code, &heap, &bindings) {
+            Ok(value) => value,
+            Err(error) => return vec![format!("error: {}", error.message)],
+        };
+        let heap = heap.borrow();
+
+        match value {
+            Value::List(_) => value
+                .as_list(&heap)
+                .unwrap()
+                .iter()
+                .map(|value| value.as_string(&heap).unwrap().to_string())
+                .collect(),
+            _ => vec![value.as_string(&heap).unwrap().to_string()],
+        }
+    }
+
+    fn formatted(code: &str) -> String {
+        let [string] = &strings(&[], code)[..] else {
+            panic!("{code} comes to a list");
+        };
+
+        string.clone()
+    }
+
+    /// The digits of a whole number that is displayed with all of them, in groups of
+    /// three.
+    fn grouped(number: f64) -> String {
+        let digits = number.abs().to_string();
+        let mut grouped = String::from(if number < 0.0 { "-" } else { "" });
+
+        for (position, digit) in digits.chars().enumerate() {
+            if position > 0 && (digits.len() - position) % 3 == 0 {
+                grouped.push(',');
+            }
+            grouped.push(digit);
+        }
+
+        grouped
+    }
+
+    #[test]
+    fn a_number_of_any_kind_is_formatted_the_way_it_is_displayed() {
+        let numbers = numbers();
+        let expected = numbers
+            .iter()
+            .map(|number| format_display_number(*number))
+            .collect::<Vec<_>>();
+
+        // A whole number that has no more than fifteen digits is displayed with all of
+        // them.
+        let mut whole = 0;
+        for (number, expected) in numbers.iter().zip(&expected) {
+            if number.fract() == 0.0
+                && number.abs() < 1e15
+                && number.to_bits() != (-0.0f64).to_bits()
+            {
+                assert_eq!(*expected, grouped(*number), "{number:e}");
+                whole += 1;
+            }
+        }
+        assert!(whole > 200, "{whole} whole numbers");
+
+        for (code, around) in [
+            ("map(xs, x => format(\"{}\", x))", ["", ""]),
+            ("map(xs, x => format(\"<{}>\", x))", ["<", ">"]),
+            (
+                "map(xs, x => format(\"{} is {}\", \"x\", x))",
+                ["x is ", ""],
+            ),
+            // As the value of a list and of a record, which are written around it.
+            ("map(xs, x => format(\"{}\", [x]))", ["[", "]"]),
+            ("map(xs, x => format(\"{}\", {is: x}))", ["{is: ", "}"]),
+            // Behind enough characters to take the string out of where its pieces are put
+            // together.
+            (
+                "map(xs, x => format(\"----------------------------------------------------------------------------------------------------------------{}\", x))",
+                [
+                    "----------------------------------------------------------------------------------------------------------------",
+                    "",
+                ],
+            ),
+        ] {
+            let actual = strings(&numbers, code);
+            assert_eq!(actual.len(), numbers.len(), "{code}");
+
+            for ((actual, expected), number) in actual.iter().zip(&expected).zip(&numbers) {
+                let [before, after] = around;
+                let expected = format!("{before}{expected}{after}");
+
+                assert_eq!(*actual, expected, "{number:e} ({code})");
+            }
+        }
+    }
+
+    #[test]
+    fn a_whole_number_is_formatted_with_its_digits_in_groups_of_three() {
+        for (code, expected) in [
+            ("format(\"{}\", 0)", "0"),
+            ("format(\"{}\", -0)", "-0"),
+            ("format(\"{}\", 7)", "7"),
+            ("format(\"{}\", -7)", "-7"),
+            ("format(\"{}\", 999)", "999"),
+            ("format(\"{}\", 1000)", "1,000"),
+            ("format(\"{}\", -1000)", "-1,000"),
+            ("format(\"{}\", 100000)", "100,000"),
+            ("format(\"{}\", 1234567)", "1,234,567"),
+            ("format(\"{}\", 1000000000)", "1,000,000,000"),
+            ("format(\"{}\", 4294967296)", "4,294,967,296"),
+            ("format(\"{}\", 999999999999999)", "999,999,999,999,999"),
+            ("format(\"{}\", -999999999999999)", "-999,999,999,999,999"),
+            // More digits than are displayed: the number is written with an exponent.
+            ("format(\"{}\", 1000000000000000)", "1e15"),
+            ("format(\"{}\", 9007199254740991)", "9.00719925474099e15"),
+            ("format(\"{}\", -9007199254740992)", "-9.00719925474099e15"),
+            ("format(\"{}\", 1e21)", "1e21"),
+            // A number that is not whole.
+            ("format(\"{}\", 1234.5)", "1,234.5"),
+            ("format(\"{}\", -1234567.25)", "-1,234,567.25"),
+            ("format(\"{}\", 999999999999999.5)", "1,000,000,000,000,000"),
+            ("format(\"{}\", 0.1 + 0.2)", "0.3"),
+            ("format(\"{}\", 0.00001)", "1e-5"),
+            ("format(\"{}\", 1 / 0)", "Infinity"),
+            ("format(\"{}\", -1 / 0)", "-Infinity"),
+            ("format(\"{}\", 0 / 0)", "NaN"),
+            (
+                "format(\"{} {} {}\", 1000, -2000.5, 3e20)",
+                "1,000 -2,000.5 3e20",
+            ),
+        ] {
+            assert_eq!(formatted(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_value_of_any_kind_is_formatted_the_way_it_is_displayed() {
+        for (code, expected) in [
+            ("format(\"{}\", \"text\")", "text"),
+            ("format(\"{}\", \"\")", ""),
+            ("format(\"{}\", \"{}\")", "{}"),
+            ("format(\"{}{}\", \"{}\", \"}\")", "{}}"),
+            ("format(\"{}\", \"é😀\")", "é😀"),
+            ("format(\"{}\", true)", "true"),
+            ("format(\"{}\", false)", "false"),
+            ("format(\"{}\", null)", "null"),
+            (
+                "format(\"{}{}{}{}\", true, false, null, \"s\")",
+                "truefalsenulls",
+            ),
+            ("format(\"{}\", [])", "[]"),
+            ("format(\"{}\", {})", "{}"),
+            (
+                "format(\"{}\", [1000, 2.5, \"a\", true, null, {a: 1000000}])",
+                "[1,000, 2.5, a, true, null, {a: 1,000,000}]",
+            ),
+            (
+                "format(\"{}\", {name: \"n\", list: [1, [2000]], none: null})",
+                "{name: n, list: [1, [2,000]], none: null}",
+            ),
+            ("format(\"{}\", x => x + 1000)", "(x) => x + 1000"),
+            ("format(\"{}\", sqrt)", "sqrt (built-in)"),
+            ("format(\"{}\", format)", "format (built-in)"),
+            (
+                "add = (a, b) => a + b\nformat(\"{} of {}\", add, [add(1000, 1), add])",
+                "(a, b) => a + b of [1,001, (a, b) => a + b]",
+            ),
+            // What a string was made from does not show.
+            (
+                "long = \"abcdefghijklmnopqrstuvwxyz\"\nformat(\"{}|{}|{}\", slice(long, 1, 25), long + long, slice(long, 0, 3))",
+                "bcdefghijklmnopqrstuvwxy|abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz|abc",
+            ),
+            // A template that was made is one like any other.
+            ("format(\"{}\" + \"-{}\", 1, 2)", "1-2"),
+            ("format(join([\"{\", \"}\"], \"\"), 1)", "1"),
+            ("format(format(\"{}{}\", \"{\", \"}\"), 1000)", "1,000"),
+        ] {
+            assert_eq!(formatted(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_template_takes_one_argument_for_each_pair_of_braces() {
+        for (code, expected) in [
+            ("format(\"\")", ""),
+            ("format(\"plain\")", "plain"),
+            ("format(\"plain\", 1, 2)", "plain"),
+            ("format(\"{}\")", ""),
+            ("format(\"{} and {}\", 1)", "1 and "),
+            ("format(\"{} and {}\", 1, 2, 3)", "1 and 2"),
+            ("format(\"{}{}{}\", 1, 2, 3)", "123"),
+            // A brace that opens no pair goes, and what follows it stays as it is.
+            ("format(\"{{}}{}\", 1, 2)", "{}1"),
+            ("format(\"{{{}}}x{y}\", 1, 2, 3)", "{1}xy"),
+            ("format(\"{{{}}}x{{}\", 1, 2, 3)", "{1}x{"),
+            ("format(\"{{}}x{{}{}}y{\", 1, 2, 3)", "{}x{{}y"),
+            ("format(\"{\", 1)", ""),
+            ("format(\"}\", 1)", ""),
+            ("format(\"}{}\", 1)", "{"),
+            ("format(\"{x}\", 1)", "x"),
+            ("format(\"é{}é{é}日本{}\", \"ü\", 2)", "éüéé日本2"),
+        ] {
+            assert_eq!(formatted(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_formatted_string_is_a_string_like_any_other() {
+        for (code, expected) in [
+            ("len(format(\"{} is {}\", 99999, 199998))", "17"),
+            ("format(\"{}\", 1000) == \"1,000\"", "true"),
+            ("format(\"{}\", 1000) + \"!\"", "1,000!"),
+            ("{[format(\"k{}\", 1)]: 2}.k1", "2"),
+            ("uppercase(format(\"{}-{}\", \"a\", true))", "A-TRUE"),
+            ("split(format(\"{}\", 1234567), \",\")", "[1, 234, 567]"),
+            ("to_number(format(\"{}\", 123))", "123"),
+            (
+                "reduce(range(6), (acc, i) => acc + format(\"{};\", i * 1000), \"\")",
+                "0;1,000;2,000;3,000;4,000;5,000;",
+            ),
+            ("map([1, 2000], x => format(\"<{}>\", x))", "[<1>, <2,000>]"),
+            // A string that is as long as a text keeps without a buffer, and longer ones.
+            (
+                "format(\"{}{}\", \"0123456789\", \"012345678901\")",
+                "0123456789012345678901",
+            ),
+            (
+                "format(\"{}{}\", \"0123456789\", \"0123456789012\")",
+                "01234567890123456789012",
+            ),
+            (
+                "len(format(\"{}{}{}{}\", [range(40)], range(40), {a: range(40)}, \"é\"))",
+                "459",
+            ),
+        ] {
+            let heap = Rc::new(RefCell::new(Heap::new()));
+            let bindings = Rc::new(Environment::new());
+
+            let value = evaluate(code, &heap, &bindings).unwrap();
+            assert_eq!(value.stringify_internal(&heap.borrow()), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_template_that_is_no_string_is_an_error() {
+        for code in [
+            "format(1, 2)",
+            "format(null)",
+            "format([\"{}\"], 1)",
+            "format({}, 1)",
+            "format(x => x, 1)",
+            "format(true, \"{}\")",
+        ] {
+            assert_eq!(
+                strings(&[], code),
+                ["error: in built-in function \"format\": first argument must be a string"],
+                "{code}"
+            );
+        }
+    }
+}
+
+// A condition computes on the way to its answer what its branches often compute again, and
+// the two operands of an operator can be one expression twice. The first value is kept and
+// taken where the expression is repeated, as long as its names still mean the same variables
+// there. Nothing may tell a value that was taken from one that was computed.
+#[cfg(test)]
+mod kept_value_tests {
+    use crate::ast::Expr;
+    use crate::bytecode::{Instr, Op};
+    use crate::compiler::compile_lambda;
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code`, up to the value of the last one.
+    fn evaluate(code: &str, heap: &Rc<RefCell<Heap>>) -> Result<Value, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+            result = evaluate_ast(
+                &expr,
+                Rc::clone(heap),
+                Rc::clone(&bindings),
+                0,
+                Rc::clone(&source),
+            )?;
+        }
+
+        Ok(result)
+    }
+
+    /// What the statements of `code` come to, rendered: the value, or the error with the
+    /// place it points at.
+    fn outcome(code: &str) -> String {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        match evaluate(code, &heap) {
+            Ok(value) => value.stringify_internal(&heap.borrow()),
+            Err(error) => format!("{} at {:?}", error.message, error.span),
+        }
+    }
+
+    fn assert_evaluates_to(code: &str, expected: &str) {
+        assert_eq!(outcome(code), expected, "{code}");
+    }
+
+    /// How many instructions with the operation `op` the function `code` compiles to.
+    fn count(code: &str, op: Op) -> usize {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let [Statement::Expression(expr)] = &statements[..] else {
+            panic!("{code} is not a single expression");
+        };
+        let Expr::Lambda { args, body, .. } = &expr.node else {
+            panic!("{code} is not a function");
+        };
+        let proto = compile_lambda(&Rc::new(args.clone()), body, true).unwrap();
+
+        let mut count = 0;
+        let mut pc = 0;
+        while pc < proto.code.len() {
+            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
+            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            count += usize::from(instr.op == op);
+            pc += 1 + instr.operand_words();
+        }
+
+        count
+    }
+
+    #[test]
+    fn a_branch_takes_what_its_condition_computed() {
+        for (code, op, expected) in [
+            // The squares of a point, compared to a bound and then put to use.
+            (
+                "(zr, zi) => if zr * zr + zi * zi > 4 then 0 else zr * zr - zi * zi",
+                Op::Mul,
+                2,
+            ),
+            // A field and an element, in either branch and in both.
+            ("(a, b) => if a.x > b then a.x else b", Op::GetField, 1),
+            (
+                "(xs, i) => if xs[i] > 0 then 0 else 0 - xs[i]",
+                Op::Index,
+                1,
+            ),
+            (
+                "(a, b) => if a % b > 1 then a % b + 1 else a % b - 1",
+                Op::Mod,
+                1,
+            ),
+            // The whole condition.
+            ("(a, b) => if a + b then a + b else 0", Op::Add, 1),
+            // A part of a part, where only that is repeated, and the larger part where both are.
+            (
+                "(a, b) => if (a - b) * (a + b) > 4 then a - b else 0",
+                Op::Sub,
+                1,
+            ),
+            (
+                "(a, b) => if (a - b) * 3 > 4 then (a - b) * 3 + (a - b) else 0",
+                Op::Sub,
+                1,
+            ),
+            // The condition of a branch, and a branch of a branch.
+            (
+                "(a, b) => if a * b > 10 then 1 else if a * b > 5 then 2 else a * b",
+                Op::Mul,
+                1,
+            ),
+            (
+                "(a, b) => if a > b then (if a * b > 5 then a * b else b) else a",
+                Op::Mul,
+                1,
+            ),
+            // In what a branch calls with, builds and binds.
+            (
+                "(n, a) => if n * a > 100 then n else f(n * a, [n * a], {k: n * a})",
+                Op::Mul,
+                1,
+            ),
+            (
+                "(n, a) => if n * a > 100 then n else do { m = n * a; return m + n * a }",
+                Op::Mul,
+                1,
+            ),
+            // In a callback that is compiled in place, and around one.
+            (
+                "(xs, k) => map(xs, x => if x * k > 10 then x * k else 0)",
+                Op::Mul,
+                1,
+            ),
+            (
+                "(xs, k) => if k * k > 10 then map(xs, x => x + k * k) else xs",
+                Op::Mul,
+                1,
+            ),
+        ] {
+            assert_eq!(count(code, op), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn an_operand_that_repeats_the_other_is_computed_once() {
+        for (code, op, expected) in [
+            ("(a, b) => (a - b) * (a - b)", Op::Sub, 1),
+            ("(a, i) => a[i] + a[i]", Op::Index, 1),
+            (
+                "(a, b) => (a.x * b.y + 1) / (a.x * b.y + 1)",
+                Op::GetField,
+                2,
+            ),
+            // Operands that only look alike in part are two computations.
+            ("(a, b) => (a - b) * (b - a)", Op::Sub, 2),
+            ("(a, b) => (a - b) * (a - b + 1)", Op::Sub, 2),
+        ] {
+            assert_eq!(count(code, op), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn what_calls_a_function_is_computed_every_time() {
+        for (code, op, expected) in [
+            ("a => if f(a) > 3 then f(a) else 0", Op::Call, 2),
+            ("a => if f(a) + 1 > 3 then f(a) + 1 else 0", Op::Call, 2),
+            ("a => (f(a) + 1) * (f(a) + 1)", Op::Call, 2),
+            (
+                "(xs, g) => ((xs via g) + 1) * ((xs via g) + 1)",
+                Op::AddK,
+                2,
+            ),
+            (
+                "(xs, g) => if sum(xs via g) > 3 then xs via g else xs",
+                Op::Via,
+                2,
+            ),
+            (
+                "(x, g) => if (x into g) + 1 > 3 then (x into g) + 1 else 0",
+                Op::AddK,
+                2,
+            ),
+            (
+                "(xs, g) => if (xs where g)[0] > 3 then (xs where g)[0] else 0",
+                Op::Index,
+                2,
+            ),
+        ] {
+            assert_eq!(count(code, op), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_remainder_that_the_condition_does_not_compute_is_computed_by_the_branch() {
+        assert_eq!(
+            count("x => if x % 2 == 0 then x % 2 else x % 2 + 1", Op::ModK),
+            2
+        );
+        assert_evaluates_to(
+            "f = x => if x % 2 == 0 then [x % 2] else x % 2 + 1\n[f(4), f(7), f(-3)]",
+            "[[0], 2, 0]",
+        );
+        assert_evaluates_to(
+            "f = (x, y) => if (x + y) % 4 != 1 then [(x + y) % 4, x + y] else x + y\n[f(1, 2), f(2, 3), f(-3, 0)]",
+            "[[3, 3], 5, [-3, -3]]",
+        );
+    }
+
+    #[test]
+    fn a_function_with_many_registers_keeps_nothing() {
+        let function = |params: usize| {
+            let params = (0..params)
+                .map(|i| format!("p{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            format!("({params}) => if p0 * p1 > 4 then p0 * p1 else 0")
+        };
+
+        assert_eq!(count(&function(100), Op::Mul), 1);
+        assert_eq!(count(&function(127), Op::Mul), 1);
+        assert_eq!(count(&function(128), Op::Mul), 2);
+        assert_eq!(count(&function(250), Op::Mul), 2);
+
+        for params in [100, 127, 128, 250] {
+            let args = (0..params)
+                .map(|i| (i + 2).to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            assert_evaluates_to(&format!("f = {}\nf({args})", function(params)), "6");
+        }
+    }
+
+    #[test]
+    fn a_name_that_means_another_variable_reads_that_variable() {
+        for (code, expected) in [
+            // A parameter of a callback, compiled in place or called.
+            (
+                "f = (a, b) => if a * b > 3 then map([1, 2], a => a * b) else 0\nf(2, 5)",
+                "[5, 10]",
+            ),
+            (
+                "f = (a, b) => if a * b > 3 then reduce([1, 2], (b, x) => a * b + x, 1) else 0\nf(2, 5)",
+                "8",
+            ),
+            (
+                "f = (a, b) => if a * b > 3 then ((a) => a * b)(7) else 0\nf(2, 5)",
+                "35",
+            ),
+            (
+                "f = (a, b) => if a * b > 3 then [1, 2] via (b => a * b) else 0\nf(2, 5)",
+                "[2, 4]",
+            ),
+            // A variable of a block, before and after it is bound.
+            (
+                "f = (a, b) => if a * b > 3 then do { x = a * b; a = 10; return [x, a * b] } else 0\nf(2, 5)",
+                "[10, 50]",
+            ),
+            (
+                "f = (a, b) => if a * b > 3 then do { a = a * b; b = a * b; return [a, b, a * b] } else 0\nf(2, 5)",
+                "[10, 50, 500]",
+            ),
+            (
+                "f = (a, b) => if a * b > 3 then do { t = do { a = b; return a * b }; return [t, a * b] } else 0\nf(2, 5)",
+                "[25, 10]",
+            ),
+            // A variable that the branch of a condition in the branch hides again.
+            (
+                "f = (a, b) => if a * b > 3 then do { a = 3; return if a * b > 3 then do { a = 4; return a * b } else a * b } else 0\n[f(2, 5), f(4, 1)]",
+                "[20, 3]",
+            ),
+            // The same names in the same places still take the value.
+            (
+                "f = (a, b) => if a * b > 3 then do { c = a * b; d = map([1], x => a * b + x); return [c, d, a * b] } else a * b\n[f(2, 5), f(1, 2)]",
+                "[[10, [11], 10], 2]",
+            ),
+        ] {
+            assert_evaluates_to(code, expected);
+        }
+    }
+
+    #[test]
+    fn a_value_that_is_kept_is_not_written_over() {
+        for (code, expected) in [
+            // A list that arithmetic over lists would otherwise put its result into.
+            (
+                "f = xs => if sum(xs * 2) > 3 then [xs * 2 + 1, xs * 2, (xs * 2) * (xs * 2)] else xs * 2 - 1\n[f([1, 2]), f([0, 1])]",
+                "[[[3, 5], [2, 4], [4, 16]], [-1, 1]]",
+            ),
+            (
+                "f = xs => (xs + 1) * (xs + 1) - (xs + 1)\nf([1, 2, 3])",
+                "[2, 6, 12]",
+            ),
+            (
+                "f = (s, t) => (s + t) + (s + t)\nf(\"ab\", \"c\")",
+                "abcabc",
+            ),
+            // A value that a call in the branch works with.
+            (
+                "f = (n, k) => if n * k > 50 then n * k else f(n * k, k) + n * k\nf(1, 3)",
+                "120",
+            ),
+            (
+                "f = (zr, zi, i) => if zr * zr + zi * zi > 4 or i == 0 then [zr * zr, zi * zi, i] else f(zr * zr - zi * zi + 1, 2 * zr * zi, i - 1)\nf(0, 0, 9)",
+                "[25, 0, 6]",
+            ),
+        ] {
+            assert_evaluates_to(code, expected);
+        }
+    }
+
+    #[test]
+    fn a_value_is_kept_for_as_long_as_the_branches_last() {
+        // What follows the branches computes the expression anew, by which time the register
+        // that kept its value holds something else.
+        for (code, expected) in [
+            (
+                "f = (a, b) => [if a * b > 3 then a * b else 0, a + b, a * b]\nf(2, 5)",
+                "[10, 7, 10]",
+            ),
+            (
+                "f = (a, b) => (if a * b > 3 then a * b else 0) + (a - b) * (a * b)\nf(2, 5)",
+                "-20",
+            ),
+            (
+                "f = (a, b) => do { x = if a * b > 3 then a * b else 0; y = a + b; return [x, y, a * b] }\nf(2, 5)",
+                "[10, 7, 10]",
+            ),
+            (
+                "f = (a, b) => if (if a * b > 3 then a * b else 0) > a + b then [a + b, a * b] else [a * b, a + b]\n[f(2, 5), f(1, 1)]",
+                "[[7, 10], [1, 2]]",
+            ),
+            (
+                "f = (a, b) => map([1, 2], x => (if a * b > x then a * b else x) + (x + 1) * (a * b))\nf(2, 5)",
+                "[30, 40]",
+            ),
+        ] {
+            assert_evaluates_to(code, expected);
+        }
+    }
+
+    #[test]
+    fn many_conditions_keep_values_at_once() {
+        // More conditions around one point than there are values kept at once, each with a
+        // value for its branches, and more values in one condition than it has kept.
+        let depth = 24;
+        let mut body = "[a, b]".to_string();
+        for level in (0..depth).rev() {
+            body = format!(
+                "if a * {level} + b > {limit} then [{level}, a * {level} + b] else {body}",
+                limit = 100 - level
+            );
+        }
+
+        assert_evaluates_to(
+            &format!("f = (a, b) => {body}\n[f(1, 200), f(4, 3), f(0, 0)]"),
+            "[[0, 200], [20, 83], [0, 0]]",
+        );
+
+        assert_evaluates_to(
+            "f = (a, b) => if (a + 1) * (a + 2) * (a + 3) * (a + 4) * (a + 5) * (a + 6) > b then [a + 1, a + 2, a + 3, a + 4, a + 5, a + 6] else [a + 6, a + 5, a + 4, a + 3, a + 2, a + 1]\n[f(1, 0), f(1, 1e9)]",
+            "[[2, 3, 4, 5, 6, 7], [7, 6, 5, 4, 3, 2]]",
+        );
+    }
+
+    #[test]
+    fn a_condition_fails_where_it_does_whatever_its_branches_repeat() {
+        // An expression of the same length in the place of the repeated one, as the error
+        // points at the code.
+        for (kept, other) in [
+            (
+                "f = a => if a.x > 1 then a.x else 0\nf(5)",
+                "f = a => if a.x > 1 then a.y else 0\nf(5)",
+            ),
+            (
+                "f = (a, b) => if a * b > 1 then a * b else a * b + 1\nf(2, \"s\")",
+                "f = (a, b) => if a * b > 1 then a + b else a + b + 1\nf(2, \"s\")",
+            ),
+            (
+                "f = (a, i) => if a[i] + a[0] > 1 then a[i] else a[0]\nf([1, 2], 7)",
+                "f = (a, i) => if a[i] + a[0] > 1 then a[1] else a[1]\nf([1, 2], 7)",
+            ),
+            (
+                "f = (a, b) => (a - b) * (a - b)\nf(1, null)",
+                "f = (a, b) => (a - b) * (a + b)\nf(1, null)",
+            ),
+            (
+                "map([1, null], x => if x * 2 > 1 then x * 2 else 0)",
+                "map([1, null], x => if x * 2 > 1 then x * 3 else 0)",
+            ),
+        ] {
+            let (actual, expected) = (outcome(kept), outcome(other));
+
+            assert!(expected.contains(" at "), "{other}: {expected}");
+            assert_eq!(actual, expected, "{kept}");
+        }
+
+        // What only a branch computes fails in the branch.
+        assert!(
+            outcome("f = (a, b) => if a > 0 then a * b else 0\n[f(0, null), f(1, null)]")
+                .contains("expected a number")
+        );
+        assert_evaluates_to("f = (a, b) => if a > 0 then a * b else 0\nf(0, null)", "0");
+    }
+}
+
+// A list that is made from another one reads the elements of that list where it can instead
+// of copying them: one that starts with a spread, `concat`, `tail`, `slice` and `chunk`.
+// A list that keeps growing this way takes time in proportion to its length, not to the
+// square of it. Nothing may tell a list that shares its elements from one that has its own.
+#[cfg(test)]
+mod shared_list_tests {
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::{Heap, HeapValue};
+    use crate::list::List;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// A program that is evaluated a few statements at a time.
+    struct Session {
+        heap: Rc<RefCell<Heap>>,
+        bindings: Rc<Environment>,
+    }
+
+    impl Session {
+        fn new() -> Self {
+            Self {
+                heap: Rc::new(RefCell::new(Heap::new())),
+                bindings: Rc::new(Environment::new()),
+            }
+        }
+
+        /// Evaluate the statements of `code`, up to the value of the last one.
+        fn evaluate(&self, code: &str) -> Result<Value, RuntimeError> {
+            let statements = parse_program(code).expect("a program the fast parser reads");
+            let source: Rc<str> = code.into();
+
+            let mut result = Value::Null;
+            for statement in statements {
+                let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement
+                else {
+                    continue;
+                };
+                result = evaluate_ast(
+                    &expr,
+                    Rc::clone(&self.heap),
+                    Rc::clone(&self.bindings),
+                    0,
+                    Rc::clone(&source),
+                )?;
+            }
+
+            Ok(result)
+        }
+
+        /// What the statements of `code` come to, rendered: the value, or the error.
+        fn outcome(&self, code: &str) -> String {
+            match self.evaluate(code) {
+                Ok(value) => value.stringify_internal(&self.heap.borrow()),
+                Err(error) => error.message,
+            }
+        }
+
+        /// The list that `code` comes to.
+        fn list(&self, code: &str) -> List {
+            let value = self.evaluate(code).unwrap();
+
+            value.as_list(&self.heap.borrow()).unwrap().clone()
+        }
+
+        /// Drop everything that the variables of the program do not lead to.
+        fn compact(&self) {
+            self.heap.borrow_mut().compact(&self.bindings, &mut []);
+        }
+
+        /// The number of buffers that the lists of at least `len` elements in the heap read
+        /// their elements from.
+        fn buffers(&self, len: usize) -> usize {
+            let heap = self.heap.borrow();
+            let mut distinct: Vec<&List> = Vec::new();
+
+            for slot in 0..heap.len() {
+                if let Some(HeapValue::List(list)) = heap.get(slot)
+                    && list.len() >= len
+                    && !distinct.iter().any(|known| known.shares_buffer_with(list))
+                {
+                    distinct.push(list);
+                }
+            }
+
+            distinct.len()
+        }
+    }
+
+    fn outcome(code: &str) -> String {
+        Session::new().outcome(code)
+    }
+
+    #[test]
+    fn a_list_that_starts_with_a_spread_holds_what_it_is_made_of() {
+        for (code, expected) in [
+            ("[...[1, 2], 3]", "[1, 2, 3]"),
+            ("[...[], 3]", "[3]"),
+            ("[...[1, 2]]", "[1, 2]"),
+            ("[...[]]", "[]"),
+            ("[...[1, 2], ...[3, 4]]", "[1, 2, 3, 4]"),
+            ("[...[1, 2], 3, ...[4], 5]", "[1, 2, 3, 4, 5]"),
+            ("[...[1], ...[2], ...[3]]", "[1, 2, 3]"),
+            ("[0, ...[1, 2], 3]", "[0, 1, 2, 3]"),
+            ("[...\"ab\", 3]", "[a, b, 3]"),
+            ("[...[1], ...\"ab\"]", "[1, a, b]"),
+            ("[...{a: 1}, 2]", "[[a, 1], 2]"),
+            ("[...[1], ...{a: 1}, 2]", "[1, [a, 1], 2]"),
+            ("xs = [1, 2]\n[...xs, ...xs]", "[1, 2, 1, 2]"),
+            ("xs = [1, 2]\n[...xs, xs]", "[1, 2, [1, 2]]"),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+
+        assert_eq!(outcome("[...1, 2]"), "expected a list, record, or string",);
+        assert_eq!(
+            outcome("[...[1], ...null]"),
+            "expected a list, record, or string",
+        );
+    }
+
+    #[test]
+    fn lists_that_follow_the_same_list_do_not_show_up_in_each_other() {
+        let session = Session::new();
+
+        session
+            .evaluate(
+                "base = [1, 2, 3]\n\
+                 a = [...base, 4]\n\
+                 b = [...base, 5]\n\
+                 c = [...a, 6]\n\
+                 d = [...a, 7]\n\
+                 e = [...c, 8]\n\
+                 f = [...a, 9, 10]\n\
+                 g = concat(c, [11])\n\
+                 h = concat(e, [12], 13)\n\
+                 i = [...e, 14]",
+            )
+            .unwrap();
+
+        assert_eq!(
+            session.outcome("[base, a, b, c, d, e, f, g, h, i]"),
+            "[[1, 2, 3], [1, 2, 3, 4], [1, 2, 3, 5], [1, 2, 3, 4, 6], [1, 2, 3, 4, 7], \
+             [1, 2, 3, 4, 6, 8], [1, 2, 3, 4, 9, 10], [1, 2, 3, 4, 6, 11], \
+             [1, 2, 3, 4, 6, 8, 12, 13], [1, 2, 3, 4, 6, 8, 14]]"
+        );
+    }
+
+    #[test]
+    fn every_step_of_a_fold_keeps_the_list_it_made() {
+        assert_eq!(
+            outcome(
+                "reduce(range(5), (state, i) => {now: [...state.now, i], before: [...state.before, state.now]}, {now: [], before: []}).before"
+            ),
+            "[[], [0], [0, 1], [0, 1, 2], [0, 1, 2, 3]]"
+        );
+
+        assert_eq!(
+            outcome(
+                "reduce(range(6), (state, i) => {now: [...tail(state.now), i], before: [...state.before, state.now]}, {now: [7, 8, 9], before: []}).before"
+            ),
+            "[[7, 8, 9], [8, 9, 0], [9, 0, 1], [0, 1, 2], [1, 2, 3], [2, 3, 4]]"
+        );
+
+        assert_eq!(
+            outcome("map(range(4), i => [...[1, 2], i])"),
+            "[[1, 2, 0], [1, 2, 1], [1, 2, 2], [1, 2, 3]]"
+        );
+    }
+
+    #[test]
+    fn a_list_that_grows_in_a_fold_is_not_copied_at_every_step() {
+        for (code, len, first, last) in [
+            (
+                "reduce(range(3000), (acc, i) => [...acc, i], [])",
+                3000,
+                0.0,
+                2999.0,
+            ),
+            (
+                "reduce(range(3000), (acc, i) => [...acc, i, -i], [])",
+                6000,
+                0.0,
+                -2999.0,
+            ),
+            (
+                "reduce(range(3000), (acc, i) => concat(acc, [i]), [])",
+                3000,
+                0.0,
+                2999.0,
+            ),
+            (
+                "reduce(range(3000), (acc, i) => concat(acc, [i], [-i]), [])",
+                6000,
+                0.0,
+                -2999.0,
+            ),
+            (
+                "reduce(range(3000), (acc, i) => [...acc, ...[i]], [])",
+                3000,
+                0.0,
+                2999.0,
+            ),
+            (
+                "reduce(range(3000), (acc, i) => if i % 2 == 0 then [...acc, i] else acc, [])",
+                1500,
+                0.0,
+                2998.0,
+            ),
+            (
+                "grow = (n, acc) => if n == 0 then acc else grow(n - 1, [...acc, n])\ngrow(900, [])",
+                900,
+                900.0,
+                1.0,
+            ),
+        ] {
+            let session = Session::new();
+            let list = session.list(code);
+
+            assert_eq!(list.len(), len, "{code}");
+            assert_eq!(list[0], Value::Number(first), "{code}");
+            assert_eq!(list[len - 1], Value::Number(last), "{code}");
+
+            // A buffer for every time that the list outgrows the one before, which is twice
+            // as large every time, rather than one for each of the steps.
+            let buffers = session.buffers(3);
+            assert!(buffers <= 40, "{code}: {buffers} buffers");
+
+            let sharing = {
+                let heap = session.heap.borrow();
+                (0..heap.len())
+                    .filter(|slot| match heap.get(*slot) {
+                        Some(HeapValue::List(other)) => other.shares_buffer_with(&list),
+                        _ => false,
+                    })
+                    .count()
+            };
+            assert!(
+                sharing > len / 8,
+                "{code}: {sharing} lists share the last buffer"
+            );
+        }
+    }
+
+    #[test]
+    fn a_queue_that_drops_from_the_front_is_not_copied_at_every_step() {
+        let session = Session::new();
+        let queue =
+            session.list("reduce(range(5000), (queue, i) => [...tail(queue), i], [0, 0, 0, 0])");
+
+        assert_eq!(queue.len(), 4);
+        assert_eq!(queue[3], Value::Number(4999.0));
+        assert_eq!(queue[0], Value::Number(4996.0));
+
+        // A tail reads the elements of its list, and the element that follows it is written
+        // after them for as long as there is room: a few steps go by for every buffer.
+        let buffers = session.buffers(3);
+        assert!(buffers < 2600, "{buffers} buffers");
+    }
+
+    #[test]
+    fn parts_of_a_list_read_the_elements_of_the_list() {
+        let session = Session::new();
+        session.evaluate("whole = range(10)").unwrap();
+        let whole = session.list("whole");
+
+        for (code, expected) in [
+            ("tail(whole)", "[1, 2, 3, 4, 5, 6, 7, 8, 9]"),
+            ("slice(whole, 2, 5)", "[2, 3, 4]"),
+            ("slice(whole, 0, 10)", "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]"),
+            ("slice(whole, 10, 10)", "[]"),
+            ("slice(whole, 4, 4)", "[]"),
+            ("chunk(whole, 4)[1]", "[4, 5, 6, 7]"),
+            ("chunk(whole, 4)[2]", "[8, 9]"),
+            ("tail(tail(slice(whole, 1, 6)))", "[3, 4, 5]"),
+        ] {
+            let part = session.list(code);
+
+            assert!(part.shares_buffer_with(&whole), "{code}");
+            assert_eq!(session.outcome(code), expected, "{code}");
+        }
+
+        assert_eq!(session.outcome("whole"), "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]");
+    }
+
+    #[test]
+    fn parts_of_a_list_are_what_they_were_before_lists_shared_their_elements() {
+        for (code, expected) in [
+            ("tail([])", "[]"),
+            ("tail([1])", "[]"),
+            ("tail([1, 2])", "[2]"),
+            ("tail(\"\")", ""),
+            ("tail(\"abc\")", "bc"),
+            (
+                "tail(1)",
+                "in built-in function \"tail\": argument must be a list or string",
+            ),
+            ("slice([1, 2, 3], 1, 3)", "[2, 3]"),
+            ("slice([1, 2, 3], 0, 0)", "[]"),
+            ("slice([1, 2, 3], 3, 3)", "[]"),
+            (
+                "slice([1, 2, 3], 2, 1)",
+                "in built-in function \"slice\": index out of bounds",
+            ),
+            (
+                "slice([1, 2, 3], 0, 4)",
+                "in built-in function \"slice\": index out of bounds",
+            ),
+            (
+                "slice([1, 2, 3], 4, 4)",
+                "in built-in function \"slice\": index out of bounds",
+            ),
+            ("slice([1, 2, 3], -1, 2)", "[1, 2]"),
+            ("slice([1, 2, 3], 0, -1)", "[]"),
+            ("slice([1, 2, 3], 1.9, 2.9)", "[2]"),
+            (
+                "slice([1, 2, 3], 0, 1e300)",
+                "in built-in function \"slice\": index out of bounds",
+            ),
+            ("slice(\"abcd\", 1, 3)", "bc"),
+            (
+                "slice(1, 1, 3)",
+                "in built-in function \"slice\": argument must be a list or string",
+            ),
+            ("chunk([], 2)", "[]"),
+            ("chunk([1, 2, 3], 1)", "[[1], [2], [3]]"),
+            ("chunk([1, 2, 3], 2)", "[[1, 2], [3]]"),
+            ("chunk([1, 2, 3], 5)", "[[1, 2, 3]]"),
+            ("chunk([1, 2, 3], 1e300)", "[[1, 2, 3]]"),
+            (
+                "chunk([1, 2, 3], 0)",
+                "in built-in function \"chunk\": chunk size must be greater than 0",
+            ),
+            (
+                "chunk(1, 2)",
+                "in built-in function \"chunk\": expected a list, but got a number",
+            ),
+            ("concat([1], [2])", "[1, 2]"),
+            ("concat([1], 2)", "[1, 2]"),
+            ("concat(1, [2])", "[1, 2]"),
+            ("concat(1, 2)", "[1, 2]"),
+            ("concat([], [])", "[]"),
+            ("concat([1], [])", "[1]"),
+            ("concat([], [1])", "[1]"),
+            ("concat([1], [2], [3], 4)", "[1, 2, 3, 4]"),
+            ("concat([1], [[2]])", "[1, [2]]"),
+            ("concat([1], \"ab\")", "[1, ab]"),
+            ("concat(\"ab\", [1])", "[ab, 1]"),
+            ("xs = [1, 2]\nconcat(xs, xs)", "[1, 2, 1, 2]"),
+            ("xs = [1, 2]\nconcat(xs, xs, xs)", "[1, 2, 1, 2, 1, 2]"),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_part_that_ends_its_list_is_followed_without_changing_the_list() {
+        let session = Session::new();
+
+        session
+            .evaluate(
+                "whole = [...[1, 2, 3], 4]\n\
+                 end = slice(whole, 2, 4)\n\
+                 longer = [...end, 5]\n\
+                 other = [...whole, 6]\n\
+                 middle = [...slice(whole, 1, 3), 7]",
+            )
+            .unwrap();
+
+        assert_eq!(
+            session.outcome("[whole, end, longer, other, middle]"),
+            "[[1, 2, 3, 4], [3, 4], [3, 4, 5], [1, 2, 3, 4, 6], [2, 3, 7]]"
+        );
+    }
+
+    #[test]
+    fn lists_that_share_their_elements_survive_compaction() {
+        let session = Session::new();
+
+        session
+            .evaluate(
+                "names = map(range(200), i => \"n\" + to_string(i))\n\
+                 few = slice(names, 100, 104)\n\
+                 more = [...few, \"x\"]\n\
+                 rest = tail(few)\n\
+                 grown = reduce(range(100), (acc, i) => [...acc, [i, to_string(i)]], [])\n\
+                 last = slice(grown, 97, 100)\n\
+                 kept = (whole => [slice(whole, 500, 503), slice(whole, 501, 505)])(map(range(1000), i => {n: i}))",
+            )
+            .unwrap();
+
+        let rendered = |session: &Session| {
+            session.outcome(
+                "[few, more, rest, last, kept, len(names), names[199], len(grown), grown[50]]",
+            )
+        };
+        let expected = "[[n100, n101, n102, n103], [n100, n101, n102, n103, x], [n101, n102, n103], \
+                        [[97, 97], [98, 98], [99, 99]], \
+                        [[{n: 500}, {n: 501}, {n: 502}], [{n: 501}, {n: 502}, {n: 503}, {n: 504}]], \
+                        200, n199, 100, [50, 50]]";
+        assert_eq!(rendered(&session), expected);
+
+        let slots = session.heap.borrow().len();
+        session.compact();
+        assert!(session.heap.borrow().len() < slots);
+        assert_eq!(rendered(&session), expected);
+
+        // The lists can be followed and taken apart like before.
+        session
+            .evaluate(
+                "again = [...more, \"y\"]\n\
+                 further = [...grown, [100, \"100\"]]\n\
+                 inner = [...kept[1], {n: 0}]",
+            )
+            .unwrap();
+        session.compact();
+
+        assert_eq!(rendered(&session), expected);
+        assert_eq!(
+            session.outcome("[again, len(further), further[100], grown[99], inner, tail(rest)]"),
+            "[[n100, n101, n102, n103, x, y], 101, [100, 100], [99, 99], \
+             [{n: 501}, {n: 502}, {n: 503}, {n: 504}, {n: 0}], [n102, n103]]"
+        );
+    }
+
+    #[test]
+    fn compaction_gives_up_the_elements_that_no_list_reads_any_more() {
+        let session = Session::new();
+
+        session
+            .evaluate("part = (whole => slice(whole, 5000, 5010))(map(range(100000), i => [i]))")
+            .unwrap();
+        let slots = session.heap.borrow().len();
+        assert!(slots > 100_000);
+
+        session.compact();
+
+        // The lists that the dropped elements were are gone with them.
+        assert!(
+            session.heap.borrow().len() < 100,
+            "{} slots",
+            session.heap.borrow().len()
+        );
+        assert_eq!(
+            session.outcome("part"),
+            "[[5000], [5001], [5002], [5003], [5004], [5005], [5006], [5007], [5008], [5009]]"
+        );
+    }
+
+    #[test]
+    fn a_list_that_is_held_while_the_heap_is_compacted_keeps_its_elements() {
+        let session = Session::new();
+        session
+            .evaluate(
+                "names = map(range(50), i => \"n\" + to_string(i))\nfew = slice(names, 10, 13)",
+            )
+            .unwrap();
+
+        let held = session.list("few");
+        let before: Vec<Value> = held.to_vec();
+
+        for _ in 0..50 {
+            session.heap.borrow_mut().insert_string("garbage");
+        }
+        session.compact();
+
+        assert_eq!(held.to_vec(), before);
+        assert_eq!(
+            session.outcome("[few, names[12], len(names)]"),
+            "[[n10, n11, n12], n12, 50]"
+        );
+        assert_eq!(session.outcome("[...few, \"x\"]"), "[n10, n11, n12, x]");
+        assert_eq!(held.to_vec(), before);
+    }
+
+    #[test]
+    fn a_copy_of_a_heap_has_lists_of_its_own() {
+        let session = Session::new();
+        session
+            .evaluate("xs = [...[1, 2], 3]\nys = [...xs, 4]\npart = tail(ys)")
+            .unwrap();
+
+        let copy = Session {
+            heap: Rc::new(RefCell::new(session.heap.borrow().clone())),
+            bindings: Rc::clone(&session.bindings),
+        };
+
+        let original = session.list("ys");
+        let copied = copy.list("ys");
+        assert_eq!(original, copied);
+        assert!(!original.shares_buffer_with(&copied));
+
+        assert_eq!(copy.outcome("[...ys, 5]"), "[1, 2, 3, 4, 5]");
+        assert_eq!(session.outcome("[...ys, 6]"), "[1, 2, 3, 4, 6]");
+        assert_eq!(
+            copy.outcome("[xs, ys, part]"),
+            "[[1, 2, 3], [1, 2, 3, 4], [2, 3, 4]]"
+        );
+        assert_eq!(
+            session.outcome("[xs, ys, part]"),
+            "[[1, 2, 3], [1, 2, 3, 4], [2, 3, 4]]"
+        );
+    }
+}
+
+#[cfg(test)]
+mod unique_tests {
+    use crate::environment::Environment;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// What the last statement of `code` comes to, rendered: the value, or the error.
+    fn outcome(code: &str) -> String {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = String::new();
+        for statement in parse_program(code).expect("a program the fast parser reads") {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+
+            result = match evaluate_ast(
+                &expr,
+                Rc::clone(&heap),
+                Rc::clone(&bindings),
+                0,
+                Rc::clone(&source),
+            ) {
+                Ok(value) => value.stringify_internal(&heap.borrow()),
+                Err(error) => error.message,
+            };
+        }
+
+        result
+    }
+
+    #[test]
+    fn the_first_of_the_values_that_are_equal_is_kept_in_its_place() {
+        assert_eq!(outcome("unique([3, 1, 3, 2, 1])"), "[3, 1, 2]");
+        assert_eq!(outcome("unique([])"), "[]");
+        assert_eq!(
+            outcome("unique(map(range(100), i => (i * 7) % 13))"),
+            "[0, 7, 1, 8, 2, 9, 3, 10, 4, 11, 5, 12, 6]"
+        );
+        assert_eq!(
+            outcome("unique(map(range(100), i => to_string(i % 11)))"),
+            "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]"
+        );
+    }
+
+    #[test]
+    fn many_distinct_values_are_all_kept() {
+        assert_eq!(
+            outcome("unique(map(range(20000), i => (i * 7919) % 5003)) into len"),
+            "5003"
+        );
+        assert_eq!(
+            outcome(
+                "xs = map(range(20000), i => (i * 7919) % 5003)\nunique(xs) == unique([...xs, ...xs]) into all"
+            ),
+            "true"
+        );
+        assert_eq!(
+            outcome("unique(map(range(6000), i => \"k\" + to_string(i % 1500))) into len"),
+            "1500"
+        );
+        assert_eq!(
+            outcome("unique(map(range(6000), i => [i % 30, {k: i % 7}])) into len"),
+            "210"
+        );
+    }
+
+    #[test]
+    fn values_of_different_kinds_are_never_equal() {
+        assert_eq!(
+            outcome(
+                "unique([0, \"0\", false, null, [], {}, [0], {a: 0}, \"\", 0, \"0\", false, null, [], {}, [0], {a: 0}, \"\"]) into len"
+            ),
+            "9"
+        );
+        assert_eq!(
+            outcome(
+                "unique(map(range(60), i => if i % 2 == 0 then i % 10 else to_string(i % 10))) into len"
+            ),
+            "10"
+        );
+    }
+
+    #[test]
+    fn zero_is_equal_to_its_negative_and_the_first_of_them_is_kept() {
+        assert_eq!(outcome("unique([0, -0, 0]) via x => 1 / x"), "[inf]");
+        assert_eq!(outcome("unique([-0, 0, -0]) via x => 1 / x"), "[-inf]");
+        assert_eq!(
+            outcome("unique([...range(1, 20), -0, 0, [-0], [0], {z: 0}, {z: -0}]) into len"),
+            "22"
+        );
+    }
+
+    #[test]
+    fn a_number_that_is_not_a_number_is_equal_to_nothing() {
+        assert_eq!(outcome("unique([0/0, 0/0, 1, 0/0]) into len"), "4");
+        assert_eq!(
+            outcome("unique(map(range(40), i => if i % 2 == 0 then 0/0 else i % 6)) into len"),
+            "23"
+        );
+        assert_eq!(
+            outcome(
+                "unique(map(range(40), i => if i % 2 == 0 then [1, {a: 0/0}] else [1, {a: i % 6}])) into len"
+            ),
+            "23"
+        );
+    }
+
+    #[test]
+    fn records_are_equal_whatever_order_their_keys_were_written_in() {
+        assert_eq!(
+            outcome("unique([{a: 1, b: 2}, {b: 2, a: 1}, {a: 2, b: 1}]) into len"),
+            "2"
+        );
+        assert_eq!(
+            outcome(
+                "unique(map(range(90), i => if i % 2 == 0 then {a: i % 9, b: \"x\"} else {b: \"x\", a: i % 9})) into len"
+            ),
+            "9"
+        );
+    }
+
+    #[test]
+    fn functions_are_equal_when_they_are_written_the_same_way() {
+        assert_eq!(
+            outcome(
+                "unique([x => x + 1, x => x + 1, y => y + 1, x => x + 2, sqrt, sqrt, sin, 1, 2, 3, 4, 5, 6, 7, 8, x => x + 1, sqrt, y => y + 1, (x, y) => x, (x, y) => x]) into len"
+            ),
+            "14"
+        );
+    }
+
+    #[test]
+    fn values_that_differ_deep_inside_are_told_apart() {
+        assert_eq!(
+            outcome(
+                "deepen = (v, n) => if n == 0 then v else deepen([v], n - 1)\nunique(map(range(300), i => deepen(i % 25, 20))) into len"
+            ),
+            "25"
+        );
+        assert_eq!(
+            outcome(
+                "deepen = (v, n) => if n == 0 then v else deepen({in: v}, n - 1)\nunique(map(range(300), i => deepen(i % 25, 20))) into len"
+            ),
+            "25"
+        );
+    }
+
+    #[test]
+    fn only_a_list_has_distinct_values() {
+        assert_eq!(
+            outcome("unique(\"aab\")"),
+            "in built-in function \"unique\": expected a list, but got a string"
+        );
+        assert_eq!(
+            outcome("unique(3)"),
+            "in built-in function \"unique\": expected a list, but got a number"
+        );
+    }
+}
+
+#[cfg(test)]
+mod call_entry_tests {
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::{Heap, HeapValue};
+    use crate::intern::Symbol;
+    use crate::values::{Entry, LambdaDef, Value};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// A function that calls itself by its name once for every level it is given.
+    const COUNT: &str = "count = n => if n <= 0 then 0 else count(n - 1) + 1";
+
+    /// What a definition has for the code that a call of it runs.
+    #[derive(Debug, PartialEq)]
+    enum Entered {
+        /// Nothing that any run found out.
+        Nowhere,
+
+        /// The code that the function was compiled to.
+        Body,
+
+        /// The code in which the function calls itself directly.
+        Variant,
+    }
+
+    /// A program that is evaluated a statement at a time, each in a run of its own.
+    struct Session {
+        heap: Rc<RefCell<Heap>>,
+        bindings: Rc<Environment>,
+    }
+
+    impl Session {
+        fn new() -> Self {
+            Self {
+                heap: Rc::new(RefCell::new(Heap::new())),
+                bindings: Rc::new(Environment::new()),
+            }
+        }
+
+        /// A program that has the values of this one, and no variables yet.
+        fn elsewhere(&self) -> Self {
+            Self {
+                heap: Rc::clone(&self.heap),
+                bindings: Rc::new(Environment::new()),
+            }
+        }
+
+        /// Evaluate the statements of `code`, up to the value of the last one.
+        fn evaluate(&self, code: &str) -> Result<Value, RuntimeError> {
+            let statements = parse_program(code).expect("a program the fast parser reads");
+            let source: Rc<str> = code.into();
+
+            let mut result = Value::Null;
+            for statement in statements {
+                let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement
+                else {
+                    continue;
+                };
+                result = evaluate_ast(
+                    &expr,
+                    Rc::clone(&self.heap),
+                    Rc::clone(&self.bindings),
+                    0,
+                    Rc::clone(&source),
+                )?;
+            }
+
+            Ok(result)
+        }
+
+        /// What the statements of `code` come to, rendered: the value, or the error.
+        fn outcome(&self, code: &str) -> String {
+            match self.evaluate(code) {
+                Ok(value) => value.stringify_internal(&self.heap.borrow()),
+                Err(error) => error.message,
+            }
+        }
+
+        /// The value of variable `name`.
+        fn variable(&self, name: &str) -> Value {
+            self.bindings
+                .get(Symbol::intern(name))
+                .expect("a variable of the program")
+        }
+
+        /// Look at the definition of the function that variable `name` is bound to.
+        fn definition<T>(&self, name: &str, look: impl FnOnce(&LambdaDef) -> T) -> T {
+            let Value::Lambda(pointer) = self.variable(name) else {
+                panic!("{name} is not a function");
+            };
+
+            match self.heap.borrow().get(pointer.index()) {
+                Some(HeapValue::Lambda(def)) => look(def),
+                _ => panic!("{name} is not a function"),
+            }
+        }
+
+        /// Change the definition of the function that variable `name` is bound to where it
+        /// is, the way whoever holds the heap can between two runs.
+        fn redefine(&self, name: &str, change: impl FnOnce(&mut LambdaDef)) {
+            let Value::Lambda(pointer) = self.variable(name) else {
+                panic!("{name} is not a function");
+            };
+
+            match self.heap.borrow_mut().get_mut(pointer.index()) {
+                Some(HeapValue::Lambda(def)) => {
+                    change(Rc::get_mut(def).expect("a definition that only the heap holds"))
+                }
+                _ => panic!("{name} is not a function"),
+            }
+        }
+
+        /// The number of the run that found out what a call of the function runs that
+        /// variable `name` is bound to.
+        fn found_in(&self, name: &str) -> u64 {
+            self.definition(name, |def| def.scope.entry.run())
+        }
+
+        /// What a run found a call of the function to run that variable `name` is bound to.
+        fn entered(&self, name: &str) -> Entered {
+            self.definition(name, |def| {
+                let entry = &def.scope.entry;
+                let body = def.scope.code.get().map(Rc::as_ptr);
+
+                if entry.run() == Entry::NO_RUN {
+                    Entered::Nowhere
+                } else if body == Some(entry.code()) {
+                    Entered::Body
+                } else {
+                    Entered::Variant
+                }
+            })
+        }
+    }
+
+    #[test]
+    fn a_function_that_can_only_run_its_body_is_entered_there_from_the_start() {
+        let session = Session::new();
+
+        session.evaluate("inc = x => x + 1").unwrap();
+        assert_eq!(session.entered("inc"), Entered::Body);
+
+        assert_eq!(
+            session.outcome("map(range(3), i => inc(inc(i)))"),
+            "[2, 3, 4]"
+        );
+        assert_eq!(session.entered("inc"), Entered::Body);
+    }
+
+    #[test]
+    fn every_run_that_calls_a_function_finds_out_for_itself_what_the_call_runs() {
+        let session = Session::new();
+
+        session.evaluate("inc = x => x + 1").unwrap();
+        let made = session.found_in("inc");
+        assert_ne!(made, Entry::NO_RUN);
+
+        assert_eq!(session.outcome("inc(1)"), "2");
+        let called = session.found_in("inc");
+        assert!(called > made);
+
+        assert_eq!(session.outcome("2 + 2"), "4");
+        assert_eq!(session.found_in("inc"), called);
+
+        assert_eq!(session.outcome("inc(inc(1))"), "3");
+        assert!(session.found_in("inc") > called);
+    }
+
+    #[test]
+    fn a_function_that_calls_itself_by_name_is_entered_where_it_calls_itself_directly() {
+        let session = Session::new();
+
+        session.evaluate(COUNT).unwrap();
+        assert_eq!(session.entered("count"), Entered::Nowhere);
+
+        assert_eq!(session.outcome("count(5)"), "5");
+        assert_eq!(session.entered("count"), Entered::Variant);
+
+        assert_eq!(
+            session.outcome("twice = n => count(n) + count(n)\n[twice(7), twice(0), twice(30)]"),
+            "[14, 0, 60]"
+        );
+        assert_eq!(session.entered("count"), Entered::Variant);
+    }
+
+    #[test]
+    fn functions_that_call_each_other_by_name_are_entered_at_their_bodies() {
+        let session = Session::new();
+
+        session
+            .evaluate(
+                "even = n => if n == 0 then true else odd(n - 1)\nodd = n => if n == 0 then false else even(n - 1)",
+            )
+            .unwrap();
+        assert_eq!(session.entered("even"), Entered::Nowhere);
+        assert_eq!(session.entered("odd"), Entered::Nowhere);
+
+        assert_eq!(
+            session.outcome("[even(10), odd(10), even(7), odd(7)]"),
+            "[true, false, false, true]"
+        );
+        assert_eq!(session.entered("even"), Entered::Body);
+        assert_eq!(session.entered("odd"), Entered::Body);
+    }
+
+    #[test]
+    fn calls_that_enter_a_function_directly_are_counted_towards_the_depth_limit() {
+        let session = Session::new();
+
+        session
+            .evaluate(
+                "f = n => if n <= 0 then 0 else g(n - 1) + 1\ng = n => if n <= 0 then 0 else f(n - 1) + 1",
+            )
+            .unwrap();
+
+        assert_eq!(session.outcome("f(1000)"), "1000");
+        assert!(
+            session
+                .outcome("f(1001)")
+                .ends_with("maximum call depth of 1000 exceeded")
+        );
+        assert_eq!(session.outcome("f(1000)"), "1000");
+    }
+
+    #[test]
+    fn a_function_that_gets_another_name_is_found_out_about_again() {
+        let session = Session::new();
+
+        session.evaluate(COUNT).unwrap();
+        assert_eq!(session.outcome("count(5)"), "5");
+        assert_eq!(session.entered("count"), Entered::Variant);
+
+        // Under another name, the function no longer knows a call of `count` to be a call of
+        // itself.
+        session.evaluate("tally = count").unwrap();
+        assert_eq!(session.entered("tally"), Entered::Nowhere);
+
+        assert_eq!(session.outcome("tally(5)"), "5");
+        assert_eq!(session.entered("tally"), Entered::Body);
+        assert_eq!(session.outcome("count(6)"), "6");
+        assert_eq!(session.entered("count"), Entered::Body);
+    }
+
+    #[test]
+    fn a_function_that_gets_another_name_in_the_run_that_calls_it_is_found_out_about_again() {
+        let session = Session::new();
+
+        session.evaluate(COUNT).unwrap();
+        assert_eq!(
+            session.outcome(
+                "do { before = count(3); tally = count; return [before, tally(4), count(5)] }"
+            ),
+            "[3, 4, 5]"
+        );
+        assert_eq!(session.entered("count"), Entered::Body);
+
+        assert_eq!(
+            session.outcome(
+                "(fn => do { before = fn(3); count = fn; return [before, count(4), fn(5)] })(count)"
+            ),
+            "[3, 4, 5]"
+        );
+        assert_eq!(session.entered("count"), Entered::Variant);
+    }
+
+    #[test]
+    fn a_function_that_gets_a_name_while_it_runs_goes_on_under_the_name_it_was_called_by() {
+        let session = Session::new();
+
+        session
+            .evaluate("h = n => if n <= 0 then missing else do { k = h; return k(n - 1) + 1 }")
+            .unwrap();
+        assert_eq!(
+            session.outcome("h(2)"),
+            "in function \"h\": in function \"k\": in function \"k\": unknown identifier: missing"
+        );
+        assert_eq!(
+            session.outcome("h(1)"),
+            "in function \"k\": in function \"k\": unknown identifier: missing"
+        );
+    }
+
+    #[test]
+    fn an_error_is_put_down_to_the_name_that_the_function_has_by_then() {
+        let session = Session::new();
+
+        session
+            .evaluate("f = n => if n <= 0 then missing else f(n - 1) + 1")
+            .unwrap();
+        assert_eq!(
+            session.outcome("f(1)"),
+            "in function \"f\": in function \"f\": unknown identifier: missing"
+        );
+
+        session.evaluate("g = f").unwrap();
+        assert_eq!(
+            session.outcome("g(1)"),
+            "in function \"g\": in function \"g\": unknown identifier: missing"
+        );
+        assert_eq!(
+            session.outcome("f(1)"),
+            "in function \"g\": in function \"g\": unknown identifier: missing"
+        );
+    }
+
+    #[test]
+    fn a_function_that_its_holder_renames_between_runs_is_found_out_about_again() {
+        let session = Session::new();
+
+        session.evaluate(COUNT).unwrap();
+        assert_eq!(session.outcome("count(3)"), "3");
+        assert_eq!(session.entered("count"), Entered::Variant);
+
+        // Where the function is `tally` and `count` is another function, it calls that one.
+        let other = session.elsewhere();
+        other.evaluate("count = n => 100").unwrap();
+        other
+            .bindings
+            .insert(Symbol::intern("tally"), session.variable("count"));
+        session.redefine("count", |def| def.name = Some(Symbol::intern("tally")));
+
+        assert_eq!(other.outcome("tally(3)"), "101");
+        assert_eq!(other.entered("tally"), Entered::Body);
+        assert_eq!(
+            other.outcome("[tally(0), tally(1), tally(9)]"),
+            "[0, 101, 101]"
+        );
+    }
+
+    #[test]
+    fn a_function_that_its_holder_names_through_the_definition_is_entered_nowhere_yet() {
+        let session = Session::new();
+
+        session.evaluate(COUNT).unwrap();
+        assert_eq!(session.outcome("count(3)"), "3");
+        assert_eq!(session.entered("count"), Entered::Variant);
+
+        let value = session.variable("count");
+        session.redefine("count", |def| def.set_name(Symbol::intern("tally"), value));
+        assert_eq!(session.entered("count"), Entered::Nowhere);
+
+        assert_eq!(session.outcome("count(3)"), "3");
+        assert_eq!(session.entered("count"), Entered::Body);
+    }
+
+    #[test]
+    fn a_function_that_its_holder_gives_another_body_between_runs_runs_that_body() {
+        let session = Session::new();
+
+        session.evaluate("f = x => x + 1\ng = x => x * 10").unwrap();
+        assert_eq!(session.outcome("f(1)"), "2");
+        assert_eq!(session.entered("f"), Entered::Body);
+
+        let (args, body) =
+            session.definition("g", |def| (Rc::clone(&def.args), Rc::clone(&def.body)));
+        session.redefine("f", |def| {
+            def.args = args;
+            def.body = body;
+        });
+
+        assert_eq!(session.outcome("f(1)"), "10");
+        assert_eq!(session.outcome("[f(2), f(f(2))]"), "[20, 200]");
+        assert_eq!(session.outcome("map([1, 2], f)"), "[10, 20]");
+    }
+
+    #[test]
+    fn a_copy_of_a_definition_is_entered_nowhere_yet() {
+        let session = Session::new();
+
+        session.evaluate("inc = x => x + 1").unwrap();
+        assert_eq!(session.entered("inc"), Entered::Body);
+
+        let copy = session.definition("inc", LambdaDef::clone);
+        assert_eq!(copy.scope.entry.run(), Entry::NO_RUN);
+        assert!(copy.scope.entry.code().is_null());
+    }
+}
+
+#[cfg(test)]
+mod shared_string_tests {
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::{Heap, HeapValue};
+    use crate::text::Text;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// A program that is evaluated a few statements at a time.
+    struct Session {
+        heap: Rc<RefCell<Heap>>,
+        bindings: Rc<Environment>,
+    }
+
+    impl Session {
+        fn new() -> Self {
+            Self {
+                heap: Rc::new(RefCell::new(Heap::new())),
+                bindings: Rc::new(Environment::new()),
+            }
+        }
+
+        /// Evaluate the statements of `code`, up to the value of the last one.
+        fn evaluate(&self, code: &str) -> Result<Value, RuntimeError> {
+            let statements = parse_program(code).expect("a program the fast parser reads");
+            let source: Rc<str> = code.into();
+
+            let mut result = Value::Null;
+            for statement in statements {
+                let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement
+                else {
+                    continue;
+                };
+                result = evaluate_ast(
+                    &expr,
+                    Rc::clone(&self.heap),
+                    Rc::clone(&self.bindings),
+                    0,
+                    Rc::clone(&source),
+                )?;
+            }
+
+            Ok(result)
+        }
+
+        /// What the statements of `code` come to, rendered: the value, or the error.
+        fn outcome(&self, code: &str) -> String {
+            match self.evaluate(code) {
+                Ok(value) => value.stringify_internal(&self.heap.borrow()),
+                Err(error) => error.message,
+            }
+        }
+
+        /// The text of the string that `code` comes to.
+        fn text(&self, code: &str) -> Text {
+            let value = self.evaluate(code).unwrap();
+
+            value.as_text(&self.heap.borrow()).unwrap().clone()
+        }
+
+        /// Drop everything that the variables of the program do not lead to.
+        fn compact(&self) {
+            self.heap.borrow_mut().compact(&self.bindings, &mut []);
+        }
+
+        /// The number of buffers that the strings of at least `len` bytes in the heap read
+        /// their characters from.
+        fn buffers(&self, len: usize) -> usize {
+            let heap = self.heap.borrow();
+            let mut distinct: Vec<&Text> = Vec::new();
+
+            for slot in 0..heap.len() {
+                if let Some(HeapValue::String(text)) = heap.get(slot)
+                    && text.len() >= len
+                    && !distinct.iter().any(|known| known.shares_buffer_with(text))
+                {
+                    distinct.push(text);
+                }
+            }
+
+            distinct.len()
+        }
+
+        /// The number of strings in the heap that read their characters where `text` does.
+        fn sharing(&self, text: &Text) -> usize {
+            let heap = self.heap.borrow();
+
+            (0..heap.len())
+                .filter(|slot| match heap.get(*slot) {
+                    Some(HeapValue::String(other)) => other.shares_buffer_with(text),
+                    _ => false,
+                })
+                .count()
+        }
+    }
+
+    fn outcome(code: &str) -> String {
+        Session::new().outcome(code)
+    }
+
+    /// The letters of the alphabet `times` times over, as a program spells them.
+    fn letters(times: usize) -> String {
+        format!("\"{}\"", "abcdefghijklmnopqrstuvwxyz".repeat(times))
+    }
+
+    #[test]
+    fn strings_that_are_added_hold_the_characters_of_both() {
+        for (code, expected) in [
+            ("\"ab\" + \"cd\"", "abcd"),
+            ("\"\" + \"cd\"", "cd"),
+            ("\"ab\" + \"\"", "ab"),
+            ("\"\" + \"\"", ""),
+            ("\"é\" + \"日本\" + \"😀\"", "é日本😀"),
+            ("s = \"ab\"\ns + s", "abab"),
+            ("s = \"ab\"\ns + s + s", "ababab"),
+            ("[\"a\", \"b\"] + \"c\"", "[ac, bc]"),
+            ("\"c\" + [\"a\", \"b\"]", "[ca, cb]"),
+            ("[\"a\", \"b\"] + [\"c\", \"\"]", "[ac, b]"),
+            ("[\"\", \"\"] + \"\"", "[, ]"),
+            ("len(\"abcdefghijklmnopqrstuv\" + \"w\")", "23"),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+
+        for (code, expected) in [
+            ("\"a\" + 1", "expected a string, but got a number"),
+            ("1 + \"a\"", "expected a number, but got a string"),
+            ("\"a\" + null", "expected a string, but got a null"),
+            ("\"\" + 1", "expected a string, but got a number"),
+            ("\"a\" + [1]", "can't add string and number"),
+            ("[1] + \"a\"", "can't add number and string"),
+            ("[\"a\", 1] + [\"b\", \"c\"]", "can't add number and string"),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_string_that_nothing_is_added_to_is_the_string_that_results() {
+        let session = Session::new();
+        session
+            .evaluate(&format!("long = {}\nshort = \"ab\"", letters(3)))
+            .unwrap();
+
+        let slots = session.heap.borrow().len();
+        assert_eq!(session.outcome("long + \"\" == long"), "true");
+        assert_eq!(session.outcome("len(\"\" + long + \"\")"), "78");
+        assert_eq!(session.outcome("short + \"\""), "ab");
+
+        // Only the empty string that each of the three statements spells out was made, and
+        // only once where a statement spells it out twice.
+        assert_eq!(session.heap.borrow().len(), slots + 3);
+    }
+
+    #[test]
+    fn strings_that_follow_the_same_string_do_not_show_up_in_each_other() {
+        let session = Session::new();
+
+        // A string that keeps being added to has room for more behind it, so the first
+        // string that follows it is written there. Every other one is a copy.
+        session
+            .evaluate(&format!(
+                "base = reduce(range(8), (acc, i) => acc + to_string(i), {})\n\
+                 a = base + \"A\"\n\
+                 b = base + \"B\"\n\
+                 c = a + \"C\"\n\
+                 d = a + \"D\"\n\
+                 e = c + \"E\"\n\
+                 f = a + \"F\" + \"G\"\n\
+                 g = base + base\n\
+                 h = e + e",
+                letters(1)
+            ))
+            .unwrap();
+
+        let base = "abcdefghijklmnopqrstuvwxyz01234567";
+        assert_eq!(
+            session.outcome("[base, a, b, c, d, e, f]"),
+            format!("[{base}, {base}A, {base}B, {base}AC, {base}AD, {base}ACE, {base}AFG]")
+        );
+        assert_eq!(session.outcome("g"), format!("{base}{base}"));
+        assert_eq!(session.outcome("h"), format!("{base}ACE{base}ACE"));
+        assert!(session.text("a").shares_buffer_with(&session.text("base")));
+        assert!(!session.text("b").shares_buffer_with(&session.text("base")));
+    }
+
+    #[test]
+    fn every_step_of_a_fold_keeps_the_string_it_made() {
+        assert_eq!(
+            outcome(
+                "reduce(range(5), (state, i) => {now: state.now + to_string(i), before: [...state.before, state.now]}, {now: \"\", before: []}).before"
+            ),
+            "[, 0, 01, 012, 0123]"
+        );
+
+        let long = letters(2);
+        let text = "abcdefghijklmnopqrstuvwxyz".repeat(2);
+        assert_eq!(
+            outcome(&format!(
+                "reduce(range(4), (state, i) => {{now: state.now + to_string(i), before: [...state.before, state.now]}}, {{now: {long}, before: []}}).before"
+            )),
+            format!("[{text}, {text}0, {text}01, {text}012]")
+        );
+        assert_eq!(
+            outcome(&format!(
+                "reduce(range(4), (state, i) => {{now: tail(state.now) + to_string(i), before: [...state.before, state.now]}}, {{now: {long}, before: []}}).before"
+            )),
+            format!(
+                "[{}, {}0, {}01, {}012]",
+                text,
+                &text[1..],
+                &text[2..],
+                &text[3..]
+            )
+        );
+        assert_eq!(
+            outcome(&format!("map(range(3), i => {long} + to_string(i))")),
+            format!("[{text}0, {text}1, {text}2]")
+        );
+    }
+
+    #[test]
+    fn a_string_that_grows_in_a_fold_is_not_copied_at_every_step() {
+        for (code, len, start, end) in [
+            (
+                "reduce(range(3000), (acc, i) => acc + \"ab\", \"\")",
+                6000,
+                "abab",
+                "abab",
+            ),
+            (
+                "reduce(range(3000), (acc, i) => acc + to_string(i % 10), \"\")",
+                3000,
+                "0123",
+                "6789",
+            ),
+            (
+                "reduce(range(3000), (acc, i) => acc + \"a\" + \"b\", \"\")",
+                6000,
+                "abab",
+                "abab",
+            ),
+            (
+                "reduce(range(3000), (acc, i) => if i % 2 == 0 then acc + \"xy\" else acc, \"\")",
+                3000,
+                "xyxy",
+                "xyxy",
+            ),
+            (
+                "grow = (n, acc) => if n == 0 then acc else grow(n - 1, acc + \"ab\")\ngrow(900, \"\")",
+                1800,
+                "abab",
+                "abab",
+            ),
+            (
+                "reduce(range(3000), (acc, i) => acc + \"é\", \"\")",
+                6000,
+                "éé",
+                "éé",
+            ),
+        ] {
+            let session = Session::new();
+            let text = session.text(code);
+
+            assert_eq!(text.len(), len, "{code}");
+            assert!(text.starts_with(start), "{code}");
+            assert!(text.ends_with(end), "{code}");
+
+            // A buffer for every time that the string outgrows the one before, which is
+            // twice as large every time, rather than one for each of the steps.
+            let buffers = session.buffers(30);
+            assert!(buffers <= 12, "{code}: {buffers} buffers");
+
+            let sharing = session.sharing(&text);
+            assert!(
+                sharing > len / 8,
+                "{code}: {sharing} strings share the last buffer"
+            );
+        }
+    }
+
+    #[test]
+    fn a_string_that_is_added_to_once_takes_the_room_of_its_characters() {
+        let session = Session::new();
+        let text = session.text(&format!("{} + \"!\"", letters(2)));
+
+        assert_eq!(text.len(), 53);
+        assert_eq!(session.sharing(&text), 1);
+        // Its share of the buffer is all of it: the characters and what a buffer starts with.
+        assert!(
+            session.heap.borrow().approx_bytes() < 400,
+            "{} bytes",
+            session.heap.borrow().approx_bytes()
+        );
+    }
+
+    #[test]
+    fn parts_of_a_string_read_the_characters_of_the_string() {
+        let session = Session::new();
+        session
+            .evaluate(&format!(
+                "whole = {}\npadded = \"  \" + whole + \" \t\"\nlisted = whole + \",\" + whole",
+                letters(4)
+            ))
+            .unwrap();
+        let whole = session.text("whole");
+        let alphabet = "abcdefghijklmnopqrstuvwxyz";
+
+        for (code, expected) in [
+            (
+                "tail(whole)",
+                format!("{}{}", &alphabet[1..], alphabet.repeat(3)),
+            ),
+            (
+                "slice(whole, 2, 52)",
+                format!("{}{}", &alphabet[2..], alphabet),
+            ),
+            ("slice(whole, 0, 104)", alphabet.repeat(4)),
+            ("slice(whole, 78, 104)", alphabet.to_string()),
+            (
+                "tail(tail(slice(whole, 1, 60)))",
+                alphabet.repeat(3)[3..60].to_string(),
+            ),
+        ] {
+            let part = session.text(code);
+
+            assert!(part.shares_buffer_with(&whole), "{code}");
+            assert_eq!(part.as_str(), expected, "{code}");
+        }
+
+        assert!(
+            session
+                .text("trim(padded)")
+                .shares_buffer_with(&session.text("padded"))
+        );
+        assert_eq!(session.outcome("trim(padded) == whole"), "true");
+        assert!(
+            session
+                .text("split(listed, \",\")[1]")
+                .shares_buffer_with(&session.text("listed"))
+        );
+        assert_eq!(
+            session.outcome("split(listed, \",\") == [whole, whole]"),
+            "[true, true]"
+        );
+
+        // A part that is short has its characters to itself.
+        assert!(
+            !session
+                .text("slice(whole, 2, 24)")
+                .shares_buffer_with(&whole)
+        );
+        assert_eq!(session.outcome("slice(whole, 2, 24)"), alphabet[2..24]);
+        assert_eq!(session.outcome("whole"), alphabet.repeat(4));
+    }
+
+    #[test]
+    fn parts_of_a_string_are_what_they_were_before_strings_shared_their_characters() {
+        for (code, expected) in [
+            ("head(\"\")", ""),
+            ("head(\"abc\")", "a"),
+            ("head(\"é\")", ""),
+            ("head(\"aé\")", "a"),
+            ("tail(\"\")", ""),
+            ("tail(\"a\")", ""),
+            ("tail(\"abc\")", "bc"),
+            ("tail(\"é\")", ""),
+            ("tail(\"aé\")", "é"),
+            ("slice(\"abcd\", 1, 3)", "bc"),
+            ("slice(\"abcd\", 0, 0)", ""),
+            ("slice(\"abcd\", 4, 4)", ""),
+            ("slice(\"abcd\", 0, 4)", "abcd"),
+            (
+                "slice(\"abcd\", 2, 1)",
+                "in built-in function \"slice\": index out of bounds",
+            ),
+            (
+                "slice(\"abcd\", 0, 5)",
+                "in built-in function \"slice\": index out of bounds",
+            ),
+            (
+                "slice(\"abcd\", 5, 5)",
+                "in built-in function \"slice\": index out of bounds",
+            ),
+            ("slice(\"aé\", 1, 3)", "é"),
+            (
+                "slice(\"aé\", 1, 2)",
+                "in built-in function \"slice\": index out of bounds",
+            ),
+            (
+                "slice(\"aé\", 2, 3)",
+                "in built-in function \"slice\": index out of bounds",
+            ),
+            ("slice(\"abcd\", -1, 2)", "ab"),
+            ("slice(\"abcd\", 1.9, 2.9)", "b"),
+            ("split(\"a,b,,c\", \",\")", "[a, b, , c]"),
+            ("split(\"abc\", \"\")", "[, a, b, c, ]"),
+            ("split(\"\", \",\")", "[]"),
+            ("split(\"\", \"\")", "[, ]"),
+            ("split(\"abc\", \"abc\")", "[, ]"),
+            ("split(\"aébéc\", \"é\")", "[a, b, c]"),
+            ("split(\"abc\", \"x\")", "[abc]"),
+            ("trim(\"  ab cd \")", "ab cd"),
+            ("trim(\"\")", ""),
+            ("trim(\"   \")", ""),
+            ("trim(\"ab\")", "ab"),
+            ("trim(\"\u{a0}é\u{3000}\")", "é"),
+            ("len(\"é\")", "2"),
+            ("len(tail(\"aé\"))", "2"),
+            ("len(split(\"a,b\", \",\"))", "2"),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn the_characters_of_a_string_are_found_by_their_position() {
+        let session = Session::new();
+        session
+            .evaluate(&format!(
+                "short = \"abc\"\nwide = \"aé😀b\"\nlong = {}\nmixed = long + \"é\" + long",
+                letters(2)
+            ))
+            .unwrap();
+
+        for (code, expected) in [
+            ("short[0]", "a"),
+            ("short[2]", "c"),
+            ("short[3]", "null"),
+            ("short[-1]", "c"),
+            ("short[-3]", "a"),
+            ("short[-4]", "null"),
+            ("short[1.9]", "b"),
+            ("short[-0.5]", "a"),
+            ("short[0/0]", "a"),
+            ("short[1e300]", "null"),
+            ("short[-1e300]", "null"),
+            ("wide[0]", "a"),
+            ("wide[1]", "é"),
+            ("wide[2]", "😀"),
+            ("wide[3]", "b"),
+            ("wide[4]", "null"),
+            ("wide[-1]", "b"),
+            ("wide[-3]", "é"),
+            ("wide[-4]", "a"),
+            ("wide[-5]", "null"),
+            ("\"\"[0]", "null"),
+            ("\"\"[-1]", "null"),
+            ("long[0]", "a"),
+            ("long[27]", "b"),
+            ("long[51]", "z"),
+            ("long[52]", "null"),
+            ("long[-1]", "z"),
+            ("long[-52]", "a"),
+            ("long[-53]", "null"),
+            ("mixed[51]", "z"),
+            ("mixed[52]", "é"),
+            ("mixed[53]", "a"),
+            ("mixed[104]", "z"),
+            ("mixed[105]", "null"),
+            ("mixed[-1]", "z"),
+            ("mixed[-53]", "é"),
+            ("mixed[-105]", "a"),
+            ("mixed[-106]", "null"),
+            ("slice(mixed, 26, 80)[26]", "é"),
+            ("slice(mixed, 26, 80)[27]", "a"),
+            ("slice(mixed, 54, 106)[51]", "z"),
+            ("tail(long)[0]", "b"),
+            ("(long + \"!\")[52]", "!"),
+            ("typeof(long[3])", "string"),
+            ("map(range(3), i => wide[i + 1])", "[é, 😀, b]"),
+            ("[...wide]", "[a, é, 😀, b]"),
+            ("{...wide}", "{0: a, 1: é, 2: 😀, 3: b}"),
+        ] {
+            assert_eq!(session.outcome(code), expected, "{code}");
+        }
+
+        assert_eq!(
+            session.outcome("short[\"a\"]"),
+            "expected a number, but got a string"
+        );
+    }
+
+    #[test]
+    fn a_part_that_ends_its_string_is_followed_without_changing_the_string() {
+        let session = Session::new();
+        let alphabet = "abcdefghijklmnopqrstuvwxyz";
+
+        session
+            .evaluate(&format!(
+                "whole = reduce(range(4), (acc, i) => acc + \"-\", {})\n\
+                 end = slice(whole, 20, 56)\n\
+                 longer = end + \"1\"\n\
+                 other = whole + \"2\"\n\
+                 middle = slice(whole, 10, 40) + \"3\"",
+                letters(2)
+            ))
+            .unwrap();
+
+        let whole = format!("{}----", alphabet.repeat(2));
+        assert_eq!(
+            session.outcome("[whole, end, longer, other, middle]"),
+            format!(
+                "[{whole}, {}, {}1, {whole}2, {}3]",
+                &whole[20..],
+                &whole[20..],
+                &whole[10..40]
+            )
+        );
+    }
+
+    #[test]
+    fn strings_that_share_their_characters_survive_compaction() {
+        let session = Session::new();
+        let alphabet = "abcdefghijklmnopqrstuvwxyz";
+
+        session
+            .evaluate(&format!(
+                "grown = reduce(range(200), (acc, i) => acc + to_string(i % 10), {})\n\
+                 part = slice(grown, 100, 160)\n\
+                 more = part + \"x\"\n\
+                 rest = tail(part)\n\
+                 words = split(reduce(range(50), (acc, i) => acc + \"word number \" + to_string(i) + \" of fifty,\", \"\"), \",\")\n\
+                 kept = (whole => [slice(whole, 5000, 5040), slice(whole, 5010, 5060) + \"!\"])(reduce(range(10000), (acc, i) => acc + to_string(i % 10), \"\"))",
+                letters(1)
+            ))
+            .unwrap();
+
+        let digits = "0123456789";
+        let grown = format!("{alphabet}{}", digits.repeat(20));
+        let rendered = |session: &Session| {
+            session
+                .outcome("[part, more, rest, kept, len(grown), grown[225], len(words), words[49]]")
+        };
+        let expected = format!(
+            "[{}, {}x, {}, [{}, {}!], 226, 9, 51, word number 49 of fifty]",
+            &grown[100..160],
+            &grown[100..160],
+            &grown[101..160],
+            digits.repeat(4),
+            digits.repeat(5),
+        );
+        assert_eq!(rendered(&session), expected);
+
+        let slots = session.heap.borrow().len();
+        session.compact();
+        assert!(session.heap.borrow().len() < slots);
+        assert_eq!(rendered(&session), expected);
+
+        // The strings can be followed and taken apart like before.
+        session
+            .evaluate(
+                "again = more + \"y\"\n\
+                 further = grown + \"!\"\n\
+                 inner = kept[1] + \"?\"",
+            )
+            .unwrap();
+        session.compact();
+
+        assert_eq!(rendered(&session), expected);
+        assert_eq!(
+            session.outcome("[again, len(further), further[226], grown[226], inner, tail(rest)]"),
+            format!(
+                "[{}xy, 227, !, null, {}!?, {}]",
+                &grown[100..160],
+                digits.repeat(5),
+                &grown[102..160]
+            )
+        );
+    }
+
+    #[test]
+    fn compaction_gives_up_the_characters_that_no_string_reads_any_more() {
+        let session = Session::new();
+
+        session
+            .evaluate(
+                "part = (whole => slice(whole, 5000, 5010))(reduce(range(100000), (acc, i) => acc + to_string(i % 10), \"\"))",
+            )
+            .unwrap();
+        assert!(session.heap.borrow().len() > 100_000);
+
+        session.compact();
+
+        assert!(
+            session.heap.borrow().len() < 100,
+            "{} slots",
+            session.heap.borrow().len()
+        );
+        assert!(
+            session.heap.borrow().approx_bytes() < 10_000,
+            "{} bytes",
+            session.heap.borrow().approx_bytes()
+        );
+        assert_eq!(session.outcome("part"), "0123456789");
+    }
+
+    #[test]
+    fn a_copy_of_a_heap_keeps_its_strings_when_the_other_adds_to_them() {
+        let session = Session::new();
+        session
+            .evaluate(&format!(
+                "grown = reduce(range(8), (acc, i) => acc + to_string(i), {})\npart = tail(grown)",
+                letters(1)
+            ))
+            .unwrap();
+
+        let copy = Session {
+            heap: Rc::new(RefCell::new(session.heap.borrow().clone())),
+            bindings: Rc::clone(&session.bindings),
+        };
+
+        let grown = "abcdefghijklmnopqrstuvwxyz01234567";
+        assert_eq!(copy.outcome("grown + \"A\""), format!("{grown}A"));
+        assert_eq!(session.outcome("grown + \"B\""), format!("{grown}B"));
+        assert_eq!(copy.outcome("part + \"C\""), format!("{}C", &grown[1..]));
+        assert_eq!(session.outcome("part + \"D\""), format!("{}D", &grown[1..]));
+        assert_eq!(
+            copy.outcome("[grown, part]"),
+            format!("[{grown}, {}]", &grown[1..])
+        );
+        assert_eq!(
+            session.outcome("[grown, part]"),
+            format!("[{grown}, {}]", &grown[1..])
+        );
+    }
+
+    #[test]
+    fn strings_are_keys_and_values_whatever_they_were_made_from() {
+        let session = Session::new();
+        session
+            .evaluate(&format!(
+                "long = {}\npart = slice(long + \"!\", 0, 52)\nbuilt = reduce(range(52), (acc, i) => acc + long[i], \"\")\nshort = slice(long, 3, 6)",
+                letters(2)
+            ))
+            .unwrap();
+
+        for (code, expected) in [
+            (
+                "[long == part, part == built, built == long]",
+                "[true, true, true]",
+            ),
+            (
+                "[long != part, long < part, long <= built, part >= built]",
+                "[false, false, true, true]",
+            ),
+            ("{[long]: 1}[part]", "1"),
+            (
+                "{[part]: 1, [built]: 2, [long]: 3}",
+                &format!("{{{}: 3}}", "abcdefghijklmnopqrstuvwxyz".repeat(2)),
+            ),
+            ("len(unique([long, part, built, short, \"def\"]))", "2"),
+            ("includes([long], built)", "true"),
+            ("includes(long, short)", "true"),
+            ("short == \"def\"", "true"),
+            ("{def: 1}[short]", "1"),
+            (
+                "sort([part, \"b\", short, \"a\"])[1]",
+                "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz",
+            ),
+            ("uppercase(short) + lowercase(\"ABC\")", "DEFabc"),
+            ("replace(part, long, \"x\")", "x"),
+            ("join([short, part], \"-\") == \"def-\" + built", "true"),
+            ("to_string(part) == part", "true"),
+            ("typeof(part)", "string"),
+            ("format(\"{}/{}\", short, 1)", "def/1"),
+        ] {
+            assert_eq!(session.outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn strings_are_compared_by_their_characters() {
+        let alphabet = "abcdefghijklmnopqrstuvwxyz";
+        let texts = [
+            String::new(),
+            "a".to_string(),
+            "b".to_string(),
+            "ab".to_string(),
+            "abc".to_string(),
+            "Z".to_string(),
+            "é".to_string(),
+            "日本".to_string(),
+            "😀".to_string(),
+            // As long as a string that is kept where its value is can be, and one longer.
+            alphabet[..22].to_string(),
+            alphabet[..23].to_string(),
+            alphabet.to_string(),
+            format!("{alphabet}a"),
+            format!("{alphabet}b"),
+            format!("{alphabet}é"),
+            alphabet.repeat(3),
+        ];
+
+        let session = Session::new();
+        let spelled: Vec<String> = texts.iter().map(|text| format!("\"{text}\"")).collect();
+        session
+            .evaluate(&format!(
+                "texts = [{}]\n\
+                 built = map(texts, text => slice(text + \"!\", 0, len(text)))\n\
+                 whole = (x, y) => [x == y, x != y, x < y, x <= y, x > y, x >= y]\n\
+                 dotted = (x, y) => [x .== y, x .!= y, x .< y, x .<= y, x .> y, x .>= y]\n\
+                 branches = (x, y) => [\n\
+                   if x == y then true else false, if x != y then true else false,\n\
+                   if x < y then true else false, if x <= y then true else false,\n\
+                   if x > y then true else false, if x >= y then true else false,\n\
+                 ]",
+                spelled.join(", ")
+            ))
+            .unwrap();
+
+        // A string that only has characters of one byte is as long as it has characters.
+        let plain = |text: &str| text.is_ascii();
+
+        for (i, x) in texts.iter().enumerate() {
+            for (j, y) in texts.iter().enumerate() {
+                let expected = format!(
+                    "[{}, {}, {}, {}, {}, {}]",
+                    x == y,
+                    x != y,
+                    x < y,
+                    x <= y,
+                    x > y,
+                    x >= y
+                );
+
+                for compare in ["whole", "dotted", "branches"] {
+                    let code = format!("{compare}(texts[{i}], texts[{j}])");
+                    assert_eq!(session.outcome(&code), expected, "{code}");
+
+                    if plain(x) && plain(y) {
+                        let code = format!("{compare}(built[{i}], texts[{j}])");
+                        assert_eq!(session.outcome(&code), expected, "{code}");
+                        let code = format!("{compare}(texts[{i}], built[{j}])");
+                        assert_eq!(session.outcome(&code), expected, "{code}");
+                    }
+                }
+            }
+        }
+
+        // A string is its own equal.
+        assert_eq!(
+            session.outcome("map(texts, text => [text == text, text < text, text >= text])[11]"),
+            "[true, false, true]"
+        );
+    }
+
+    #[test]
+    fn a_string_is_compared_with_other_values_as_before() {
+        for (code, expected) in [
+            ("\"a\" == 1", "false"),
+            ("\"a\" != null", "true"),
+            ("1 != \"1\"", "true"),
+            ("\"a\" .== [\"a\"]", "false"),
+            ("\"a\" < [\"a\", \"b\"]", "[false, true]"),
+            ("[\"a\", \"c\"] >= \"b\"", "[false, true]"),
+            ("[\"a\", \"c\"] == [\"a\", \"b\"]", "[true, false]"),
+            ("\"a\" < 1", "cannot compare string with number"),
+            ("1 < \"a\"", "cannot compare number with string"),
+            ("\"a\" <= null", "cannot compare string with null"),
+            ("\"a\" > true", "cannot compare string with boolean"),
+            ("\"a\" .>= 1", "cannot compare string with number"),
+            (
+                "if \"a\" < 1 then 1 else 0",
+                "cannot compare string with number",
+            ),
+            (
+                "(x => if x >= \"a\" then 1 else 0)({})",
+                "in anonymous function: cannot compare record with string",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    /// The number of values that evaluating `code` adds to a heap.
+    fn values_made(code: &str) -> usize {
+        let session = Session::new();
+        let slots = session.heap.borrow().len();
+        session.evaluate(code).unwrap();
+
+        session.heap.borrow().len() - slots
+    }
+
+    #[test]
+    fn a_string_literal_is_made_once_however_often_a_statement_evaluates_it() {
+        for code in [
+            "sum(map(range({}), i => len(\"abc\")))",
+            "sum(map(range({}), i => if \"abc\" < \"abd\" then 1 else 0))",
+            "len(filter(range({}), i => \"number\" != \"string\" && \"\" == \"\"))",
+            "count = (n, acc) => if n == 0 then acc else count(n - 1, acc + len(\"abc\"))\ncount({}, 0)",
+        ] {
+            let few = values_made(&code.replace("{}", "3"));
+            let many = values_made(&code.replace("{}", "900"));
+
+            assert_eq!(many, few, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_string_literal_is_made_again_by_the_statements_that_follow() {
+        let session = Session::new();
+        session
+            .evaluate(
+                "greet = name => \"hello \" + name\n\
+                 first = greet(\"a\")",
+            )
+            .unwrap();
+
+        // What a statement leaves behind goes, and what the variables hold moves there.
+        for name in ["second", "third", "fourth"] {
+            session
+                .evaluate(&format!(
+                    "map(range(100), i => to_string(i) + \"!\")\n{name} = greet(\"{name}\")"
+                ))
+                .unwrap();
+            session.compact();
+        }
+
+        assert_eq!(
+            session.outcome("[first, second, third, fourth, greet(\"last\"), greet(\"hello \")]"),
+            "[hello a, hello second, hello third, hello fourth, hello last, hello hello ]"
+        );
+    }
+
+    #[test]
+    fn what_is_made_of_a_string_literal_leaves_the_literal_as_it_is() {
+        let long = letters(1);
+        let text = "abcdefghijklmnopqrstuvwxyz";
+
+        for (code, expected) in [
+            (
+                format!("map(range(3), i => {long} + to_string(i))"),
+                format!("[{text}0, {text}1, {text}2]"),
+            ),
+            (
+                format!("map(range(3), i => {long} + {long})"),
+                format!("[{text}{text}, {text}{text}, {text}{text}]"),
+            ),
+            (
+                format!("reduce(range(3), (acc, i) => acc + {long}, {long}) == {long} + {long} + {long} + {long}"),
+                "true".to_string(),
+            ),
+            (
+                format!("(s => [s + \"1\", s + \"2\", {long} + \"3\", s == {long}, s])({long})"),
+                format!("[{text}1, {text}2, {text}3, true, {text}]"),
+            ),
+            (
+                "map(range(3), i => [\"ab\" + \"cd\", \"ab\", \"cd\", \"ab\" == \"ab\", \"ab\" < \"cd\"])[2]".to_string(),
+                "[abcd, ab, cd, true, true]".to_string(),
+            ),
+            (
+                "map([\"a\", \"b\"], s => {[s]: \"v\", v: s + \"v\"})".to_string(),
+                "[{a: v, v: av}, {b: v, v: bv}]".to_string(),
+            ),
+            (
+                "map(range(2), i => slice(\"abcdef\", i, 4) + uppercase(\"abcdef\")[i] + \"abcdef\"[i])".to_string(),
+                "[abcdAa, bcdBb]".to_string(),
+            ),
+        ] {
+            assert_eq!(outcome(&code), expected, "{code}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod shared_record_tests {
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::{Heap, HeapValue};
+    use crate::record::Record;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// A program that is evaluated a few statements at a time.
+    struct Session {
+        heap: Rc<RefCell<Heap>>,
+        bindings: Rc<Environment>,
+    }
+
+    impl Session {
+        fn new() -> Self {
+            Self {
+                heap: Rc::new(RefCell::new(Heap::new())),
+                bindings: Rc::new(Environment::new()),
+            }
+        }
+
+        /// Evaluate the statements of `code`, up to the value of the last one.
+        fn evaluate(&self, code: &str) -> Result<Value, RuntimeError> {
+            let statements = parse_program(code).expect("a program the fast parser reads");
+            let source: Rc<str> = code.into();
+
+            let mut result = Value::Null;
+            for statement in statements {
+                let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement
+                else {
+                    continue;
+                };
+                result = evaluate_ast(
+                    &expr,
+                    Rc::clone(&self.heap),
+                    Rc::clone(&self.bindings),
+                    0,
+                    Rc::clone(&source),
+                )?;
+            }
+
+            Ok(result)
+        }
+
+        /// What the statements of `code` come to, rendered: the value, or the error.
+        fn outcome(&self, code: &str) -> String {
+            match self.evaluate(code) {
+                Ok(value) => value.stringify_internal(&self.heap.borrow()),
+                Err(error) => error.message,
+            }
+        }
+
+        /// What `look` makes of the record that `code` comes to and of the heap it is in.
+        fn inspect<T>(&self, code: &str, look: impl FnOnce(&Record, &Heap) -> T) -> T {
+            let value = self.evaluate(code).unwrap();
+            let heap = self.heap.borrow();
+
+            look(value.as_record(&heap).unwrap(), &heap)
+        }
+
+        /// Whether the records that `one` and `other` come to read their values from the
+        /// same block.
+        fn share(&self, one: &str, other: &str) -> bool {
+            let one = self.evaluate(one).unwrap();
+            let other = self.evaluate(other).unwrap();
+            let heap = self.heap.borrow();
+
+            one.as_record(&heap)
+                .unwrap()
+                .shares_values_with(other.as_record(&heap).unwrap())
+        }
+
+        /// Drop everything that the variables of the program do not lead to.
+        fn compact(&self) {
+            self.heap.borrow_mut().compact(&self.bindings, &mut []);
+        }
+
+        /// The number of blocks that the records of at least `len` entries in the heap read
+        /// their values from.
+        fn blocks(&self, len: usize) -> usize {
+            let heap = self.heap.borrow();
+            let mut distinct: Vec<&Record> = Vec::new();
+
+            for slot in 0..heap.len() {
+                if let Some(HeapValue::Record(record)) = heap.get(slot)
+                    && record.len() >= len
+                    && !distinct
+                        .iter()
+                        .any(|known| known.shares_values_with(record))
+                {
+                    distinct.push(record);
+                }
+            }
+
+            distinct.len()
+        }
+
+        /// The number of records in the heap that read their values where the record that
+        /// `code` comes to does.
+        fn sharing(&self, code: &str) -> usize {
+            self.inspect(code, |record, heap| {
+                (0..heap.len())
+                    .filter(|slot| match heap.get(*slot) {
+                        Some(HeapValue::Record(other)) => other.shares_values_with(record),
+                        _ => false,
+                    })
+                    .count()
+            })
+        }
+    }
+
+    fn outcome(code: &str) -> String {
+        Session::new().outcome(code)
+    }
+
+    #[test]
+    fn a_record_that_starts_with_a_spread_holds_what_it_is_made_of() {
+        for (code, expected) in [
+            ("{...{a: 1, b: 2}, c: 3}", "{a: 1, b: 2, c: 3}"),
+            ("{...{a: 1, b: 2}}", "{a: 1, b: 2}"),
+            ("{...{}}", "{}"),
+            ("{...{}, a: 1}", "{a: 1}"),
+            ("{...{a: 1, b: 2}, a: 10}", "{a: 10, b: 2}"),
+            ("{...{a: 1, b: 2}, b: 10, a: 20}", "{a: 20, b: 10}"),
+            ("{...{a: 1, b: 2}, c: 3, c: 4, a: 5}", "{a: 5, b: 2, c: 4}"),
+            (
+                "{...{a: 1, b: 2}, ...{c: 3, a: 0}, d: 4}",
+                "{a: 0, b: 2, c: 3, d: 4}",
+            ),
+            ("{...{a: 1}, ...{b: 2}, ...{c: 3}}", "{a: 1, b: 2, c: 3}"),
+            ("{a: 0, ...{a: 1, b: 2}}", "{a: 1, b: 2}"),
+            ("{a: 0, ...{a: 1, b: 2}, c: 1}", "{a: 1, b: 2, c: 1}"),
+            ("{z: 0, ...{a: 1, b: 2}}", "{z: 0, a: 1, b: 2}"),
+            ("{...[7, 8], a: 1}", "{0: 7, 1: 8, a: 1}"),
+            ("{...\"hi\", a: 1}", "{0: h, 1: i, a: 1}"),
+            ("{...{a: 1}, [\"b\"]: 2}", "{a: 1, b: 2}"),
+            ("{...{a: 1}, [\"a\"]: 2}", "{a: 2}"),
+            ("r = {a: 1, b: 2}\n{...r, ...r}", "{a: 1, b: 2}"),
+            (
+                "r = {a: 1, b: 2}\n{...r, r: r}",
+                "{a: 1, b: 2, r: {a: 1, b: 2}}",
+            ),
+            (
+                "r = {a: 1, b: 2}\n{...r, x: {...r, y: 1}, z: 2}",
+                "{a: 1, b: 2, x: {a: 1, b: 2, y: 1}, z: 2}",
+            ),
+            (
+                "r = {a: 1, b: 2}\n{...r, x: 1, y: {...r, z: 2}}",
+                "{a: 1, b: 2, x: 1, y: {a: 1, b: 2, z: 2}}",
+            ),
+            (
+                "r = {...{a: 1}, b: 2}\ns = {...r, c: 3}\n{...s, x: 1, y: {...s, z: 2}, w: {...s, x: 3}}",
+                "{a: 1, b: 2, c: 3, x: 1, y: {a: 1, b: 2, c: 3, z: 2}, w: {a: 1, b: 2, c: 3, x: 3}}",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+
+        for code in [
+            "{...1, a: 2}",
+            "{...null}",
+            "{a: 1, ...true}",
+            "{...(x => x)}",
+        ] {
+            assert_eq!(
+                outcome(code),
+                "expected a list, record, or string",
+                "{code}"
+            );
+        }
+        assert_eq!(
+            outcome("{...{a: 1}, [1]: 2}"),
+            "expected a string, but got a number"
+        );
+    }
+
+    #[test]
+    fn records_that_add_to_the_same_record_do_not_show_up_in_each_other() {
+        let session = Session::new();
+
+        session
+            .evaluate(
+                "base = {a: 1, b: 2}\n\
+                 c = {...base, c: 3}\n\
+                 d = {...base, c: 4}\n\
+                 e = {...c, d: 5}\n\
+                 f = {...c, d: 6}\n\
+                 g = {...e, e: 7}\n\
+                 h = {...e, e: 8, f: 9}\n\
+                 i = {...e, d: 10}\n\
+                 j = {...g, f: 11}\n\
+                 k = {...g, g: 12}",
+            )
+            .unwrap();
+
+        assert_eq!(
+            session.outcome("[base, c, d, e, f, g, h, i, j, k]"),
+            "[{a: 1, b: 2}, {a: 1, b: 2, c: 3}, {a: 1, b: 2, c: 4}, {a: 1, b: 2, c: 3, d: 5}, \
+             {a: 1, b: 2, c: 3, d: 6}, {a: 1, b: 2, c: 3, d: 5, e: 7}, \
+             {a: 1, b: 2, c: 3, d: 5, e: 8, f: 9}, {a: 1, b: 2, c: 3, d: 10}, \
+             {a: 1, b: 2, c: 3, d: 5, e: 7, f: 11}, {a: 1, b: 2, c: 3, d: 5, e: 7, g: 12}]"
+        );
+
+        // A record that is added to once or twice just fits its values, and so do the
+        // records that are made from it apart from the first one, which is taken to keep
+        // growing: the record that is made from that one first has its entry right behind
+        // the values of that one.
+        assert_eq!(session.sharing("c"), 0);
+        assert_eq!(session.sharing("e"), 1);
+        assert_eq!(session.sharing("g"), 2);
+        assert!(session.share("j", "g"));
+        assert!(!session.share("k", "g"));
+        assert!(!session.share("g", "e"));
+        assert!(!session.share("h", "e"));
+        assert!(!session.share("f", "e"));
+        assert!(!session.share("i", "e"));
+    }
+
+    #[test]
+    fn every_step_of_a_fold_keeps_the_record_it_made() {
+        assert_eq!(
+            outcome(
+                "reduce(range(5), (state, i) => {now: {...state.now, [\"k\" + to_string(i)]: i}, before: [...state.before, state.now]}, {now: {}, before: []}).before"
+            ),
+            "[{}, {k0: 0}, {k0: 0, k1: 1}, {k0: 0, k1: 1, k2: 2}, {k0: 0, k1: 1, k2: 2, k3: 3}]"
+        );
+
+        assert_eq!(
+            outcome(
+                "reduce(range(4), (state, i) => {now: {...state.now, n: i, [\"k\" + to_string(i)]: i}, before: [...state.before, state.now]}, {now: {n: -1}, before: []}).before"
+            ),
+            "[{n: -1}, {n: 0, k0: 0}, {n: 1, k0: 0, k1: 1}, {n: 2, k0: 0, k1: 1, k2: 2}]"
+        );
+
+        assert_eq!(
+            outcome("map(range(3), i => {...{a: 1, b: 2}, [\"k\" + to_string(i)]: i})"),
+            "[{a: 1, b: 2, k0: 0}, {a: 1, b: 2, k1: 1}, {a: 1, b: 2, k2: 2}]"
+        );
+
+        assert_eq!(
+            outcome(
+                "grown = reduce(range(6), (acc, i) => {...acc, [\"k\" + to_string(i)]: i}, {})\nmap(range(3), i => {...grown, x: i})"
+            ),
+            "[{k0: 0, k1: 1, k2: 2, k3: 3, k4: 4, k5: 5, x: 0}, \
+             {k0: 0, k1: 1, k2: 2, k3: 3, k4: 4, k5: 5, x: 1}, \
+             {k0: 0, k1: 1, k2: 2, k3: 3, k4: 4, k5: 5, x: 2}]"
+        );
+    }
+
+    #[test]
+    fn a_record_that_grows_in_a_fold_is_not_copied_at_every_step() {
+        for (code, len, first, last) in [
+            (
+                "grown = reduce(range(3000), (acc, i) => {...acc, [\"k\" + to_string(i)]: i}, {})",
+                3000,
+                0.0,
+                2999.0,
+            ),
+            (
+                "grown = reduce(range(3000), (acc, i) => {...acc, [\"k\" + to_string(i)]: i, [\"n\" + to_string(i)]: -i}, {})",
+                6000,
+                0.0,
+                -2999.0,
+            ),
+            (
+                "grown = reduce(range(3000), (acc, i) => {...acc, ...{[\"k\" + to_string(i)]: i}}, {})",
+                3000,
+                0.0,
+                2999.0,
+            ),
+            (
+                "grown = reduce(range(3000), (acc, i) => if i % 2 == 0 then {...acc, [\"k\" + to_string(i)]: i} else acc, {})",
+                1500,
+                0.0,
+                2998.0,
+            ),
+            (
+                "grown = reduce(range(3000), (acc, i) => {...acc, [\"k\" + to_string(i)]: i}, {start: -1})",
+                3001,
+                -1.0,
+                2999.0,
+            ),
+            (
+                "grow = (n, acc) => if n == 0 then acc else grow(n - 1, {...acc, [\"k\" + to_string(n)]: n})\ngrown = grow(900, {})",
+                900,
+                900.0,
+                1.0,
+            ),
+        ] {
+            let session = Session::new();
+            session.evaluate(code).unwrap();
+
+            let values = session.inspect("grown", |record, _| record.as_slice().to_vec());
+            assert_eq!(values.len(), len, "{code}");
+            assert_eq!(values[0], Value::Number(first), "{code}");
+            assert_eq!(values[len - 1], Value::Number(last), "{code}");
+
+            // A block for every time that the record outgrows the one before, which is twice
+            // as large every time, rather than one for each of the steps.
+            let blocks = session.blocks(3);
+            assert!(blocks <= 16, "{code}: {blocks} blocks");
+
+            let sharing = session.sharing("grown");
+            assert!(
+                sharing > len / 8,
+                "{code}: {sharing} records share the last block"
+            );
+
+            // What the heap holds is in proportion to the number of steps.
+            let bytes = session.heap.borrow().approx_bytes();
+            assert!(bytes < 2_000_000, "{code}: {bytes} bytes");
+        }
+    }
+
+    #[test]
+    fn records_are_what_they_were_before_records_shared_their_values() {
+        let session = Session::new();
+        session
+            .evaluate(
+                "r = {...{a: 1, b: 2}, c: 3}\n\
+                 grown = reduce(range(20), (acc, i) => {...acc, [\"k\" + to_string(i)]: i}, {})\n\
+                 longer = {...grown, more: true}",
+            )
+            .unwrap();
+
+        for (code, expected) in [
+            ("keys(r)", "[a, b, c]"),
+            ("values(r)", "[1, 2, 3]"),
+            ("entries(r)", "[[a, 1], [b, 2], [c, 3]]"),
+            ("r == {c: 3, b: 2, a: 1}", "true"),
+            ("r != {c: 3, b: 2, a: 1}", "false"),
+            ("[r.c, r[\"c\"], r.d, r[\"d\"]]", "[3, 3, null, null]"),
+            ("keys({...{a: 1, b: 2}, a: 3})", "[a, b]"),
+            ("typeof(r)", "record"),
+            ("to_string(r)", "{a: 1, b: 2, c: 3}"),
+            (
+                "unique([r, {a: 1, b: 2, c: 3}, {...r}, {...r, c: 4}])",
+                "[{a: 1, b: 2, c: 3}, {a: 1, b: 2, c: 4}]",
+            ),
+            ("r.a + r.b + r.c", "6"),
+            ("{...r, a: r.a + 1}.a", "2"),
+            (
+                "sort_by([{...r, a: 3}, {...r, a: 2}], x => x.a)",
+                "[{a: 2, b: 2, c: 3}, {a: 3, b: 2, c: 3}]",
+            ),
+            ("includes([r], {a: 1, b: 2, c: 3})", "true"),
+            ("len(keys(grown))", "20"),
+            (
+                "[grown.k0, grown.k19, grown.k20, grown.more]",
+                "[0, 19, null, null]",
+            ),
+            ("[longer.k0, longer.k19, longer.more]", "[0, 19, true]"),
+            ("grown == longer", "false"),
+            ("{...grown, more: true} == longer", "true"),
+            ("{...longer} == longer", "true"),
+            ("sum(...values(grown))", "190"),
+            ("len(entries(longer))", "21"),
+            ("keys(longer)[20]", "more"),
+            ("{...grown, k3: 30}.k3 + grown.k3", "33"),
+        ] {
+            assert_eq!(session.outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_record_has_what_it_was_given_under_a_string_and_nothing_under_any_other() {
+        let session = Session::new();
+        session
+            .evaluate(
+                "small = {a: 1, bb: 2, ccc: 3, [\"a key of many bytes\"]: 4, [\"\"]: 5}\n\
+                 large = reduce(range(40), (acc, i) => {...acc, [\"k\" + to_string(i)]: i}, {})\n\
+                 name = i => \"k\" + to_string(i)",
+            )
+            .unwrap();
+
+        for (code, expected) in [
+            (
+                "[small[\"a\"], small[\"bb\"], small[\"ccc\"], small[\"\"]]",
+                "[1, 2, 3, 5]",
+            ),
+            ("small[\"a key of many bytes\"]", "4"),
+            (
+                "[small[\"b\"], small[\"aa\"], small[\"cccc\"], small[\"a key of many bytes!\"]]",
+                "[null, null, null, null]",
+            ),
+            ("map(keys(small), k => small[k])", "[1, 2, 3, 4, 5]"),
+            (
+                "map(range(38, 42), i => large[name(i)])",
+                "[38, 39, null, null]",
+            ),
+            ("sum(map(keys(large), k => large[k]))", "780"),
+            ("{...large, k3: \"three\"}[name(3)]", "three"),
+            ("small[0]", "expected a string, but got a number"),
+            ("small[null]", "expected a string, but got a null"),
+            ("small[[\"a\"]]", "expected a string, but got a list"),
+            ("[1, 2][\"a\"]", "expected a number, but got a string"),
+            ("\"abc\"[\"a\"]", "expected a number, but got a string"),
+        ] {
+            assert_eq!(session.outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_record_tells_keys_of_every_length_that_start_alike_apart() {
+        let session = Session::new();
+        session
+            .evaluate(
+                "name = n => reduce(range(n), (acc, i) => acc + to_string(i % 10), \"\")\n\
+                 few = reduce(range(8), (acc, n) => {...acc, [name(n * 5)]: n}, {})\n\
+                 many = reduce(range(42), (acc, n) => {...acc, [name(n)]: n}, {})\n\
+                 marked = {[\"é\"]: 1, e: 2, [\"ééé\"]: 3, [\"éééé\"]: 4, [\"ééééé\"]: 5, \
+                 [\"😀😀\"]: 6, [\"😀\"]: 7}",
+            )
+            .unwrap();
+
+        let list = |items: Vec<String>| format!("[{}]", items.join(", "));
+        let found = |number: Option<usize>| match number {
+            Some(number) => number.to_string(),
+            None => "null".to_string(),
+        };
+
+        // A key of every number of characters from none to more than a short string has,
+        // each of which starts with the ones before it.
+        assert_eq!(
+            session.outcome("map(range(44), n => many[name(n)])"),
+            list((0..44).map(|n| found((n < 42).then_some(n))).collect())
+        );
+        assert_eq!(
+            session.outcome("map(range(44), n => few[name(n)])"),
+            list(
+                (0..44)
+                    .map(|n| found((n % 5 == 0 && n < 40).then_some(n / 5)))
+                    .collect()
+            )
+        );
+        assert_eq!(
+            session.outcome("map(range(42), n => many[name(n) + \"-\"])"),
+            list(vec![found(None); 42])
+        );
+        assert_eq!(
+            session.outcome("map(keys(many), k => many[k])"),
+            list((0..42).map(|n| found(Some(n))).collect())
+        );
+
+        // Characters of more than one byte, in keys that are made where they are looked up.
+        for (code, expected) in [
+            ("map(keys(marked), k => marked[k])", "[1, 2, 3, 4, 5, 6, 7]"),
+            (
+                "[marked[\"é\" + \"\"], marked[\"é\" + \"é\"], marked[\"éé\" + \"é\"]]",
+                "[1, null, 3]",
+            ),
+            (
+                "[marked[\"ééé\" + \"é\"], marked[\"ééé\" + \"éé\"], marked[\"ééé\" + \"ééé\"]]",
+                "[4, 5, null]",
+            ),
+            (
+                "[marked[\"e\" + \"\"], marked[\"ééé\" + \"e\"], marked[\"e\" + \"ééé\"]]",
+                "[2, null, null]",
+            ),
+            (
+                "[marked[\"😀\" + \"\"], marked[\"😀\" + \"😀\"], marked[\"😀\" + \"é\"]]",
+                "[7, 6, null]",
+            ),
+        ] {
+            assert_eq!(session.outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn records_that_share_their_values_survive_compaction() {
+        let session = Session::new();
+
+        session
+            .evaluate(
+                "grown = reduce(range(100), (acc, i) => {...acc, [\"k\" + to_string(i)]: [i, to_string(i)]}, {})\n\
+                 more = {...grown, extra: \"x\"}\n\
+                 other = {...grown, other: \"y\"}\n\
+                 updated = {...grown, k5: \"five\"}\n\
+                 kept = (steps => [steps[10], steps[12]])(reduce(range(50), (state, i) => {now: {...state.now, [\"s\" + to_string(i)]: {n: i}}, all: [...state.all, state.now]}, {now: {}, all: []}).all)",
+            )
+            .unwrap();
+
+        let rendered = |session: &Session| {
+            session.outcome(
+                "[len(keys(grown)), grown.k99, grown.k0, grown.extra, more.extra, more.k50, \
+                 other.other, other.extra, updated.k5, updated.k6, grown.k5, kept[0].s9, \
+                 kept[0].s10, len(keys(kept[0])), len(keys(kept[1])), kept[1].s11, kept[1].s12]",
+            )
+        };
+        let expected = "[100, [99, 99], [0, 0], null, x, [50, 50], y, null, five, [6, 6], [5, 5], \
+                        {n: 9}, null, 10, 12, {n: 11}, null]";
+        assert_eq!(rendered(&session), expected);
+
+        let slots = session.heap.borrow().len();
+        session.compact();
+        assert!(session.heap.borrow().len() < slots);
+        assert_eq!(rendered(&session), expected);
+
+        // The records can be added to and read like before.
+        session
+            .evaluate(
+                "again = {...more, y: 1}\n\
+                 further = {...grown, z: [100, \"100\"]}\n\
+                 inner = {...kept[1], t: {n: 0}}",
+            )
+            .unwrap();
+        session.compact();
+
+        assert_eq!(rendered(&session), expected);
+        assert_eq!(
+            session.outcome(
+                "[again.extra, again.y, len(keys(again)), further.z, further.k99, len(keys(further)), \
+                 grown.z, inner.t, inner.s11, len(keys(inner)), kept[1].t]"
+            ),
+            "[x, 1, 102, [100, 100], [99, 99], 101, null, {n: 0}, {n: 11}, 13, null]"
+        );
+    }
+
+    #[test]
+    fn compaction_gives_up_the_values_that_no_record_reads_any_more() {
+        let session = Session::new();
+
+        session
+            .evaluate(
+                "part = (steps => steps[12])(reduce(range(20000), (state, i) => {now: {...state.now, [\"k\" + to_string(i)]: [i]}, all: [...state.all, state.now]}, {now: {}, all: []}).all)",
+            )
+            .unwrap();
+        assert!(session.heap.borrow().len() > 20_000);
+
+        // Other records have their values behind those of the record.
+        assert!(session.sharing("part") > 2);
+        session.evaluate("aside = {...part, more: [12]}").unwrap();
+        assert!(!session.share("aside", "part"));
+
+        session.compact();
+
+        // The lists that the dropped values were are gone with them.
+        let slots = session.heap.borrow().len();
+        assert!(slots < 100, "{slots} slots");
+        let bytes = session.heap.borrow().approx_bytes();
+        assert!(bytes < 10_000, "{bytes} bytes");
+        assert_eq!(
+            session.outcome("part"),
+            "{k0: [0], k1: [1], k2: [2], k3: [3], k4: [4], k5: [5], k6: [6], k7: [7], k8: [8], k9: [9], k10: [10], k11: [11]}"
+        );
+        assert_eq!(
+            session.outcome("[aside.more, aside.k11, len(keys(aside))]"),
+            "[[12], [11], 13]"
+        );
+
+        // The record that is left is added to where its values are.
+        session.evaluate("longer = {...part, more: [10]}").unwrap();
+        assert_eq!(session.sharing("part"), 2);
+        assert_eq!(
+            session.outcome("[longer.more, longer.k11, part.more, aside.more]"),
+            "[[10], [11], null, [12]]"
+        );
+    }
+
+    #[test]
+    fn a_copy_of_a_heap_has_records_of_its_own() {
+        let session = Session::new();
+        session
+            .evaluate("base = {...{a: 1}, b: 2}\ngrown = {...base, c: 3}")
+            .unwrap();
+
+        let copy = Session {
+            heap: Rc::new(RefCell::new(session.heap.borrow().clone())),
+            bindings: Rc::clone(&session.bindings),
+        };
+
+        let shared = session.inspect("grown", |original, _| {
+            copy.inspect("grown", |copied, _| {
+                assert!(original == copied);
+                original.shares_values_with(copied)
+            })
+        });
+        assert!(!shared);
+
+        assert_eq!(copy.outcome("{...grown, d: 4}"), "{a: 1, b: 2, c: 3, d: 4}");
+        assert_eq!(
+            session.outcome("{...grown, d: 5}"),
+            "{a: 1, b: 2, c: 3, d: 5}"
+        );
+        assert_eq!(
+            copy.outcome("[base, grown]"),
+            "[{a: 1, b: 2}, {a: 1, b: 2, c: 3}]"
+        );
+        assert_eq!(
+            session.outcome("[base, grown]"),
+            "[{a: 1, b: 2}, {a: 1, b: 2, c: 3}]"
+        );
+    }
+}
+
+// A call that names a built-in function is compiled to an instruction that calls that
+// function, and for the functions that are called the most to one that does what the function
+// does where that takes no more than looking at numbers, or at a list or a string. Nothing
+// may tell either from calling the function through its value.
+#[cfg(test)]
+mod built_in_call_tests {
+    use crate::ast::Expr;
+    use crate::bytecode::{Instr, Op};
+    use crate::compiler::{compile_chunk, compile_lambda};
+    use crate::environment::Environment;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::vm::Vm;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// The functions of one argument that have an instruction.
+    const OF_ONE: [(&str, Op); 16] = [
+        ("sqrt", Op::Sqrt),
+        ("sin", Op::Sin),
+        ("cos", Op::Cos),
+        ("tan", Op::Tan),
+        ("asin", Op::Asin),
+        ("acos", Op::Acos),
+        ("atan", Op::Atan),
+        ("log", Op::Log),
+        ("log10", Op::Log10),
+        ("exp", Op::Exp),
+        ("abs", Op::Abs),
+        ("floor", Op::Floor),
+        ("ceil", Op::Ceil),
+        ("round", Op::Round),
+        ("trunc", Op::Trunc),
+        ("len", Op::Len),
+    ];
+
+    /// The functions that have an instruction for two arguments.
+    const OF_TWO: [(&str, Op); 2] = [("min", Op::Min), ("max", Op::Max)];
+
+    /// Values of every kind, and the numbers that functions tell apart.
+    const VALUES: [&str; 30] = [
+        "0",
+        "0 * -1",
+        "0.5",
+        "-0.5",
+        "1.5",
+        "2.5",
+        "-1.5",
+        "-2.5",
+        "3",
+        "-7",
+        "1e308",
+        "1e-320",
+        "0.49999999999999994",
+        "4503599627370497",
+        "-4503599627370497.5",
+        "nan",
+        "inf",
+        "-inf",
+        "\"héllo\"",
+        "\"\"",
+        "[1, 2, 3]",
+        "[]",
+        "[4, 9]",
+        "[\"a\"]",
+        "{a: 1}",
+        "null",
+        "true",
+        "x => x",
+        "sqrt",
+        "missing",
+    ];
+
+    /// A heap and the variables of the statements that were evaluated against it.
+    struct Session {
+        heap: Rc<RefCell<Heap>>,
+        bindings: Rc<Environment>,
+    }
+
+    impl Session {
+        fn new() -> Self {
+            let session = Self {
+                heap: Rc::new(RefCell::new(Heap::new())),
+                bindings: Rc::new(Environment::new()),
+            };
+            for definition in ["nan = sqrt(-1)", "inf = 1 / 0"] {
+                let bound = session.outcome(definition, true);
+                assert!(!bound.contains(" at "), "{definition}: {bound}");
+            }
+
+            session
+        }
+
+        /// Evaluate the statement `code`, with the calls that name a built-in function
+        /// compiled to the instructions they have (`direct`) or to calls of the function's
+        /// value, and render what comes of it: the value, or the error with the place it
+        /// points at.
+        fn outcome(&self, code: &str, direct: bool) -> String {
+            let statements = parse_program(code).expect("a program the fast parser reads");
+            let [Statement::Expression(expr)] = &statements[..] else {
+                panic!("{code} is not a single expression");
+            };
+
+            let result = compile_chunk(expr, direct, &self.bindings).and_then(|chunk| {
+                Vm::new(Rc::clone(&self.heap), Rc::clone(&self.bindings)).run_chunk(
+                    &chunk,
+                    code.into(),
+                    0,
+                )
+            });
+
+            match result {
+                Ok(value) => value.stringify_internal(&self.heap.borrow()),
+                Err(error) => format!("{} at {:?}", error.message, error.span),
+            }
+        }
+
+        /// Evaluate the statements of `code` one after the other, and render what comes of
+        /// the last one.
+        fn run(&self, code: &str) -> String {
+            let mut last = String::new();
+            for statement in code.lines() {
+                last = self.outcome(statement, true);
+            }
+
+            last
+        }
+    }
+
+    /// How many instructions with the operation `op` the function `code` compiles to.
+    fn count(code: &str, op: Op) -> usize {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let [Statement::Expression(expr)] = &statements[..] else {
+            panic!("{code} is not a single expression");
+        };
+        let Expr::Lambda { args, body, .. } = &expr.node else {
+            panic!("{code} is not a function");
+        };
+        let proto = compile_lambda(&Rc::new(args.clone()), body, true).unwrap();
+
+        let mut count = 0;
+        let mut pc = 0;
+        while pc < proto.code.len() {
+            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
+            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            count += usize::from(instr.op == op);
+            pc += 1 + instr.operand_words();
+        }
+
+        count
+    }
+
+    /// How many instructions that call a value the function `code` compiles to.
+    fn calls_of_values(code: &str) -> usize {
+        count(code, Op::Call) + count(code, Op::CallList)
+    }
+
+    #[test]
+    fn a_call_that_names_a_function_is_an_instruction() {
+        for (function, op) in OF_ONE {
+            let code = format!("x => {function}(x)");
+            assert_eq!(count(&code, op), 1, "{code}");
+            assert_eq!(calls_of_values(&code), 0, "{code}");
+        }
+
+        for (function, op) in OF_TWO {
+            let code = format!("(a, b) => {function}(a, b)");
+            assert_eq!(count(&code, op), 1, "{code}");
+            assert_eq!(calls_of_values(&code), 0, "{code}");
+        }
+
+        for code in [
+            "x => typeof(x)",
+            "x => to_string(x)",
+            "x => keys(x)",
+            "x => round(x, 2)",
+            "x => min(x)",
+            "(a, b, c) => max(a, b, c)",
+            "(a, b) => sum(a, b)",
+            "(a, b) => concat(a, b)",
+            "(a, b, c) => slice(a, b, c)",
+            "(xs, f) => map(xs, f)",
+            "(xs, f) => reduce(xs, f, 0)",
+            "(xs, f) => sort_by(xs, f)",
+        ] {
+            assert_eq!(count(code, Op::CallBuiltIn), 1, "{code}");
+            assert_eq!(calls_of_values(code), 0, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_call_that_only_shows_what_it_passes_when_it_is_made_calls_the_value() {
+        for (code, op) in [
+            // A number of arguments that the function does not take.
+            ("x => sqrt()", Op::Call),
+            ("x => sqrt(x, x)", Op::Call),
+            ("x => len(x, x)", Op::Call),
+            ("x => min()", Op::Call),
+            ("x => slice(x, 1)", Op::Call),
+            ("x => typeof()", Op::Call),
+            // Arguments that are spread.
+            ("x => sqrt(...x)", Op::CallList),
+            ("x => min(...x)", Op::CallList),
+            ("x => max(1, ...x)", Op::CallList),
+            ("x => typeof(...x)", Op::CallList),
+        ] {
+            assert_eq!(count(code, op), 1, "{code}");
+            assert_eq!(count(code, Op::CallBuiltIn), 0, "{code}");
+            for (_, instruction) in OF_ONE.into_iter().chain(OF_TWO) {
+                assert_eq!(count(code, instruction), 0, "{code}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_instruction_comes_to_what_calling_the_function_comes_to() {
+        let session = Session::new();
+        let mut outcomes = std::collections::HashSet::new();
+
+        let mut check = |code: String| {
+            let direct = session.outcome(&code, true);
+            assert_eq!(direct, session.outcome(&code, false), "{code}");
+            outcomes.insert(direct);
+        };
+
+        for (function, _) in OF_ONE {
+            for value in VALUES {
+                check(format!("{function}({value})"));
+                check(format!("1 / {function}({value})"));
+                check(format!("[{function}({value}), {function}({value})]"));
+            }
+        }
+
+        for (function, _) in OF_TWO {
+            for first in VALUES {
+                for second in VALUES {
+                    check(format!("{function}({first}, {second})"));
+                    check(format!("1 / {function}({first}, {second})"));
+                }
+            }
+        }
+
+        for call in [
+            "typeof(V)",
+            "to_string(V)",
+            "to_number(V)",
+            "to_bool(V)",
+            "keys(V)",
+            "values(V)",
+            "entries(V)",
+            "arity(V)",
+            "sum(V)",
+            "sum(V, 1)",
+            "sum(1, V, 2)",
+            "min(V)",
+            "max(1, 2, V)",
+            "avg(V, 3)",
+            "range(V)",
+            "range(1, V)",
+            "head(V)",
+            "tail(V)",
+            "reverse(V)",
+            "sort(V)",
+            "unique(V)",
+            "concat(V, V)",
+            "slice(V, 0, 1)",
+            "round(V, 1)",
+            "includes(V, 1)",
+            "join(V, \"-\")",
+            "format(\"{}\", V)",
+            "flatten(V)",
+            "map(V, sqrt)",
+            "map([4, 9], V)",
+            "filter([4, 9], V)",
+            "reduce([4, 9], V, 0)",
+            "sort_by([4, 9], V)",
+            "ugt(V, 1)",
+        ] {
+            for value in VALUES {
+                check(call.replace('V', value));
+            }
+        }
+
+        // The calls come to enough different things to tell the functions and their
+        // arguments apart.
+        assert!(outcomes.len() > 900, "{} outcomes", outcomes.len());
+    }
+
+    #[test]
+    fn the_arguments_of_a_call_are_evaluated_before_it_fails() {
+        let session = Session::new();
+        for (code, expected) in [
+            // The first thing that fails is an argument, from left to right.
+            ("min(missing, other)", "unknown identifier: missing"),
+            ("min(1, other)", "unknown identifier: other"),
+            ("sum(1, other, missing)", "unknown identifier: other"),
+            ("sqrt(missing)", "unknown identifier: missing"),
+            ("len(missing)", "unknown identifier: missing"),
+            // What a function cannot take only shows after that.
+            ("min(\"a\", missing)", "unknown identifier: missing"),
+            ("slice(null, missing, 1)", "unknown identifier: missing"),
+        ] {
+            for direct in [true, false] {
+                let outcome = session.outcome(code, direct);
+                assert!(outcome.starts_with(expected), "{code}: {outcome}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_smaller_and_the_larger_of_two_numbers_are_what_the_functions_find() {
+        let session = Session::new();
+        for (code, expected) in [
+            (
+                "[min(1, 2), min(2, 1), max(1, 2), max(2, 1)]",
+                "[1, 1, 2, 2]",
+            ),
+            ("[min(-inf, inf), max(-inf, inf)]", "[-inf, inf]"),
+            ("[min(inf, inf), max(-inf, -inf)]", "[inf, -inf]"),
+            ("[min(3, 3), max(-3, -3)]", "[3, -3]"),
+            ("[1 / min(0, 0), 1 / max(0 * -1, 0 * -1)]", "[inf, -inf]"),
+            // A number that is none is passed over, and so are two of them.
+            (
+                "[min(nan, 1), min(1, nan), max(nan, 1), max(1, nan)]",
+                "[1, 1, 1, 1]",
+            ),
+            ("[min(nan, nan), max(nan, nan)]", "[inf, -inf]"),
+            ("[min(inf, nan), max(-inf, nan)]", "[inf, -inf]"),
+        ] {
+            for direct in [true, false] {
+                assert_eq!(session.outcome(code, direct), expected, "{code}");
+            }
+        }
+
+        // Which of two zeros that differ in their sign is found is up to the machine, but
+        // not to how the function is called.
+        for code in [
+            "1 / min(0, 0 * -1)",
+            "1 / min(0 * -1, 0)",
+            "1 / max(0, 0 * -1)",
+            "1 / max(0 * -1, 0)",
+        ] {
+            let found = session.outcome(code, true);
+            assert!(found == "inf" || found == "-inf", "{code}: {found}");
+            assert_eq!(found, session.outcome(code, false), "{code}");
+        }
+    }
+
+    #[test]
+    fn the_length_of_a_string_is_the_number_of_its_bytes() {
+        let session = Session::new();
+        for (code, expected) in [
+            ("len(\"\")", "0"),
+            ("len(\"abc\")", "3"),
+            ("len(\"héllo\")", "6"),
+            ("len(\"abc\" + \"déf\")", "7"),
+            ("len([])", "0"),
+            ("len([1, [2, 3]])", "2"),
+            ("len(range(1000))", "1000"),
+            ("len([...[1, 2], ...[3]])", "3"),
+        ] {
+            for direct in [true, false] {
+                assert_eq!(session.outcome(code, direct), expected, "{code}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_function_that_is_called_too_deep_fails_as_its_call_does() {
+        let calls = OF_ONE
+            .into_iter()
+            .map(|(function, _)| match function {
+                "len" => "len([4])".to_string(),
+                _ => format!("{function}(0.5)"),
+            })
+            .chain(
+                OF_TWO
+                    .into_iter()
+                    .map(|(function, _)| format!("{function}(4, 3)")),
+            )
+            .chain(["typeof(4)", "sum(4, 3)", "round(0.25, 1)"].map(String::from));
+
+        for call in calls {
+            let function = call.split('(').next().unwrap();
+
+            // The function calls itself `n` times before it makes the call, which puts the
+            // call at the last depth to call from and then one deeper.
+            let session = Session::new();
+            let defined = session.run(&format!(
+                "f = n => if n == 0 then {call} else [f(n - 1)][0]"
+            ));
+            assert!(!defined.contains(" at "), "{call}: {defined}");
+
+            assert_eq!(
+                session.outcome("f(999)", true),
+                session.outcome(&call, true),
+                "{call}"
+            );
+
+            let deeper = session.outcome("f(1000)", true);
+            let expected =
+                format!("in built-in function \"{function}\": maximum call depth of 1000 exceeded");
+            assert!(deeper.contains(&expected), "{call}: {deeper}");
+        }
+    }
+
+    #[test]
+    fn a_call_in_a_loop_that_is_compiled_in_place_is_an_instruction_too() {
+        let session = Session::new();
+        for (code, expected) in [
+            ("map([1, 4, 9], x => sqrt(x))", "[1, 2, 3]"),
+            ("map([\"a\", \"bcd\", \"\"], s => len(s))", "[1, 3, 0]"),
+            ("map([[], [1], [1, 2]], xs => len(xs) * 2)", "[0, 2, 4]"),
+            ("reduce(range(10), (acc, i) => max(acc, i * 7 % 5), 0)", "4"),
+            ("reduce(range(10), (acc, i) => min(acc, i - 4), 0)", "-4"),
+            (
+                "filter(range(9), i => floor(i / 2) == i / 2)",
+                "[0, 2, 4, 6, 8]",
+            ),
+            (
+                "map([1.5, -1.5], x => [floor(x), ceil(x), round(x), trunc(x), abs(x)])",
+                "[[1, 2, 2, 1, 1.5], [-2, -1, -2, -1, 1.5]]",
+            ),
+            ("map([1, 2], x => typeof(x))", "[number, number]"),
+        ] {
+            for direct in [true, false] {
+                assert_eq!(session.outcome(code, direct), expected, "{code}");
+            }
+        }
+
+        for (code, expected) in [
+            (
+                "map([4, \"4\"], x => sqrt(x))",
+                "in built-in function \"sqrt\": expected a number, but got a string",
+            ),
+            (
+                "map([[1], 1], x => len(x))",
+                "in built-in function \"len\": argument must be a list or string",
+            ),
+            (
+                "map([1, null], x => max(x, 0))",
+                "in built-in function \"max\": expected a number, but got a null",
+            ),
+        ] {
+            let direct = session.outcome(code, true);
+            assert!(direct.contains(expected), "{code}: {direct}");
+            assert_eq!(direct, session.outcome(code, false), "{code}");
+        }
+    }
+}
+
+// A statement gives up what it leaves behind in the heap while it runs: the heap is compacted
+// between two of its instructions, and the run goes on with everything where the pass put
+// it. Nothing but the size of the heap may tell that from a run without passes.
+#[cfg(test)]
+mod in_run_compaction_tests {
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::{evaluate_ast, evaluate_statement};
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::{Heap, HeapValue};
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// `junk(n)` comes to `2 * n` and leaves `n` lists behind in the heap, which is enough
+    /// for a pass from a few ten thousand on.
+    const JUNK: &str = "junk = n => sum(map(range(n), i => len([i, i + 1])))\n";
+
+    /// A program that is evaluated a statement at a time, with nothing reclaimed between
+    /// two statements.
+    struct Session {
+        heap: Rc<RefCell<Heap>>,
+        bindings: Rc<Environment>,
+
+        /// Whether a statement may have the heap compacted while it runs.
+        compacts: bool,
+    }
+
+    impl Session {
+        fn new(compacts: bool) -> Self {
+            Self {
+                heap: Rc::new(RefCell::new(Heap::new())),
+                bindings: Rc::new(Environment::new()),
+                compacts,
+            }
+        }
+
+        /// Evaluate the statements of `code`, up to the value of the last one. The caller
+        /// holds on to `held` in the meantime.
+        fn evaluate_holding(
+            &self,
+            code: &str,
+            held: &mut [&mut Value],
+        ) -> Result<Value, RuntimeError> {
+            let statements = parse_program(code).expect("a program the fast parser reads");
+            let source: Rc<str> = code.into();
+
+            let mut result = Value::Null;
+            for statement in statements {
+                let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement
+                else {
+                    continue;
+                };
+
+                let (heap, bindings) = (Rc::clone(&self.heap), Rc::clone(&self.bindings));
+                result = match self.compacts {
+                    true => evaluate_statement(&expr, heap, bindings, Rc::clone(&source), held)?,
+                    false => evaluate_ast(&expr, heap, bindings, 0, Rc::clone(&source))?,
+                };
+            }
+
+            Ok(result)
+        }
+
+        fn evaluate(&self, code: &str) -> Result<Value, RuntimeError> {
+            self.evaluate_holding(code, &mut [])
+        }
+
+        fn render(&self, value: Value) -> String {
+            value.stringify_internal(&self.heap.borrow())
+        }
+
+        /// What the statements of `code` come to, rendered: the value, or the error with
+        /// the place it points at.
+        fn outcome(&self, code: &str) -> String {
+            match self.evaluate(code) {
+                Ok(value) => self.render(value),
+                Err(error) => format!("{} at {:?}", error.message, error.span),
+            }
+        }
+
+        /// The number of values in the heap, in use or not.
+        fn slots(&self) -> usize {
+            self.heap.borrow().len()
+        }
+
+        /// The number of passes over the heap so far.
+        fn passes(&self) -> usize {
+            self.heap.borrow().passes()
+        }
+    }
+
+    /// What `code` comes to, which is the same with passes in its statements as without.
+    /// Returns the number of values that either way leaves in the heap.
+    fn agree(code: &str) -> (String, usize, usize) {
+        let (compacting, plain) = (Session::new(true), Session::new(false));
+        let outcome = compacting.outcome(code);
+
+        assert_eq!(outcome, plain.outcome(code), "{code}");
+
+        (outcome, compacting.slots(), plain.slots())
+    }
+
+    /// [`agree`] for a program that leaves a lot behind, most of which the passes in its
+    /// statements have to reclaim. Returns what the program comes to.
+    fn reclaims(code: &str) -> String {
+        let (outcome, compacted, plain) = agree(code);
+
+        assert!(
+            compacted * 4 < plain,
+            "{code}: {compacted} values are left of {plain}"
+        );
+
+        outcome
+    }
+
+    #[test]
+    fn a_statement_gives_up_what_it_leaves_behind_while_it_runs() {
+        let session = Session::new(true);
+
+        assert_eq!(
+            session.outcome("sum(map(range(300000), i => len([i, i + 1])))"),
+            "600000"
+        );
+        assert!(session.slots() < 100_000, "{} values", session.slots());
+
+        let plain = Session::new(false);
+
+        assert_eq!(
+            plain.outcome("sum(map(range(300000), i => len([i, i + 1])))"),
+            "600000"
+        );
+        assert!(plain.slots() > 300_000, "{} values", plain.slots());
+    }
+
+    #[test]
+    fn a_pass_in_a_run_keeps_what_the_variables_of_the_program_lead_to() {
+        let program = [
+            JUNK,
+            "xs = map(range(200), i => [i, \"s\" + to_string(i)])",
+            "r = {a: xs, b: {c: \"deep\"}, d: [xs[3], xs[4]]}",
+            "f = x => x + len(xs)",
+            "n = junk(100000)",
+            "[n, sum(map(xs, x => x[0])), xs[199][1], r.b.c, len(r.a), r.d[1] == xs[4], f(1)]",
+        ]
+        .join("\n");
+
+        assert_eq!(
+            reclaims(&program),
+            "[200000, 19900, s199, deep, 200, [true, true], 201]"
+        );
+    }
+
+    #[test]
+    fn a_pass_in_a_run_keeps_what_the_statement_has_in_its_registers() {
+        for (code, expected) in [
+            // The operands of an operator, and the arguments of a call.
+            ("[1, 2] + junk(60000) + [3, 4]", "[120004, 120006]"),
+            ("len([[1], [2]]) + junk(60000)", "120002"),
+            (
+                "max(len(\"abc\" + \"def\"), junk(60000) * 0) + len([junk(60000)])",
+                "7",
+            ),
+            (
+                "(xs => (ys => [xs, ys, junk(60000)])([3, \"four\"]))([1, \"two\"])",
+                "[[1, two], [3, four], 120000]",
+            ),
+            // The arguments that are spread into a call.
+            (
+                "((a, b, c, d) => [d, c, b, a])(...[[1], \"two\"], junk(60000), ...[[3]])",
+                "[[3], 120000, two, [1]]",
+            ),
+            // The branches of a conditional, and what `do` binds.
+            (
+                "if junk(60000) > 0 then [junk(60000), \"then\"] else [\"else\"]",
+                "[120000, then]",
+            ),
+            (
+                "do {\n  a = [1, \"one\"]\n  b = junk(60000)\n  c = {two: [2]}\n  d = junk(60000)\n  return [a, b, c, d]\n}",
+                "[[1, one], 120000, {two: [2]}, 120000]",
+            ),
+        ] {
+            assert_eq!(reclaims(&format!("{JUNK}{code}")), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_pass_in_a_run_keeps_the_lists_and_records_that_are_being_built() {
+        for (code, expected) in [
+            (
+                "[[1, 2], junk(60000), \"three\", {a: [4]}, junk(60000), [5]]",
+                "[[1, 2], 120000, three, {a: [4]}, 120000, [5]]",
+            ),
+            (
+                "[...[[1], [2]], junk(60000), ...[[3]], junk(60000), ...\"ab\", ...{k: [4]}]",
+                "[[1], [2], 120000, [3], 120000, a, b, [k, [4]]]",
+            ),
+            (
+                "map(range(4), i => [i, junk(30000), to_string(i)])",
+                "[[0, 60000, 0], [1, 60000, 1], [2, 60000, 2], [3, 60000, 3]]",
+            ),
+            (
+                "filter(map(range(6), i => [i, to_string(i)]), x => junk(20000) > 0 and x[0] % 2 == 1)",
+                "[[1, 1], [3, 3], [5, 5]]",
+            ),
+            (
+                "{a: [1, 2], b: junk(60000), c: \"x\", d: {e: [junk(60000)]}}",
+                "{a: [1, 2], b: 120000, c: x, d: {e: [120000]}}",
+            ),
+            // A key that was computed waits for its value.
+            (
+                "{a: [1], [\"k\" + to_string(1)]: junk(60000), [\"k\" + to_string(2)]: [junk(60000)]}",
+                "{a: [1], k1: 120000, k2: [120000]}",
+            ),
+            // A record that starts with the entries of another one reads its values.
+            (
+                "(r => {...r, c: junk(60000), a: [junk(60000), r.b], d: r.a})({a: [1], b: \"two\"})",
+                "{a: [120000, two], b: two, c: 120000, d: [1]}",
+            ),
+            (
+                "{...{a: [1]}, ...[[2], junk(60000)], ...\"x\", b: junk(60000)}",
+                "{a: [1], 0: x, 1: 120000, b: 120000}",
+            ),
+        ] {
+            assert_eq!(reclaims(&format!("{JUNK}{code}")), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_pass_in_a_run_leaves_the_elements_of_a_list_where_a_loop_reads_them() {
+        let lists = "xs = map(range(60), i => [i, to_string(i)])\n";
+
+        for (code, expected) in [
+            ("sum(map(xs, x => junk(2000) + x[0]))", "241770"),
+            (
+                "reduce(xs, (acc, x) => acc + junk(2000) + len(x[1]), 0)",
+                "240110",
+            ),
+            (
+                "len(filter(xs, (x, i) => junk(2000) > 0 and x[0] == i and i % 2 == 0))",
+                "30",
+            ),
+            ("every(xs, x => junk(2000) > x[0])", "true"),
+            ("some(xs, x => junk(2000) < x[0])", "false"),
+            // A list that only the loop has, and one that reads the elements of another.
+            (
+                "sum(map(map(range(60), i => [i, [i]]), x => junk(2000) + x[1][0]))",
+                "241770",
+            ),
+            (
+                "sum(map(slice(xs, 10, 50), x => junk(2000) + x[0]))",
+                "161180",
+            ),
+            (
+                "sum(map([...xs, [100, \"more\"]], x => junk(2000) + x[0]))",
+                "245870",
+            ),
+            // A loop inside of another one, over the same list.
+            (
+                "sum(map(xs, x => sum(map(xs, y => junk(40) + x[0] + y[0]))))",
+                "500400",
+            ),
+            // The list is still what it was, for every one that reads its elements.
+            (
+                "[sum(map(xs, x => junk(2000) + x[0])), xs[59], slice(xs, 58, 60), len(xs)]",
+                "[241770, [59, 59], [[58, 58], [59, 59]], 60]",
+            ),
+        ] {
+            assert_eq!(
+                reclaims(&format!("{JUNK}{lists}{code}")),
+                expected,
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pass_in_a_run_keeps_what_the_functions_that_are_running_have() {
+        for (code, expected) in [
+            // Every call that is waiting has values of its own.
+            (
+                "g = n => if n == 0 then [] else do {\n  mine = [n, \"s\" + to_string(n)]\n  rest = g(n - 1)\n  extra = junk(4000)\n  return [mine[1], extra, ...rest]\n}\nh = g(30)\n[len(h), h[0], h[1], h[58], h[59]]",
+                "[60, s30, 8000, s1, 8000]",
+            ),
+            // A call that takes the place of its caller.
+            (
+                "loop = (n, acc) => if n == 0 then acc else loop(n - 1, [...acc, [junk(4000) + n]])\nr = loop(30, [])\n[len(r), r[0], r[29]]",
+                "[30, [8030], [8001]]",
+            ),
+            (
+                "even = (n, acc) => if n == 0 then acc else odd(n - 1, [junk(4000), ...acc])\nodd = (n, acc) => if n == 0 then acc else even(n - 1, [\"odd\", ...acc])\nr = even(60, [])\n[len(r), r[0], r[1]]",
+                "[60, odd, 8000]",
+            ),
+            // What a function captured is read where its definition has it.
+            (
+                "make = k => do {\n  ks = [k, k + 1]\n  return x => junk(2000) + sum(ks) + x\n}\nfs = map(range(60), k => make(k))\nsum(map(fs, f => f(1)))",
+                "243660",
+            ),
+            (
+                "counter = (xs, tag) => n => if n == 0 then [tag, len(xs)] else counter([...xs, junk(4000)], tag)(n - 1)\ncounter([], \"t\")(30)",
+                "[t, 30]",
+            ),
+            (
+                "add = a => b => c => [a, b, c, junk(40000)]\nadd([1])(\"two\")({c: 3})",
+                "[[1], two, {c: 3}, 80000]",
+            ),
+        ] {
+            assert_eq!(reclaims(&format!("{JUNK}{code}")), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_pass_in_a_run_keeps_a_definition_that_was_renamed_while_it_ran() {
+        let program = [
+            JUNK,
+            "make = k => do {",
+            "  f = n => do {",
+            "    g = f",
+            "    extra = junk(60000)",
+            "    return [k[0] + n, extra, g == f, typeof(g)]",
+            "  }",
+            "  return f",
+            "}",
+            "make([7])(1)",
+        ]
+        .join("\n");
+
+        assert_eq!(reclaims(&program), "[8, 120000, true, function]");
+    }
+
+    #[test]
+    fn a_pass_in_a_run_forgets_where_the_names_that_were_looked_up_had_their_values() {
+        // A name that is bound after the function that reads it is looked up in the frames
+        // every time, which remember what it came to from the ones that are still running.
+        for (code, expected) in [
+            // What the program binds the name to, behind what the statement before left.
+            (
+                "read = i => late[i][1]\ntwig = i => read(i)\nbefore = junk(60000)\nlate = [[0, \"zero\"], [1, \"one\"], [2, \"two\"]]\nwalk = (n, acc) => if n == 0 then acc else walk(n - 1, [twig(n % 3), junk(4000), ...acc])\nr = walk(30, [])\n[len(r), r[0], r[2], r[4], r[58]]",
+                "[60, one, two, zero, zero]",
+            ),
+            // A function, and what it captured.
+            (
+                "call = x => late(x)\ntwig = x => call(x)\nbefore = junk(60000)\nscale = [3, \"three\"]\nlate = x => [x * scale[0], scale[1]]\nwalk = (n, acc) => if n == 0 then acc else walk(n - 1, [twig(n), junk(4000), ...acc])\nr = walk(30, [])\n[len(r), r[0], r[58]]",
+                "[60, [3, three], [90, three]]",
+            ),
+            // What a call that is waiting has in a parameter.
+            (
+                "read = i => held[i]\ntwig = i => read(i)\nwalk = (n, acc) => if n == 0 then acc else walk(n - 1, [twig(n % 2), junk(4000), ...acc])\nhold = (pad, held) => [pad, ...walk(30, [])]\nr = hold(junk(60000), [[\"even\"], [\"odd\"]])\n[len(r), r[1], r[3], r[59]]",
+                "[61, [odd], [even], [even]]",
+            ),
+        ] {
+            assert_eq!(reclaims(&format!("{JUNK}{code}")), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_pass_in_a_run_makes_the_string_of_a_literal_again() {
+        for (code, expected) in [
+            // A literal of a function is made into a string by every call of the function,
+            // and one of a loop by the first pass through the loop.
+            (
+                "pair = i => to_string(i % 2) + \"b\"\nreduce(range(150000), (acc, i) => if pair(i) == \"1b\" then acc + 1 else acc, 0)",
+                "75000",
+            ),
+            (
+                "words = [\"x\", \"yy\"]\nreduce(range(150000), (acc, i) => acc + len(words[i % 2] + \"-suffix\"), 0)",
+                "1275000",
+            ),
+            (
+                "tag = i => if i % 2 == 0 then \"even\" else \"odd\"\nlen(filter(range(150000), i => tag(i) + \"!\" == \"odd!\"))",
+                "75000",
+            ),
+        ] {
+            assert_eq!(reclaims(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_pass_in_a_run_leaves_what_keeps_growing_able_to_grow_in_place() {
+        // Each of these would take a time that grows with the square of the number of steps
+        // if a pass left the list, the string or the record without the room behind it.
+        for (code, expected) in [
+            (
+                "len(reduce(range(300000), (acc, i) => [...acc, i], []))",
+                "300000",
+            ),
+            (
+                "len(reduce(range(300000), (acc, i) => acc + \"x\", \"\"))",
+                "300000",
+            ),
+            (
+                "reduce(range(80000), (acc, i) => {...acc, [\"k\" + to_string(i)]: i}, {}).k79999",
+                "79999",
+            ),
+        ] {
+            assert_eq!(reclaims(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_pass_in_a_run_waits_for_the_built_in_function_that_is_calling_back() {
+        for (code, expected) in [
+            // The function sorts copies of the elements, which no pass may move.
+            (
+                "xs = map(range(300), i => [i * 7 % 300, to_string(i)])\nsorted = sort_by(xs, x => junk(400) * 0 + x[0])\n[len(sorted), sorted[0], sorted[299], junk(60000)]",
+                "[300, [0, 0], [299, 257], 120000]",
+            ),
+            (
+                "groups = group_by(range(300), i => to_string(junk(400) * 0 + i % 3))\n[len(groups[\"0\"]), groups[\"2\"][99], junk(60000)]",
+                "[100, 299, 120000]",
+            ),
+            // A function that is called through a variable is called back as well.
+            (
+                "step = x => junk(400) * 0 + x[0]\nxs = map(range(300), i => [i])\n[sum(map(xs, step)), junk(60000)]",
+                "[44850, 120000]",
+            ),
+        ] {
+            assert_eq!(reclaims(&format!("{JUNK}{code}")), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_pass_in_a_run_leaves_errors_as_they_are() {
+        for (code, expected) in [
+            (
+                "map(range(150000), i => if i == 149999 then [i].x else len([i]))",
+                "expected a record",
+            ),
+            (
+                "junk = n => sum(map(range(n), i => len([i, i + 1])))\n[junk(60000), len(junk(60000))]",
+                "argument must be a list or string",
+            ),
+            (
+                "junk = n => sum(map(range(n), i => len([i, i + 1])))\nf = xs => junk(60000) + xs.missing.deeper\nf({a: [1]})",
+                "",
+            ),
+        ] {
+            let (outcome, ..) = agree(code);
+
+            assert!(outcome.contains(" at "), "{code}: {outcome}");
+            assert!(outcome.contains(expected), "{code}: {outcome}");
+        }
+    }
+
+    #[test]
+    fn a_pass_in_a_run_tells_whoever_holds_values_where_they_went() {
+        let session = Session::new(true);
+
+        session.evaluate(JUNK).unwrap();
+        let mut front = session.evaluate("map(range(1000), i => [i])").unwrap();
+        let mut list = session
+            .evaluate_holding("[[1, 2], \"three\"]", &mut [&mut front])
+            .unwrap();
+        let mut record = session
+            .evaluate_holding("{a: [4], b: \"five\"}", &mut [&mut front, &mut list])
+            .unwrap();
+        let mut number = Value::Number(6.0);
+        let before = (list, record);
+
+        assert_eq!(session.render(front).len(), 6890);
+
+        // The caller lets go of the first list.
+        let result = session
+            .evaluate_holding("junk(100000)", &mut [&mut list, &mut number, &mut record])
+            .unwrap();
+
+        assert_eq!(result, Value::Number(200000.0));
+        assert!(session.slots() < 50_000, "{} values", session.slots());
+
+        // What was in front of the values is gone, so they have moved.
+        assert_ne!((list, record), before);
+        assert_eq!(session.render(list), "[[1, 2], three]");
+        assert_eq!(session.render(record), "{a: [4], b: five}");
+        assert_eq!(number, Value::Number(6.0));
+    }
+
+    #[test]
+    fn a_pass_in_a_run_is_given_up_for_a_definition_that_something_else_holds() {
+        let session = Session::new(true);
+
+        session.evaluate(JUNK).unwrap();
+        let Value::Lambda(pointer) = session.evaluate("f = x => x + 1\nf").unwrap() else {
+            panic!("f is a function");
+        };
+        let held = match session.heap.borrow().get(pointer.index()) {
+            Some(HeapValue::Lambda(def)) => Rc::clone(def),
+            other => panic!("expected a function, got {other:?}"),
+        };
+
+        // The definition cannot be rewritten where it is, so everything stays where it is.
+        assert_eq!(session.outcome("junk(100000) + f(1)"), "200002");
+        assert!(session.slots() > 100_000, "{} values", session.slots());
+        assert_eq!(held.name.map(|name| name.to_string()), Some("f".into()));
+
+        drop(held);
+
+        assert_eq!(session.outcome("junk(100000) + f(1)"), "200002");
+        assert!(session.slots() < 50_000, "{} values", session.slots());
+    }
+
+    #[test]
+    fn a_statement_that_keeps_everything_is_not_gone_through_over_and_over() {
+        // Nothing of this is garbage: the passes that find that out have to become rare
+        // enough to take a small part of the time, whatever the size of the heap.
+        let session = Session::new(true);
+
+        assert_eq!(
+            session.outcome("xs = map(range(200000), i => [i, [i]])\n[len(xs), xs[199999][1][0]]"),
+            "[200000, 199999]"
+        );
+        assert!(session.slots() > 400_000, "{} values", session.slots());
+
+        if !cfg!(blots_compact_always) {
+            assert!(session.passes() <= 4, "{} passes", session.passes());
+        }
+    }
+
+    #[test]
+    fn a_list_that_a_loop_is_making_is_not_gone_through_for_every_bit_of_garbage() {
+        // The list is outside of the heap until it is complete, and a pass goes through all
+        // of it: as it gets longer, more garbage has to be worth a pass.
+        let session = Session::new(true);
+
+        assert_eq!(
+            session.outcome("sum(map(range(1000000), i => len([i])))"),
+            "1000000"
+        );
+        assert!(session.slots() < 500_000, "{} values", session.slots());
+
+        if !cfg!(blots_compact_always) {
+            let passes = session.passes();
+
+            assert!((5..25).contains(&passes), "{passes} passes");
+        }
+    }
+}
+
+// Tests for names that are bound more than once while a statement runs
+#[cfg(test)]
+mod rebound_name_tests {
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code`, up to the value of the last one.
+    fn evaluate(code: &str, heap: &Rc<RefCell<Heap>>) -> Result<Value, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+            result = evaluate_ast(
+                &expr,
+                Rc::clone(heap),
+                Rc::clone(&bindings),
+                0,
+                Rc::clone(&source),
+            )?;
+        }
+
+        Ok(result)
+    }
+
+    /// What the statements of `code` come to, rendered: the value, or the message of the
+    /// error.
+    fn outcome(code: &str) -> String {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        match evaluate(code, &heap) {
+            Ok(value) => value.stringify_internal(&heap.borrow()),
+            Err(error) => error.message,
+        }
+    }
+
+    #[test]
+    fn a_name_that_its_own_value_binds_is_read_as_what_it_is_bound_to_in_the_end() {
+        // An assignment finds its name unbound before it evaluates the value, so the value
+        // may bind the name, and what reads the name behind that assignment reads what the
+        // outer one binds it to.
+        for (code, expected) in [
+            ("[x = [(x = 5), x][1] + 1, x]", "[6, 6]"),
+            ("y = [x = [(x = 5), x][1] + 1, x]\n[x, y]", "[6, [6, 6]]"),
+            ("x = [(x = 5), x][1] + 1\nx", "6"),
+            ("[x = (x = (x = 5) + x) + x, x]", "[20, 20]"),
+            // The name is read where the value of the inner assignment is not sure to be.
+            (
+                "[x = [(x = 5), (if true then x else 0)][1] + 1, x]",
+                "[6, 6]",
+            ),
+            (
+                "[x = [(if true then (x = 5) else 0), x][1] + 1, x]",
+                "[6, 6]",
+            ),
+            // By a function that is made there, the key of a record and the callback of a
+            // loop.
+            ("[x = [(x = 5), x][1] + 1, (() => x)()]", "[6, 6]"),
+            ("[x = [(x = 5), x][1] + 1, {x}.x]", "[6, 6]"),
+            (
+                "[x = [(x = 5), x][1] + 1, sum(map([1, 2], v => v * x))]",
+                "[6, 18]",
+            ),
+            // By a function that finds the name where it is called from.
+            (
+                "r = () => x\n[x = [(x = 5), r()][1] + 1, r(), x]",
+                "[6, 6, 6]",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_is_bound_cannot_be_bound_by_what_follows() {
+        for (code, expected) in [
+            (
+                "[x = [(x = 5), x][1] + 1, (x = 7)]",
+                "x is already defined, and cannot be reassigned",
+            ),
+            (
+                "[(x = 5), x = x + 1]",
+                "x is already defined, and cannot be reassigned",
+            ),
+            (
+                "[(if false then (x = 5) else 0), x]",
+                "unknown identifier: x",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+}
+
+// A function finds a name that it does not bind where it was called from, and the callback of
+// a loop that is compiled into the function finds it the same way on every pass. So the loop
+// looks the name up once, where it reads it first. Nothing may tell that from looking the
+// name up wherever it is read.
+#[cfg(test)]
+mod loop_name_tests {
+    use crate::ast::Expr;
+    use crate::bytecode::{Instr, Op};
+    use crate::compiler::compile_lambda;
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code`, up to the value of the last one.
+    fn evaluate(code: &str, heap: &Rc<RefCell<Heap>>) -> Result<Value, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+            result = evaluate_ast(
+                &expr,
+                Rc::clone(heap),
+                Rc::clone(&bindings),
+                0,
+                Rc::clone(&source),
+            )?;
+        }
+
+        Ok(result)
+    }
+
+    /// What the statements of `code` come to, rendered: the value, or the message of the
+    /// error and the part of `code` that it points at.
+    fn outcome(code: &str) -> String {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        match evaluate(code, &heap) {
+            Ok(value) => value.stringify_internal(&heap.borrow()),
+            Err(error) => {
+                let place = match error.span {
+                    Some(span) => &code[span.start_byte..span.end_byte],
+                    None => "nothing",
+                };
+
+                format!("{} at {place}", error.message)
+            }
+        }
+    }
+
+    /// The instructions of the function `code`.
+    fn instructions(code: &str) -> Vec<(usize, Instr)> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let [Statement::Expression(expr)] = &statements[..] else {
+            panic!("{code} is not a single expression");
+        };
+        let Expr::Lambda { args, body, .. } = &expr.node else {
+            panic!("{code} is not a function");
+        };
+        let proto = compile_lambda(&Rc::new(args.clone()), body, true).unwrap();
+
+        let mut instructions = Vec::new();
+        let mut pc = 0;
+        while pc < proto.code.len() {
+            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
+            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            instructions.push((pc, instr));
+            pc += 1 + instr.operand_words();
+        }
+
+        instructions
+    }
+
+    /// How many instructions with the operation `op` the function `code` compiles to.
+    fn count(code: &str, op: Op) -> usize {
+        instructions(code)
+            .iter()
+            .filter(|(_, instr)| instr.op == op)
+            .count()
+    }
+
+    /// The instructions that look a name up in the innermost loop of the function `code`:
+    /// how many of them run once, ahead of the passes, and how many run on every pass.
+    fn lookups_of_innermost_loop(code: &str) -> (usize, usize) {
+        let instructions = instructions(code);
+
+        // A loop is complete before the loop around it goes on to its next pass, so the first
+        // instruction that starts a next pass belongs to the innermost loop.
+        let (back, next) = instructions
+            .iter()
+            .copied()
+            .find(|(_, instr)| matches!(instr.op, Op::ForRangeNext | Op::ForListNext))
+            .expect("a loop that is compiled in place");
+        let start = (back as isize + 1 + next.sbx()) as usize;
+        let (entry, _) = instructions
+            .iter()
+            .copied()
+            .rfind(|(pc, instr)| {
+                *pc < start && matches!(instr.op, Op::ForRange | Op::ForList) && instr.a == next.a
+            })
+            .expect("the instruction that enters the loop");
+
+        let lookups = |from: usize, to: usize| {
+            instructions
+                .iter()
+                .filter(|(pc, instr)| {
+                    (from..to).contains(pc)
+                        && matches!(instr.op, Op::EnsureName | Op::GetName | Op::GetCapture)
+                })
+                .count()
+        };
+
+        (lookups(entry, start), lookups(start, back))
+    }
+
+    #[test]
+    fn a_loop_reads_a_name_as_what_its_function_finds_for_it() {
+        for (code, expected) in [
+            // In the function that called it: a parameter, a variable of a block, and a name
+            // that an assignment bound on the way.
+            (
+                "total = xs => reduce(xs, (acc, x) => acc + k, 0)\ncall = k => total([1, 2, 3])\ncall(10)",
+                "30",
+            ),
+            (
+                "f = xs => map(xs, x => x + k)\ng = () => do { k = 7; return f([1, 2]) }\ng()",
+                "[8, 9]",
+            ),
+            (
+                "f = xs => map(xs, x => x + k)\ng = () => [(k = 7), f([1, 2])]\ng()",
+                "[7, [8, 9]]",
+            ),
+            // At the top level of the program, where the name was bound after the function.
+            (
+                "total = xs => reduce(xs, (acc, x) => acc + w(x) + k, 0)\nw = x => x * 2 % 7\nk = 3\ntotal(range(10))",
+                "57",
+            ),
+            (
+                "f = xs => every(xs, x => x < limit) and some(xs, x => x == limit - 1)\nlimit = 4\nf([1, 2, 3])",
+                "true",
+            ),
+            // The function itself, and what it captured when it was made.
+            (
+                "k = xs => map(xs, x => if x == 0 then typeof(k) else x)\nk([0, 1])",
+                "[function, 1]",
+            ),
+            (
+                "tree = d => if d == 0 then [] else map(range(3), i => tree(d - 1))\ncount = t => reduce(t, (acc, c) => acc + count(c), 1)\ncount(tree(4))",
+                "121",
+            ),
+            (
+                "mk = n => (xs => map(xs, x => x + n))\na = mk(1)\nb = mk(100)\n[a([1, 2]), b([1, 2])]",
+                "[[2, 3], [101, 102]]",
+            ),
+            // In a loop of the loop, in a function and a record that a pass makes, and where
+            // the pass computes ahead.
+            (
+                "k = 1\nf = xs => map(xs, x => filter(xs, y => y + k > x))\nf([1, 2, 3])",
+                "[[1, 2, 3], [2, 3], [3]]",
+            ),
+            (
+                "k = 2\nf = xs => map(xs, x => [k, (y => y + k)(x), {k}, {k, x: x}.k])\nf([1, 2])",
+                "[[2, 3, {k: 2}, 2], [2, 4, {k: 2}, 2]]",
+            ),
+            (
+                "k = [10, 20]\nf = xs => map(xs, x => k[0] + x)\nf([1, 2])",
+                "[11, 12]",
+            ),
+            // A function that the pass calls finds the name where the loop does.
+            (
+                "g = () => k\nf = xs => map(xs, x => g() + k + x)\ncall = k => f([1, 2])\ncall(10)",
+                "[21, 22]",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_loop_looks_a_name_up_whenever_it_starts() {
+        for (code, expected) in [
+            // Every call of the function finds what its own caller has for the name.
+            (
+                "total = xs => reduce(xs, (acc, x) => acc + k, 0)\na = k => total([1, 2, 3])\nb = k => total([1, 2, 3])\n[a(10), b(100), a(1)]",
+                "[30, 300, 3]",
+            ),
+            (
+                "show = xs => map(xs, x => x + k)\nrec = k => if k == 0 then [] else [show([1]), ...rec(k - 1)]\nrec(3)",
+                "[[4], [3], [2]]",
+            ),
+            // So does every call of a function that calls itself in its last place.
+            (
+                "f = (xs, n) => if n == 0 then sum(map(xs, x => x * k)) else f(xs, n - 1)\nk = 4\nf([1, 2, 3], 5)",
+                "24",
+            ),
+            // Two loops of a function, and a loop that starts on every pass of another.
+            (
+                "k = 3\nf = xs => [map(xs, x => x + k), map(xs, x => x * k), sum(map(xs, x => k))]\nf([1, 2])",
+                "[[4, 5], [3, 6], 6]",
+            ),
+            (
+                "k = 3\nf = m => map(m, row => reduce(row, (acc, x) => acc + x * k, 0))\nf([[1, 2], [3, 4]])",
+                "[9, 21]",
+            ),
+            // What a loop starts from may have looked the name up for it: `inputs` is read by
+            // name everywhere. The loops that follow look it up for themselves.
+            (
+                "f = xs => [reduce(xs, (acc, x) => acc + x * inputs.a, inputs.a), map(xs, x => x + inputs.a), sum(map(range(inputs.a), i => i + inputs.a))]\ng = inputs => f([1, 2])\n[g({a: 10}), g({a: 2})]",
+                "[[40, [11, 12], 145], [8, [3, 4], 5]]",
+            ),
+            (
+                "f = xs => [filter(range(inputs.a), i => i < inputs.b), every(xs, x => x < inputs.a), map(xs, x => inputs.b)]\ng = v => do { inputs = {a: v, b: 2}; return f([3, 4]) }\n[g(3), g(5)]",
+                "[[[0, 1], false, [2, 2]], [[0, 1], true, [2, 2]]]",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_variable_of_the_function_is_not_looked_up() {
+        for (code, expected) in [
+            // The parameter of the callback, and that of the callback of a loop in the loop.
+            (
+                "k = 100\nf = xs => map(xs, k => k + 1)\nf([1, 2])",
+                "[2, 3]",
+            ),
+            (
+                "k = 3\nf = m => map(m, row => k + sum(map(row, k => k * 2)))\nf([[1, 2], [3]])",
+                "[9, 9]",
+            ),
+            // A variable of a block, from where the block binds it.
+            (
+                "k = 100\nf = xs => map(xs, x => do { a = k + x; k = a * 2; return k })\nf([1, 2])",
+                "[202, 204]",
+            ),
+            (
+                "f = xs => map(xs, x => do { t = k; k = t + x; u = map([1], y => y + k); return u[0] })\nk = 10\nf([1, 2])",
+                "[12, 13]",
+            ),
+            (
+                "f = xs => do { k = 5; return map(xs, x => x + k) }\nk = 100\nf([1, 2])",
+                "[6, 7]",
+            ),
+            // A name that an assignment may have bound in the function or in a block.
+            (
+                "f = xs => [(k = 5), map(xs, x => x + k)]\nf([1, 2])",
+                "[5, [6, 7]]",
+            ),
+            (
+                "f = xs => map(xs, x => do { r = [(q = x * 2), q + 1]; return r[1] + q })\nf([1, 2])",
+                "[5, 9]",
+            ),
+            (
+                "q = 1\nf = xs => map(xs, x => do { r = [(q = x * 2), q + 1]; return r[1] + q })\nf([1, 2])",
+                "in function \"f\": in built-in function \"map\": in anonymous function: q is already defined, and cannot be reassigned at q = x * 2",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_nothing_binds_fails_the_pass_that_reads_it() {
+        const IN_F: &str =
+            "in function \"f\": in built-in function \"map\": in anonymous function: ";
+
+        for (code, expected) in [
+            (
+                "f = xs => map(xs, x => x + missing)\nf([1])",
+                format!("{IN_F}unknown identifier: missing at missing"),
+            ),
+            (
+                "f = xs => map(xs, x => missing + x.a)\nf([1])",
+                format!("{IN_F}unknown identifier: missing at missing"),
+            ),
+            // What the pass does before it reads the name fails first.
+            (
+                "f = xs => map(xs, x => x.a + missing)\nf([1])",
+                format!("{IN_F}expected a record, but got a number at x"),
+            ),
+            // The name is read by one of the passes, or by none.
+            (
+                "f = xs => map(xs, x => if x > 1 then nope else 0)\nf([0, 1, 2])",
+                format!("{IN_F}unknown identifier: nope at nope"),
+            ),
+            (
+                "f = xs => map(xs, x => if x > 1 then nope else 0)\nf([0, 1])",
+                "[0, 0]".to_string(),
+            ),
+            (
+                "f = xs => map(xs, x => (if x > 1 then k else 0) + k)\nf([0, 1])",
+                format!("{IN_F}unknown identifier: k at k"),
+            ),
+            (
+                "f = xs => map(xs, x => x + missing)\nf([])",
+                "[]".to_string(),
+            ),
+            (
+                "f = xs => reduce(xs, (acc, x) => acc + missing, 0)\nf([])",
+                "0".to_string(),
+            ),
+            // A record that takes its key from the name has no place of its own to fail at.
+            (
+                "f = xs => map(xs, x => {missing})\nf([1])",
+                format!("{IN_F}unknown identifier: missing at (xs, x => {{missing}})"),
+            ),
+            (
+                "f = xs => map(xs, x => [missing, {missing}])\nf([1])",
+                format!("{IN_F}unknown identifier: missing at missing"),
+            ),
+            // A name that is bound behind the loop is not bound in the loop.
+            (
+                "f = xs => map(xs, x => x + k)\ng = () => [f([1, 2]), (k = 7)]\ng()",
+                format!("in function \"g\": {IN_F}unknown identifier: k at k"),
+            ),
+            // More names than a loop keeps.
+            (
+                "f = xs => map(xs, x => x + a + b + c + d + e + g + h + i + j + k + l + m + n + o + p + q + r + s)\na = 1\nb = 1\nc = 1\nd = 1\ne = 1\ng = 1\nh = 1\ni = 1\nj = 1\nk = 1\nl = 1\nm = 1\nn = 1\no = 1\np = 1\nq = 1\nr = 1\nf([1, 2])",
+                format!("{IN_F}unknown identifier: s at s"),
+            ),
+            (
+                "f = xs => map(xs, x => x + a + b + c + d + e + g + h + i + j + k + l + m + n + o + p + q + r + s)\na = 1\nb = 1\nc = 1\nd = 1\ne = 1\ng = 1\nh = 1\ni = 1\nj = 1\nk = 1\nl = 1\nm = 1\nn = 1\no = 1\np = 1\nq = 1\nr = 1\ns = 1\nf([1, 2])",
+                "[19, 20]".to_string(),
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_loop_looks_a_name_up_once() {
+        for (code, expected) in [
+            // The name that a pass reads first is looked up ahead of the passes, and any
+            // other where a pass gets to it, which finds it there from then on.
+            ("xs => map(xs, x => x + k)", (1, 0)),
+            ("xs => map(xs, x => k[0] + x * k[1])", (1, 0)),
+            ("xs => reduce(xs, (acc, x) => acc + w(x) + k, 0)", (1, 1)),
+            ("xs => map(xs, x => if x > 1 then k else j)", (0, 2)),
+            // A loop in the loop asks for the name whenever it starts, as none of its passes
+            // may read it, and finds what a pass of the loop around it looked up before.
+            (
+                "m => map(m, row => reduce(row, (acc, x) => acc + x * k, 0))",
+                (1, 0),
+            ),
+            (
+                "m => map(m, row => reduce(row, (acc, x) => acc + x * k, j))",
+                (1, 0),
+            ),
+            // A variable is not looked up at all.
+            ("(xs, k) => map(xs, x => x + k)", (0, 0)),
+            ("xs => map(xs, k => k + 1)", (0, 0)),
+            ("xs => do { k = 5; return map(xs, x => x + k) }", (0, 0)),
+            ("xs => map(xs, x => do { t = x * 2; return t + 1 })", (0, 0)),
+        ] {
+            assert_eq!(lookups_of_innermost_loop(code), expected, "{code}");
+            assert_eq!(count(code, Op::GetName), 0, "{code}");
+        }
+
+        // What the loop starts from looks the name up for the passes, but not for the loop
+        // that follows.
+        let code = "xs => [reduce(xs, (acc, x) => acc + x * inputs.a, inputs.a), map(xs, x => x + inputs.a)]";
+
+        assert_eq!(count(code, Op::EnsureName), 2, "{code}");
+        assert_eq!(count(code, Op::GetName), 0, "{code}");
+
+        // A name that an assignment may have bound is looked up wherever it is read.
+        let code = "xs => [(k = 5), map(xs, x => x + k)]";
+
+        assert_eq!(lookups_of_innermost_loop(code), (0, 1), "{code}");
+        assert_eq!(count(code, Op::GetName), 1, "{code}");
+        assert_eq!(count(code, Op::EnsureName), 0, "{code}");
+    }
+
+    #[test]
+    fn a_loop_keeps_only_the_names_that_it_may_look_up() {
+        for (code, expected) in [
+            ("xs => map(xs, x => x + k)", 1),
+            ("xs => map(xs, x => x + k * k + j)", 2),
+            ("xs => [map(xs, x => x + k), map(xs, x => x * k)]", 2),
+            (
+                "m => map(m, row => reduce(row, (acc, x) => acc + x * k, 0))",
+                1,
+            ),
+            // Not a variable that is bound around the loop, or by the statements of a block
+            // before it is read.
+            ("(xs, k) => map(xs, x => x + k)", 0),
+            ("xs => do { k = 5; return map(xs, x => x + k) }", 0),
+            (
+                "xs => map(xs, x => do { t = x * 2; u = t + 1; return t + u })",
+                0,
+            ),
+            ("xs => map(xs, x => do { t = t0 * 2; return t + 1 })", 1),
+            ("xs => map(xs, x => do { t = t * 2; return t + 1 })", 1),
+        ] {
+            assert_eq!(count(code, Op::LoadUnbound), expected, "{code}");
+        }
+    }
+}
+
+// A function finds a name that it does not bind where it was called from: in the frame of its
+// caller, in that of the caller's caller, and so on down to the top level of the program. The
+// VM remembers what a lookup found below the frames that it went down, for the lookups that
+// come across those frames again. Nothing but the time that a lookup takes may tell that from
+// going down the frames every time.
+#[cfg(test)]
+mod remembered_name_tests {
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::values::Value;
+    use crate::vm::frames_searched;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code`, up to the value of the last one.
+    fn evaluate(code: &str, heap: &Rc<RefCell<Heap>>) -> Result<Value, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+            result = evaluate_ast(
+                &expr,
+                Rc::clone(heap),
+                Rc::clone(&bindings),
+                0,
+                Rc::clone(&source),
+            )?;
+        }
+
+        Ok(result)
+    }
+
+    /// What the statements of `code` come to, rendered: the value, or the message of the
+    /// error and the part of `code` that it points at.
+    fn outcome(code: &str) -> String {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        match evaluate(code, &heap) {
+            Ok(value) => value.stringify_internal(&heap.borrow()),
+            Err(error) => {
+                let place = match error.span {
+                    Some(span) => &code[span.start_byte..span.end_byte],
+                    None => "nothing",
+                };
+
+                format!("{} at {place}", error.message)
+            }
+        }
+    }
+
+    /// The number of frames that the lookups of `code` went down to, and what it came to.
+    fn searched(code: &str) -> (usize, String) {
+        let before = frames_searched();
+        let outcome = outcome(code);
+
+        (frames_searched() - before, outcome)
+    }
+
+    #[test]
+    fn a_name_is_found_in_the_frame_that_binds_it_however_far_down() {
+        for (code, expected) in [
+            // A function that is defined after the one that calls it, at every level of a
+            // recursion.
+            (
+                "f = n => if n == 0 then 0 else g(n) + f(n - 1)\ng = n => n * 2\nf(50)",
+                "2550",
+            ),
+            (
+                "even = n => if n == 0 then true else odd(n - 1)\nodd = n => if n == 0 then false else even(n - 1)\n[even(10), odd(7), even(7)]",
+                "[true, true, false]",
+            ),
+            // A parameter of the caller's caller, between two calls that have none.
+            (
+                "show = () => k\nvia = () => show()\nmid = k => via()\nk = 1\n[via(), mid(2), via(), mid(3), show()]",
+                "[1, 2, 1, 3, 1]",
+            ),
+            // A parameter of every level of a recursion, read before the levels further in
+            // and after them, and from further in than the frames that read it before.
+            (
+                "leaf = () => k\ntwig = () => leaf()\nrec = k => if k == 0 then [] else [twig(), ...rec(k - 1), twig()]\nrec(3)",
+                "[3, 2, 1, 1, 2, 3]",
+            ),
+            (
+                "leaf = () => k\ntwig = n => if n == 0 then leaf() else twig(n - 1) + 0\nrec = k => if k == 0 then [] else [twig(k), ...rec(k - 1), twig(0)]\nrec(4)",
+                "[4, 3, 2, 1, 1, 2, 3, 4]",
+            ),
+            // What a function captured when it was made, and the function itself.
+            (
+                "leaf = () => k\ntwig = () => leaf()\nmk = k => (() => [k, twig()])\nc = mk(7)\nk = 1\n[c(), twig(), mk(9)()]",
+                "[[7, 7], 1, [9, 9]]",
+            ),
+            (
+                "leaf = () => typeof(me)\ntwig = () => leaf()\nfs = [do { me = n => twig(); return me }]\nfs[0](1)",
+                "function",
+            ),
+            // The inputs of whoever calls.
+            (
+                "leaf = () => inputs.a + #b\ntwig = () => leaf()\ng = inputs => twig()\n[g({a: 1, b: 10}), g({a: 2, b: 20})]",
+                "[11, 22]",
+            ),
+            // Below a built-in function that calls back.
+            (
+                "leaf = x => x * k\ntwig = x => leaf(x)\nw = k => sort_by([3, 1, 2], x => twig(x))\n[w(1), w(-1)]",
+                "[[1, 2, 3], [3, 2, 1]]",
+            ),
+            (
+                "leaf = x => x * k\ntwig = x => leaf(x)\nw = k => ([1, 2] via twig)\n[w(2), w(3), w(2)]",
+                "[[2, 4], [3, 6], [2, 4]]",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_frame_binds_a_name_from_where_it_assigns_it() {
+        for (code, expected) in [
+            // A variable of a block is bound for the calls that the block makes after it
+            // assigned it, and for no call that the function makes behind the block.
+            (
+                "leaf = () => k\ntwig = () => leaf()\nx = () => do {\n  a = twig()\n  k = 5\n  b = twig()\n  return [a, b]\n}\nw = k => x()\nw(1)",
+                "[1, 5]",
+            ),
+            (
+                "leaf = () => k\ntwig = () => leaf()\nx = () => do {\n  a = twig()\n  b = do { k = 5; return twig() }\n  c = twig()\n  d = do { k = 7; return [twig(), leaf()] }\n  return [a, b, c, d, twig()]\n}\nw = k => [x(), twig()]\n[w(1), w(2)]",
+                "[[[1, 5, 1, [7, 7], 1], 1], [[2, 5, 2, [7, 7], 2], 2]]",
+            ),
+            (
+                "leaf = () => k\ntwig = () => leaf()\nf = () => [do { k = 5; return twig() }, do { k = 6; return twig() }]\nf()",
+                "[5, 6]",
+            ),
+            (
+                "leaf = () => k\ntwig = () => leaf()\nx = () => do { a = twig(); k = 5; return a }\nx()",
+                "in function \"x\": in function \"twig\": in function \"leaf\": unknown identifier: k at k",
+            ),
+            // So is a name that the function assigns outside of a block, which nothing that
+            // is in sight may have bound before.
+            (
+                "leaf = () => k\ntwig = () => leaf()\nx = () => [(k = 5), twig(), leaf()]\n[x(), x()]",
+                "[[5, 5, 5], [5, 5, 5]]",
+            ),
+            (
+                "leaf = () => k\ntwig = () => leaf()\nx = () => [twig(), (k = 5), twig(), leaf()]\nw = k => [x(), twig()]\n[w(1), w(2)]",
+                "in function \"w\": in function \"x\": k is already defined, and cannot be reassigned at k = 5",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_frame_that_starts_over_binds_its_parameters_anew() {
+        for (code, expected) in [
+            (
+                "leaf = () => k\ntwig = () => leaf()\nloop = (k, acc) => if k == 0 then acc else loop(k - 1, [...acc, twig()])\nloop(4, [])",
+                "[4, 3, 2, 1]",
+            ),
+            (
+                "leaf = () => k\ntwig = () => leaf()\nloop = (k, acc) => if k == 0 then acc else loop(k - 1, [...acc, twig(), leaf()])\nouter = () => loop(2, [])\n[outer(), outer()]",
+                "[[2, 2, 1, 1], [2, 2, 1, 1]]",
+            ),
+            // What the frames below it bind is what they bound before.
+            (
+                "leaf = () => k\ntwig = () => leaf()\nloop = (n, acc) => if n == 0 then acc else loop(n - 1, [...acc, twig()])\nk = 9\nloop(3, [])",
+                "[9, 9, 9]",
+            ),
+            (
+                "leaf = () => k\ntwig = () => leaf()\nloop = (n, acc) => if n == 0 then acc else loop(n - 1, [...acc, twig()])\nw = k => loop(2, [])\n[w(1), w(2)]",
+                "[[1, 1], [2, 2]]",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_the_top_level_binds_is_found_from_then_on() {
+        for (code, expected) in [
+            // A function that is made where nothing binds the name finds it when it is called.
+            (
+                "mk = () => (() => k)\nvia = () => mk()\nearly = via()\nk = 5\n[early(), via()()]",
+                "[5, 5]",
+            ),
+            // The statement that binds the name looked for it before, from further in.
+            (
+                "mk = () => (() => k)\nvia = () => mk()\n[typeof(via()), (k = 5), via()(), mk()()]",
+                "[function, 5, 5, 5]",
+            ),
+            (
+                "show = () => k\nvia = () => show()\n[(k = 1), via(), (j = 2), via(), show() + j]",
+                "[1, 1, 2, 1, 3]",
+            ),
+            (
+                "show = () => k\nvia = () => show()\nk = 1\n[via(), (k = 2), via()]",
+                "k is already defined, and cannot be reassigned at k = 2",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_nothing_binds_fails_where_it_is_read() {
+        for (code, expected) in [
+            (
+                "leaf = () => missing\ntwig = () => leaf()\ntwig()",
+                "in function \"twig\": in function \"leaf\": unknown identifier: missing at missing",
+            ),
+            // The frames that the name was found from before bind it no longer.
+            (
+                "leaf = n => if n == 0 then k else n\ntwig = n => leaf(n)\nrec = n => if n < 0 then 0 else twig(n) + rec(n - 1)\nw = k => rec(1)\n[w(5), rec(1)]",
+                "in function \"rec\": in function \"rec\": in function \"twig\": in function \"leaf\": unknown identifier: k at k",
+            ),
+            (
+                "leaf = () => pi\ntwig = () => leaf()\nrec = n => if n == 0 then twig() else rec(n - 1) + 0\nrec(3)",
+                "in function \"rec\": in function \"rec\": in function \"rec\": in function \"rec\": in function \"twig\": in function \"leaf\": unknown identifier: pi. Did you mean constants.pi? at pi",
+            ),
+            // A record that takes its key from the name, and a field of the inputs.
+            (
+                "leaf = () => {missing}\ntwig = () => leaf()\ntwig()",
+                "in function \"twig\": in function \"leaf\": unknown identifier: missing at ()",
+            ),
+            (
+                "leaf = () => #a\ntwig = () => leaf()\ntwig()",
+                "in function \"twig\": in function \"leaf\": inputs not found (required for #a syntax) at ()",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_lookup_goes_down_the_frames_once() {
+        // The function that reads is a hundred and one calls further in than the top level.
+        const DEEP: &str = "deep = d => if d == 0 then spin() else deep(d - 1) + 0\n";
+
+        for (code, expected, most) in [
+            // Every level of a recursion reads a name that the top level binds, and comes
+            // across the level below, which found it before.
+            (
+                "f = n => if n == 0 then 0 else g(n) + f(n - 1)\ng = n => n * 2\nf(300)"
+                    .to_string(),
+                "90300",
+                300,
+            ),
+            // A frame that reads the name again finds it without going down.
+            (
+                format!(
+                    "spin = () => late() + late() + late() + late() + late()\n{DEEP}late = () => 1\ndeep(100)"
+                ),
+                "5",
+                102,
+            ),
+            // So does every one of the frames that it calls, and of those that they call:
+            // they come across the frame that called them.
+            (
+                format!(
+                    "use = () => late()\nspin = () => use() + use() + use() + use() + use()\n{DEEP}late = () => 1\ndeep(100)"
+                ),
+                "5",
+                103 + 4,
+            ),
+            (
+                format!(
+                    "use = () => late()\nvia = () => use()\nspin = () => via() + via() + via() + via() + via()\n{DEEP}late = () => 1\ndeep(100)"
+                ),
+                "5",
+                104 + 2 * 4,
+            ),
+            // A function that is made takes what it can of what it reads with it.
+            (
+                format!(
+                    "make = n => (x => x + k + n)\nspin = () => make(1)(1) + make(2)(1) + make(3)(1)\n{DEEP}k = 10\ndeep(100)"
+                ),
+                "39",
+                103 + 2,
+            ),
+            // A frame that binds the name is as far as a lookup goes, whatever is below.
+            (
+                format!(
+                    "use = () => k\nvia = () => use()\nspin = () => via() + via() + via() + via() + via()\nbind = k => spin()\n{}k = 1\ndeep(100)",
+                    DEEP.replace("spin()", "bind(2)")
+                ),
+                "10",
+                3 + 2 * 4,
+            ),
+        ] {
+            let (frames, outcome) = searched(&code);
+
+            assert_eq!(outcome, expected, "{code}");
+            assert!(frames <= most, "{code}: {frames} frames");
+        }
+    }
+}
+
+// The instruction loop takes the call into the rest of the VM itself for an instruction that
+// is one such call whatever its operands are, and for two strings that are added, a character
+// of a string, and a field that is not where it was found last. Nothing may tell that from
+// handing the instruction to the code that executes any instruction in full, which is where
+// every instruction goes in a build with `blots_vm_step_only`.
+#[cfg(test)]
+mod instruction_call_tests {
+    use crate::ast::Expr;
+    use crate::bytecode::{Instr, Op};
+    use crate::compiler::compile_lambda;
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::{evaluate_ast, evaluate_statement};
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code`, up to the value of the last one, with the heap
+    /// compacted while a statement runs (`compacts`) or left alone.
+    fn evaluate(
+        code: &str,
+        heap: &Rc<RefCell<Heap>>,
+        compacts: bool,
+    ) -> Result<Value, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+
+            let (heap, bindings) = (Rc::clone(heap), Rc::clone(&bindings));
+            result = match compacts {
+                true => evaluate_statement(&expr, heap, bindings, Rc::clone(&source), &mut [])?,
+                false => evaluate_ast(&expr, heap, bindings, 0, Rc::clone(&source))?,
+            };
+        }
+
+        Ok(result)
+    }
+
+    /// What the statements of `code` come to, rendered: the value, or the message of the
+    /// error and the part of `code` that it points at. Returns the number of passes over
+    /// the heap as well.
+    fn run(code: &str, compacts: bool) -> (String, usize) {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        let outcome = match evaluate(code, &heap, compacts) {
+            Ok(value) => value.stringify_internal(&heap.borrow()),
+            Err(error) => {
+                let place = match error.span {
+                    Some(span) => &code[span.start_byte..span.end_byte],
+                    None => "nothing",
+                };
+
+                format!("{} at {place}", error.message)
+            }
+        };
+
+        (outcome, heap.borrow().passes())
+    }
+
+    /// What `code` comes to, which is the same with passes over the heap in its statements
+    /// as without.
+    fn outcome(code: &str) -> String {
+        let (outcome, _) = run(code, true);
+
+        assert_eq!(outcome, run(code, false).0, "{code}");
+
+        outcome
+    }
+
+    /// The operations of the instructions of the function `code`.
+    fn operations(code: &str) -> Vec<Op> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let [Statement::Expression(expr)] = &statements[..] else {
+            panic!("{code} is not a single expression");
+        };
+        let Expr::Lambda { args, body, .. } = &expr.node else {
+            panic!("{code} is not a function");
+        };
+        let proto = compile_lambda(&Rc::new(args.clone()), body, true).unwrap();
+
+        let mut operations = Vec::new();
+        let mut pc = 0;
+        while pc < proto.code.len() {
+            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
+            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            operations.push(instr.op);
+            pc += 1 + instr.operand_words();
+        }
+
+        operations
+    }
+
+    /// A list of `count` elements, which are the parameters `a`, `b` and `c` in turn, with
+    /// `last` behind them.
+    fn long_list(count: usize, last: &str) -> String {
+        let items: Vec<&str> = ["a", "b", "c"].into_iter().cycle().take(count).collect();
+
+        format!("[{}{last}]", items.join(", "))
+    }
+
+    #[test]
+    fn the_functions_of_these_tests_are_made_of_the_instructions_in_question() {
+        let long = format!("(a, b, c) => {}", long_list(300, ", ...a"));
+
+        for (code, expected) in [
+            ("(a, b) => a + b", &[Op::Add][..]),
+            ("(s, i) => s[i]", &[Op::Index]),
+            ("r => r.x", &[Op::GetField]),
+            ("x => typeof(x)", &[Op::CallBuiltIn]),
+            ("(xs, g) => map(xs, g)", &[Op::CallBuiltIn]),
+            ("k => (() => k)", &[Op::Closure]),
+            ("a => [a, a + 1, [a]]", &[Op::NewList]),
+            ("xs => [...xs, 3]", &[Op::Spread, Op::NewListSpread]),
+            (
+                "(f, xs) => f(1, ...xs, 2)",
+                &[Op::ListBegin, Op::Spread, Op::ListAppend, Op::CallList],
+            ),
+            (
+                long.as_str(),
+                &[Op::ListBegin, Op::ListAppend, Op::Spread, Op::ListEnd],
+            ),
+            ("(a, b) => {a: a, b: b}", &[Op::NewRecord]),
+            (
+                "(r, a) => {...r, a: a}",
+                &[
+                    Op::RecordBegin,
+                    Op::Spread,
+                    Op::RecordSpread,
+                    Op::RecordSet,
+                    Op::RecordEnd,
+                ],
+            ),
+            (
+                "(k, v) => {[k]: v}",
+                &[
+                    Op::RecordBegin,
+                    Op::RecordKey,
+                    Op::RecordValue,
+                    Op::RecordEnd,
+                ],
+            ),
+            (
+                "xs => map(xs, x => x + 1)",
+                &[Op::IterPrep, Op::ListBegin, Op::ListEnd],
+            ),
+            (
+                "n => map(range(n), x => x * 2)",
+                &[Op::RangePrep, Op::ListBegin, Op::ListEnd],
+            ),
+        ] {
+            let operations = operations(code);
+
+            for op in expected {
+                assert!(
+                    operations.contains(op),
+                    "{code}: {op:?} is not in {operations:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn two_strings_that_are_added_are_joined() {
+        for (code, expected) in [
+            // Strings of every length, and with characters of more than one byte.
+            ("s = \"ab\"\nt = \"cd\"\ns + t", "abcd"),
+            (
+                "f = (a, b) => a + b\n[f(\"x\", \"y\"), f(1, 2), f(\"x\", \"\"), f(\"\", \"\"), f(\"é\", \"ü\")]",
+                "[xy, 3, x, , éü]",
+            ),
+            // A string that is added to stays what it was for whoever else has it.
+            (
+                "s = \"x\"\nt = s + s\nu = t + t\n[s, t, u, u + s + t]",
+                "[x, xx, xxxx, xxxxxxx]",
+            ),
+            (
+                "s = \"x\"\nt = s + \"y\"\nu = s + \"z\"\n[s, t, u]",
+                "[x, xy, xz]",
+            ),
+            // A string that grows on every pass of a loop.
+            (
+                "reduce([\"a\", \"b\", \"c\", \"d\"], (acc, s) => acc + s, \"\")",
+                "abcd",
+            ),
+            (
+                "len(reduce(range(200), (acc, n) => acc + to_string(n % 10), \"\"))",
+                "200",
+            ),
+            (
+                "words = map(range(50), n => \"w\" + to_string(n))\nlen(reduce(words, (acc, w) => acc + w + \" \", \"\"))",
+                "190",
+            ),
+            // Whatever else is added is added as it always was.
+            (
+                "f = (a, b) => a + b\nf([\"a\", \"b\"], [\"c\", \"d\"])",
+                "[ac, bd]",
+            ),
+            ("f = (a, b) => a + b\nf([1, 2], [3, 4])", "[4, 6]"),
+            (
+                "f = (a, b) => a + b\nf(\"x\", 1)",
+                "in function \"f\": expected a string, but got a number at (\"x\", 1)",
+            ),
+            (
+                "f = (a, b) => a + b\nf(1, \"x\")",
+                "in function \"f\": expected a number, but got a string at (1, \"x\")",
+            ),
+            (
+                "f = (a, b) => a + b\nf(\"x\", null)",
+                "in function \"f\": expected a string, but got a null at (\"x\", null)",
+            ),
+            (
+                "f = (a, b) => a + b\nf([1, 2], \"x\")",
+                "in function \"f\": can't add number and string at a + b",
+            ),
+            (
+                "f = (a, b) => a + b\nf(\"x\", [1, 2])",
+                "in function \"f\": can't add string and number at a + b",
+            ),
+            (
+                "f = (a, b) => a + b\nf({a: 1}, \"x\")",
+                "in function \"f\": expected a number, but got a record at ({a: 1}, \"x\")",
+            ),
+            (
+                "f = (a, b) => a + b\nf(true, \"x\")",
+                "in function \"f\": expected a number, but got a boolean at (true, \"x\")",
+            ),
+            (
+                "f = (a, b) => a + b\nf(x => x, \"x\")",
+                "in function \"f\": expected a number, but got a function at (x => x, \"x\")",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_string_has_a_character_at_an_index() {
+        for (code, expected) in [
+            // From the start and from the end, in range and out of it, whole or not.
+            (
+                "s = \"héllo\"\n[s[0], s[1], s[4], s[5], s[-1], s[-5], s[-6], s[1.7], s[-1.5], s[1e30], s[-1e30]]",
+                "[h, é, o, null, o, h, null, é, o, null, null]",
+            ),
+            (
+                "f = (s, i) => s[i]\n[f(\"ab\", 0 / 0), f([1, 2], 0 / 0), f(\"\", 0)]",
+                "[a, 1, null]",
+            ),
+            // One instruction that indexes a string, a list and a record in turn.
+            (
+                "f = (s, i) => s[i]\n[f(\"ab\", 1), f([1, 2], 1), f({a: 1}, \"a\"), f(\"ab\", -1), f([1, 2], -1), f({a: 1}, \"b\")]",
+                "[b, 2, 1, b, 2, null]",
+            ),
+            (
+                "s = \"abc\"\nmap(range(5), i => s[i])",
+                "[a, b, c, null, null]",
+            ),
+            (
+                "s = \"abc\"\nmap(range(5), i => s[i] ?? \"-\")",
+                "[a, b, c, -, -]",
+            ),
+            (
+                "letters = s => map(range(len(s)), i => s[i])\nletters(\"héllo wörld\")",
+                "[h, é, l, l, o,  , w, ö, r, l, d, null, null]",
+            ),
+            // What cannot be indexed, and what cannot be an index.
+            (
+                "f = (s, i) => s[i]\nf(\"ab\", \"a\")",
+                "in function \"f\": expected a number, but got a string at (\"ab\", \"a\")",
+            ),
+            (
+                "f = (s, i) => s[i]\nf(\"ab\", null)",
+                "in function \"f\": expected a number, but got a null at (\"ab\", null)",
+            ),
+            (
+                "f = (s, i) => s[i]\nf(\"ab\", [0])",
+                "in function \"f\": expected a number, but got a list at (\"ab\", [0])",
+            ),
+            (
+                "f = (s, i) => s[i]\nf(1, 0)",
+                "in function \"f\": expected a record, list, or string, but got a number at s",
+            ),
+            (
+                "f = (s, i) => s[i]\nf(null, 0)",
+                "in function \"f\": expected a record, list, or string, but got a null at s",
+            ),
+            (
+                "f = (s, i) => s[i]\nf({a: 1}, 0)",
+                "in function \"f\": expected a string, but got a number at ({a: 1}, 0)",
+            ),
+            (
+                "f = (s, i) => s[i]\nf([1], \"a\")",
+                "in function \"f\": expected a number, but got a string at ([1], \"a\")",
+            ),
+            (
+                "f = (s, i) => s[i]\nf(x => x, 0)",
+                "in function \"f\": expected a record, list, or string, but got a function at s",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_field_is_found_wherever_the_record_has_it() {
+        for (code, expected) in [
+            ("r = {a: 1, b: 2}\n[r.a, r.b, r.c]", "[1, 2, null]"),
+            // One instruction that reads records whose keys are in tables of their own.
+            (
+                "f = r => r.x\n[f({x: 1}), f({y: 2}), f({y: 1, x: 3}), f({x: 4, y: 5}), f({}), f({x: null})]",
+                "[1, null, 3, 4, null, null]",
+            ),
+            (
+                "f = r => r.x\nmap([{x: 1}, {y: 2}, {x: 3, y: 4}, {y: 5, x: 6}], f)",
+                "[1, null, 3, 6]",
+            ),
+            ("f = r => r.x.y\n[f({x: {y: 1}}), f({x: {}})]", "[1, null]"),
+            // What has no fields.
+            (
+                "f = r => r.x\nf(1)",
+                "in function \"f\": expected a record, but got a number at r",
+            ),
+            (
+                "f = r => r.x\nf(\"s\")",
+                "in function \"f\": expected a record, but got a string at r",
+            ),
+            (
+                "f = r => r.x\nf([1])",
+                "in function \"f\": expected a record, but got a list at r",
+            ),
+            (
+                "f = r => r.x\nf(null)",
+                "in function \"f\": expected a record, but got a null at r",
+            ),
+            (
+                "f = r => r.x\nf(x => x)",
+                "in function \"f\": expected a record, but got a function at r",
+            ),
+            (
+                "f = r => r.x.y\nf({})",
+                "in function \"f\": expected a record, but got a null at .x",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_built_in_function_is_called_by_its_name() {
+        for (code, expected) in [
+            (
+                "f = x => typeof(x)\n[f(1), f(\"a\"), f([1]), f({a: 1}), f(null), f(true), f(f)]",
+                "[number, string, list, record, null, boolean, function]",
+            ),
+            ("f = x => keys(x)\nf({a: 1, b: 2})", "[a, b]"),
+            (
+                "f = x => to_string(x)\n[f(12), f(\"a\"), f([1, \"b\"]), f({a: 1})]",
+                "[12, a, [1, b], {a: 1}]",
+            ),
+            (
+                "f = (a, b, c) => slice(a, b, c)\n[f([1, 2, 3], 1, 2), f(\"abc\", 0, 2)]",
+                "[[2], ab]",
+            ),
+            // A function that calls back, which runs the instruction loop again.
+            (
+                "f = (xs, g) => map(xs, g)\nf([1, 2, 3], x => x * 2)",
+                "[2, 4, 6]",
+            ),
+            (
+                "f = (xs, g) => sort_by(xs, g)\nf([3, 1, 2], x => 0 - x)",
+                "[3, 2, 1]",
+            ),
+            (
+                "f = (xs, g) => reduce(xs, g, 0)\nf([3, 1, 2], (a, x) => a + x)",
+                "6",
+            ),
+            (
+                "deep = n => if n == 0 then 0 else sum(map([n], x => deep(x - 1))) + 1\ndeep(20)",
+                "20",
+            ),
+            // What the function does not take, and what goes wrong in what it calls back.
+            (
+                "f = x => keys(x)\nf(1)",
+                "in function \"f\": in built-in function \"keys\": expected a record, but got a number at (x)",
+            ),
+            (
+                "f = (a, b, c) => slice(a, b, c)\nf([1], \"a\", 2)",
+                "in function \"f\": in built-in function \"slice\": expected a number, but got a string at (a, b, c)",
+            ),
+            (
+                "f = (xs, g) => map(xs, g)\nf(1, x => x)",
+                "in function \"f\": in built-in function \"map\": expected a list, but got a number at (xs, g)",
+            ),
+            (
+                "f = (xs, g) => map(xs, g)\nf([1, 2], 3)",
+                "in function \"f\": in built-in function \"map\": second argument must be a function at (xs, g)",
+            ),
+            (
+                "f = (xs, g) => map(xs, g)\nf([1], x => x.a)",
+                "in function \"f\": in built-in function \"map\": in anonymous function: expected a record, but got a number at x",
+            ),
+            (
+                "f = (xs, g) => map(xs, g)\nf([{a: 1}, 2], x => x.a)",
+                "in function \"f\": in built-in function \"map\": in anonymous function: expected a record, but got a number at x",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_function_is_made_with_what_it_captures() {
+        for (code, expected) in [
+            (
+                "fs = map([1, 2, 3], x => (y => x + y))\nmap(fs, f => f(10))",
+                "[11, 12, 13]",
+            ),
+            ("mk = k => (() => k)\n[mk(1)(), mk(2)()]", "[1, 2]"),
+            (
+                "mk = k => (() => k + j)\nj = 10\n[mk(1)(), mk(2)()]",
+                "[11, 12]",
+            ),
+            (
+                "counter = n => { next: () => counter(n + 1), value: n }\ncounter(0).next().next().value",
+                "2",
+            ),
+            (
+                "compose = (f, g) => x => f(g(x))\ninc = x => x + 1\ndbl = x => x * 2\n[compose(inc, dbl)(5), compose(dbl, inc)(5)]",
+                "[11, 12]",
+            ),
+            (
+                "mk = k => (() => missing + k)\nmk(1)()",
+                "in anonymous function: unknown identifier: missing at missing",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_list_is_built_from_values_and_from_what_is_spread() {
+        for (code, expected) in [
+            ("a = 1\n[a, a + 1, [a]]", "[1, 2, [1]]"),
+            (
+                "xs = [1, 2]\n[[...xs, 3], [0, ...xs, ...xs], [...\"ab\", 1], [...{a: 1, b: 2}], [...xs], [...[], ...xs, ...[]]]",
+                "[[1, 2, 3], [0, 1, 2, 1, 2], [a, b, 1], [[a, 1], [b, 2]], [1, 2], [1, 2]]",
+            ),
+            (
+                "f = x => [0, ...x, 1]\n[f([]), f(\"\"), f({}), f([[1]]), f(\"é\")]",
+                "[[0, 1], [0, 1], [0, 1], [0, [1], 1], [0, é, 1]]",
+            ),
+            // The arguments of a call, of which only the call finds out how many there are.
+            (
+                "g = (...xs) => xs\nf = xs => g(...xs)\n[f([1, 2]), f([]), f(\"ab\")]",
+                "[[1, 2], [], [a, b]]",
+            ),
+            (
+                "g = (...xs) => len(xs)\nf = xs => g(...xs, ...xs, 1)\n[f([1, 2]), f(range(100))]",
+                "[5, 201]",
+            ),
+            (
+                "g = (a, b) => a - b\nf = xs => g(...xs)\n[f([5, 2]), f([1, 2, 3])]",
+                "in function \"f\": function \"g\" takes exactly 2 arguments, but 3 were given at (...xs)",
+            ),
+            (
+                "g = (a, b) => a - b\nf = xs => g(...xs)\nf([1])",
+                "in function \"f\": function \"g\" takes exactly 2 arguments, but 1 were given at (...xs)",
+            ),
+            // What cannot be spread.
+            (
+                "f = x => [...x]\nf(1)",
+                "in function \"f\": expected a list, record, or string at x",
+            ),
+            (
+                "f = x => [...x]\nf(null)",
+                "in function \"f\": expected a list, record, or string at x",
+            ),
+            (
+                "f = x => [0, ...x, 1]\nf(true)",
+                "in function \"f\": expected a list, record, or string at x",
+            ),
+            (
+                "f = x => [0, ...x, 1]\nf(y => y)",
+                "in function \"f\": expected a list, record, or string at x",
+            ),
+            (
+                "g = (a, b) => a - b\nf = xs => g(1, ...xs)\nf(3)",
+                "in function \"f\": expected a list, record, or string at xs",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_record_is_built_from_entries_and_from_what_is_spread() {
+        for (code, expected) in [
+            (
+                "f = (a, b) => {a: a, b: b}\n[f(1, 2), f(\"x\", [1])]",
+                "[{a: 1, b: 2}, {a: x, b: [1]}]",
+            ),
+            (
+                "nest = n => if n == 0 then {} else {inner: nest(n - 1), n: n}\nnest(3)",
+                "{inner: {inner: {inner: {}, n: 1}, n: 2}, n: 3}",
+            ),
+            // An entry behind what is spread and in front of it.
+            (
+                "f = (r, a) => {...r, a: a}\n[f({}, 1), f({a: 0, b: 2}, 1), f({b: 2}, 1)]",
+                "[{a: 1}, {a: 1, b: 2}, {b: 2, a: 1}]",
+            ),
+            (
+                "f = (r, a) => {a: a, ...r}\n[f({}, 1), f({a: 0, b: 2}, 1), f({b: 2}, 1)]",
+                "[{a: 1}, {a: 0, b: 2}, {a: 1, b: 2}]",
+            ),
+            (
+                "f = (r, a) => {...r, a: a}\n[f([7, 8], 2), f(\"xy\", 2)]",
+                "[{0: 7, 1: 8, a: 2}, {0: x, 1: y, a: 2}]",
+            ),
+            // A key that is only known when the record is built.
+            (
+                "f = (k, v) => {[k]: v}\n[f(\"a\", 1), f(\"\", 2), f(\"é\", [3])]",
+                "[{a: 1}, {: 2}, {é: [3]}]",
+            ),
+            (
+                "f = (k, j) => {[k]: 1, [j]: 2, [k]: 3}\nf(\"a\", \"b\")",
+                "{a: 3, b: 2}",
+            ),
+            (
+                "f = (k, r) => {[k]: 1, ...r, b: 2}\n[f(\"a\", {a: 5, c: 6}), f(\"b\", {}), f(\"c\", {b: 0})]",
+                "[{a: 5, c: 6, b: 2}, {b: 2}, {c: 1, b: 2}]",
+            ),
+            // What cannot be spread, and what cannot be a key.
+            (
+                "f = (r, a) => {...r, a: a}\nf(1, 2)",
+                "in function \"f\": expected a list, record, or string at r",
+            ),
+            (
+                "f = (r, a) => {...r, a: a}\nf(null, 2)",
+                "in function \"f\": expected a list, record, or string at r",
+            ),
+            (
+                "f = (k, r) => {[k]: 1, ...r, b: 2}\nf(\"a\", 1)",
+                "in function \"f\": expected a list, record, or string at r",
+            ),
+            (
+                "f = (k, v) => {[k]: v}\nf(1, 2)",
+                "in function \"f\": expected a string, but got a number at (1, 2)",
+            ),
+            (
+                "f = (k, v) => {[k]: v}\nf(null, 2)",
+                "in function \"f\": expected a string, but got a null at (null, 2)",
+            ),
+            (
+                "f = (k, v) => {[k]: v}\nf([\"a\"], 2)",
+                "in function \"f\": expected a string, but got a list at ([\"a\"], 2)",
+            ),
+            (
+                "f = (k, r) => {[k]: 1, ...r, b: 2}\nf(1, {})",
+                "in function \"f\": expected a string, but got a number at (1, {})",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_loop_is_set_up_over_a_range_or_a_list() {
+        for (code, expected) in [
+            (
+                "f = n => map(range(n), x => x * 2)\n[f(0), f(3), f(2.9)]",
+                "[[], [0, 2, 4], [0, 2]]",
+            ),
+            (
+                "f = (a, b) => map(range(a, b), x => x)\n[f(2, 5), f(2, 2), f(-2, 1)]",
+                "[[2, 3, 4], [], [-2, -1, 0]]",
+            ),
+            (
+                "f = xs => map(xs, x => x + 1)\n[f([1, 2, 3]), f([])]",
+                "[[2, 3, 4], []]",
+            ),
+            (
+                "f = xs => filter(xs, x => x > 1)\n[f([1, 2, 3]), f([])]",
+                "[[2, 3], []]",
+            ),
+            (
+                "f = xs => reduce(xs, (a, x) => a + x, 0)\n[f([1, 2, 3]), f([])]",
+                "[6, 0]",
+            ),
+            (
+                "f = xs => map(xs, x => map(range(x), y => {v: y, s: to_string(y) + \"!\"}))\nf([1, 2])",
+                "[[{v: 0, s: 0!}], [{v: 0, s: 0!}, {v: 1, s: 1!}]]",
+            ),
+            // A range that the function does not make.
+            (
+                "f = (a, b) => map(range(a, b), x => x)\nf(3, 1)",
+                "in function \"f\": in built-in function \"range\": range requires start to be less than or equal to end at (a, b)",
+            ),
+            (
+                "f = n => map(range(n), x => x)\nf(\"a\")",
+                "in function \"f\": in built-in function \"range\": range requires 1 or 2 numbers at (n)",
+            ),
+            (
+                "f = n => map(range(n), x => x)\nf(null)",
+                "in function \"f\": in built-in function \"range\": range requires 1 or 2 numbers at (n)",
+            ),
+            (
+                "f = n => map(range(n), x => x)\nf(-1)",
+                "in function \"f\": in built-in function \"range\": range requires start to be less than or equal to end at (n)",
+            ),
+            (
+                "f = n => map(range(n), x => x)\nf(1 / 0)",
+                "in function \"f\": in built-in function \"range\": range requires finite numbers at (n)",
+            ),
+            (
+                "f = n => map(range(n), x => x)\nf(0 / 0)",
+                "in function \"f\": in built-in function \"range\": range requires finite numbers at (n)",
+            ),
+            (
+                "f = n => map(range(n), x => x)\nf(1e10)",
+                "in function \"f\": in built-in function \"range\": list would be longer than the maximum length of 4294967295 at (n)",
+            ),
+            // What is not a list.
+            (
+                "f = xs => map(xs, x => x + 1)\nf(1)",
+                "in function \"f\": in built-in function \"map\": expected a list, but got a number at (xs, x => x + 1)",
+            ),
+            (
+                "f = xs => map(xs, x => x + 1)\nf(\"ab\")",
+                "in function \"f\": in built-in function \"map\": expected a list, but got a string at (xs, x => x + 1)",
+            ),
+            (
+                "f = xs => map(xs, x => x + 1)\nf({a: 1})",
+                "in function \"f\": in built-in function \"map\": expected a list, but got a record at (xs, x => x + 1)",
+            ),
+            (
+                "f = xs => map(xs, x => x + 1)\nf(null)",
+                "in function \"f\": in built-in function \"map\": expected a list, but got a null at (xs, x => x + 1)",
+            ),
+            (
+                "f = xs => filter(xs, x => x > 1)\nf(7)",
+                "in function \"f\": in built-in function \"filter\": expected a list, but got a number at (xs, x => x > 1)",
+            ),
+            (
+                "f = xs => reduce(xs, (a, x) => a + x, 0)\nf(\"abc\")",
+                "in function \"f\": in built-in function \"reduce\": expected a list, but got a string at (xs, (a, x) => a + x, 0)",
+            ),
+            // What goes wrong on a pass, with a list or a record half built.
+            (
+                "f = xs => map(xs, x => [x, ...missing])\nf([1])",
+                "in function \"f\": in built-in function \"map\": in anonymous function: unknown identifier: missing at missing",
+            ),
+            (
+                "f = xs => map(xs, x => {a: x, ...x})\nf([1])",
+                "in function \"f\": in built-in function \"map\": in anonymous function: expected a list, record, or string at x",
+            ),
+            (
+                "f = xs => map(xs, x => [{a: [x, ...x.b]}])\nf([{b: [1]}, {b: 2}])",
+                "in function \"f\": in built-in function \"map\": in anonymous function: expected a list, record, or string at .b",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_list_of_more_elements_than_a_function_has_registers_is_built_in_parts() {
+        for (last, call, expected) in [
+            ("", "f(1, 2, 3)", "[300, 600, 1, 3]"),
+            (", ...a", "f([7, 8], 2, 3)", "[302, 515, [7, 8], 8]"),
+            (", ...a", "f(\"xy\", 2, 3)", "[302, 500, xy, y]"),
+            (", ...a", "f({k: 1}, 2, 3)", "[301, 500, {k: 1}, [k, 1]]"),
+            (
+                ", ...a",
+                "f(1, 2, 3)",
+                "in function \"f\": expected a list, record, or string at a",
+            ),
+        ] {
+            let code = format!(
+                "g = xs => [len(xs), sum(filter(xs, x => typeof(x) == \"number\")), xs[0], xs[-1]]\nf = (a, b, c) => g({})\n{call}",
+                long_list(300, last)
+            );
+
+            assert_eq!(outcome(&code), expected, "{call} with{last}");
+        }
+    }
+
+    #[test]
+    fn the_heap_is_compacted_behind_what_these_instructions_add_to_it() {
+        for (code, expected) in [
+            // Strings that are made and joined.
+            (
+                "sum(map(range(100000), i => len(\"a\" + to_string(i % 10))))",
+                "200000",
+            ),
+            // A character of a string.
+            (
+                "s = \"héllo\"\nsum(map(range(100000), i => len(s[i % 5] ?? \"\")))",
+                "120000",
+            ),
+            // Functions that are made and called.
+            (
+                "sum(map(range(100000), i => (j => i + j)(1)))",
+                "5000050000",
+            ),
+            // Records and lists, of entries and of what is spread.
+            (
+                "sum(map(range(100000), i => {a: i, b: [i]}.a))",
+                "4999950000",
+            ),
+            (
+                "r = {a: 1, b: 2}\nsum(map(range(100000), i => {...r, a: i}.a + {a: i, ...r}.b))",
+                "5000150000",
+            ),
+            (
+                "k = \"key\"\nsum(map(range(100000), i => {[k]: i}.key))",
+                "4999950000",
+            ),
+            (
+                "xs = [1, 2]\nsum(map(range(100000), i => len([...xs, i]) + [i, ...xs][0]))",
+                "5000250000",
+            ),
+            // Arguments that are spread into a call.
+            (
+                "g = (a, b) => a - b\nsum(map(range(100000), i => g(...[i, 1])))",
+                "4999850000",
+            ),
+        ] {
+            let (outcome, passes) = run(code, true);
+
+            assert_eq!(outcome, expected, "{code}");
+            assert_eq!(run(code, false), (outcome, 0), "{code}");
+            assert!(passes > 0, "{code}: no pass");
+        }
+    }
+}
+
+// `list via function` and `list where function` go through a list the way `map` and `filter`
+// do, so a function that is written out on the right of the operator runs as a loop in the
+// function that the operator is in. Nothing may tell that from the operator calling the
+// function: not what it comes to, not what an error says and points at, and not how deep the
+// calls of a program go.
+#[cfg(test)]
+mod operator_loop_tests {
+    use crate::ast::Expr;
+    use crate::bytecode::{Instr, Op};
+    use crate::compiler::{compile_chunk, compile_lambda};
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code`, up to the value of the last one.
+    fn evaluate(code: &str, heap: &Rc<RefCell<Heap>>) -> Result<Value, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+            result = evaluate_ast(
+                &expr,
+                Rc::clone(heap),
+                Rc::clone(&bindings),
+                0,
+                Rc::clone(&source),
+            )?;
+        }
+
+        Ok(result)
+    }
+
+    /// What the statements of `code` come to, rendered: the value, or the message of the
+    /// error and the part of `code` that it points at.
+    fn outcome(code: &str) -> String {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        match evaluate(code, &heap) {
+            Ok(value) => value.stringify_internal(&heap.borrow()),
+            Err(error) => {
+                let place = match error.span {
+                    Some(span) => &code[span.start_byte..span.end_byte],
+                    None => "nothing",
+                };
+
+                format!("{} at {place}", error.message)
+            }
+        }
+    }
+
+    /// The operations of the instructions of the function `code`.
+    fn operations(code: &str) -> Vec<Op> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let [Statement::Expression(expr)] = &statements[..] else {
+            panic!("{code} is not a single expression");
+        };
+        let Expr::Lambda { args, body, .. } = &expr.node else {
+            panic!("{code} is not a function");
+        };
+        let proto = compile_lambda(&Rc::new(args.clone()), body, true).unwrap();
+
+        let mut operations = Vec::new();
+        let mut pc = 0;
+        while pc < proto.code.len() {
+            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
+            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            operations.push(instr.op);
+            pc += 1 + instr.operand_words();
+        }
+
+        operations
+    }
+
+    /// The operations of the instructions of the statement `code`, which is no function.
+    fn chunk_operations(code: &str) -> Vec<Op> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let [Statement::Expression(expr)] = &statements[..] else {
+            panic!("{code} is not a single expression");
+        };
+        let chunk = compile_chunk(expr, true, &Environment::new()).unwrap();
+
+        let mut operations = Vec::new();
+        let mut pc = 0;
+        while pc < chunk.code.len() {
+            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
+            let instr = unsafe { Instr::decode(chunk.code[pc]) };
+            operations.push(instr.op);
+            pc += 1 + instr.operand_words();
+        }
+
+        operations
+    }
+
+    /// What `body` comes to in a function that has called itself `depth` times before it
+    /// gets there, without the functions that an error went through on its way out.
+    fn at_depth(body: &str, depth: usize) -> String {
+        let code = format!(
+            "g = x => x + 1\nd = k => if k <= 0 then {body} else [d(k - 1)][0]\nd({depth})"
+        );
+
+        outcome(&code)
+            .trim_start_matches("in function \"d\": ")
+            .to_string()
+    }
+
+    #[test]
+    fn an_operator_with_a_function_written_out_is_a_loop() {
+        let list = [
+            Op::IterList,
+            Op::ListBegin,
+            Op::ForList,
+            Op::CallbackDepth,
+            Op::ListPush,
+            Op::ForListNext,
+            Op::ListEnd,
+        ];
+        let range = [
+            Op::RangePrep,
+            Op::ListBegin,
+            Op::ForRange,
+            Op::CallbackDepth,
+            Op::ListPush,
+            Op::ForRangeNext,
+            Op::ListEnd,
+        ];
+        let loops = [
+            Op::IterList,
+            Op::IterPrep,
+            Op::RangePrep,
+            Op::ForList,
+            Op::ForRange,
+        ];
+        let calls = [Op::Closure, Op::Via, Op::Where];
+
+        for (code, expected, absent) in [
+            // A loop for a list, and behind it the operator for anything else.
+            (
+                "xs => (xs via (x => x + 1))",
+                &[&list[..], &[Op::Closure, Op::Via]].concat()[..],
+                &[Op::IterPrep, Op::Where][..],
+            ),
+            (
+                "xs => (xs via ((x, i) => x * i))",
+                &[&list[..], &[Op::Closure, Op::Via]].concat(),
+                &[Op::IterPrep, Op::Where],
+            ),
+            (
+                "xs => (xs where (x => x > 1))",
+                &[&list[..], &[Op::Closure, Op::Where]].concat(),
+                &[Op::IterPrep, Op::Via],
+            ),
+            (
+                "xs => (xs via (x => do { y = x + 1; return y * 2 }))",
+                &[&list[..], &[Op::Closure, Op::Via]].concat(),
+                &[Op::IterPrep, Op::Where],
+            ),
+            // A range is a list whatever it is made from, so the operator has nothing to do.
+            ("n => (range(n) via (x => x * 2))", &range, &calls),
+            ("n => (range(1, n) where (x => x > 2))", &range, &calls),
+            // A function that is not written out, one that an operator does not call with
+            // what it takes, and an operator that goes through nothing.
+            ("(xs, g) => (xs via g)", &[Op::Via], &loops),
+            ("(xs, g) => (xs where g)", &[Op::Where], &loops),
+            ("xs => (xs via (() => 1))", &[Op::Closure, Op::Via], &loops),
+            (
+                "xs => (xs where ((x, i, j) => x))",
+                &[Op::Closure, Op::Where],
+                &loops,
+            ),
+            (
+                "xs => (xs via ((x, i?) => x))",
+                &[Op::Closure, Op::Via],
+                &loops,
+            ),
+            (
+                "xs => (xs via ((...rest) => rest))",
+                &[Op::Closure, Op::Via],
+                &loops,
+            ),
+            (
+                "xs => (xs into (ys => len(ys)))",
+                &[Op::Closure, Op::Into],
+                &loops,
+            ),
+        ] {
+            let operations = operations(code);
+
+            for op in expected {
+                assert!(
+                    operations.contains(op),
+                    "{code}: {op:?} is not in {operations:?}"
+                );
+            }
+            for op in absent {
+                assert!(
+                    !operations.contains(op),
+                    "{code}: {op:?} is in {operations:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_operator_loop_looks_a_name_up_once() {
+        let count =
+            |operations: &[Op], op: Op| operations.iter().filter(|other| **other == op).count();
+
+        // The first element that gets to a name looks it up, and the others find it where
+        // that put it: in a register that the loop keeps for the name.
+        for (code, kept, lookups) in [
+            ("xs => (xs via (x => x + k))", 1, 1),
+            ("xs => (xs where (x => x > k))", 1, 1),
+            ("xs => (xs via (x => x * k + k))", 1, 1),
+            ("xs => (xs via (x => if x > 1 then k else j))", 2, 2),
+            // A loop keeps the names of the loops in it, which start once for each of its
+            // elements.
+            (
+                "m => (m via (row => reduce(row, (acc, x) => acc + x * k, 0)))",
+                1,
+                1,
+            ),
+            ("m => map(m, row => (row via (x => x * k)))", 1, 1),
+            ("m => (m via (row => (row where (x => x > k))))", 1, 1),
+            // A variable is not looked up at all.
+            ("(xs, k) => (xs via (x => x + k))", 0, 0),
+            ("xs => (xs via (k => k + 1))", 0, 0),
+            ("xs => do { k = 5; return xs where (x => x > k) }", 0, 0),
+        ] {
+            let operations = operations(code);
+
+            assert_eq!(count(&operations, Op::LoadUnbound), kept, "{code}");
+            assert_eq!(count(&operations, Op::EnsureName), lookups, "{code}");
+            assert_eq!(count(&operations, Op::GetName), 0, "{code}");
+        }
+
+        // At the top level of a program, the names are those of the program.
+        for (code, lookups) in [
+            ("[1, 2, 3] via (x => x + k)", 1),
+            ("[1, 2, 3] where (x => x > k)", 1),
+            ("xs via (x => x + k * j)", 3),
+            ("[[1], [2]] via (row => (row via (x => x * k)))", 1),
+            ("[1, 2, 3] via (x => x + 1)", 0),
+        ] {
+            let operations = chunk_operations(code);
+
+            assert_eq!(count(&operations, Op::EnsureGlobal), lookups, "{code}");
+            assert_eq!(count(&operations, Op::GetName), 0, "{code}");
+        }
+
+        // A name that an assignment may have bound is looked up wherever it is read.
+        let operations = operations("xs => [(k = 5), xs via (x => x + k)]");
+
+        assert_eq!(count(&operations, Op::GetName), 1);
+        assert_eq!(count(&operations, Op::EnsureName), 0);
+    }
+
+    #[test]
+    fn an_operator_comes_to_what_calling_its_function_comes_to() {
+        for (code, expected) in [
+            // Every element, with its index for a function that takes one.
+            ("[1, 2, 3] via (x => x * 2)", "[2, 4, 6]"),
+            ("[1, 2, 3] via ((x, i) => x * 10 + i)", "[10, 21, 32]"),
+            ("[1, 2, 3] where (x => x > 1)", "[2, 3]"),
+            ("[5, 6, 7] where ((x, i) => i != 1)", "[5, 7]"),
+            ("[[] via (x => x * 2), [] where (x => x)]", "[[], []]"),
+            ("range(4) via ((x, i) => x * i)", "[0, 1, 4, 9]"),
+            ("range(2, 6) where (x => x != 3)", "[2, 4, 5]"),
+            ("sum(range(1000) via (x => x * 2))", "999000"),
+            ("len(range(1000) where (x => x % 3 == 0))", "334"),
+            // Elements of every kind, and whatever a function makes of them.
+            ("[{a: 1}, {a: 2}] via (r => r.a)", "[1, 2]"),
+            (
+                "[\"a\", \"b\"] via ((s, i) => s + to_string(i))",
+                "[a0, b1]",
+            ),
+            ("[\"a\", \"bb\", \"\"] where (s => len(s) > 0)", "[a, bb]"),
+            (
+                "[1, 2, 3] via (x => if x > 1 then [x] else null)",
+                "[null, [2], [3]]",
+            ),
+            (
+                "fs = [1, 2] via (x => (y => x + y))\n[fs[0](10), fs[1](10)]",
+                "[11, 12]",
+            ),
+            ("[1, 2] via ((x, x) => x)", "[1, 2]"),
+            ("[1, 2] via (x => do { y = x + 1; return y * 2 })", "[4, 6]"),
+            // Parameters that a function need not be given.
+            ("[1, 2] via ((x, i?) => [x, i])", "[[1, 0], [2, 1]]"),
+            (
+                "[1, 2] via ((x, i, j?) => [x, i, j])",
+                "[[1, 0, null], [2, 1, null]]",
+            ),
+            ("[1, 2] where ((x?) => x > 1)", "[2]"),
+            ("[1, 2] via ((...rest) => rest)", "[[1, 0], [2, 1]]"),
+            (
+                "[1, 2] via ((x, ...rest) => [x, rest])",
+                "[[1, [0]], [2, [1]]]",
+            ),
+            // One operator after another, and one in the function of another.
+            (
+                "[1, 2, 3, 4] where (x => x % 2 == 0) via (x => x * x)",
+                "[4, 16]",
+            ),
+            (
+                "[1, 2, 3, 4] via (x => x * x) where (x => x > 4)",
+                "[9, 16]",
+            ),
+            (
+                "[3, 1, 2] where (x => x > 1) via ((x, i) => [i, x])",
+                "[[0, 3], [1, 2]]",
+            ),
+            (
+                "[[1, 2], [3]] via (xs => (xs via (y => y + 1)))",
+                "[[2, 3], [4]]",
+            ),
+            (
+                "[[1, 2], [3], []] via (xs => (xs where (y => y > 1)))",
+                "[[2], [3], []]",
+            ),
+            (
+                "map([[1, 2], [3]], xs => (xs via ((y, i) => y + i)))",
+                "[[1, 3], [3]]",
+            ),
+            (
+                "[[1, 2], [3]] via (xs => reduce(xs, (acc, y) => acc + y, 0))",
+                "[3, 3]",
+            ),
+            // The list stays what it was, and so does what the operator made of it before.
+            (
+                "xs = [1, 2, 3]\nys = xs where (x => x > 1)\nzs = xs via (x => x + len(ys))\n[xs, ys, zs]",
+                "[[1, 2, 3], [2, 3], [3, 4, 5]]",
+            ),
+            ("xs = [1, 2]\nxs via (x => len(xs) + x)", "[3, 4]"),
+            // What the function reads: variables of the function around it, names that its
+            // callers bind, and names of the program that are bound by the time it runs.
+            (
+                "f = (xs, k) => (xs via (x => x + k))\n[f([1, 2], 10), f([], 1), f([3], -3)]",
+                "[[11, 12], [], [0]]",
+            ),
+            (
+                "f = (xs, k) => (xs where (x => x > k))\n[f([1, 2, 3], 1), f([], 1), f([3], 3)]",
+                "[[2, 3], [], []]",
+            ),
+            (
+                "total = xs => sum(xs via (x => x * k))\ncall = k => total([1, 2, 3])\n[call(1), call(10)]",
+                "[6, 60]",
+            ),
+            (
+                "f = xs => (xs via (x => x + w))\ng = w => f([1, 2, 3])\n[g(10), g(20)]",
+                "[[11, 12, 13], [21, 22, 23]]",
+            ),
+            (
+                "f = xs => (xs where (x => x > w))\nw = 1\nf([1, 2, 3])",
+                "[2, 3]",
+            ),
+            // A function that goes through a list of its own results.
+            (
+                "f = n => if n == 0 then [] else [n, ...(f(n - 1) via (x => x * 2))]\nf(4)",
+                "[4, 6, 8, 8]",
+            ),
+            (
+                "f = t => if typeof(t) == \"list\" then sum(t via (c => f(c))) else t\nf([1, [2, [3, 4]], [[5]]])",
+                "15",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn what_is_no_list_is_left_to_the_operator() {
+        for (code, expected) in [
+            // `via` gives its function whatever is on the left.
+            ("5 via (x => x * 2)", "10"),
+            ("\"ab\" via (x => x + \"!\")", "ab!"),
+            ("null via (x => x)", "null"),
+            ("{a: 1} via (x => x.a)", "1"),
+            ("true via (x => !x)", "false"),
+            ("(y => y) via (f => f(3))", "3"),
+            // One operator that finds a list in one call and something else in the next.
+            (
+                "f = v => (v via (x => [x]))\n[f(1), f([1, 2]), f(\"a\"), f(null), f([]), f({a: 1})]",
+                "[[1], [[1], [2]], [a], [null], [], [{a: 1}]]",
+            ),
+            (
+                "f = v => (v via (x => x + k))\ncall = k => [f(1), f([1, 2]), f(2)]\ncall(10)",
+                "[11, [11, 12], 12]",
+            ),
+            // There is no index for what is not an element.
+            (
+                "5 via ((x, i) => x)",
+                "in \"via\" callback: anonymous function takes exactly 2 arguments, but 1 were given at 5 via ((x, i) => x",
+            ),
+            (
+                "f = v => (v via ((x, i) => [x, i]))\n[f([7, 8]), f(7)]",
+                "in function \"f\": in \"via\" callback: anonymous function takes exactly 2 arguments, but 1 were given at v via ((x, i) => [x, i]",
+            ),
+            // `where` goes through lists only.
+            (
+                "5 where (x => x > 2)",
+                "where operator requires a list on the left side at 5 where (x => x > 2",
+            ),
+            (
+                "\"ab\" where (x => true)",
+                "where operator requires a list on the left side at \"ab\" where (x => true",
+            ),
+            (
+                "null where (x => true)",
+                "where operator requires a list on the left side at null where (x => true",
+            ),
+            (
+                "{a: 1} where (x => true)",
+                "where operator requires a list on the left side at {a: 1} where (x => true",
+            ),
+            (
+                "f = v => (v where (x => x > 1))\n[f([1, 2]), f(2)]",
+                "in function \"f\": where operator requires a list on the left side at v where (x => x > 1",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn an_error_is_put_down_to_the_operator_and_to_its_function() {
+        for (code, expected) in [
+            // What goes wrong in the function, where it goes wrong.
+            (
+                "[1, \"a\", 3] via (x => x * 2)",
+                "in \"via\" callback: in anonymous function: expected a number, but got a string at [1, \"a\", 3] via (x => x * 2",
+            ),
+            (
+                "[1, 2, 3] via (x => x + missing)",
+                "in \"via\" callback: in anonymous function: unknown identifier: missing at missing",
+            ),
+            (
+                "[1, 2, 3] via (x => x.a)",
+                "in \"via\" callback: in anonymous function: expected a record, but got a number at x",
+            ),
+            (
+                "[1, 2, 3] where (x => x > \"a\")",
+                "in \"where\" callback: in anonymous function: cannot compare number with string at x > \"a\"",
+            ),
+            (
+                "[1, 2] via (x => [x, ...missing])",
+                "in \"via\" callback: in anonymous function: unknown identifier: missing at missing",
+            ),
+            (
+                "[1, 2] via ((x, i) => {a: x, ...i})",
+                "in \"via\" callback: in anonymous function: expected a list, record, or string at i",
+            ),
+            (
+                "f = xs => (xs via (x => x.a))\nf([1])",
+                "in function \"f\": in \"via\" callback: in anonymous function: expected a record, but got a number at x",
+            ),
+            // What `where` has against what its function comes to is no error of the function.
+            (
+                "[1, 2, 3] where (x => x)",
+                "in \"where\" callback: expected a boolean, but got a number at [1, 2, 3] where (x => x",
+            ),
+            (
+                "[1, 2, 3] where (x => null)",
+                "in \"where\" callback: expected a boolean, but got a null at [1, 2, 3] where (x => null",
+            ),
+            (
+                "f = xs => (xs where (x => x.a))\nf([{a: true}, {a: 1}])",
+                "in function \"f\": in \"where\" callback: expected a boolean, but got a number at xs where (x => x.a",
+            ),
+            // What the function calls, and the loops in it.
+            (
+                "g = x => x.a\n[1] via (x => g(x))",
+                "in \"via\" callback: in anonymous function: in function \"g\": expected a record, but got a number at x",
+            ),
+            (
+                "g = x => x.a\n[1] where (x => g(x))",
+                "in \"where\" callback: in anonymous function: in function \"g\": expected a record, but got a number at x",
+            ),
+            (
+                "[1, 2] where (x => sum([]) > x)",
+                "in \"where\" callback: in anonymous function: in built-in function \"sum\": sum requires at least one number at ([])",
+            ),
+            (
+                "[[1], 2] via (xs => (xs where (y => y > 0)))",
+                "in \"via\" callback: in anonymous function: where operator requires a list on the left side at xs where (y => y > 0",
+            ),
+            (
+                "[[1], [null]] via (xs => (xs via (y => y + 1)))",
+                "in \"via\" callback: in anonymous function: in \"via\" callback: in anonymous function: expected a number, but got a null at xs via (y => y + 1",
+            ),
+            (
+                "[1, 2] via (x => map([x], y => y + missing))",
+                "in \"via\" callback: in anonymous function: in built-in function \"map\": in anonymous function: unknown identifier: missing at missing",
+            ),
+            (
+                "map([[1]], xs => (xs where (y => y + missing)))",
+                "in built-in function \"map\": in anonymous function: in \"where\" callback: in anonymous function: unknown identifier: missing at missing",
+            ),
+            // A function that cannot take an element is not called, and neither is one that
+            // takes more than an element and its index.
+            (
+                "[1, 2] via (() => 1)",
+                "in \"via\" callback: anonymous function takes exactly 0 arguments, but 1 were given at [1, 2] via (() => 1",
+            ),
+            (
+                "[1, 2] where (() => true)",
+                "in \"where\" callback: anonymous function takes exactly 0 arguments, but 1 were given at [1, 2] where (() => true",
+            ),
+            (
+                "[1, 2] via ((x, i, j) => x)",
+                "in \"via\" callback: anonymous function takes exactly 3 arguments, but 1 were given at [1, 2] via ((x, i, j) => x",
+            ),
+            (
+                "[1, 2] where ((x, i, j) => true)",
+                "in \"where\" callback: anonymous function takes exactly 3 arguments, but 1 were given at [1, 2] where ((x, i, j) => true",
+            ),
+            // A list without elements calls nothing, so nothing goes wrong.
+            ("[] via (x => x + missing)", "[]"),
+            ("[] where (x => missing)", "[]"),
+            ("[] via (() => 1)", "[]"),
+            ("[] where ((x, i, j) => true)", "[]"),
+            // What is on the left fails before the operator has anything to do.
+            (
+                "missing via (x => x)",
+                "unknown identifier: missing at missing",
+            ),
+            (
+                "missing where (x => x)",
+                "unknown identifier: missing at missing",
+            ),
+            (
+                "range(3, 1) via (x => x)",
+                "in built-in function \"range\": range requires start to be less than or equal to end at (3, 1)",
+            ),
+            (
+                "range(\"a\") where (x => x)",
+                "in built-in function \"range\": range requires 1 or 2 numbers at (\"a\")",
+            ),
+        ] {
+            assert_eq!(outcome(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_function_is_called_as_deep_as_the_operator_calls_it() {
+        // What an operator comes to at the last depth that it works at, and what goes wrong
+        // one call further in.
+        for (body, last, expected, error) in [
+            // The function is called from where the operator is, and runs one level further
+            // in than that.
+            (
+                "[1, 2] via (x => x + 1)",
+                999,
+                "[2, 3]",
+                "in \"via\" callback: in anonymous function: maximum call depth of 1000 exceeded at [1, 2] via (x => x + 1",
+            ),
+            (
+                "[1, 2] via ((x, i) => x + i)",
+                999,
+                "[1, 3]",
+                "in \"via\" callback: in anonymous function: maximum call depth of 1000 exceeded at [1, 2] via ((x, i) => x + i",
+            ),
+            (
+                "[1, 2] where (x => x > 1)",
+                999,
+                "[2]",
+                "in \"where\" callback: in anonymous function: maximum call depth of 1000 exceeded at [1, 2] where (x => x > 1",
+            ),
+            (
+                "7 via (x => x + 1)",
+                999,
+                "8",
+                "in \"via\" callback: in anonymous function: maximum call depth of 1000 exceeded at 7 via (x => x + 1",
+            ),
+            // What the function calls is one level further in again.
+            (
+                "[1, 2] via (x => g(x))",
+                998,
+                "[2, 3]",
+                "in \"via\" callback: in anonymous function: in function \"g\": maximum call depth of 1000 exceeded at (x)",
+            ),
+            (
+                "[1, 2] where (x => g(x) > 2)",
+                998,
+                "[2]",
+                "in \"where\" callback: in anonymous function: in function \"g\": maximum call depth of 1000 exceeded at (x)",
+            ),
+            (
+                "[1, 2] via (x => typeof(x))",
+                998,
+                "[number, number]",
+                "in \"via\" callback: in anonymous function: in built-in function \"typeof\": maximum call depth of 1000 exceeded at (x)",
+            ),
+            // An operator in the function of an operator, or of a built-in function that
+            // calls its function two levels further in than it is called from.
+            (
+                "[1, 2] via (x => ([x] via (y => y)))",
+                998,
+                "[[1], [2]]",
+                "in \"via\" callback: in anonymous function: in \"via\" callback: in anonymous function: maximum call depth of 1000 exceeded at [x] via (y => y",
+            ),
+            (
+                "[[1], [2]] via (x => (x where (y => g(y) > 0)))",
+                997,
+                "[[1], [2]]",
+                "in \"via\" callback: in anonymous function: in \"where\" callback: in anonymous function: in function \"g\": maximum call depth of 1000 exceeded at (y)",
+            ),
+            (
+                "[1, 2] via (x => (7 via (y => g(y))))",
+                997,
+                "[8, 8]",
+                "in \"via\" callback: in anonymous function: in \"via\" callback: in anonymous function: in function \"g\": maximum call depth of 1000 exceeded at (y)",
+            ),
+            (
+                "map([[1], [2]], x => (x via (y => y)))",
+                996,
+                "[[1], [2]]",
+                "in built-in function \"map\": in anonymous function: in \"via\" callback: in anonymous function: maximum call depth of 1000 exceeded at x via (y => y",
+            ),
+            (
+                "map([[1], [2]], x => (x via (y => g(y))))",
+                995,
+                "[[2], [3]]",
+                "in built-in function \"map\": in anonymous function: in \"via\" callback: in anonymous function: in function \"g\": maximum call depth of 1000 exceeded at (y)",
+            ),
+            (
+                "[[1], [2]] via (x => map(x, y => g(y)))",
+                995,
+                "[[2], [3]]",
+                "in \"via\" callback: in anonymous function: in built-in function \"map\": in anonymous function: in function \"g\": maximum call depth of 1000 exceeded at (y)",
+            ),
+            // A list without elements calls nothing, so it is gone through wherever a
+            // function runs. A range is made by a function that is called.
+            (
+                "[] via (x => x + 1)",
+                1000,
+                "[]",
+                "maximum call depth of 1000 exceeded at (k - 1)",
+            ),
+            (
+                "[] where (x => x > 1)",
+                1000,
+                "[]",
+                "maximum call depth of 1000 exceeded at (k - 1)",
+            ),
+            (
+                "range(2) via (x => x + 1)",
+                999,
+                "[1, 2]",
+                "in built-in function \"range\": maximum call depth of 1000 exceeded at (2)",
+            ),
+            (
+                "range(0) via (x => x + 1)",
+                999,
+                "[]",
+                "in built-in function \"range\": maximum call depth of 1000 exceeded at (0)",
+            ),
+        ] {
+            assert_eq!(at_depth(body, last), expected, "{body} at {last}");
+            assert_eq!(at_depth(body, last + 1), error, "{body} at {}", last + 1);
+        }
+
+        // `where` fails for what is no list however deep it is.
+        for depth in [999, 1000] {
+            assert_eq!(
+                at_depth("7 where (x => x > 1)", depth),
+                "where operator requires a list on the left side at 7 where (x => x > 1"
+            );
+        }
+    }
+}
+
+// A loop over the list that `keys`, `values` or `entries` makes of a record goes through the
+// entries of the record instead, and a function that only ever reads `e[0]` and `e[1]` of
+// the list that `entries` makes for an entry is given the value alone. Nothing may tell that
+// from the list being made: not what the loop comes to, not what an error says and points
+// at, and not how deep the calls of a program go.
+#[cfg(test)]
+mod record_loop_tests {
+    use crate::ast::Expr;
+    use crate::bytecode::{EntryPart, Instr, Op};
+    use crate::compiler::compile_lambda;
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::{evaluate_ast, evaluate_statement};
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code`, up to the value of the last one, with the heap
+    /// compacted while a statement runs (`compacts`) or left alone.
+    fn evaluate(
+        code: &str,
+        heap: &Rc<RefCell<Heap>>,
+        compacts: bool,
+    ) -> Result<Value, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+
+            let (heap, bindings) = (Rc::clone(heap), Rc::clone(&bindings));
+            result = match compacts {
+                true => evaluate_statement(&expr, heap, bindings, Rc::clone(&source), &mut [])?,
+                false => evaluate_ast(&expr, heap, bindings, 0, Rc::clone(&source))?,
+            };
+        }
+
+        Ok(result)
+    }
+
+    /// What the statements of `code` come to, rendered: the value, or the message of the
+    /// error and the part of `code` that it points at. Returns the number of passes over
+    /// the heap as well.
+    fn run(code: &str, compacts: bool) -> (String, usize) {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        let outcome = match evaluate(code, &heap, compacts) {
+            Ok(value) => value.stringify_internal(&heap.borrow()),
+            Err(error) => {
+                let place = match error.span {
+                    Some(span) => &code[span.start_byte..span.end_byte],
+                    None => "nothing",
+                };
+
+                format!("{} at {place}", error.message)
+            }
+        };
+
+        (outcome, heap.borrow().passes())
+    }
+
+    /// What `code` comes to, which is the same with passes over the heap in its statements
+    /// as without.
+    fn outcome(code: &str) -> String {
+        let (outcome, _) = run(code, true);
+
+        assert_eq!(outcome, run(code, false).0, "{code}");
+
+        outcome
+    }
+
+    /// `code` with each call of `keys`, `values` or `entries` spread into a list literal,
+    /// which a loop goes through as the list that it is.
+    fn as_list(code: &str) -> String {
+        let bytes = code.as_bytes();
+        let mut spelled = String::new();
+        let mut at = 0;
+
+        while let Some(c) = code[at..].chars().next() {
+            let starts_name =
+                at == 0 || !(bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_');
+            let name = ["keys(", "values(", "entries("]
+                .into_iter()
+                .find(|name| starts_name && code[at..].starts_with(name));
+            let close = name.and_then(|name| {
+                let mut depth = 0;
+                (at + name.len() - 1..code.len()).find(|&end| {
+                    match bytes[end] {
+                        b'(' => depth += 1,
+                        b')' => depth -= 1,
+                        _ => {}
+                    }
+                    depth == 0
+                })
+            });
+
+            let (Some(name), Some(close)) = (name, close) else {
+                spelled.push(c);
+                at += c.len_utf8();
+                continue;
+            };
+
+            let open = at + name.len();
+            spelled.push_str("[...");
+            spelled.push_str(&code[at..open]);
+            spelled.push_str(&as_list(&code[open..close]));
+            spelled.push_str(")]");
+            at = close + 1;
+        }
+
+        spelled
+    }
+
+    /// `outcome` with the part of the code that an error points at spelled without the
+    /// calls of `keys`, `values` and `entries`, and without the list literals that
+    /// [`as_list`] spreads them into. A call is located at its arguments, so the part that
+    /// an operation is located at starts somewhere else when what is on its left is spread
+    /// into a list.
+    fn unlisted(outcome: &str) -> String {
+        let Some((message, place)) = outcome.rsplit_once(" at ") else {
+            return outcome.to_string();
+        };
+
+        let place = ["[...", "keys", "values", "entries", "]"]
+            .into_iter()
+            .fold(place.to_string(), |place, spelling| {
+                place.replace(spelling, "")
+            });
+
+        format!("{message} at {place}")
+    }
+
+    /// What `code` comes to, which is what it comes to when the lists that it goes through
+    /// are made.
+    fn as_made(code: &str) -> String {
+        let outcome = outcome(code);
+
+        assert_eq!(
+            unlisted(&outcome),
+            unlisted(&self::outcome(&as_list(code))),
+            "{code}"
+        );
+
+        outcome
+    }
+
+    /// The instructions of the function `code`.
+    fn instructions(code: &str) -> Vec<Instr> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let [Statement::Expression(expr)] = &statements[..] else {
+            panic!("{code} is not a single expression");
+        };
+        let Expr::Lambda { args, body, .. } = &expr.node else {
+            panic!("{code} is not a function");
+        };
+        let proto = compile_lambda(&Rc::new(args.clone()), body, true).unwrap();
+
+        let mut instructions = Vec::new();
+        let mut pc = 0;
+        while pc < proto.code.len() {
+            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
+            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            instructions.push(instr);
+            pc += 1 + instr.operand_words();
+        }
+
+        instructions
+    }
+
+    /// What `body` comes to in a function that has called itself `depth` times before it
+    /// gets there, without the functions that an error went through on its way out.
+    fn at_depth(body: &str, depth: usize) -> String {
+        let code = format!(
+            "g = x => x + 1\nd = k => if k <= 0 then {body} else [d(k - 1)][0]\nd({depth})"
+        );
+
+        outcome(&code)
+            .trim_start_matches("in function \"d\": ")
+            .to_string()
+    }
+
+    #[test]
+    fn a_loop_goes_through_the_entries_of_a_record_without_a_list() {
+        let calls = [Op::CallBuiltIn, Op::IterPrep, Op::ForList];
+
+        // The part of each entry that the loop goes through, and whether a list of a key and a
+        // value is made for the entries that a filter keeps.
+        for (code, part, kept_pairs) in [
+            ("r => map(keys(r), k => k)", EntryPart::Key, false),
+            (
+                "r => map(values(r), (v, i) => v * i)",
+                EntryPart::Value,
+                false,
+            ),
+            (
+                "r => (keys(r) where (k => k != \"a\"))",
+                EntryPart::Key,
+                false,
+            ),
+            ("r => map(entries(r), e => e)", EntryPart::Pair, false),
+            ("r => map(entries(r), e => len(e))", EntryPart::Pair, false),
+            ("r => map(entries(r), e => e[2])", EntryPart::Pair, false),
+            ("r => map(entries(r), e => {e})", EntryPart::Pair, false),
+            ("r => map(entries(r), e => g(e[0]))", EntryPart::Pair, false),
+            (
+                "r => map(entries(r), e => (() => e[0]))",
+                EntryPart::Pair,
+                false,
+            ),
+            (
+                "r => map(entries(r), e => do { e = 1; return e })",
+                EntryPart::Pair,
+                false,
+            ),
+            (
+                "r => (entries(r) via (e => (e[0] via (k => k))))",
+                EntryPart::Pair,
+                false,
+            ),
+            (
+                "r => map(entries(r), (e, e) => e[0])",
+                EntryPart::Pair,
+                false,
+            ),
+            // A function that only takes the entries apart is given the value.
+            (
+                "r => reduce(entries(r), (s, e) => s + e[1] + len(e[0]), 0)",
+                EntryPart::Value,
+                false,
+            ),
+            (
+                "r => map(entries(r), (e, i) => [e[0], e[1], i])",
+                EntryPart::Value,
+                false,
+            ),
+            (
+                "r => (entries(r) via (e => {[e[0]]: e[1]}))",
+                EntryPart::Value,
+                false,
+            ),
+            (
+                "r => map(entries(r), e => map(entries(e[1]), f => e[0] + f[0]))",
+                EntryPart::Value,
+                false,
+            ),
+            (
+                "r => filter(entries(r), e => e[1] > 1)",
+                EntryPart::Value,
+                true,
+            ),
+            (
+                "r => (entries(r) where (e => e[0] != \"a\"))",
+                EntryPart::Value,
+                true,
+            ),
+        ] {
+            let instructions = instructions(code);
+            let (parts, loads): (Vec<&Instr>, Vec<&Instr>) = instructions
+                .iter()
+                .filter(|instr| matches!(instr.op, Op::ForRecord | Op::LoadEntry))
+                .partition(|instr| instr.op == Op::ForRecord);
+
+            assert!(
+                instructions.iter().any(|instr| instr.op == Op::IterRecord),
+                "{code}"
+            );
+            assert_eq!(EntryPart::of_operand(parts[0].x).0, part, "{code}");
+            assert_eq!(
+                loads.iter().any(|load| load.x == EntryPart::Pair as u8),
+                kept_pairs,
+                "{code}"
+            );
+            for op in calls {
+                assert!(
+                    !instructions[..3].iter().any(|instr| instr.op == op),
+                    "{code}: {op:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_loop_over_the_entries_of_a_record_comes_to_what_one_over_their_list_does() {
+        let records = "r = {a: 1, b: 2, c: 3}\nn = {a: {b: 1}, c: {d: 2, e: 3}}\n\
+                       u = {[\"é\"]: 1, [\"日本\"]: 2, [\"a key that is long\"]: 3}\n";
+
+        for (code, expected) in [
+            // What a loop gives its function of each entry.
+            ("map(keys(r), k => k)", "[a, b, c]"),
+            ("map(keys(r), (k, i) => k + to_string(i))", "[a0, b1, c2]"),
+            ("map(values(r), v => v * 2)", "[2, 4, 6]"),
+            ("map(values(r), (v, i) => v * i)", "[0, 2, 6]"),
+            ("map(entries(r), e => e)", "[[a, 1], [b, 2], [c, 3]]"),
+            ("map(entries(r), e => e[0])", "[a, b, c]"),
+            ("map(entries(r), e => e[1])", "[1, 2, 3]"),
+            (
+                "map(entries(r), e => [e[1], e[0]])",
+                "[[1, a], [2, b], [3, c]]",
+            ),
+            ("map(entries(r), e => e[1.0] + e[1])", "[2, 4, 6]"),
+            (
+                "map(entries(r), (e, i) => e[0] + to_string(e[1] + i))",
+                "[a1, b3, c5]",
+            ),
+            (
+                "map(entries(u), e => e[0] + to_string(e[1]))",
+                "[é1, 日本2, a key that is long3]",
+            ),
+            ("map(keys(u), k => len(k))", "[2, 6, 18]"),
+            // What each higher-order function and operator makes of it.
+            ("filter(entries(r), e => e[1] > 1)", "[[b, 2], [c, 3]]"),
+            ("filter(entries(r), e => e[0] != \"b\")", "[[a, 1], [c, 3]]"),
+            ("filter(keys(r), k => k != \"a\")", "[b, c]"),
+            ("filter(values(r), v => v % 2 == 1)", "[1, 3]"),
+            ("reduce(entries(r), (acc, e) => acc + e[1], 0)", "6"),
+            (
+                "reduce(entries(r), (acc, e) => {...acc, [e[0]]: e[1] * 10}, {})",
+                "{a: 10, b: 20, c: 30}",
+            ),
+            ("reduce(keys(r), (acc, k) => acc + k, \"\")", "abc"),
+            ("reduce(values(r), (acc, v) => acc * v, 1)", "6"),
+            ("reduce(entries(r), (acc, e, i) => acc + e[1] * i, 0)", "8"),
+            ("every(entries(r), e => e[1] > 0)", "true"),
+            ("some(entries(r), e => e[0] == \"c\")", "true"),
+            ("every(keys(r), k => k != \"b\")", "false"),
+            ("some(values(r), v => v > 5)", "false"),
+            ("entries(r) via (e => e[0])", "[a, b, c]"),
+            ("keys(r) where (k => k > \"a\")", "[b, c]"),
+            ("values(r) via ((v, i) => v + i)", "[1, 3, 5]"),
+            ("entries(r) where (e => e[1] != 2)", "[[a, 1], [c, 3]]"),
+            (
+                "entries(r) where ((e, i) => i > 0) via (e => e[0])",
+                "[b, c]",
+            ),
+            // A record without entries calls nothing.
+            ("map(keys({}), k => k + missing)", "[]"),
+            ("reduce(entries({}), (a, e) => a + e[1], 0)", "0"),
+            ("entries({}) where (e => missing)", "[]"),
+            ("every(values({}), v => v)", "true"),
+            // A function that does more with the list of an entry than take it apart.
+            ("map(entries(r), e => len(e))", "[2, 2, 2]"),
+            ("map(entries(r), e => e[2])", "[null, null, null]"),
+            (
+                "map(entries(r), e => e[-1] + e[-2])",
+                "in built-in function \"map\": in anonymous function: expected a number, but got a string",
+            ),
+            (
+                "map(entries(r), e => [...e, e[0]])",
+                "[[a, 1, a], [b, 2, b], [c, 3, c]]",
+            ),
+            (
+                "map(entries(r), e => {e})",
+                "[{e: [a, 1]}, {e: [b, 2]}, {e: [c, 3]}]",
+            ),
+            ("map(entries(r), e => typeof(e))", "[list, list, list]"),
+            ("map(entries(r), e => (p => p[0])(e))", "[a, b, c]"),
+            (
+                "map(entries(r), e => e via (x => x))",
+                "[[a, 1], [b, 2], [c, 3]]",
+            ),
+            (
+                "g = () => e[0] + \"!\"\nmap(entries(r), e => g())",
+                "[a!, b!, c!]",
+            ),
+            (
+                "g = () => to_string(e[1])\nmap(entries(r), e => e[0] + g())",
+                "[a1, b2, c3]",
+            ),
+            (
+                "fs = map(entries(r), e => (() => e[0] + to_string(e[1])))\nmap(fs, f => f())",
+                "[a1, b2, c3]",
+            ),
+            (
+                "map(entries(r), e => do { e = [9, 8]; return e[0] })",
+                "[9, 9, 9]",
+            ),
+            (
+                "map(entries(r), e => map([[7, 8]], e => e[0]))",
+                "[[7], [7], [7]]",
+            ),
+            ("map(entries(r), (e, e) => e[0])", "[a, b, c]"),
+            // Loops in the function, and what the function computes ahead of them.
+            (
+                "map(entries(n), e => map(entries(e[1]), f => e[0] + f[0] + to_string(f[1])))",
+                "[[ab1], [cd2, ce3]]",
+            ),
+            (
+                "map(entries(r), e => reduce(range(3), (s, j) => s + e[1] * j, 0))",
+                "[3, 6, 9]",
+            ),
+            (
+                "map(entries(r), e => filter(keys(n), k => k + e[0] != \"ca\"))",
+                "[[a], [a, c], [a, c]]",
+            ),
+            ("map(values(n), v => keys(v))", "[[b], [d, e]]"),
+            (
+                "map(entries(r), e => if e[0] == \"a\" then e[0] + \"!\" else e[1])",
+                "[a!, 2, 3]",
+            ),
+            (
+                "reduce(range(3), (acc, i) => acc + reduce(keys(r), (s, k) => s + k, \"\"), \"\")",
+                "abcabcabc",
+            ),
+            // Records whose tables have more keys than they do, and records that share one.
+            (
+                "big = {...r, d: 4}\n[map(keys(r), k => k), map(entries(big), e => e[0])]",
+                "[[a, b, c], [a, b, c, d]]",
+            ),
+            (
+                "rs = map(range(3), i => {a: i, b: i * 2})\nmap(rs, x => reduce(entries(x), (s, e) => s + e[0] + to_string(e[1]), \"\"))",
+                "[a0b0, a1b2, a2b4]",
+            ),
+            // In a function, for any record it is given.
+            (
+                "f = x => map(entries(x), e => e[0] + to_string(e[1]))\n[f(r), f({z: 0}), f({})]",
+                "[[a1, b2, c3], [z0], []]",
+            ),
+            (
+                "f = x => (keys(x) where (k => k != \"b\"))\n[f(r), f({b: 1})]",
+                "[[a, c], []]",
+            ),
+        ] {
+            let outcome = as_made(&format!("{records}{code}"));
+
+            assert!(outcome.starts_with(expected), "{code}: {outcome}");
+        }
+    }
+
+    #[test]
+    fn an_error_is_where_the_list_of_the_entries_would_have_put_it() {
+        for code in [
+            // What is no record.
+            "map(keys(5), k => k)",
+            "map(values(\"s\"), v => v)",
+            "reduce(entries([1]), (a, e) => a, 0)",
+            "entries(null) via (e => e)",
+            "keys(missing) where (k => true)",
+            "f = x => map(entries(x), e => e[0])\n[f({a: 1}), f(5)]",
+            "f = x => (values(x) via (v => v))\n[f({a: 1}), f([1])]",
+            // The list is made before the initial value is evaluated.
+            "reduce(keys(5), (a, k) => a, missing)",
+            "reduce(keys({a: 1}), (a, k) => a, missing)",
+            // What goes wrong in the function.
+            "map(entries({a: 1, b: \"x\"}), e => e[1] + 1)",
+            "map(keys({a: 1}), k => k * 2)",
+            "filter(entries({a: 1}), e => e[1])",
+            "every(values({a: 1}), v => v)",
+            "entries({a: 1}) where (e => e[1])",
+            "keys({a: 1}) via (k => k.x)",
+            "map(entries({a: {b: 1}}), e => map(entries(e[1]), f => f[1] + e[0]))",
+            "map(entries({a: 1}), e => map(entries(e[1]), f => f))",
+            "map(entries({a: 1}), e => sum([]) + e[1])",
+        ] {
+            as_made(code);
+        }
+    }
+
+    #[test]
+    fn a_loop_over_the_entries_of_a_record_is_as_deep_as_the_list_and_its_function() {
+        for body in [
+            "map(keys({a: 1}), k => k)",
+            "map(keys({a: 1}), k => g(len(k)))",
+            "reduce(entries({a: 1}), (s, e) => s + e[1], 0)",
+            "filter(entries({a: 1, b: 2}), e => e[1] > 1)",
+            "entries({a: 1}) via (e => e[0])",
+            "values({a: 1}) via (v => g(v))",
+            "keys({}) where (k => k)",
+            "keys(5) where (k => k)",
+            "map(entries({a: {b: 1}}), e => map(keys(e[1]), k => k + e[0]))",
+        ] {
+            for depth in 994..=1000 {
+                assert_eq!(
+                    unlisted(&at_depth(body, depth)),
+                    unlisted(&at_depth(&as_list(body), depth)),
+                    "{body} at {depth}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_key_is_made_into_a_string_again_after_a_pass_over_the_heap() {
+        let code = "r = reduce(range(50), (acc, i) => {...acc, [\"k\" + to_string(i)]: i}, {})\n\
+                    sum(map(range(2000), i => len(reduce(entries(r), (s, e) => s + e[0], \"\")) + len(filter(keys(r), k => k + to_string(i) != \"k1\"))))";
+        let (outcome, passes) = run(code, true);
+
+        assert_eq!(outcome, "380000");
+        assert_eq!(run(code, false), (outcome, 0));
+        assert!(passes > 0, "no pass");
+    }
+}
+
+// A condition made of `and`, `or` and `not` over comparisons of numbers is decided by jumps
+// between the comparisons, which leave out those that cannot change how it comes out, for
+// as long as the variables that it reads hold finite numbers. The condition evaluates all of
+// its comparisons otherwise. Nothing may tell the two apart: not what the condition comes
+// to, and not what an error says and points at.
+#[cfg(test)]
+mod number_logic_tests {
+    use crate::ast::Expr;
+    use crate::bytecode::{Instr, Op};
+    use crate::compiler::{compile_chunk, compile_lambda};
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code`, up to the value of the last one.
+    fn evaluate(code: &str, heap: &Rc<RefCell<Heap>>) -> Result<Value, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+            result = evaluate_ast(
+                &expr,
+                Rc::clone(heap),
+                Rc::clone(&bindings),
+                0,
+                Rc::clone(&source),
+            )?;
+        }
+
+        Ok(result)
+    }
+
+    /// What the statements of `code` come to, rendered: the value, or the message of the
+    /// error and the part of `code` that it points at.
+    fn outcome(code: &str) -> String {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        match evaluate(code, &heap) {
+            Ok(value) => value.stringify_internal(&heap.borrow()),
+            Err(error) => {
+                let place = match error.span {
+                    Some(span) => &code[span.start_byte..span.end_byte],
+                    None => "nothing",
+                };
+
+                format!("{} at {place}", error.message)
+            }
+        }
+    }
+
+    /// `condition` as a part of a condition that is never decided by jumps: a constant is no
+    /// comparison. `x and true` is `x` for a boolean, and for a list of them.
+    fn evaluated(condition: &str) -> String {
+        format!("({condition}) and true")
+    }
+
+    /// What `code` with `condition` in place of `COND` comes to, which is what it comes to
+    /// when the condition evaluates all of its comparisons.
+    fn as_evaluated(code: &str, condition: &str) -> String {
+        let decided = code.replace("COND", condition);
+        let outcome = outcome(&decided);
+        let evaluated = self::outcome(&code.replace("COND", &evaluated(condition)))
+            .replace(&evaluated(condition), condition);
+
+        assert_eq!(outcome, evaluated, "{decided}");
+
+        outcome
+    }
+
+    /// The operations of the instructions of the function `code`.
+    fn operations(code: &str) -> Vec<Op> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let [Statement::Expression(expr)] = &statements[..] else {
+            panic!("{code} is not a single expression");
+        };
+        let Expr::Lambda { args, body, .. } = &expr.node else {
+            panic!("{code} is not a function");
+        };
+        let proto = compile_lambda(&Rc::new(args.clone()), body, true).unwrap();
+
+        let mut operations = Vec::new();
+        let mut pc = 0;
+        while pc < proto.code.len() {
+            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
+            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            operations.push(instr.op);
+            pc += 1 + instr.operand_words();
+        }
+
+        operations
+    }
+
+    #[test]
+    fn a_condition_over_numbers_is_decided_by_jumps() {
+        for (code, jumps) in [
+            ("n => if n % 3 == 0 and n % 5 != 1 then 1 else 2", true),
+            // A value is computed, whatever it is made of.
+            ("n => n % 3 == 0 and n % 5 != 1", false),
+            ("n => filter(range(n), x => x % 3 == 0 or x > 7)", true),
+            ("n => every([n], x => not (x < 2) and x != 9)", true),
+            ("(n, m) => if n < m or n == 3 then 1 else 2", true),
+            (
+                "(n, m) => if not (n >= 1 and m % 2 == 1) then 1 else 2",
+                true,
+            ),
+            ("n => some([n], x => 1 < x and 2 > x % 4)", true),
+            ("(n, k) => filter(range(n), x => x > k * 2 and x < 9)", true),
+            // A single comparison has its own jump, and so has a value that is no comparison.
+            ("n => if n % 3 == 0 then 1 else 2", false),
+            ("n => if not (n % 3 == 0) then 1 else 2", false),
+            ("n => if n and n > 1 then 1 else 2", false),
+            ("n => if n % 3 == 0 and g(n) then 1 else 2", false),
+            ("n => if [n][0] > 1 or n < 0 then 1 else 2", false),
+            ("n => if n % 0 == 0 or n > 1 then 1 else 2", false),
+            // A remainder that a branch reads again is computed whatever the condition does.
+            ("n => if n % 3 == 0 and n > 1 then n % 3 else 0", false),
+            ("n => if n % 3 == 0 and n > 1 then 1 else n % 3", false),
+        ] {
+            assert_eq!(
+                operations(code).contains(&Op::JmpNotFinite),
+                jumps,
+                "{code}"
+            );
+        }
+
+        // A name of the program is in its register once it was read.
+        let chunk = |code: &str| {
+            let statements = parse_program(code).unwrap();
+            let [Statement::Expression(expr)] = &statements[..] else {
+                panic!("{code} is not a single expression");
+            };
+            let chunk = compile_chunk(expr, true, &Environment::new()).unwrap();
+
+            (0..chunk.code.len()).any(|pc| {
+                // SAFETY: a number operand never decodes to this operation's opcode and
+                // operands together, so this only finds the instruction itself.
+                let instr = unsafe { Instr::decode(chunk.code[pc]) };
+                instr.op == Op::JmpNotFinite
+            })
+        };
+        assert!(!chunk("if k > 1 or k < 0 then 1 else 2"));
+        assert!(chunk("[k, if k > 1 or k < 0 then 1 else 2]"));
+    }
+
+    #[test]
+    fn a_condition_decided_by_jumps_comes_to_what_it_evaluates_to() {
+        let values = "[0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 14, 15, 21, 30, -3, -4, 2.5, -0.5, \
+                      1e300, 4503599627370497, inf, -inf, 0/0]";
+        let others = "[\"7\", [3, 5], [], null, true, {a: 1}, x => x]";
+        let conditions = [
+            "n % 3 == 0 and n % 5 != 1",
+            "n % 3 == 0 or n % 5 == 0",
+            "(n % 3 == 0 or n % 5 == 0) and not (n % 7 == 0) and (n % 2 == 1 or n % 11 == 0)",
+            "n % 2 == 1 && n % 4 != 3 || n % 8 == 0",
+            "!(n > 3) || n < -1",
+            "not (n >= 1 and n <= 10) or n == 5",
+            "n < 7 and n > 2 and n != 4",
+            "1 < n and 10 >= n",
+            "n % 2.5 == 0.5 or n % -4 == -1",
+            "n % 0.5 == 0 and n % 3 != 0",
+            "n == n and n % 2 == 0",
+            "n < m or n % m == 1",
+            "n % 7 > m % 3 and not (m == n)",
+            "1 < 2 and n > 3",
+            "1 > 2 or n > 3",
+        ];
+
+        for condition in conditions {
+            for code in [
+                format!("m = 3\nfilter({values}, n => COND)"),
+                format!("m = 3\nmap({values}, n => if COND then 1 else 0)"),
+                format!("m = 3\n{values} where (n => COND)"),
+                format!("m = 3\nmap({values}, n => every([n], n => COND))"),
+                format!("m = 3\nmap({values}, n => some([n, 1], n => COND))"),
+                format!("f = (n, m) => if COND then n else -1\nmap({values}, n => f(n, 3))"),
+                format!("f = (n, m) => filter([n, m], n => COND)\nmap({values}, n => f(n, 2))"),
+                format!("m = 3\nmap({values}, n => if COND then n % 3 else m)"),
+                format!("m = 3\nmap({others}, n => if COND then 1 else 0)"),
+                format!("m = 3\nfilter({others}, n => COND)"),
+                format!("m = 3\nmap({others}, n => every([n], n => COND))"),
+                format!("m = \"3\"\nmap({values}, n => if COND then 1 else 0)"),
+                format!("m = [1, 2]\nfilter({values}, n => COND)"),
+                format!("m = 0/0\nmap({values}, n => if COND then 1 else 0)"),
+            ] {
+                as_evaluated(&code, condition);
+            }
+        }
+
+        for (code, condition, expected) in [
+            (
+                "filter(range(30), n => COND)",
+                "(n % 3 == 0 or n % 5 == 0) and not (n % 7 == 0)",
+                "[3, 5, 6, 9, 10, 12, 15, 18, 20, 24, 25, 27]",
+            ),
+            (
+                "map([1, 2, 3], n => if COND then n else 0)",
+                "n < 2 or n > 2",
+                "[1, 0, 3]",
+            ),
+            (
+                "filter([1, \"a\", 3], n => COND)",
+                "n > 0 and n < 5",
+                "in built-in function \"filter\": in anonymous function: cannot compare string with number at n > 0",
+            ),
+            (
+                "filter([4, [1, 5]], n => COND)",
+                "n > 2 and n < 5",
+                "in built-in function \"filter\": expected a boolean, but got a list at ([4, [1, 5]], n => n > 2 and n < 5)",
+            ),
+        ] {
+            assert_eq!(as_evaluated(code, condition), expected, "{code}");
+        }
+    }
+}
+
+// The accumulator of a `reduce` that starts out as a list or a record literal, and that its
+// function makes again of the same shape from nothing but its parts, is kept in registers
+// part by part and made once the loop is over. Nothing may tell that from the accumulator
+// being made on every pass: not what the loop comes to, and not what an error says and
+// points at.
+#[cfg(test)]
+mod accumulator_parts_tests {
+    use crate::ast::Expr;
+    use crate::bytecode::{Instr, Op};
+    use crate::compiler::compile_lambda;
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code`, up to the value of the last one.
+    fn evaluate(code: &str, heap: &Rc<RefCell<Heap>>) -> Result<Value, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+            result = evaluate_ast(
+                &expr,
+                Rc::clone(heap),
+                Rc::clone(&bindings),
+                0,
+                Rc::clone(&source),
+            )?;
+        }
+
+        Ok(result)
+    }
+
+    /// What the statements of `code` come to, rendered: the value, or the message of the
+    /// error and the part of `code` that it points at.
+    fn outcome(code: &str) -> String {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        match evaluate(code, &heap) {
+            Ok(value) => value.stringify_internal(&heap.borrow()),
+            Err(error) => {
+                let place = match error.span {
+                    Some(span) => &code[span.start_byte..span.end_byte],
+                    None => "nothing",
+                };
+
+                format!("{} at {place}", error.message)
+            }
+        }
+    }
+
+    /// What `code` with `init` in place of `INIT` comes to, which is what it comes to when
+    /// the initial value is no literal, and the accumulator is made on every pass.
+    fn as_made(code: &str, init: &str) -> String {
+        let kept = code.replace("INIT", init);
+        let outcome = outcome(&kept);
+        let made = format!("[{init}][0]");
+        let made_outcome = self::outcome(&code.replace("INIT", &made)).replace(&made, init);
+
+        assert_eq!(outcome, made_outcome, "{kept}");
+
+        outcome
+    }
+
+    /// Whether the loop of the function `code` makes a list or a record on every pass.
+    fn makes_aggregates(code: &str) -> bool {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let [Statement::Expression(expr)] = &statements[..] else {
+            panic!("{code} is not a single expression");
+        };
+        let Expr::Lambda { args, body, .. } = &expr.node else {
+            panic!("{code} is not a function");
+        };
+        let proto = compile_lambda(&Rc::new(args.clone()), body, true).unwrap();
+
+        let mut operations = Vec::new();
+        let mut pc = 0;
+        while pc < proto.code.len() {
+            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
+            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            operations.push(instr.op);
+            pc += 1 + instr.operand_words();
+        }
+
+        let start = operations
+            .iter()
+            .position(|op| matches!(op, Op::ForRange | Op::ForList))
+            .expect("a loop");
+        let end = operations
+            .iter()
+            .rposition(|op| matches!(op, Op::ForRangeNext | Op::ForListNext))
+            .expect("a loop");
+
+        operations[start..end].iter().any(|op| {
+            matches!(
+                op,
+                Op::NewList | Op::NewListSpread | Op::ListEnd | Op::NewRecord | Op::RecordEnd
+            )
+        })
+    }
+
+    #[test]
+    fn an_accumulator_of_a_shape_is_kept_in_registers() {
+        for (code, kept) in [
+            (
+                "xs => reduce(xs, (acc, x) => [acc[0] + x, acc[1] * 2], [0, 1])",
+                true,
+            ),
+            (
+                "n => reduce(range(n), (acc, i) => [acc[1], acc[0] + i], [0, 0])",
+                true,
+            ),
+            (
+                "n => reduce(range(n), (acc, i) => if i > acc[0] then [i, acc[1]] else acc, [0, 0])",
+                true,
+            ),
+            (
+                "n => reduce(range(n), (acc, i) => {...acc, x: acc.x + i}, {x: 0, y: 1})",
+                true,
+            ),
+            (
+                "n => reduce(range(n), (acc, i) => {x: acc[\"y\"], y: acc.x + i}, {x: 0, y: 1})",
+                true,
+            ),
+            (
+                "n => reduce(range(n), (acc, i, j) => [acc[0] + j, max(acc[1], i)], [0, 0])",
+                true,
+            ),
+            // Something that reads the accumulator otherwise, or that could.
+            (
+                "n => reduce(range(n), (acc, i) => [acc[0] + len(acc)], [0])",
+                false,
+            ),
+            ("n => reduce(range(n), (acc, i) => [acc[2]], [0])", false),
+            ("n => reduce(range(n), (acc, i) => [acc[-1]], [0])", false),
+            ("n => reduce(range(n), (acc, i) => [acc[0], 1], [0])", false),
+            ("n => reduce(range(n), (acc, i) => [g(acc[0])], [0])", false),
+            (
+                "n => reduce(range(n), (acc, i) => [(() => acc[0])()], [0])",
+                false,
+            ),
+            (
+                "n => reduce(range(n), (acc, i) => {...acc, z: 1}, {x: 0})",
+                false,
+            ),
+            (
+                "n => reduce(range(n), (acc, i) => {y: 1, x: 0}, {x: 0, y: 1})",
+                false,
+            ),
+            (
+                "n => reduce(range(n), (acc, i) => {...acc, x: 1, x: 2}, {x: 0})",
+                false,
+            ),
+            ("n => reduce(range(n), (acc, i) => [...acc], [0])", false),
+            (
+                "(n, init) => reduce(range(n), (acc, i) => [acc[0] + i], init)",
+                false,
+            ),
+            ("n => reduce(range(n), (acc, acc) => [acc[0]], [0])", false),
+        ] {
+            assert_eq!(!makes_aggregates(code), kept, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_kept_accumulator_comes_to_what_the_made_one_does() {
+        for (code, init, expected) in [
+            (
+                "reduce(range(10), (acc, i) => [acc[0] + i, acc[1] + i % 3], INIT)",
+                "[0, 0]",
+                "[45, 9]",
+            ),
+            (
+                "reduce(range(10), (acc, i) => [acc[1], acc[0] + i], INIT)",
+                "[0, 100]",
+                "[20, 125]",
+            ),
+            (
+                "reduce([3, 9, 2, 7], (acc, x) => if x > acc[0] then [x, acc[1] + 1] else acc, INIT)",
+                "[0, 0]",
+                "[9, 2]",
+            ),
+            (
+                "reduce([3, 9, 2], (acc, x, i) => [acc[2] + x, acc[0] * i, acc[1]], INIT)",
+                "[1, 2, 3]",
+                "[2, 22, 6]",
+            ),
+            (
+                "reduce(range(5), (acc, i) => {...acc, x: acc.x + i, y: acc[\"y\"] * 2}, INIT)",
+                "{x: 0, y: 1, z: \"kept\"}",
+                "{x: 10, y: 32, z: kept}",
+            ),
+            (
+                "reduce(range(4), (acc, i) => {a: acc.b, b: acc.a + i}, INIT)",
+                "{a: 1, b: 2}",
+                "{a: 3, b: 6}",
+            ),
+            (
+                "reduce(range(6), (acc, i) => if i % 2 == 0 then {...acc, even: acc.even + 1} else {...acc, odd: acc.odd + 1}, INIT)",
+                "{odd: 0, even: 0}",
+                "{odd: 3, even: 3}",
+            ),
+            ("reduce([], (acc, x) => [acc[0] + x], INIT)", "[7]", "[7]"),
+            (
+                "reduce([], (acc, x) => {...acc, n: acc.n + 1}, INIT)",
+                "{n: 0, m: 1}",
+                "{n: 0, m: 1}",
+            ),
+            (
+                "reduce([[1, 2], [3, 4]], (acc, row) => [acc[0] + reduce(row, (s, x) => [s[0] + x * acc[1]], [0])[0], acc[1] + 1], INIT)",
+                "[0, 1]",
+                "[17, 3]",
+            ),
+            (
+                "f = (xs, k) => reduce(xs, (acc, x) => [acc[0] + x * k, acc[1] + 1], INIT)\n[f([1, 2], 10), f([], 1)]",
+                "[0, 0]",
+                "[[30, 2], [0, 0]]",
+            ),
+            (
+                "reduce(range(3), (acc, i) => [[...acc[0], i], acc[1] + len(acc[0])], INIT)",
+                "[[], 0]",
+                "[[0, 1, 2], 3]",
+            ),
+            // An accumulator that something else reads is made, whatever its shape.
+            (
+                "reduce(range(3), (acc, i) => [acc[0] + len(acc)], INIT)",
+                "[0]",
+                "[3]",
+            ),
+            (
+                "reduce(range(3), (acc, i) => {...acc, z: i}, INIT)",
+                "{x: 0}",
+                "{x: 0, z: 2}",
+            ),
+            // What goes wrong where.
+            (
+                "reduce([1, \"a\", 3], (acc, x) => [acc[0] + x, acc[1] * x], INIT)",
+                "[0, 1]",
+                "in built-in function \"reduce\": in anonymous function: expected a number, but got a string",
+            ),
+            (
+                "reduce([1, 2], (acc, x) => [acc[0] + x], INIT)",
+                "[missing]",
+                "unknown identifier: missing at missing",
+            ),
+            (
+                "reduce(5, (acc, x) => [acc[0] + x], INIT)",
+                "[0]",
+                "in built-in function \"reduce\": expected a list, but got a number",
+            ),
+            (
+                "reduce([1, 2], (acc, x) => if acc[0] then [x] else acc, INIT)",
+                "[0]",
+                "in built-in function \"reduce\": in anonymous function: expected a boolean, but got a number",
+            ),
+        ] {
+            let outcome = as_made(code, init);
+
+            assert!(outcome.starts_with(expected), "{code}: {outcome}");
+        }
     }
 }

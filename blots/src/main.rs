@@ -1,12 +1,32 @@
+#![cfg_attr(
+    all(
+        not(test),
+        target_os = "linux",
+        target_env = "gnu",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    no_main
+)]
+
+mod allocator;
 mod cli;
 mod commands;
+#[cfg(all(
+    not(test),
+    target_os = "linux",
+    target_env = "gnu",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod entry;
 mod highlighter;
 
 use blots_core::ast::{Expr, Spanned};
 use blots_core::environment::Environment;
 use blots_core::expressions::{
-    evaluate_pairs, pairs_to_expr_with_comments, validate_portable_value,
+    evaluate_statement, evaluate_statement_pairs, pairs_to_expr_with_comments,
+    validate_portable_value,
 };
+use blots_core::fast_parser::{Statement, parse_program};
 use blots_core::formatter::format_expr;
 use blots_core::functions::{
     clear_function_call_stats, get_function_call_stats, set_profiling_enabled,
@@ -16,7 +36,7 @@ use blots_core::intern::Symbol;
 use blots_core::parser::{Rule, get_pairs};
 use blots_core::stats::ProfilingSummary;
 use blots_core::values::{SerializableValue, Value};
-use clap::{CommandFactory, Parser};
+use clap::CommandFactory;
 use clap_complete::{Shell, generate, shells::*};
 use cli::Args;
 use commands::{CommandResult, exec_command, is_command};
@@ -29,7 +49,10 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::rc::Rc;
 use std::sync::LazyLock;
 
-static ARGS: LazyLock<Args> = LazyLock::new(Args::parse);
+#[global_allocator]
+static ALLOCATOR: allocator::Allocator = allocator::Allocator;
+
+static ARGS: LazyLock<Args> = LazyLock::new(Args::from_env);
 
 /// Parse JSON string into an IndexMap of Values
 fn parse_json_inputs(
@@ -98,6 +121,85 @@ fn write_outputs(outputs: &IndexMap<String, SerializableValue>, output_path: Opt
     }
 }
 
+/// Record `value` as the output called `name`, or exit if it cannot leave the program.
+fn record_output(
+    name: &str,
+    value: &Value,
+    heap: &Rc<RefCell<Heap>>,
+    bindings: &Rc<Environment>,
+    outputs: &mut IndexMap<String, SerializableValue>,
+) {
+    if let Err(e) = validate_portable_value(value, &heap.borrow(), bindings) {
+        eprintln!("[output error] {}", e);
+        std::process::exit(1);
+    }
+
+    if let Ok(serializable) = value.to_serializable_value(&heap.borrow()) {
+        outputs.insert(name.to_string(), serializable);
+    }
+}
+
+/// Evaluate the statements of a program that `parse_program` read, in order.
+fn evaluate_statements(
+    statements: Vec<Statement>,
+    source: &str,
+    heap: &Rc<RefCell<Heap>>,
+    bindings: &Rc<Environment>,
+    outputs: &mut IndexMap<String, SerializableValue>,
+) {
+    let source: Rc<str> = source.into();
+
+    for statement in statements {
+        match statement {
+            Statement::Expression(expr) => {
+                let result = evaluate_statement(
+                    &expr,
+                    Rc::clone(heap),
+                    Rc::clone(bindings),
+                    Rc::clone(&source),
+                    &mut [],
+                );
+
+                if let Err(error) = result {
+                    println!("[evaluation error] {}", error);
+                    std::process::exit(1);
+                }
+            }
+            Statement::Output {
+                name,
+                expr,
+                assigns,
+            } => {
+                let result = evaluate_statement(
+                    &expr,
+                    Rc::clone(heap),
+                    Rc::clone(bindings),
+                    Rc::clone(&source),
+                    &mut [],
+                );
+
+                if assigns {
+                    if let Ok(value) = &result {
+                        record_output(name.as_str(), value, heap, bindings, outputs);
+                    }
+                } else if let Some(value) = bindings.get(name) {
+                    record_output(name.as_str(), &value, heap, bindings, outputs);
+                }
+
+                if let Err(error) = result {
+                    println!("[evaluation error] {}", error);
+                    std::process::exit(1);
+                }
+            }
+            Statement::Comment => {}
+        }
+
+        // Statement boundary: safe point to reclaim heap garbage, since only the root
+        // bindings (and the pinned constants record) need to survive past this point.
+        heap.borrow_mut().compact_if_grown(bindings, &mut []);
+    }
+}
+
 /// Evaluate Blots source code and collect outputs
 fn evaluate_source(
     source: &str,
@@ -105,6 +207,11 @@ fn evaluate_source(
     bindings: &Rc<Environment>,
     outputs: &mut IndexMap<String, SerializableValue>,
 ) -> Result<(), String> {
+    if let Some(statements) = parse_program(source) {
+        evaluate_statements(statements, source, heap, bindings, outputs);
+        return Ok(());
+    }
+
     let pairs = get_pairs(source).map_err(|e| format!("Parse error: {}", e))?;
 
     pairs.for_each(|pair| match pair.as_rule() {
@@ -112,12 +219,12 @@ fn evaluate_source(
             if let Some(inner_pair) = pair.into_inner().next() {
                 match inner_pair.as_rule() {
                     Rule::expression => {
-                        let result = evaluate_pairs(
+                        let result = evaluate_statement_pairs(
                             inner_pair.into_inner(),
                             Rc::clone(heap),
                             Rc::clone(bindings),
-                            0,
                             source,
+                            &mut [],
                         );
 
                         if let Err(error) = result {
@@ -128,12 +235,12 @@ fn evaluate_source(
                     Rule::output_declaration => {
                         let inner_pairs_clone = inner_pair.clone().into_inner();
 
-                        let result = evaluate_pairs(
+                        let result = evaluate_statement_pairs(
                             inner_pair.clone().into_inner(),
                             Rc::clone(heap),
                             Rc::clone(bindings),
-                            0,
                             source,
+                            &mut [],
                         );
 
                         for pair in inner_pairs_clone {
@@ -605,12 +712,12 @@ fn main() -> ! {
                 if let Some(inner_pair) = pair.into_inner().next() {
                     match inner_pair.as_rule() {
                         Rule::expression => {
-                            let result = evaluate_pairs(
+                            let result = evaluate_statement_pairs(
                                 inner_pair.into_inner(),
                                 Rc::clone(&heap),
                                 Rc::clone(&bindings),
-                                0,
                                 &accumulated_input,
+                                &mut [],
                             );
 
                             match result {
@@ -634,12 +741,12 @@ fn main() -> ! {
                             let inner_pairs_clone = inner_pair.clone().into_inner();
 
                             // Evaluate the entire output declaration
-                            let result = evaluate_pairs(
+                            let result = evaluate_statement_pairs(
                                 inner_pair.clone().into_inner(),
                                 Rc::clone(&heap),
                                 Rc::clone(&bindings),
-                                0,
                                 &accumulated_input,
+                                &mut [],
                             );
 
                             // Extract the output name from the declaration
