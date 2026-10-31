@@ -11515,3 +11515,275 @@ mod number_logic_tests {
         }
     }
 }
+
+// The accumulator of a `reduce` that starts out as a list or a record literal, and that its
+// function makes again of the same shape from nothing but its parts, is kept in registers
+// part by part and made once the loop is over. Nothing may tell that from the accumulator
+// being made on every pass: not what the loop comes to, and not what an error says and
+// points at.
+#[cfg(test)]
+mod accumulator_parts_tests {
+    use crate::ast::Expr;
+    use crate::bytecode::{Instr, Op};
+    use crate::compiler::compile_lambda;
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code`, up to the value of the last one.
+    fn evaluate(code: &str, heap: &Rc<RefCell<Heap>>) -> Result<Value, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+            result = evaluate_ast(
+                &expr,
+                Rc::clone(heap),
+                Rc::clone(&bindings),
+                0,
+                Rc::clone(&source),
+            )?;
+        }
+
+        Ok(result)
+    }
+
+    /// What the statements of `code` come to, rendered: the value, or the message of the
+    /// error and the part of `code` that it points at.
+    fn outcome(code: &str) -> String {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        match evaluate(code, &heap) {
+            Ok(value) => value.stringify_internal(&heap.borrow()),
+            Err(error) => {
+                let place = match error.span {
+                    Some(span) => &code[span.start_byte..span.end_byte],
+                    None => "nothing",
+                };
+
+                format!("{} at {place}", error.message)
+            }
+        }
+    }
+
+    /// What `code` with `init` in place of `INIT` comes to, which is what it comes to when
+    /// the initial value is no literal, and the accumulator is made on every pass.
+    fn as_made(code: &str, init: &str) -> String {
+        let kept = code.replace("INIT", init);
+        let outcome = outcome(&kept);
+        let made = format!("[{init}][0]");
+        let made_outcome = self::outcome(&code.replace("INIT", &made)).replace(&made, init);
+
+        assert_eq!(outcome, made_outcome, "{kept}");
+
+        outcome
+    }
+
+    /// Whether the loop of the function `code` makes a list or a record on every pass.
+    fn makes_aggregates(code: &str) -> bool {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let [Statement::Expression(expr)] = &statements[..] else {
+            panic!("{code} is not a single expression");
+        };
+        let Expr::Lambda { args, body, .. } = &expr.node else {
+            panic!("{code} is not a function");
+        };
+        let proto = compile_lambda(&Rc::new(args.clone()), body, true).unwrap();
+
+        let mut operations = Vec::new();
+        let mut pc = 0;
+        while pc < proto.code.len() {
+            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
+            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            operations.push(instr.op);
+            pc += 1 + instr.operand_words();
+        }
+
+        let start = operations
+            .iter()
+            .position(|op| matches!(op, Op::ForRange | Op::ForList))
+            .expect("a loop");
+        let end = operations
+            .iter()
+            .rposition(|op| matches!(op, Op::ForRangeNext | Op::ForListNext))
+            .expect("a loop");
+
+        operations[start..end].iter().any(|op| {
+            matches!(
+                op,
+                Op::NewList | Op::NewListSpread | Op::ListEnd | Op::NewRecord | Op::RecordEnd
+            )
+        })
+    }
+
+    #[test]
+    fn an_accumulator_of_a_shape_is_kept_in_registers() {
+        for (code, kept) in [
+            (
+                "xs => reduce(xs, (acc, x) => [acc[0] + x, acc[1] * 2], [0, 1])",
+                true,
+            ),
+            (
+                "n => reduce(range(n), (acc, i) => [acc[1], acc[0] + i], [0, 0])",
+                true,
+            ),
+            (
+                "n => reduce(range(n), (acc, i) => if i > acc[0] then [i, acc[1]] else acc, [0, 0])",
+                true,
+            ),
+            (
+                "n => reduce(range(n), (acc, i) => {...acc, x: acc.x + i}, {x: 0, y: 1})",
+                true,
+            ),
+            (
+                "n => reduce(range(n), (acc, i) => {x: acc[\"y\"], y: acc.x + i}, {x: 0, y: 1})",
+                true,
+            ),
+            (
+                "n => reduce(range(n), (acc, i, j) => [acc[0] + j, max(acc[1], i)], [0, 0])",
+                true,
+            ),
+            // Something that reads the accumulator otherwise, or that could.
+            (
+                "n => reduce(range(n), (acc, i) => [acc[0] + len(acc)], [0])",
+                false,
+            ),
+            ("n => reduce(range(n), (acc, i) => [acc[2]], [0])", false),
+            ("n => reduce(range(n), (acc, i) => [acc[-1]], [0])", false),
+            ("n => reduce(range(n), (acc, i) => [acc[0], 1], [0])", false),
+            ("n => reduce(range(n), (acc, i) => [g(acc[0])], [0])", false),
+            (
+                "n => reduce(range(n), (acc, i) => [(() => acc[0])()], [0])",
+                false,
+            ),
+            (
+                "n => reduce(range(n), (acc, i) => {...acc, z: 1}, {x: 0})",
+                false,
+            ),
+            (
+                "n => reduce(range(n), (acc, i) => {y: 1, x: 0}, {x: 0, y: 1})",
+                false,
+            ),
+            (
+                "n => reduce(range(n), (acc, i) => {...acc, x: 1, x: 2}, {x: 0})",
+                false,
+            ),
+            ("n => reduce(range(n), (acc, i) => [...acc], [0])", false),
+            (
+                "(n, init) => reduce(range(n), (acc, i) => [acc[0] + i], init)",
+                false,
+            ),
+            ("n => reduce(range(n), (acc, acc) => [acc[0]], [0])", false),
+        ] {
+            assert_eq!(!makes_aggregates(code), kept, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_kept_accumulator_comes_to_what_the_made_one_does() {
+        for (code, init, expected) in [
+            (
+                "reduce(range(10), (acc, i) => [acc[0] + i, acc[1] + i % 3], INIT)",
+                "[0, 0]",
+                "[45, 9]",
+            ),
+            (
+                "reduce(range(10), (acc, i) => [acc[1], acc[0] + i], INIT)",
+                "[0, 100]",
+                "[20, 125]",
+            ),
+            (
+                "reduce([3, 9, 2, 7], (acc, x) => if x > acc[0] then [x, acc[1] + 1] else acc, INIT)",
+                "[0, 0]",
+                "[9, 2]",
+            ),
+            (
+                "reduce([3, 9, 2], (acc, x, i) => [acc[2] + x, acc[0] * i, acc[1]], INIT)",
+                "[1, 2, 3]",
+                "[2, 22, 6]",
+            ),
+            (
+                "reduce(range(5), (acc, i) => {...acc, x: acc.x + i, y: acc[\"y\"] * 2}, INIT)",
+                "{x: 0, y: 1, z: \"kept\"}",
+                "{x: 10, y: 32, z: kept}",
+            ),
+            (
+                "reduce(range(4), (acc, i) => {a: acc.b, b: acc.a + i}, INIT)",
+                "{a: 1, b: 2}",
+                "{a: 3, b: 6}",
+            ),
+            (
+                "reduce(range(6), (acc, i) => if i % 2 == 0 then {...acc, even: acc.even + 1} else {...acc, odd: acc.odd + 1}, INIT)",
+                "{odd: 0, even: 0}",
+                "{odd: 3, even: 3}",
+            ),
+            ("reduce([], (acc, x) => [acc[0] + x], INIT)", "[7]", "[7]"),
+            (
+                "reduce([], (acc, x) => {...acc, n: acc.n + 1}, INIT)",
+                "{n: 0, m: 1}",
+                "{n: 0, m: 1}",
+            ),
+            (
+                "reduce([[1, 2], [3, 4]], (acc, row) => [acc[0] + reduce(row, (s, x) => [s[0] + x * acc[1]], [0])[0], acc[1] + 1], INIT)",
+                "[0, 1]",
+                "[17, 3]",
+            ),
+            (
+                "f = (xs, k) => reduce(xs, (acc, x) => [acc[0] + x * k, acc[1] + 1], INIT)\n[f([1, 2], 10), f([], 1)]",
+                "[0, 0]",
+                "[[30, 2], [0, 0]]",
+            ),
+            (
+                "reduce(range(3), (acc, i) => [[...acc[0], i], acc[1] + len(acc[0])], INIT)",
+                "[[], 0]",
+                "[[0, 1, 2], 3]",
+            ),
+            // An accumulator that something else reads is made, whatever its shape.
+            (
+                "reduce(range(3), (acc, i) => [acc[0] + len(acc)], INIT)",
+                "[0]",
+                "[3]",
+            ),
+            (
+                "reduce(range(3), (acc, i) => {...acc, z: i}, INIT)",
+                "{x: 0}",
+                "{x: 0, z: 2}",
+            ),
+            // What goes wrong where.
+            (
+                "reduce([1, \"a\", 3], (acc, x) => [acc[0] + x, acc[1] * x], INIT)",
+                "[0, 1]",
+                "in built-in function \"reduce\": in anonymous function: expected a number, but got a string",
+            ),
+            (
+                "reduce([1, 2], (acc, x) => [acc[0] + x], INIT)",
+                "[missing]",
+                "unknown identifier: missing at missing",
+            ),
+            (
+                "reduce(5, (acc, x) => [acc[0] + x], INIT)",
+                "[0]",
+                "in built-in function \"reduce\": expected a list, but got a number",
+            ),
+            (
+                "reduce([1, 2], (acc, x) => if acc[0] then [x] else acc, INIT)",
+                "[0]",
+                "in built-in function \"reduce\": in anonymous function: expected a boolean, but got a number",
+            ),
+        ] {
+            let outcome = as_made(code, init);
+
+            assert!(outcome.starts_with(expected), "{code}: {outcome}");
+        }
+    }
+}

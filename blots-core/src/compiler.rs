@@ -395,19 +395,38 @@ fn pair_part(index: &SpannedExpr) -> Option<EntryPart> {
 /// The body may call built-in functions that call no function, and loops that are inlined
 /// themselves.
 fn takes_entries_apart(call: &InlineCall, name: Symbol) -> bool {
-    let distinct = call.params.iter().enumerate().all(|(index, param)| {
+    let is_part = |expr: &SpannedExpr| match &expr.node {
+        Expr::Access {
+            expr: object,
+            index,
+        } => variable_name(object) == Some(name) && pair_part(index).is_some(),
+        _ => false,
+    };
+
+    distinct_params(call) && !is_constant_name(name) && reads_only_parts(call.body, name, &is_part)
+}
+
+/// Whether the parameters of the callback of `call` have names of their own.
+fn distinct_params(call: &InlineCall) -> bool {
+    call.params.iter().enumerate().all(|(index, param)| {
         call.params[..index]
             .iter()
             .all(|other| other.get_name() != param.get_name())
-    });
-
-    distinct && !is_constant_name(name) && only_takes_apart(call.body, name)
+    })
 }
 
-/// Whether `expr` reads `name` only as `name[0]` or `name[1]`, and nothing that it does can
-/// find `name` otherwise (see [`takes_entries_apart`]).
-fn only_takes_apart(expr: &SpannedExpr, name: Symbol) -> bool {
-    let apart = |expr: &SpannedExpr| only_takes_apart(expr, name);
+/// Whether `expr` reads `name` only in the parts of it that `is_part` holds for, and nothing
+/// that it does can find `name` otherwise (see [`takes_entries_apart`]).
+fn reads_only_parts(
+    expr: &SpannedExpr,
+    name: Symbol,
+    is_part: &dyn Fn(&SpannedExpr) -> bool,
+) -> bool {
+    let apart = |expr: &SpannedExpr| reads_only_parts(expr, name, is_part);
+
+    if is_part(expr) {
+        return true;
+    }
 
     match &expr.node {
         Expr::Number(_)
@@ -422,10 +441,7 @@ fn only_takes_apart(expr: &SpannedExpr, name: Symbol) -> bool {
         Expr::Access {
             expr: object,
             index,
-        } => match variable_name(object) == Some(name) && pair_part(index).is_some() {
-            true => true,
-            false => apart(object) && apart(index),
-        },
+        } => apart(object) && apart(index),
         Expr::List(items) => items.iter().all(|item| apart(&item.node)),
         Expr::Record(entries) => entries.iter().all(|entry| {
             let entry = &entry.node;
@@ -478,6 +494,200 @@ fn only_takes_apart(expr: &SpannedExpr, name: Symbol) -> bool {
         | Expr::Output { expr: operand }
         | Expr::Spread(operand) => apart(operand),
         Expr::Lambda { .. } | Expr::Assignment { .. } => false,
+    }
+}
+
+/// The most parts of an accumulator of `reduce` that are kept in registers of their own
+/// (see [`accumulator_shape`]).
+const MAX_PARTS: usize = 16;
+
+/// What the accumulator of an inlined `reduce` is made of, when it is kept in registers
+/// part by part (see [`accumulator_shape`]).
+enum Shape {
+    /// A list of this many elements.
+    List(usize),
+
+    /// A record with these keys, in this order.
+    Record(Vec<String>),
+}
+
+impl Shape {
+    fn len(&self) -> usize {
+        match self {
+            Shape::List(len) => *len,
+            Shape::Record(keys) => keys.len(),
+        }
+    }
+
+    /// The position of the part that `expr` reads of the accumulator `name`, when it reads
+    /// one that the shape has: `name[k]` of a list, `name.key` or `name["key"]` of a record.
+    fn part(&self, expr: &SpannedExpr, name: Symbol) -> Option<usize> {
+        let (Expr::Access { expr: object, .. } | Expr::DotAccess { expr: object, .. }) = &expr.node
+        else {
+            return None;
+        };
+        if variable_name(object) != Some(name) {
+            return None;
+        }
+
+        match (self, &expr.node) {
+            (Shape::List(len), Expr::Access { index, .. }) => match index.node {
+                Expr::Number(position)
+                    if position.fract() == 0.0 && position >= 0.0 && position < *len as f64 =>
+                {
+                    Some(position as usize)
+                }
+                _ => None,
+            },
+            (Shape::Record(keys), Expr::DotAccess { field, .. }) => {
+                keys.iter().position(|key| key == field)
+            }
+            (Shape::Record(keys), Expr::Access { index, .. }) => match &index.node {
+                Expr::String(text) => keys.iter().position(|key| **key == **text),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+/// The shape of the accumulator of `call`, when the call is a `reduce` whose accumulator
+/// can be kept in registers part by part, and only made when the loop is over.
+///
+/// The initial value has to be a list or a record that is spelled out, with values only
+/// (no spread) and distinct keys that are written out (`records` says whether a record can
+/// be made from a layout of its own). The callback has to come to an accumulator of the
+/// same shape on every pass, which it makes the same way (see [`updates_parts`]), and it
+/// may read the accumulator in nothing but its parts: nothing else can tell that the
+/// accumulator is not made for every pass. A function that is called, or a lambda, could
+/// (see [`takes_entries_apart`]).
+fn accumulator_shape(call: &InlineCall, records: bool) -> Option<Shape> {
+    if call.builtin != BuiltInFunction::Reduce {
+        return None;
+    }
+
+    let shape = match &call.init?.node {
+        Expr::List(items)
+            if (1..=MAX_PARTS).contains(&items.len())
+                && !items
+                    .iter()
+                    .any(|item| matches!(item.node.node, Expr::Spread(_))) =>
+        {
+            Shape::List(items.len())
+        }
+        Expr::Record(entries) if records && (1..=MAX_PARTS).contains(&entries.len()) => {
+            let mut keys: Vec<String> = Vec::new();
+            for entry in entries {
+                let RecordKey::Static(key) = &entry.node.key else {
+                    return None;
+                };
+                if keys.contains(key) {
+                    return None;
+                }
+                keys.push(key.clone());
+            }
+
+            Shape::Record(keys)
+        }
+        _ => return None,
+    };
+
+    let name = call.params[0].get_name();
+    let shaped =
+        distinct_params(call) && !is_constant_name(name) && updates_parts(call.body, name, &shape);
+
+    shaped.then_some(shape)
+}
+
+/// Whether `body` comes to an accumulator of `shape` that it makes from the parts of the
+/// accumulator `name` and nothing else of it: `name` itself, a list of as many elements,
+/// a record that spreads `name` and writes some of its keys, or one that writes all of
+/// them in the same order; or a condition that comes to one of those either way.
+fn updates_parts(body: &SpannedExpr, name: Symbol, shape: &Shape) -> bool {
+    let reads = |expr: &SpannedExpr| {
+        reads_only_parts(expr, name, &|part: &SpannedExpr| {
+            shape.part(part, name).is_some()
+        })
+    };
+
+    if variable_name(body) == Some(name) {
+        return true;
+    }
+
+    match &body.node {
+        Expr::List(items) => {
+            items.len() == shape.len()
+                && matches!(shape, Shape::List(_))
+                && items
+                    .iter()
+                    .all(|item| !matches!(item.node.node, Expr::Spread(_)) && reads(&item.node))
+        }
+        Expr::Record(entries) => {
+            written_parts(entries, name, shape).is_some()
+                && entries.iter().all(|entry| match &entry.node.key {
+                    RecordKey::Static(_) => reads(&entry.node.value),
+                    _ => true,
+                })
+        }
+        Expr::Conditional {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            reads(condition)
+                && updates_parts(then_expr, name, shape)
+                && updates_parts(else_expr, name, shape)
+        }
+        _ => false,
+    }
+}
+
+/// The positions of the parts of the accumulator `name` of `shape` that a record literal
+/// writes, in the order of its entries, when it makes an accumulator of the same shape:
+/// `{...name, k: v, ...}` with distinct keys of the shape, or a literal of all of its keys
+/// in the same order.
+fn written_parts(
+    entries: &[Commented<RecordEntry>],
+    name: Symbol,
+    shape: &Shape,
+) -> Option<Vec<usize>> {
+    let Shape::Record(keys) = shape else {
+        return None;
+    };
+
+    let spreads_name = |spread: &SpannedExpr| match &spread.node {
+        Expr::Spread(operand) => variable_name(operand) == Some(name),
+        _ => variable_name(spread) == Some(name),
+    };
+    let (spread, written) = match entries.first().map(|entry| &entry.node.key) {
+        Some(RecordKey::Spread(spread)) if spreads_name(spread) => (true, &entries[1..]),
+        _ => (false, entries),
+    };
+
+    let mut positions = Vec::with_capacity(written.len());
+    for entry in written {
+        let RecordKey::Static(key) = &entry.node.key else {
+            return None;
+        };
+        let position = keys.iter().position(|own| own == key)?;
+        if positions.contains(&position) {
+            return None;
+        }
+        positions.push(position);
+    }
+
+    let whole = positions.iter().copied().eq(0..keys.len());
+
+    (spread || whole).then_some(positions)
+}
+
+/// The values of the list or record literal `init`, which has no spread and only keys that
+/// are written out (see [`accumulator_shape`]), in the order the literal evaluates them.
+fn literal_values(init: &SpannedExpr) -> Vec<&SpannedExpr> {
+    match &init.node {
+        Expr::List(items) => items.iter().map(|item| &item.node).collect(),
+        Expr::Record(entries) => entries.iter().map(|entry| &entry.node.value).collect(),
+        _ => unreachable!("an accumulator is kept part by part from a literal"),
     }
 }
 
@@ -1052,6 +1262,21 @@ struct FnCompiler {
     /// callback is given for an entry (see [`takes_entries_apart`]). The element register of
     /// such a loop holds the value alone.
     apart: Vec<u16>,
+
+    /// The accumulators of the inlined `reduce` loops around the current point that are
+    /// kept in registers part by part (see [`accumulator_shape`]).
+    parts: Vec<Parts>,
+}
+
+/// An accumulator of an inlined `reduce` that is kept in registers part by part.
+struct Parts {
+    /// The register of the parameter that the accumulator is bound to, which holds nothing.
+    holder: u16,
+
+    shape: Shape,
+
+    /// The register of the first part, which the others follow.
+    first: u16,
 }
 
 /// An expression that a condition evaluates and that one of its branches evaluates again:
@@ -1108,6 +1333,7 @@ impl FnCompiler {
             shared: Vec::new(),
             shared_search: SHARED_SEARCH_NODES,
             apart: Vec::new(),
+            parts: Vec::new(),
         }
     }
 
@@ -1631,6 +1857,10 @@ impl FnCompiler {
             return Ok(state + 2);
         }
 
+        if let Some(reg) = self.part_reg(expr) {
+            return Ok(reg);
+        }
+
         let reg = self.alloc()?;
         self.expr_into(expr, reg)?;
 
@@ -1682,6 +1912,12 @@ impl FnCompiler {
         if !self.shared.is_empty()
             && let Some(reg) = self.shared_reg(expr)
         {
+            self.emit(Instr::abc(Op::Move, dst, reg, 0));
+
+            return Ok(());
+        }
+
+        if let Some(reg) = self.part_reg(expr) {
             self.emit(Instr::abc(Op::Move, dst, reg, 0));
 
             return Ok(());
@@ -2189,6 +2425,121 @@ impl FnCompiler {
         }
 
         Ok(())
+    }
+
+    /// Compile `body`, the callback of a `reduce` whose accumulator `name` is kept in
+    /// registers part by part (the innermost of [`Self::parts`]), into code that leaves the
+    /// next accumulator in those registers (see [`updates_parts`]).
+    fn update_parts(&mut self, body: &SpannedExpr, name: Symbol) -> CResult<()> {
+        if variable_name(body) == Some(name) {
+            return Ok(());
+        }
+
+        match &body.node {
+            Expr::List(items) => {
+                let values: Vec<_> = items.iter().map(|item| &item.node).enumerate().collect();
+                self.set_parts(&values, name)
+            }
+            Expr::Record(entries) => {
+                let parts = self.parts.last().expect("parts of an accumulator");
+                let positions = written_parts(entries, name, &parts.shape)
+                    .expect("a record of the shape of the accumulator");
+                let values: Vec<_> = entries
+                    .iter()
+                    .filter(|entry| matches!(entry.node.key, RecordKey::Static(_)))
+                    .map(|entry| &entry.node.value)
+                    .zip(positions)
+                    .map(|(value, position)| (position, value))
+                    .collect();
+
+                self.set_parts(&values, name)
+            }
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                let to_else = self.branch_if_false(condition)?;
+                let ensured = self.ensured.len();
+
+                self.update_parts(then_expr, name)?;
+                let to_end = self.emit_jump(Op::Jmp, 0);
+                self.ensured.truncate(ensured);
+
+                for jump in to_else {
+                    self.patch_jump(jump, self.here());
+                }
+                self.update_parts(else_expr, name)?;
+                self.ensured.truncate(ensured);
+
+                self.patch_jump(to_end, self.here());
+                Ok(())
+            }
+            _ => unreachable!("not a body that updates an accumulator part by part"),
+        }
+    }
+
+    /// Compute the values of the parts at the positions that `values` gives, in order, from
+    /// the parts as they were before any of them. A value goes straight into its part when
+    /// no value after it reads that part, and waits in a register of its own otherwise.
+    fn set_parts(&mut self, values: &[(usize, &SpannedExpr)], name: Symbol) -> CResult<()> {
+        let mark = self.free_reg;
+        let parts = self.parts.last().expect("parts of an accumulator");
+        let first = parts.first;
+        let read_later: Vec<bool> = values
+            .iter()
+            .enumerate()
+            .map(|(index, (position, _))| {
+                values[index + 1..].iter().any(|(_, later)| {
+                    !reads_only_parts(later, name, &|part: &SpannedExpr| {
+                        parts
+                            .shape
+                            .part(part, name)
+                            .is_some_and(|read| read != *position)
+                    })
+                })
+            })
+            .collect();
+
+        let mut waiting = Vec::new();
+        for ((position, value), read_later) in values.iter().zip(read_later) {
+            let part = first + *position as u16;
+            match read_later {
+                true => {
+                    let value_reg = self.alloc()?;
+                    self.expr_into(value, value_reg)?;
+                    waiting.push((part, value_reg));
+                }
+                false => self.expr_into(value, part)?,
+            }
+        }
+
+        for (part, value_reg) in waiting {
+            self.emit(Instr::abc(Op::Move, part, value_reg, 0));
+        }
+        self.free_reg = mark;
+
+        Ok(())
+    }
+
+    /// Make the accumulator that `parts` holds, into `dst`.
+    fn make_accumulator(&mut self, parts: &Parts, dst: u16) {
+        let len = parts.shape.len() as u16;
+
+        match &parts.shape {
+            Shape::List(_) => {
+                self.emit(Instr::abc(Op::NewList, dst, parts.first, len));
+            }
+            Shape::Record(keys) => {
+                let layout = self.layouts.len() as u16;
+                self.layouts.push(RecordLayout {
+                    distinct: true,
+                    keys: Keys::interned(keys.iter().map(String::as_str)),
+                    slots: (0..len).collect(),
+                });
+                self.emit(Instr::abc(Op::NewRecord, dst, parts.first, layout));
+            }
+        }
     }
 
     /// A register that holds the value of `term`, which is no number.
@@ -3130,6 +3481,26 @@ impl FnCompiler {
             .map(|state| (*state, part))
     }
 
+    /// The register that holds the part of an accumulator that `expr` reads, when the
+    /// accumulator is kept in registers part by part.
+    fn part_reg(&self, expr: &SpannedExpr) -> Option<u16> {
+        if self.parts.is_empty() {
+            return None;
+        }
+
+        let (Expr::Access { expr: object, .. } | Expr::DotAccess { expr: object, .. }) = &expr.node
+        else {
+            return None;
+        };
+        let Resolved::Register(reg) = self.place(object) else {
+            return None;
+        };
+        let parts = self.parts.iter().rev().find(|parts| parts.holder == reg)?;
+        let position = parts.shape.part(expr, variable_name(object)?)?;
+
+        Some(parts.first + position as u16)
+    }
+
     /// The register holding the value of `expr`, when it was computed ahead of the loop that
     /// is being compiled.
     fn hoisted_reg(&self, expr: &SpannedExpr) -> Option<u16> {
@@ -3438,10 +3809,28 @@ impl FnCompiler {
             self.expr_into(call.list, state + 1)?;
         }
 
+        // An accumulator that is kept in registers part by part starts out as the parts of
+        // the initial value, which are evaluated in the order the literal evaluates them.
+        let shape = accumulator_shape(call, self.layouts.len() < MAX_LAYOUTS);
+        let mut parts = None;
         let acc_reg = match call.init {
             Some(init) => {
                 let reg = self.alloc()?;
-                self.expr_into(init, reg)?;
+                match shape {
+                    Some(shape) => {
+                        let first = self.free_reg;
+                        for value in literal_values(init) {
+                            let part = self.alloc()?;
+                            self.expr_into(value, part)?;
+                        }
+                        parts = Some(Parts {
+                            holder: reg,
+                            shape,
+                            first,
+                        });
+                    }
+                    None => self.expr_into(init, reg)?,
+                }
                 Some(reg)
             }
             None => None,
@@ -3521,6 +3910,10 @@ impl FnCompiler {
         if apart {
             self.apart.push(state);
         }
+        let kept_parts = self.parts.len();
+        if let Some(parts) = parts.take() {
+            self.parts.push(parts);
+        }
 
         // The first pass through the body starts here. It begins by computing what every pass
         // would compute the same way, and the passes after it start behind that.
@@ -3564,7 +3957,10 @@ impl FnCompiler {
                 }
             }
             BuiltInFunction::Reduce => {
-                self.expr_into(call.body, acc_reg.expect("reduce accumulator"))?;
+                match self.parts.len() > kept_parts {
+                    true => self.update_parts(call.body, call.params[0].get_name())?,
+                    false => self.expr_into(call.body, acc_reg.expect("reduce accumulator"))?,
+                }
                 body_end = self.here();
             }
             BuiltInFunction::Every => {
@@ -3598,6 +3994,7 @@ impl FnCompiler {
         self.ensured.truncate(ensured);
         self.hoisted.truncate(hoisted);
         self.apart.truncate(taken_apart);
+        let parts = self.parts.split_off(kept_parts).pop();
 
         let mut next = Instr::abx(next_op, state, 0);
         next.x = mode;
@@ -3614,8 +4011,12 @@ impl FnCompiler {
             BuiltInFunction::Reduce => {
                 self.patch_jump(to_exit, self.here());
                 let acc = acc_reg.expect("reduce accumulator");
-                if acc != dst {
-                    self.emit(Instr::abc(Op::Move, dst, acc, 0));
+                match parts {
+                    Some(parts) => self.make_accumulator(&parts, dst),
+                    None if acc != dst => {
+                        self.emit(Instr::abc(Op::Move, dst, acc, 0));
+                    }
+                    None => {}
                 }
             }
             BuiltInFunction::Every | BuiltInFunction::Some => {
