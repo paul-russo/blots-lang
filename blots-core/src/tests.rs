@@ -11526,18 +11526,21 @@ mod number_logic_tests {
 mod accumulator_parts_tests {
     use crate::ast::Expr;
     use crate::bytecode::{Instr, Op};
-    use crate::compiler::compile_lambda;
+    use crate::compiler::{compile_chunk, compile_lambda};
     use crate::environment::Environment;
     use crate::error::RuntimeError;
     use crate::expressions::evaluate_ast;
     use crate::fast_parser::{Statement, parse_program};
     use crate::heap::Heap;
     use crate::values::Value;
+    use crate::vm::Vm;
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    /// Evaluate the statements of `code`, up to the value of the last one.
-    fn evaluate(code: &str, heap: &Rc<RefCell<Heap>>) -> Result<Value, RuntimeError> {
+    /// Evaluate the statements of `code`, up to the value of the last one, with the calls at
+    /// the top level of the program made as calls (`called`) or compiled into loops. A call of
+    /// `reduce` is the function that every loop of it is held to.
+    fn evaluate(code: &str, heap: &Rc<RefCell<Heap>>, called: bool) -> Result<Value, RuntimeError> {
         let statements = parse_program(code).expect("a program the fast parser reads");
         let bindings = Rc::new(Environment::new());
         let source: Rc<str> = code.into();
@@ -11547,24 +11550,31 @@ mod accumulator_parts_tests {
             let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
                 continue;
             };
-            result = evaluate_ast(
-                &expr,
-                Rc::clone(heap),
-                Rc::clone(&bindings),
-                0,
-                Rc::clone(&source),
-            )?;
+            result = match called {
+                true => {
+                    let mut vm = Vm::new(Rc::clone(heap), Rc::clone(&bindings));
+                    let chunk = compile_chunk(&expr, false, &bindings)?;
+                    vm.run_chunk(&chunk, Rc::clone(&source), 0)?
+                }
+                false => evaluate_ast(
+                    &expr,
+                    Rc::clone(heap),
+                    Rc::clone(&bindings),
+                    0,
+                    Rc::clone(&source),
+                )?,
+            };
         }
 
         Ok(result)
     }
 
-    /// What the statements of `code` come to, rendered: the value, or the message of the
-    /// error and the part of `code` that it points at.
-    fn outcome(code: &str) -> String {
+    /// What the statements of `code` come to (see [`evaluate`]), rendered: the value, or the
+    /// message of the error and the part of `code` that it points at.
+    fn outcome(code: &str, called: bool) -> String {
         let heap = Rc::new(RefCell::new(Heap::new()));
 
-        match evaluate(code, &heap) {
+        match evaluate(code, &heap, called) {
             Ok(value) => value.stringify_internal(&heap.borrow()),
             Err(error) => {
                 let place = match error.span {
@@ -11577,15 +11587,13 @@ mod accumulator_parts_tests {
         }
     }
 
-    /// What `code` with `init` in place of `INIT` comes to, which is what it comes to when
-    /// the initial value is no literal, and the accumulator is made on every pass.
+    /// What `code` with `init` in place of `INIT` comes to, which is what the call of `reduce`
+    /// at the top level of the program comes to, which makes the accumulator on every pass.
     fn as_made(code: &str, init: &str) -> String {
-        let kept = code.replace("INIT", init);
-        let outcome = outcome(&kept);
-        let made = format!("[{init}][0]");
-        let made_outcome = self::outcome(&code.replace("INIT", &made)).replace(&made, init);
+        let code = code.replace("INIT", init);
+        let outcome = outcome(&code, false);
 
-        assert_eq!(outcome, made_outcome, "{kept}");
+        assert_eq!(outcome, self::outcome(&code, true), "{code}");
 
         outcome
     }
@@ -11685,10 +11693,6 @@ mod accumulator_parts_tests {
                 false,
             ),
             ("n => reduce(range(n), (acc, i) => [...acc], [0])", false),
-            (
-                "(n, init) => reduce(range(n), (acc, i) => [acc[0] + i], init)",
-                false,
-            ),
             ("n => reduce(range(n), (acc, acc) => [acc[0]], [0])", false),
         ] {
             assert_eq!(!makes_aggregates(code), kept, "{code}");
@@ -12195,6 +12199,263 @@ mod type_test_tests {
                     "{body} at {depth}"
                 );
             }
+        }
+    }
+}
+
+// The accumulator of a `reduce` whose initial value is no literal, and whose function makes a
+// list or a record of the accumulator from nothing but its parts, is kept in registers part by
+// part where the initial value turns out to have the shape: a list of as many elements, or a
+// record that has every key that the function writes. Another copy of the loop makes the
+// accumulator on every pass otherwise. Nothing may tell either from the call of `reduce`.
+#[cfg(test)]
+mod guarded_parts_tests {
+    use crate::ast::Expr;
+    use crate::bytecode::{Instr, Op};
+    use crate::compiler::{compile_chunk, compile_lambda};
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::values::Value;
+    use crate::vm::Vm;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code`, up to the value of the last one, with the calls at
+    /// the top level of the program made as calls (`called`) or compiled into loops. A call of
+    /// `reduce` is the function that every loop of it is held to.
+    fn evaluate(code: &str, heap: &Rc<RefCell<Heap>>, called: bool) -> Result<Value, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+            result = match called {
+                true => {
+                    let mut vm = Vm::new(Rc::clone(heap), Rc::clone(&bindings));
+                    let chunk = compile_chunk(&expr, false, &bindings)?;
+                    vm.run_chunk(&chunk, Rc::clone(&source), 0)?
+                }
+                false => evaluate_ast(
+                    &expr,
+                    Rc::clone(heap),
+                    Rc::clone(&bindings),
+                    0,
+                    Rc::clone(&source),
+                )?,
+            };
+        }
+
+        Ok(result)
+    }
+
+    /// What the statements of `code` come to (see [`evaluate`]), rendered: the value, or the
+    /// message of the error and the part of `code` that it points at.
+    fn outcome(code: &str, called: bool) -> String {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        match evaluate(code, &heap, called) {
+            Ok(value) => value.stringify_internal(&heap.borrow()),
+            Err(error) => {
+                let place = match error.span {
+                    Some(span) => &code[span.start_byte..span.end_byte],
+                    None => "nothing",
+                };
+
+                format!("{} at {place}", error.message)
+            }
+        }
+    }
+
+    /// What `code` comes to, which is what the calls of `reduce` at the top level of the
+    /// program come to.
+    fn as_called(code: &str) -> String {
+        let outcome = outcome(code, false);
+
+        assert_eq!(outcome, self::outcome(code, true), "{code}");
+
+        outcome
+    }
+
+    /// Whether the function `code` takes the accumulator of a loop apart.
+    fn takes_apart(code: &str) -> bool {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let [Statement::Expression(expr)] = &statements[..] else {
+            panic!("{code} is not a single expression");
+        };
+        let Expr::Lambda { args, body, .. } = &expr.node else {
+            panic!("{code} is not a function");
+        };
+        let proto = compile_lambda(&Rc::new(args.clone()), body, true).unwrap();
+
+        let mut pc = 0;
+        while pc < proto.code.len() {
+            // SAFETY: `pc` only lands on instruction words, as operand words are skipped.
+            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            if instr.op == Op::JmpNotApart {
+                return true;
+            }
+            pc += 1 + instr.operand_words();
+        }
+
+        false
+    }
+
+    #[test]
+    fn an_accumulator_that_starts_out_as_a_value_of_the_shape_is_taken_apart() {
+        for (code, taken) in [
+            (
+                "(xs, r) => reduce(xs, (acc, x) => {...acc, a: acc.a + x}, r)",
+                true,
+            ),
+            (
+                "(xs, r) => reduce(xs, (acc, x) => if x > acc.m then {...acc, m: x} else acc, r)",
+                true,
+            ),
+            (
+                "(xs, r) => reduce(xs, (acc, x) => {...acc, a: acc[\"b\"] + x, c: 1}, r)",
+                true,
+            ),
+            (
+                "(n, init) => reduce(range(n), (acc, i) => [acc[0] + i], init)",
+                true,
+            ),
+            (
+                "(xs, l) => reduce(xs, (acc, x) => [acc[1], acc[0] + x], [...l])",
+                true,
+            ),
+            // A literal is kept in registers without being taken apart.
+            (
+                "xs => reduce(xs, (acc, x) => {...acc, a: acc.a + x}, {a: 0})",
+                false,
+            ),
+            // Something that reads the accumulator otherwise, or makes another one.
+            (
+                "(xs, r) => reduce(xs, (acc, x) => {...acc, a: len(acc)}, r)",
+                false,
+            ),
+            (
+                "(xs, r) => reduce(xs, (acc, x) => {a: acc.a + x}, r)",
+                false,
+            ),
+            (
+                "(xs, r) => reduce(xs, (acc, x) => {...acc, a: 1, a: 2}, r)",
+                false,
+            ),
+            ("(xs, r) => reduce(xs, (acc, x) => {...acc}, r)", false),
+            (
+                "(xs, r) => reduce(xs, (acc, x) => if x then [x] else {...acc, a: x}, r)",
+                false,
+            ),
+            (
+                "(xs, r) => reduce(xs, (acc, x) => if x then [x] else [x, x], r)",
+                false,
+            ),
+            (
+                "(xs, r) => reduce(xs, (acc, x) => {...acc, a: g(acc.a)}, r)",
+                false,
+            ),
+            ("(xs, r) => reduce(xs, (acc, x) => acc, r)", false),
+        ] {
+            assert_eq!(takes_apart(code), taken, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_taken_apart_accumulator_comes_to_what_the_call_does() {
+        let values = "r = {a: 1, b: 2, m: 0, n: \"s\"}\ns = {...r, z: [1]}\nl = [3, 4]\n";
+
+        for (code, expected) in [
+            // A record that has every key that is written, in the place it has it.
+            (
+                "reduce(range(5), (acc, i) => {...acc, a: acc.a + i, b: acc.b * 2}, r)",
+                "{a: 11, b: 64, m: 0, n: s}",
+            ),
+            (
+                "reduce([3, 9, 2], (acc, x) => if x > acc.m then {...acc, m: x} else acc, s)",
+                "{a: 1, b: 2, m: 9, n: s, z: [1]}",
+            ),
+            (
+                "reduce(range(3), (acc, i) => {...acc, b: acc[\"a\"] + acc.b, a: acc.q ?? 0}, r)",
+                "{a: 0, b: 3, m: 0, n: s}",
+            ),
+            (
+                "reduce([], (acc, x) => {...acc, a: x}, r)",
+                "{a: 1, b: 2, m: 0, n: s}",
+            ),
+            // A record without a key that is written gets it behind its own, as the call does.
+            (
+                "reduce(range(3), (acc, i) => {...acc, c: i, a: acc.a + i}, r)",
+                "{a: 4, b: 2, m: 0, n: s, c: 2}",
+            ),
+            (
+                "reduce(range(2), (acc, i) => if i == 1 then {...acc, x: i} else acc, r)",
+                "{a: 1, b: 2, m: 0, n: s, x: 1}",
+            ),
+            (
+                "reduce(range(1), (acc, i) => if i == 1 then {...acc, x: i} else acc, r)",
+                "{a: 1, b: 2, m: 0, n: s}",
+            ),
+            (
+                "reduce(range(2), (acc, i) => if i == 1 then {...acc, y: i} else {...acc, x: i}, r)",
+                "{a: 1, b: 2, m: 0, n: s, x: 0, y: 1}",
+            ),
+            // A list of as many elements, and lists of other sizes.
+            (
+                "reduce(range(4), (acc, i) => [acc[1], acc[0] + i], l)",
+                "[5, 8]",
+            ),
+            ("reduce(range(3), (acc, i) => [acc[0] + i], [5])", "[8]"),
+            ("reduce(range(3), (acc, i) => [acc[0], i], [1])", "[1, 2]"),
+            (
+                "reduce(range(2), (acc, i) => [acc[0] + i, 0], [1, 2, 3])",
+                "[2, 0]",
+            ),
+            ("reduce([], (acc, x) => [acc[1], x], l)", "[3, 4]"),
+            // What is neither, which the copy of the loop that makes accumulators goes on with.
+            (
+                "reduce(range(3), (acc, i) => {...acc, a: i}, l)",
+                "{0: 3, 1: 4, a: 2}",
+            ),
+            (
+                "reduce(range(2), (acc, i) => {...acc, a: acc.a}, \"ab\")",
+                "in built-in function \"reduce\": in anonymous function: expected a record, but got a string",
+            ),
+            (
+                "reduce(range(2), (acc, i) => {...acc, a: 1}, 5)",
+                "in built-in function \"reduce\": in anonymous function: expected a list, record, or string",
+            ),
+            (
+                "reduce(range(2), (acc, i) => [acc[0] + i], null)",
+                "in built-in function \"reduce\": in anonymous function: expected a record, list, or string, but got a null",
+            ),
+            (
+                "reduce(range(2), (acc, i) => [acc[0] + i], r)",
+                "in built-in function \"reduce\": in anonymous function: expected a string, but got a number",
+            ),
+            // What goes wrong in a part.
+            (
+                "reduce([1, \"a\"], (acc, x) => {...acc, a: acc.a + x}, r)",
+                "in built-in function \"reduce\": in anonymous function: expected a number, but got a string",
+            ),
+            (
+                "reduce([1, 2], (acc, x) => {...acc, n: acc.n * x}, r)",
+                "in built-in function \"reduce\": in anonymous function: expected a number, but got a string",
+            ),
+            (
+                "reduce(missing, (acc, x) => [acc[0]], l)",
+                "unknown identifier: missing at missing",
+            ),
+        ] {
+            let outcome = as_called(&format!("{values}{code}"));
+
+            assert!(outcome.starts_with(expected), "{code}: {outcome}");
         }
     }
 }

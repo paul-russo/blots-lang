@@ -13,11 +13,12 @@ use super::{
     Builder, DEPTH_MASK, ENTRY, Frame, MAX_CALL_DEPTH, NOT_TRUNCATED, PROFILED, TAIL_SHIFT,
     UNBOUND, Vm, copy_value, entry_next, is_of_type, is_unbound, known_key, leaves_remainder, less,
     less_eq, list_next, load_value, range_next, register, same_strings, set_state, step::Flow,
-    store_value, string_order, truncate, whole,
+    store_value, string_order, take_apart, truncate, whole,
 };
 use crate::{
     bytecode::{
-        EntryPart, Instr, NOT_OF_TYPE, Op, Proto, REGISTER_SCALE, RemainderTest, register_index,
+        Apart, EntryPart, Instr, NOT_OF_TYPE, Op, Proto, REGISTER_SCALE, RemainderTest,
+        register_index,
     },
     error::RuntimeError,
     expressions::{modulo, small_remainder},
@@ -1040,6 +1041,16 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                         && number.is_finite()
                     {
                         next!(1);
+                    }
+                    jump!(ip);
+                }
+                Op::JmpNotApart => {
+                    let apart = Apart::decode(*ip.add(1));
+                    let first = register(base, apart.first);
+                    let value = *reg!(instr.a);
+
+                    if take_apart(&*slots, &*(*frame).proto, value, instr.x, apart, first) {
+                        next!(2);
                     }
                     jump!(ip);
                 }

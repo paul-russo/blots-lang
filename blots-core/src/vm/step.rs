@@ -8,11 +8,13 @@
 
 use super::{
     Builder, MAX_CALL_DEPTH, UNBOUND, Vm, depth_exceeded, is_of_type, is_unbound, list_next,
-    range_next, register, set_state, store_value,
+    range_next, register, set_state, store_value, take_apart,
 };
 use crate::{
     ast::BinaryOp,
-    bytecode::{EntryPart, Instr, NOT_OF_TYPE, Op, RECIPROCAL, RemainderTest, register_index},
+    bytecode::{
+        Apart, EntryPart, Instr, NOT_OF_TYPE, Op, RECIPROCAL, RemainderTest, register_index,
+    },
     error::RuntimeError,
     values::Value,
 };
@@ -625,6 +627,19 @@ impl Vm {
                 if !matches!(self.reg(a), Value::Number(number) if number.is_finite()) {
                     self.skip(instr.sbx());
                 }
+            }
+            Op::JmpNotApart => {
+                // SAFETY: the saved `ip` points at the operand word of the instruction.
+                let apart = Apart::decode(unsafe { *self.top().ip });
+                let first = self.reg_ptr(apart.first);
+                let heap = self.heap.borrow();
+                let (proto, value) = (self.top().proto(), self.reg(a));
+
+                // SAFETY: the compiler gives the parts registers of the frame, one per part.
+                let taken =
+                    unsafe { take_apart(heap.slots(), proto, value, instr.x, apart, first) };
+                drop(heap);
+                self.skip(if taken { 1 } else { instr.sbx() });
             }
             Op::IsType => {
                 self.typeof_depth()?;

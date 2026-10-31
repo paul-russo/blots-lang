@@ -25,10 +25,10 @@ use crate::{
         BinaryOp, Commented, Expr, PostfixOp, RecordEntry, RecordKey, Span, SpannedExpr, UnaryOp,
     },
     bytecode::{
-        CaptureSource, EntryPart, FAST_FRAME_SLOTS, FieldCache, Handler, Instr, LAST_USE_B,
-        LAST_USE_C, LambdaTemplate, Literal, LocalVar, MAX_REGISTERS, NOT_OF_TYPE, Op, Proto,
-        RECIPROCAL, RecordLayout, RemainderTest, SelfRef, TYPE_NAMED_NOTHING, Wrap, binary_opcode,
-        exact_reciprocal, small_divisor,
+        APART_LIST, APART_RECORD, Apart, CaptureSource, EntryPart, FAST_FRAME_SLOTS, FieldCache,
+        Handler, Instr, LAST_USE_B, LAST_USE_C, LambdaTemplate, Literal, LocalVar, MAX_REGISTERS,
+        NOT_OF_TYPE, Op, Proto, RECIPROCAL, RecordLayout, RemainderTest, SelfRef,
+        TYPE_NAMED_NOTHING, Wrap, binary_opcode, exact_reciprocal, register_operand, small_divisor,
     },
     environment::Environment,
     error::RuntimeError,
@@ -39,7 +39,13 @@ use crate::{
     values::{LambdaArg, Value, ValueType},
 };
 use indexmap::IndexSet;
-use std::{borrow::Borrow, cell::OnceCell, collections::HashMap, hash::Hash, rc::Rc};
+use std::{
+    borrow::Borrow,
+    cell::{OnceCell, RefCell},
+    collections::HashMap,
+    hash::Hash,
+    rc::Rc,
+};
 
 type CResult<T> = Result<T, RuntimeError>;
 
@@ -600,6 +606,187 @@ fn accumulator_shape(call: &InlineCall, records: bool) -> Option<Shape> {
     shaped.then_some(shape)
 }
 
+/// The shape of the accumulator of `call`, when the call is a `reduce` whose initial value
+/// is no literal (see [`accumulator_shape`]) and whose function makes a list of a number of
+/// elements or a record that spreads the accumulator and writes some keys, and the number of
+/// the parts that it writes, which come first. The accumulator is kept in registers part by
+/// part where its initial value turns out to have that shape: a list of that many elements,
+/// or a record that has every key that the function writes (see `Op::JmpNotApart`).
+///
+/// What the function makes of such a value is of the same shape, and what it makes of
+/// anything else is compiled as before. A record has the keys of the initial value with
+/// those that the function writes in their places, so that is what it is made from in the
+/// end. The other keys that the function reads are parts as well.
+fn guarded_shape(call: &InlineCall, records: bool) -> Option<(Shape, usize)> {
+    if call.builtin != BuiltInFunction::Reduce || call.init.is_none() {
+        return None;
+    }
+
+    let name = call.params[0].get_name();
+    if !distinct_params(call) || is_constant_name(name) {
+        return None;
+    }
+
+    let mut leaves = Vec::new();
+    made_accumulators(call.body, name, &mut leaves)?;
+
+    let (shape, written) = match &leaves.first()?.node {
+        Expr::List(items) => {
+            let len = items.len();
+            let same = leaves
+                .iter()
+                .all(|leaf| matches!(&leaf.node, Expr::List(items) if items.len() == len));
+            if !same || !(1..=MAX_PARTS).contains(&len) {
+                return None;
+            }
+
+            (Shape::List(len), len)
+        }
+        Expr::Record(_) if records => {
+            let mut keys: Vec<String> = Vec::new();
+            for leaf in &leaves {
+                let Expr::Record(entries) = &leaf.node else {
+                    return None;
+                };
+                let mut written: Vec<&String> = Vec::new();
+                for entry in &entries[1..] {
+                    let RecordKey::Static(key) = &entry.node.key else {
+                        return None;
+                    };
+                    if written.contains(&key) {
+                        return None;
+                    }
+                    written.push(key);
+                    if !keys.contains(key) {
+                        keys.push(key.clone());
+                    }
+                }
+            }
+
+            let written = keys.len();
+            let read = RefCell::new(Vec::new());
+            read_keys(call.body, name, &read);
+            for key in read.into_inner() {
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
+            }
+            if written == 0 || keys.len() > MAX_PARTS {
+                return None;
+            }
+
+            (Shape::Record(keys), written)
+        }
+        _ => return None,
+    };
+
+    updates_parts(call.body, name, &shape).then_some((shape, written))
+}
+
+/// Collect the accumulators that `body` comes to in `leaves`, other than the accumulator
+/// `name` itself, through the branches of conditions: each has to be a list literal without
+/// spreads, or a record literal that spreads `name` first.
+fn made_accumulators<'e>(
+    body: &'e SpannedExpr,
+    name: Symbol,
+    leaves: &mut Vec<&'e SpannedExpr>,
+) -> Option<()> {
+    if variable_name(body) == Some(name) {
+        return Some(());
+    }
+
+    match &body.node {
+        Expr::List(items)
+            if !items
+                .iter()
+                .any(|item| matches!(item.node.node, Expr::Spread(_))) =>
+        {
+            leaves.push(body);
+        }
+        Expr::Record(entries)
+            if matches!(entries.first().map(|entry| &entry.node.key),
+                Some(RecordKey::Spread(spread)) if spread_of(spread) == Some(name)) =>
+        {
+            leaves.push(body);
+        }
+        Expr::Conditional {
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            made_accumulators(then_expr, name, leaves)?;
+            made_accumulators(else_expr, name, leaves)?;
+        }
+        _ => return None,
+    }
+
+    Some(())
+}
+
+/// Add the keys that the conditions of `body` and the values that it writes read of the
+/// record `name` to `keys` (see [`made_accumulators`]).
+fn read_keys(body: &SpannedExpr, name: Symbol, keys: &RefCell<Vec<String>>) {
+    let read = |expr: &SpannedExpr| {
+        reads_only_parts(
+            expr,
+            name,
+            &|part: &SpannedExpr| match read_key(part, name) {
+                Some(key) => {
+                    keys.borrow_mut().push(key.to_string());
+                    true
+                }
+                None => false,
+            },
+        );
+    };
+
+    match &body.node {
+        Expr::Conditional {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            read(condition);
+            read_keys(then_expr, name, keys);
+            read_keys(else_expr, name, keys);
+        }
+        Expr::Record(entries) => {
+            for entry in entries {
+                if let RecordKey::Static(_) = entry.node.key {
+                    read(&entry.node.value);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The name of the variable that the spread `spread` spreads, when it spreads one.
+fn spread_of(spread: &SpannedExpr) -> Option<Symbol> {
+    match &spread.node {
+        Expr::Spread(operand) => variable_name(operand),
+        _ => variable_name(spread),
+    }
+}
+
+/// The key that `expr` reads of the record `name`, when it is `name.key` or `name["key"]`.
+fn read_key(expr: &SpannedExpr, name: Symbol) -> Option<&str> {
+    match &expr.node {
+        Expr::DotAccess {
+            expr: object,
+            field,
+        } if variable_name(object) == Some(name) => Some(field),
+        Expr::Access {
+            expr: object,
+            index,
+        } if variable_name(object) == Some(name) => match &index.node {
+            Expr::String(key) => Some(key),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Whether `body` comes to an accumulator of `shape` that it makes from the parts of the
 /// accumulator `name` and nothing else of it: `name` itself, a list of as many elements,
 /// a record that spreads `name` and writes some of its keys, or one that writes all of
@@ -656,12 +843,8 @@ fn written_parts(
         return None;
     };
 
-    let spreads_name = |spread: &SpannedExpr| match &spread.node {
-        Expr::Spread(operand) => variable_name(operand) == Some(name),
-        _ => variable_name(spread) == Some(name),
-    };
     let (spread, written) = match entries.first().map(|entry| &entry.node.key) {
-        Some(RecordKey::Spread(spread)) if spreads_name(spread) => (true, &entries[1..]),
+        Some(RecordKey::Spread(spread)) if spread_of(spread) == Some(name) => (true, &entries[1..]),
         _ => (false, entries),
     };
 
@@ -1271,13 +1454,60 @@ struct FnCompiler {
 
 /// An accumulator of an inlined `reduce` that is kept in registers part by part.
 struct Parts {
-    /// The register of the parameter that the accumulator is bound to, which holds nothing.
+    /// The register of the parameter that the accumulator is bound to, which holds the
+    /// initial value when that is no literal, and nothing otherwise.
     holder: u16,
 
     shape: Shape,
 
     /// The register of the first part, which the others follow.
     first: u16,
+
+    origin: Origin,
+}
+
+/// What the passes of an inlined loop are compiled from, once what it goes through and its
+/// initial value are where the loop finds them (see `FnCompiler::loop_passes`).
+#[derive(Clone, Copy)]
+struct LoopSetup<'c, 'e> {
+    span: Span,
+    call: &'c InlineCall<'e>,
+
+    /// The first register of the state of the loop.
+    state: u16,
+    element_reg: u16,
+    index_reg: u16,
+    wants_index: bool,
+
+    /// Whether the function is given the value of an entry for the list of its key and value
+    /// (see [`takes_entries_apart`]).
+    apart: bool,
+    acc_reg: Option<u16>,
+    call_depth: u16,
+    body_depth: i32,
+
+    /// Whether the loop starts by checking that what it goes through is a list.
+    checks_list: bool,
+    entry_op: Op,
+    next_op: Op,
+
+    /// Operand `x` of the iteration instructions.
+    mode: u8,
+
+    /// The capacity hint of a list that gets an element per pass.
+    hint: u8,
+}
+
+/// Where the parts of an accumulator come from, which is what it is made from in the end.
+#[derive(Clone, Copy)]
+enum Origin {
+    /// The values of the literal that the accumulator starts out as.
+    Literal,
+
+    /// An initial value of the shape, which a record is made from with the parts that the
+    /// function writes, which are the first `written` parts. `spread` is the register right in
+    /// front of the parts, for the spread of the initial value.
+    Value { spread: u16, written: usize },
 }
 
 /// An expression that a condition evaluates and that one of its branches evaluates again:
@@ -2558,11 +2788,21 @@ impl FnCompiler {
     fn make_accumulator(&mut self, parts: &Parts, dst: u16) {
         let len = parts.shape.len() as u16;
 
-        match &parts.shape {
-            Shape::List(_) => {
+        match (&parts.shape, parts.origin) {
+            (Shape::List(_), _) => {
                 self.emit(Instr::abc(Op::NewList, dst, parts.first, len));
             }
-            Shape::Record(keys) => {
+            (Shape::Record(keys), Origin::Value { spread, written }) => {
+                let layout = self.layouts.len() as u16;
+                self.layouts.push(RecordLayout {
+                    distinct: true,
+                    keys: Keys::interned(keys[..written].iter().map(String::as_str)),
+                    slots: (0..written as u16).collect(),
+                });
+                self.emit(Instr::abc(Op::Spread, spread, parts.holder, 0));
+                self.emit(Instr::abc(Op::UpdateRecord, dst, spread, layout));
+            }
+            (Shape::Record(keys), Origin::Literal) => {
                 let layout = self.layouts.len() as u16;
                 self.layouts.push(RecordLayout {
                     distinct: true,
@@ -3879,13 +4119,14 @@ impl FnCompiler {
         }
 
         // An accumulator that is kept in registers part by part starts out as the parts of
-        // the initial value, which are evaluated in the order the literal evaluates them.
-        let shape = accumulator_shape(call, self.layouts.len() < MAX_LAYOUTS);
+        // the initial value: those of a literal are evaluated in the order the literal
+        // evaluates them, and another value is taken apart where it turns out to have the
+        // shape (see `guarded_shape`).
         let mut parts = None;
         let acc_reg = match call.init {
             Some(init) => {
                 let reg = self.alloc()?;
-                match shape {
+                match accumulator_shape(call, self.layouts.len() < MAX_LAYOUTS) {
                     Some(shape) => {
                         let first = self.free_reg;
                         for value in literal_values(init) {
@@ -3896,29 +4137,32 @@ impl FnCompiler {
                             holder: reg,
                             shape,
                             first,
+                            origin: Origin::Literal,
                         });
                     }
-                    None => self.expr_into(init, reg)?,
+                    None => {
+                        self.expr_into(init, reg)?;
+
+                        let layouts = self.layouts.len() + 2 <= MAX_LAYOUTS;
+                        if let Some((shape, written)) = guarded_shape(call, layouts) {
+                            let spread = self.alloc()?;
+                            let first = self.free_reg;
+                            for _ in 0..shape.len() {
+                                self.alloc()?;
+                            }
+                            parts = Some(Parts {
+                                holder: reg,
+                                shape,
+                                first,
+                                origin: Origin::Value { spread, written },
+                            });
+                        }
+                    }
                 }
                 Some(reg)
             }
             None => None,
         };
-
-        let region_start = self.here();
-
-        // A built-in function fails when it is given anything but a list. An operator does
-        // something else with that, which is compiled behind the loop. A range and the
-        // entries of a record are lists whenever there is no error.
-        let mut to_operator = None;
-        if range_args.is_none() && entries.is_none() {
-            match call.operator {
-                Some(_) => to_operator = Some(self.emit_jump(Op::IterList, state)),
-                None => {
-                    self.emit(Instr::abc(Op::IterPrep, state, 0, 0));
-                }
-            }
-        }
 
         // The iteration instructions, their operand `x`, and the capacity hint of a list
         // that gets an element per pass.
@@ -3932,6 +4176,110 @@ impl FnCompiler {
             ),
             (None, None) => (Op::ForList, Op::ForListNext, wants_index as u8, 1),
         };
+        let setup = LoopSetup {
+            span,
+            call,
+            state,
+            element_reg,
+            index_reg,
+            wants_index,
+            apart,
+            acc_reg,
+            call_depth,
+            body_depth,
+            checks_list: range_args.is_none() && entries.is_none(),
+            entry_op,
+            next_op,
+            mode,
+            hint,
+        };
+
+        // An initial value that is no literal is taken apart where it has the shape, and the
+        // loop goes on with its parts. Another copy of the loop goes on with anything else.
+        let to_operator = match parts {
+            Some(parts) if matches!(parts.origin, Origin::Value { .. }) => {
+                let to_other = self.take_apart(&parts);
+                let ensured = self.ensured.len();
+
+                self.loop_passes(&setup, Some(parts), dst)?;
+                let to_end = self.emit_jump(Op::Jmp, 0);
+                self.ensured.truncate(ensured);
+
+                self.patch_jump(to_other, self.here());
+                self.loop_passes(&setup, None, dst)?;
+                self.ensured.truncate(ensured);
+
+                self.patch_jump(to_end, self.here());
+                None
+            }
+            parts => self.loop_passes(&setup, parts, dst)?,
+        };
+
+        self.release_loop_names(cached);
+
+        if let (Some(to_operator), Some((op, lambda))) = (to_operator, call.operator) {
+            // What is on the left is no list: the operator gets it together with the
+            // function that the lambda makes, as it does when nothing is inlined. Nothing
+            // was done since the left-hand side was evaluated that the lambda could tell.
+            let to_end = self.emit_jump(Op::Jmp, 0);
+            self.patch_jump(to_operator, self.here());
+
+            let function = self.alloc()?;
+            self.expr_into(lambda, function)?;
+            self.emit_spanned(
+                Instr::abc(binary_opcode(op), dst, state + 1, function),
+                span,
+            );
+
+            self.patch_jump(to_end, self.here());
+        }
+
+        self.free_reg = mark;
+
+        Ok(())
+    }
+
+    /// Compile the passes of an inlined loop, once what it goes through and its initial value
+    /// are where the loop finds them (see [`Self::inline_loop`]), with the accumulator of a
+    /// `reduce` kept in registers part by part when `parts` says so. Returns the jump that an
+    /// operator takes for what is no list.
+    fn loop_passes(
+        &mut self,
+        setup: &LoopSetup,
+        mut parts: Option<Parts>,
+        dst: u16,
+    ) -> CResult<Option<usize>> {
+        let LoopSetup {
+            span,
+            call,
+            state,
+            element_reg,
+            index_reg,
+            wants_index,
+            apart,
+            acc_reg,
+            call_depth,
+            body_depth,
+            checks_list,
+            entry_op,
+            next_op,
+            mode,
+            hint,
+        } = *setup;
+        let region_start = self.here();
+
+        // A built-in function fails when it is given anything but a list. An operator does
+        // something else with that, which is compiled behind the loop. A range and the
+        // entries of a record are lists whenever there is no error.
+        let mut to_operator = None;
+        if checks_list {
+            match call.operator {
+                Some(_) => to_operator = Some(self.emit_jump(Op::IterList, state)),
+                None => {
+                    self.emit(Instr::abc(Op::IterPrep, state, 0, 0));
+                }
+            }
+        }
 
         if matches!(call.builtin, BuiltInFunction::Map | BuiltInFunction::Filter) {
             // Mapping produces exactly one result per element, so the result list can be sized
@@ -4124,28 +4472,43 @@ impl FnCompiler {
             ],
         });
 
-        self.release_loop_names(cached);
+        Ok(to_operator)
+    }
 
-        if let (Some(to_operator), Some((op, lambda))) = (to_operator, call.operator) {
-            // What is on the left is no list: the operator gets it together with the
-            // function that the lambda makes, as it does when nothing is inlined. Nothing
-            // was done since the left-hand side was evaluated that the lambda could tell.
-            let to_end = self.emit_jump(Op::Jmp, 0);
-            self.patch_jump(to_operator, self.here());
+    /// Emit the instruction that takes the initial value of an accumulator apart into its
+    /// parts where it has their shape (see `Op::JmpNotApart`), and return it, for its jump to
+    /// be patched: the jump is taken where the value has another shape.
+    fn take_apart(&mut self, parts: &Parts) -> usize {
+        let (kind, size, required) = match (&parts.shape, parts.origin) {
+            (Shape::List(len), _) => (APART_LIST, *len as u32, 0),
+            (Shape::Record(keys), Origin::Value { written, .. }) => {
+                let layout = self.layouts.len() as u32;
+                self.layouts.push(RecordLayout {
+                    distinct: true,
+                    keys: Keys::interned(keys.iter().map(String::as_str)),
+                    slots: (0..keys.len() as u16).collect(),
+                });
 
-            let function = self.alloc()?;
-            self.expr_into(lambda, function)?;
-            self.emit_spanned(
-                Instr::abc(binary_opcode(op), dst, state + 1, function),
-                span,
-            );
+                (APART_RECORD, layout, written as u8)
+            }
+            (Shape::Record(_), Origin::Literal) => {
+                unreachable!("a literal is not taken apart")
+            }
+        };
 
-            self.patch_jump(to_end, self.here());
-        }
+        let mut instr = Instr::abx(Op::JmpNotApart, parts.holder, 0);
+        instr.x = kind;
+        let jump = self.emit(instr);
+        self.emit_word(
+            Apart {
+                size,
+                first: register_operand(parts.first),
+                required,
+            }
+            .encode(),
+        );
 
-        self.free_reg = mark;
-
-        Ok(())
+        jump
     }
 }
 

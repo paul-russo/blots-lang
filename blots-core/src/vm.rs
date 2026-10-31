@@ -23,8 +23,8 @@ mod step;
 use crate::{
     ast::{BinaryOp, Span},
     bytecode::{
-        CaptureSource, EntryPart, FAST_FRAME_SLOTS, Instr, Proto, REGISTER_SCALE, RemainderTest,
-        Wrap, register_index,
+        APART_LIST, APART_RECORD, Apart, CaptureSource, EntryPart, FAST_FRAME_SLOTS, Instr, Proto,
+        REGISTER_SCALE, RemainderTest, Wrap, register_index,
     },
     compiler::{compile_lambda, compile_self_variant},
     environment::Environment,
@@ -412,6 +412,59 @@ unsafe fn entry_next(slot: *mut Value, record: &Record, x: u8, run: u64) -> Opti
     }
 
     Some(true)
+}
+
+/// Take the accumulator `value` apart into the registers from `first` on, when it has the
+/// shape that `kind` and `apart` describe (see `Op::JmpNotApart`), and report whether it
+/// did. The layouts are those of `proto`.
+///
+/// # Safety
+/// `first` must point to as many registers of the innermost frame as the shape has parts.
+unsafe fn take_apart(
+    slots: &[HeapValue],
+    proto: &Proto,
+    value: Value,
+    kind: u8,
+    apart: Apart,
+    first: *mut Value,
+) -> bool {
+    match (kind, value) {
+        (APART_LIST, Value::List(pointer)) => {
+            let Some(HeapValue::List(items)) = slots.get(pointer.index()) else {
+                return false;
+            };
+            if items.len() != apart.size as usize {
+                return false;
+            }
+
+            for (offset, item) in items.iter().enumerate() {
+                // SAFETY: guaranteed by the caller, for each element of a list of that size.
+                unsafe { store_value(first.add(offset), *item) };
+            }
+
+            true
+        }
+        (APART_RECORD, Value::Record(pointer)) => {
+            let Some(HeapValue::Record(record)) = slots.get(pointer.index()) else {
+                return false;
+            };
+            let keys = &proto.layouts[apart.size as usize].keys;
+            let keys = keys.first(keys.len());
+            let required = &keys[..apart.required as usize];
+            if !required.iter().all(|key| record.position(key).is_some()) {
+                return false;
+            }
+
+            for (offset, key) in keys.iter().enumerate() {
+                let value = record.get(key).copied().unwrap_or(Value::Null);
+                // SAFETY: guaranteed by the caller, for each key of the layout.
+                unsafe { store_value(first.add(offset), value) };
+            }
+
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Whether `value` is of the type whose discriminant is `tag` (see `Op::IsType`).

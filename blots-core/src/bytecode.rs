@@ -330,6 +330,12 @@ pub(crate) enum Op {
     LoadEntry,
     /// `pc += sbx` unless `R[a]` is a finite number.
     JmpNotFinite,
+    /// Take the accumulator `R[a]` of a `reduce` apart into the registers that the operand
+    /// word names (see [`Apart`]) when it has the shape that `x` says, and `pc += sbx`
+    /// otherwise: a list of `size` elements for [`APART_LIST`], and a record that has the
+    /// first `required` keys of layout `H[size]` for [`APART_RECORD`], each register of which
+    /// gets the value under its key (null for a key that the record does not have).
+    JmpNotApart,
     /// `R[a] = (typeof(R[b]) == ` the name of type `x` `)`, or `!=` that name when `c` is 1,
     /// without making a string of the name (see [`TYPE_NAMED_NOTHING`]). Checks the call
     /// depth first, the way the call of `typeof` that it stands for does.
@@ -524,6 +530,7 @@ impl Op {
             | Op::JmpNotNeNull
             | Op::JmpNotFinite
             | Op::JmpNotType
+            | Op::JmpNotApart
             | Op::JmpIfFalse
             | Op::Return
             | Op::Closure
@@ -566,7 +573,7 @@ pub(crate) const REGISTER_SCALE: usize = 2;
 pub(crate) const MAX_REGISTERS: usize = (u16::MAX as usize + 1) / REGISTER_SCALE;
 
 /// The operand that names register `index`.
-const fn register_operand(index: u16) -> u16 {
+pub(crate) const fn register_operand(index: u16) -> u16 {
     debug_assert!((index as usize) < MAX_REGISTERS);
 
     index * REGISTER_SCALE as u16
@@ -610,6 +617,39 @@ pub(crate) const LAST_USE_B: u8 = 1;
 
 /// The same for operand register `c`.
 pub(crate) const LAST_USE_C: u8 = 2;
+
+/// Operand `x` of a `JmpNotApart` that takes a list apart.
+pub(crate) const APART_LIST: u8 = 0;
+
+/// Operand `x` of a `JmpNotApart` that takes a record apart.
+pub(crate) const APART_RECORD: u8 = 1;
+
+/// The operand word of a `JmpNotApart`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Apart {
+    /// The number of elements of a list, or the layout whose keys a record has.
+    pub size: u32,
+
+    /// The operand that names the register of the first part, which the others follow.
+    pub first: u16,
+
+    /// The number of the first keys of the layout that a record has to have.
+    pub required: u8,
+}
+
+impl Apart {
+    pub const fn encode(self) -> u64 {
+        self.size as u64 | (self.first as u64) << 32 | (self.required as u64) << 48
+    }
+
+    pub const fn decode(word: u64) -> Self {
+        Self {
+            size: word as u32,
+            first: (word >> 32) as u16,
+            required: (word >> 48) as u8,
+        }
+    }
+}
 
 /// Operand `x` of `IsType` and `JmpNotType` for a string that no type is called: no value
 /// is of that type.
@@ -867,6 +907,7 @@ impl Instr {
     pub fn operand_words(self) -> usize {
         match self.op {
             Op::JmpNotRemEq | Op::JmpNotRemNe => 2,
+            Op::JmpNotApart => 1,
             _ => self.has_number_operand() as usize,
         }
     }
