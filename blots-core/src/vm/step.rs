@@ -488,6 +488,10 @@ impl Vm {
                 let value = self.new_record(c as usize, self.reg_ptr(b));
                 self.set_reg(a, value);
             }
+            Op::UpdateRecord => {
+                let value = self.update_record(c as usize, self.reg_ptr(b))?;
+                self.set_reg(a, value);
+            }
             Op::RecordBegin => self.record_begin(instr.bx()),
             Op::RecordSet => self.record_set(instr.bx(), self.reg(a)),
             Op::RecordKey => self.record_key(self.reg(a))?,

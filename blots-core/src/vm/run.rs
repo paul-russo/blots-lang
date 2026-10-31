@@ -1138,6 +1138,13 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     added!();
                     next!(1);
                 }
+                Op::UpdateRecord => {
+                    publish!();
+                    let value = done!((*vm).update_record(instr.c as usize, reg!(instr.b)));
+                    store_value(reg!(instr.a), value);
+                    added!();
+                    next!(1);
+                }
                 Op::RecordBegin => {
                     publish!();
                     (*vm).record_begin(instr.bx());

@@ -9499,8 +9499,9 @@ mod instruction_call_tests {
                 &[Op::ListBegin, Op::ListAppend, Op::Spread, Op::ListEnd],
             ),
             ("(a, b) => {a: a, b: b}", &[Op::NewRecord]),
+            ("(r, a) => {...r, a: a}", &[Op::Spread, Op::UpdateRecord]),
             (
-                "(r, a) => {...r, a: a}",
+                "(r, a) => {a: a, ...r, b: a}",
                 &[
                     Op::RecordBegin,
                     Op::Spread,
@@ -11621,7 +11622,12 @@ mod accumulator_parts_tests {
         operations[start..end].iter().any(|op| {
             matches!(
                 op,
-                Op::NewList | Op::NewListSpread | Op::ListEnd | Op::NewRecord | Op::RecordEnd
+                Op::NewList
+                    | Op::NewListSpread
+                    | Op::ListEnd
+                    | Op::NewRecord
+                    | Op::UpdateRecord
+                    | Op::RecordEnd
             )
         })
     }
@@ -11782,6 +11788,179 @@ mod accumulator_parts_tests {
             ),
         ] {
             let outcome = as_made(code, init);
+
+            assert!(outcome.starts_with(expected), "{code}: {outcome}");
+        }
+    }
+}
+
+// A record literal that spreads a value and then writes keys that are spelled out is made by
+// one instruction, and a record that has all of those keys already is copied once, with some
+// of its values replaced. Nothing may tell that from the record being built entry by entry:
+// not what it comes to, nor the order of its keys, nor what an error says and points at.
+#[cfg(test)]
+mod record_update_tests {
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::{evaluate_ast, evaluate_statement};
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code`, up to the value of the last one, with the heap
+    /// compacted while a statement runs (`compacts`) or left alone.
+    fn evaluate(
+        code: &str,
+        heap: &Rc<RefCell<Heap>>,
+        compacts: bool,
+    ) -> Result<Value, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+
+            let (heap, bindings) = (Rc::clone(heap), Rc::clone(&bindings));
+            result = match compacts {
+                true => evaluate_statement(&expr, heap, bindings, Rc::clone(&source), &mut [])?,
+                false => evaluate_ast(&expr, heap, bindings, 0, Rc::clone(&source))?,
+            };
+        }
+
+        Ok(result)
+    }
+
+    /// What the statements of `code` come to, rendered: the value, or the message of the
+    /// error and the part of `code` that it points at. Returns the number of passes over
+    /// the heap as well.
+    fn run(code: &str, compacts: bool) -> (String, usize) {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        let outcome = match evaluate(code, &heap, compacts) {
+            Ok(value) => value.stringify_internal(&heap.borrow()),
+            Err(error) => {
+                let place = match error.span {
+                    Some(span) => &code[span.start_byte..span.end_byte],
+                    None => "nothing",
+                };
+
+                format!("{} at {place}", error.message)
+            }
+        };
+
+        (outcome, heap.borrow().passes())
+    }
+
+    /// `code` with the keys that its record literals spell out written as strings that are
+    /// computed, which a record is built entry by entry for.
+    fn computed_keys(code: &str) -> String {
+        let mut spelled = String::new();
+        let mut rest = code;
+
+        while let Some(at) = rest.find(": ") {
+            let (before, after) = rest.split_at(at);
+            let start = before
+                .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .map_or(0, |position| position + 1);
+            let key = &before[start..];
+            let in_record = before[..start].trim_end().ends_with([',', '{']);
+
+            spelled.push_str(&before[..start]);
+            match in_record && !key.is_empty() {
+                true => spelled.push_str(&format!("[\"{key}\"]")),
+                false => spelled.push_str(key),
+            }
+            spelled.push_str(": ");
+            rest = &after[2..];
+        }
+        spelled.push_str(rest);
+
+        spelled
+    }
+
+    /// What `code` comes to, which is what it comes to when its records are built entry by
+    /// entry, whether the heap is compacted while it runs or not.
+    fn as_built(code: &str) -> String {
+        let (outcome, _) = run(code, true);
+        let built = computed_keys(code);
+
+        assert_ne!(built, code, "{code} has no keys to compute");
+        assert_eq!(outcome, run(code, false).0, "{code}");
+        assert_eq!(
+            outcome,
+            run(&built, true).0.replace("[\"", "").replace("\"]", ""),
+            "{code}"
+        );
+
+        outcome
+    }
+
+    #[test]
+    fn a_record_with_keys_written_comes_to_what_it_does_built_entry_by_entry() {
+        let records = "r = {a: 1, b: 2, c: 3}\ng = {...r, d: 4}\nl = [10, 20]\n";
+
+        for (code, expected) in [
+            // A record that has every key, some of them, or none.
+            ("{...r, b: 20}", "{a: 1, b: 20, c: 3}"),
+            ("{...r, c: 30, a: 10}", "{a: 10, b: 2, c: 30}"),
+            ("{...r, b: 20, z: 0}", "{a: 1, b: 20, c: 3, z: 0}"),
+            ("{...r, y: 1, x: 2}", "{a: 1, b: 2, c: 3, y: 1, x: 2}"),
+            ("{...{}, x: 1}", "{x: 1}"),
+            // Records whose table has more keys than they do, and the records it has.
+            (
+                "[{...r, d: 0}, {...r, a: 0}, g]",
+                "[{a: 1, b: 2, c: 3, d: 0}, {a: 0, b: 2, c: 3}, {a: 1, b: 2, c: 3, d: 4}]",
+            ),
+            (
+                "[{...g, d: 5}, {...r, c: 0}, r, g]",
+                "[{a: 1, b: 2, c: 3, d: 5}, {a: 1, b: 2, c: 0}, {a: 1, b: 2, c: 3}, {a: 1, b: 2, c: 3, d: 4}]",
+            ),
+            // A list and a string are spread under their positions.
+            ("{...l, x: 1}", "{0: 10, 1: 20, x: 1}"),
+            ("{...\"ab\", b: 1}", "{0: a, 1: b, b: 1}"),
+            // Keys that are written twice, and a spread that is not the first entry, are built
+            // entry by entry.
+            ("{...r, a: 1, a: 2}", "{a: 2, b: 2, c: 3}"),
+            ("{x: 0, ...r, b: 5}", "{x: 0, a: 1, b: 5, c: 3}"),
+            // In a loop, where the heap is compacted as it goes.
+            (
+                "reduce(range(3000), (acc, i) => {...acc, a: acc.a + i, b: [i]}, r).a",
+                "4498501",
+            ),
+            (
+                "insert = (t, v) => if t == null then {v: v, l: null, r: null} else if v < t.v then {...t, l: insert(t.l, v)} else {...t, r: insert(t.r, v)}\nsize = t => if t == null then 0 else 1 + size(t.l) + size(t.r)\nsize(reduce(range(2000), (t, i) => insert(t, (i * 7919) % 10007), null))",
+                "2000",
+            ),
+            (
+                "len(map(range(3000), i => {...g, a: to_string(i), z: [i]}))",
+                "3000",
+            ),
+            // What goes wrong, and where.
+            ("{...5, a: 1}", "expected a list, record, or string"),
+            (
+                "{...null, a: missing}",
+                "expected a list, record, or string",
+            ),
+            (
+                "{...r, a: missing}",
+                "unknown identifier: missing at missing",
+            ),
+            (
+                "{...missing, a: 1}",
+                "unknown identifier: missing at missing",
+            ),
+            (
+                "{...r, a: 1 + \"x\"}",
+                "expected a number, but got a string",
+            ),
+        ] {
+            let outcome = as_built(&format!("{records}{code}"));
 
             assert!(outcome.starts_with(expected), "{code}: {outcome}");
         }

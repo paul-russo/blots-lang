@@ -2597,6 +2597,56 @@ impl Vm {
         self.heap.borrow_mut().insert_record(record)
     }
 
+    /// The record that the spread value in the register at `first` makes, with the values of
+    /// the registers that follow it under the keys of layout `index`, in order (see
+    /// `Op::UpdateRecord`).
+    #[inline(never)]
+    fn update_record(&mut self, index: usize, first: *const Value) -> Result<Value, RuntimeError> {
+        let proto = self.top().proto;
+        // SAFETY: the code of an active frame outlives it (see `Vm::proto_for`).
+        let keys = unsafe { &(&(*proto).layouts)[index].keys };
+        let count = keys.len();
+
+        // SAFETY: the spread value and the values are consecutive registers of the innermost
+        // frame, one value per key of the layout.
+        let spread = unsafe { *first };
+
+        // A record that has every one of the keys keeps its table, and a key keeps its place:
+        // the values are copied once, and some of them replaced.
+        if let Value::Spread(IterablePointer::Record(pointer)) = spread {
+            let heap = self.heap.borrow();
+            let record = pointer.reify(&heap).as_record()?;
+            let mut values: Box<[Value]> = record.as_slice().into();
+            let replaced = keys.first(count).iter().enumerate().all(|(offset, key)| {
+                let Some(position) = record.position(key) else {
+                    return false;
+                };
+
+                // SAFETY: as above.
+                values[position] = unsafe { *first.add(offset + 1) };
+                true
+            });
+
+            if replaced {
+                let record = Record::new(Rc::clone(record.table()), values);
+                drop(heap);
+
+                return Ok(self.heap.borrow_mut().insert_record(record));
+            }
+        }
+
+        let mut entries = RecordBuilder::with_capacity(count);
+        if let Value::Spread(iterable) = spread {
+            spread_into_record(&self.heap, &mut entries, iterable)?;
+        }
+        for (offset, key) in keys.first(count).iter().enumerate() {
+            // SAFETY: as above.
+            entries.insert(key, unsafe { *first.add(offset + 1) });
+        }
+
+        Ok(self.heap.borrow_mut().insert_built_record(entries))
+    }
+
     fn record_builder(&mut self) -> (&mut RecordBuilder, &mut Option<StringPointer>) {
         match self.builders.last_mut() {
             Some(Builder::Record { entries, key }) => (entries, key),

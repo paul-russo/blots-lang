@@ -3095,6 +3095,43 @@ impl FnCompiler {
             return Ok(());
         }
 
+        // A record that is another one with some of its keys written is made by one
+        // instruction, from the spread and the values in consecutive registers.
+        if let [first, written @ ..] = entries
+            && let RecordKey::Spread(spread) = &first.node.key
+            && !written.is_empty()
+            && written.len() <= MAX_SHAPE_KEYS
+            && self.layouts.len() < MAX_LAYOUTS
+        {
+            let mut keys = IndexSet::new();
+            let distinct = written.iter().all(|entry| match &entry.node.key {
+                RecordKey::Static(key) => keys.insert(key.clone()),
+                _ => false,
+            });
+
+            if distinct {
+                // The layout takes its place before the values are compiled, as above.
+                let layout = self.layouts.len() as u16;
+                self.layouts.push(RecordLayout {
+                    distinct: true,
+                    keys: Keys::interned(keys.iter().map(String::as_str)),
+                    slots: (0..keys.len() as u16).collect(),
+                });
+
+                let base = self.alloc()?;
+                self.expr_into(spread, base)?;
+                for entry in written {
+                    let reg = self.alloc()?;
+                    self.expr_into(&entry.node.value, reg)?;
+                }
+
+                self.emit(Instr::abc(Op::UpdateRecord, dst, base, layout));
+                self.free_reg = mark;
+
+                return Ok(());
+            }
+        }
+
         // How many entries the literal spells out tells the record how much room to make
         // for them when it starts with the entries of a spread.
         let spelled_out = entries

@@ -248,6 +248,10 @@ pub(crate) enum Op {
 
     /// `R[a] = ` record of layout `H[c]` with the values `R[b], R[b+1], ...`
     NewRecord,
+    /// `R[a] = {...R[b], k1: R[b+1], k2: R[b+2], ...}` for the distinct keys `k1, k2, ...`
+    /// of layout `H[c]`, written in that order: `R[b]` is the spread of a list, a string or a
+    /// record.
+    UpdateRecord,
     /// Start building a record that `bx` entries are inserted into one by one.
     RecordBegin,
     /// Insert `S[bx] => R[a]` into the record being built.
@@ -451,6 +455,7 @@ impl Op {
             | Op::NewList
             | Op::NewListSpread
             | Op::NewRecord
+            | Op::UpdateRecord
             | Op::GetField
             | Op::Spread
             | Op::RangePrep
