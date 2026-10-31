@@ -324,6 +324,8 @@ pub(crate) enum Op {
     /// `R[a] = ` the part `x` (an [`EntryPart`]) of the entry that the record loop whose
     /// state starts at `R[b]` went on to last.
     LoadEntry,
+    /// `pc += sbx` unless `R[a]` is a finite number.
+    JmpNotFinite,
     /// Raise the "maximum call depth" error an out-of-line callback call would have produced
     /// when the frame is too deep: the callback is called `b` levels further in than the
     /// frame is. Executed once, before the first iteration.
@@ -507,6 +509,7 @@ impl Op {
             | Op::JmpNotRemNe
             | Op::JmpNotEqNull
             | Op::JmpNotNeNull
+            | Op::JmpNotFinite
             | Op::JmpIfFalse
             | Op::Return
             | Op::Closure

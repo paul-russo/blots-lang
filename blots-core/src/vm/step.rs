@@ -617,6 +617,11 @@ impl Vm {
                     self.skip(instr.sbx());
                 }
             }
+            Op::JmpNotFinite => {
+                if !matches!(self.reg(a), Value::Number(number) if number.is_finite()) {
+                    self.skip(instr.sbx());
+                }
+            }
             Op::LoadEntry => {
                 // SAFETY: the loop whose state the instruction names is at an entry.
                 let value = unsafe { self.load_entry(self.reg_ptr(b), EntryPart::of(instr.x)) };

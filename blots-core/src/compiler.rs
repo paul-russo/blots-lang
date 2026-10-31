@@ -105,6 +105,10 @@ const MAX_SHARING_FRAME: usize = FAST_FRAME_SLOTS / 2;
 /// A table of up to this many entries is searched from the start for an entry.
 const MAX_SCANNED_ENTRIES: usize = 16;
 
+/// The most comparisons in a condition that is decided by jumps between them (see
+/// `FnCompiler::branch_on_numbers`), which compiles the condition a second time.
+const MAX_LOGIC_COMPARISONS: usize = 16;
+
 /// The distinct strings or names an instruction of a function refers to by index, in the
 /// order they were first used.
 ///
@@ -1882,9 +1886,9 @@ impl FnCompiler {
         self.same_value(left, &mut variables.iter(), right)
     }
 
-    /// Compile a condition and emit a jump (returned for patching) that is taken when the
+    /// Compile a condition and emit the jumps (returned for patching) that are taken when the
     /// condition is false.
-    fn branch_if_false(&mut self, condition: &SpannedExpr) -> CResult<usize> {
+    fn branch_if_false(&mut self, condition: &SpannedExpr) -> CResult<Vec<usize>> {
         let mark = self.free_reg;
 
         if let Expr::BinaryOp { op, left, right } = &condition.node
@@ -1900,7 +1904,7 @@ impl FnCompiler {
                 instr.x = null_first as u8;
                 self.free_reg = mark;
 
-                return Ok(self.emit_spanned(instr, span));
+                return Ok(vec![self.emit_spanned(instr, span)]);
             }
 
             if let Some(constant) = Self::number_operand(right) {
@@ -1926,7 +1930,7 @@ impl FnCompiler {
                     self.emit_word(test.bits);
                     self.free_reg = mark;
 
-                    return Ok(jump);
+                    return Ok(vec![jump]);
                 }
 
                 let left_reg = self.expr_any(left)?;
@@ -1934,7 +1938,7 @@ impl FnCompiler {
                 self.emit_number(constant);
                 self.free_reg = mark;
 
-                return Ok(jump);
+                return Ok(vec![jump]);
             }
 
             let left_reg = self.expr_any(left)?;
@@ -1943,13 +1947,263 @@ impl FnCompiler {
             self.free_reg = mark;
 
             // The comparison skips this jump when it holds and takes it otherwise.
-            return Ok(self.emit_jump(Op::Jmp, 0));
+            return Ok(vec![self.emit_jump(Op::Jmp, 0)]);
         }
 
-        let reg = self.expr_any(condition)?;
+        Ok(self.jumps_if_false(condition)?.0)
+    }
+
+    /// Compile `condition`, which decides a branch, into jumps that are taken where it does
+    /// not hold: a `JmpIfFalse` on its value, behind jumps between its comparisons where it
+    /// is made of them (see [`Self::branch_on_numbers`]). Returns the jumps, and where the
+    /// code that evaluates the condition ends, which is right before the `JmpIfFalse`.
+    fn jumps_if_false(&mut self, condition: &SpannedExpr) -> CResult<(Vec<usize>, usize)> {
+        let mark = self.free_reg;
+        let ensured = self.ensured.len();
+
+        let (mut to_false, to_true) = match self.branch_on_numbers(condition)? {
+            Some((to_false, to_value)) => {
+                let to_true = self.emit_jump(Op::Jmp, 0);
+                for jump in to_value {
+                    self.patch_jump(jump, self.here());
+                }
+
+                (to_false, Some(to_true))
+            }
+            None => (Vec::new(), None),
+        };
+
+        let value = self.expr_any(condition)?;
+        let end = self.here();
+        to_false.push(self.emit_jump(Op::JmpIfFalse, value));
         self.free_reg = mark;
 
-        Ok(self.emit_jump(Op::JmpIfFalse, reg))
+        // The value is only evaluated where the comparisons were not decided.
+        if let Some(to_true) = to_true {
+            self.patch_jump(to_true, self.here());
+            self.ensured.truncate(ensured);
+        }
+
+        Ok((to_false, end))
+    }
+
+    /// Decide `condition` by jumps between its comparisons, when it is a [`Logic`] condition
+    /// with an `and` or an `or` in it, for as long as each of the registers that it reads
+    /// holds a finite number. Returns the jumps that are taken where the condition does not
+    /// hold, and those taken where one of the registers holds something else; the code falls
+    /// through where the condition holds.
+    ///
+    /// Such a condition evaluates every one of its comparisons, and fails where one of them
+    /// fails. A comparison of finite numbers cannot fail, and neither can the remainder of a
+    /// finite number by another one that is not zero, so the comparisons that are not
+    /// evaluated could not have told.
+    fn branch_on_numbers(
+        &mut self,
+        condition: &SpannedExpr,
+    ) -> CResult<Option<(Vec<usize>, Vec<usize>)>> {
+        let Some(logic) = self.logic(condition) else {
+            return Ok(None);
+        };
+        if !logic.has_junction() || logic.comparisons() > MAX_LOGIC_COMPARISONS {
+            return Ok(None);
+        }
+
+        let mut registers = Vec::new();
+        logic.registers(&mut registers);
+        let to_value = registers
+            .into_iter()
+            .map(|reg| self.emit_jump(Op::JmpNotFinite, reg))
+            .collect();
+
+        let mark = self.free_reg;
+        let mut to_false = Vec::new();
+        self.jump_on(&logic, false, &mut to_false)?;
+        self.free_reg = mark;
+
+        Ok(Some((to_false, to_value)))
+    }
+
+    /// `expr` as a [`Logic`] condition, when it is one, and none of its parts is computed
+    /// ahead of a loop or kept for the branches of a condition: comparisons that are not
+    /// evaluated would leave a kept value uncomputed.
+    fn logic(&self, expr: &SpannedExpr) -> Option<Logic> {
+        if self.awaited_shared(expr).is_some() || self.hoisted_reg(expr).is_some() {
+            return None;
+        }
+        if !self.shared.is_empty() && self.shared_reg(expr).is_some() {
+            return None;
+        }
+
+        match &expr.node {
+            Expr::BinaryOp {
+                op: BinaryOp::And | BinaryOp::NaturalAnd,
+                left,
+                right,
+            } => Some(Logic::Both(
+                Box::new(self.logic(left)?),
+                Box::new(self.logic(right)?),
+            )),
+            Expr::BinaryOp {
+                op: BinaryOp::Or | BinaryOp::NaturalOr,
+                left,
+                right,
+            } => Some(Logic::Either(
+                Box::new(self.logic(left)?),
+                Box::new(self.logic(right)?),
+            )),
+            Expr::UnaryOp {
+                op: UnaryOp::Not | UnaryOp::Invert,
+                expr: operand,
+            } => Some(Logic::Not(Box::new(self.logic(operand)?))),
+            Expr::BinaryOp { op, left, right } if compare_jump_opcodes(*op).is_some() => {
+                Some(Logic::Compare(*op, self.term(left)?, self.term(right)?))
+            }
+            _ => None,
+        }
+    }
+
+    /// `expr` as an operand of a comparison in a [`Logic`] condition, when it is one whose
+    /// value takes no code to get, or the remainder of one by a number.
+    fn term(&self, expr: &SpannedExpr) -> Option<Term> {
+        if self.awaited_shared(expr).is_some() {
+            return None;
+        }
+        if let Some(reg) = self.hoisted_reg(expr) {
+            return Some(Term::Register(reg));
+        }
+        if !self.shared.is_empty()
+            && let Some(reg) = self.shared_reg(expr)
+        {
+            return Some(Term::Register(reg));
+        }
+
+        match &expr.node {
+            Expr::Number(number) if number.is_finite() => Some(Term::Number(*number)),
+            Expr::BinaryOp {
+                op: BinaryOp::Modulo,
+                left,
+                right,
+            } => match (self.loaded_reg(left)?, &right.node) {
+                (reg, Expr::Number(divisor)) if divisor.is_finite() && *divisor != 0.0 => {
+                    Some(Term::Remainder(reg, *divisor))
+                }
+                _ => None,
+            },
+            _ => self.loaded_reg(expr).map(Term::Register),
+        }
+    }
+
+    /// The register that holds the value of the variable that `expr` reads, when no code is
+    /// needed at this point to get the value there.
+    fn loaded_reg(&self, expr: &SpannedExpr) -> Option<u16> {
+        match self.place(expr) {
+            Resolved::Register(reg) => Some(reg),
+            Resolved::Global(name, reg) if self.ensured.contains(&name) => Some(reg),
+            Resolved::Global(..) | Resolved::Dynamic => None,
+        }
+    }
+
+    /// Emit jumps, which are added to `jumps`, that are taken where `logic` comes out as
+    /// `when`; the code falls through where it does not. The registers that the condition
+    /// reads hold finite numbers.
+    fn jump_on(&mut self, logic: &Logic, when: bool, jumps: &mut Vec<usize>) -> CResult<()> {
+        match logic {
+            Logic::Both(first, second) if !when => {
+                self.jump_on(first, false, jumps)?;
+                self.jump_on(second, false, jumps)?;
+            }
+            Logic::Either(first, second) if when => {
+                self.jump_on(first, true, jumps)?;
+                self.jump_on(second, true, jumps)?;
+            }
+            Logic::Both(first, second) | Logic::Either(first, second) => {
+                // The first operand decides the condition where it comes out as the second
+                // one would have to for the condition to come out the other way.
+                let mut decided = Vec::new();
+                self.jump_on(first, !when, &mut decided)?;
+                self.jump_on(second, when, jumps)?;
+                for jump in decided {
+                    self.patch_jump(jump, self.here());
+                }
+            }
+            Logic::Not(operand) => self.jump_on(operand, !when, jumps)?,
+            Logic::Compare(op, left, right) => {
+                self.jump_on_comparison(*op, *left, *right, when, jumps)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// [`Self::jump_on`] for the comparison `left op right`.
+    fn jump_on_comparison(
+        &mut self,
+        op: BinaryOp,
+        left: Term,
+        right: Term,
+        when: bool,
+        jumps: &mut Vec<usize>,
+    ) -> CResult<()> {
+        // A number is compared from the right.
+        let (op, left, right) = match (left, right) {
+            (Term::Number(x), Term::Number(y)) => {
+                if compare_numbers(op, x, y) == when {
+                    jumps.push(self.emit_jump(Op::Jmp, 0));
+                }
+
+                return Ok(());
+            }
+            (Term::Number(_), _) => (swapped_comparison(op), right, left),
+            _ => (op, left, right),
+        };
+
+        // A jump instruction is taken where its comparison does not hold.
+        let op = match when {
+            true => negated_comparison(op),
+            false => op,
+        };
+        let (jump_op, jump_const_op) = compare_jump_opcodes(op).expect("a comparison");
+
+        if let (Term::Remainder(reg, divisor), Term::Number(remainder)) = (left, right)
+            && let Some(remainder_op) = remainder_jump_opcode(op)
+            && let Some(test) = RemainderTest::new(divisor, remainder)
+        {
+            jumps.push(self.emit_jump(remainder_op, reg));
+            self.emit_word(test.mask);
+            self.emit_word(test.bits);
+
+            return Ok(());
+        }
+
+        let left = self.term_reg(left)?;
+        match right {
+            Term::Number(number) => {
+                jumps.push(self.emit_jump(jump_const_op, left));
+                self.emit_number(number);
+            }
+            _ => {
+                let right = self.term_reg(right)?;
+                self.emit(Instr::abc(jump_op, 0, left, right));
+                jumps.push(self.emit_jump(Op::Jmp, 0));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// A register that holds the value of `term`, which is no number.
+    fn term_reg(&mut self, term: Term) -> CResult<u16> {
+        match term {
+            Term::Register(reg) => Ok(reg),
+            Term::Remainder(reg, divisor) => {
+                let dst = self.alloc()?;
+                self.emit(Instr::abc(Op::ModK, dst, reg, small_divisor(divisor)));
+                self.emit_number(divisor);
+
+                Ok(dst)
+            }
+            Term::Number(_) => unreachable!("a number is compared from the right"),
+        }
     }
 
     fn conditional(
@@ -1974,7 +2228,9 @@ impl FnCompiler {
                 let to_end = self.emit_jump(Op::Jmp, 0);
                 self.ensured.truncate(ensured);
 
-                self.patch_jump(to_else, self.here());
+                for jump in to_else {
+                    self.patch_jump(jump, self.here());
+                }
                 self.expr_into(else_expr, dst)?;
                 self.ensured.truncate(ensured);
 
@@ -1984,7 +2240,9 @@ impl FnCompiler {
                 self.expr_return(then_expr)?;
                 self.ensured.truncate(ensured);
 
-                self.patch_jump(to_else, self.here());
+                for jump in to_else {
+                    self.patch_jump(jump, self.here());
+                }
                 self.expr_return(else_expr)?;
                 self.ensured.truncate(ensured);
             }
@@ -3274,8 +3532,9 @@ impl FnCompiler {
         let body_mark = self.free_reg;
 
         // After the body: the instructions that consume its result, then the exits that leave
-        // the loop early (each has to undo the depth adjustment).
-        let mut early_exit = None;
+        // the loop early (each has to undo the depth adjustment). The result of a function
+        // that decides whether to keep an element or go on is only branched on.
+        let mut early_exit = Vec::new();
         let body_end;
 
         match call.builtin {
@@ -3285,9 +3544,8 @@ impl FnCompiler {
                 self.emit(Instr::abc(Op::ListPush, result, 0, 0));
             }
             BuiltInFunction::Filter => {
-                let result = self.expr_any(call.body)?;
-                body_end = self.here();
-                let skip = self.emit_jump(Op::JmpIfFalse, result);
+                let (skip, end) = self.jumps_if_false(call.body)?;
+                body_end = end;
 
                 // An entry that is kept is the list of its key and its value after all.
                 let kept = match apart {
@@ -3301,23 +3559,26 @@ impl FnCompiler {
                     false => element_reg,
                 };
                 self.emit(Instr::abc(Op::ListPush, kept, 0, 0));
-                self.patch_jump(skip, self.here());
+                for jump in skip {
+                    self.patch_jump(jump, self.here());
+                }
             }
             BuiltInFunction::Reduce => {
                 self.expr_into(call.body, acc_reg.expect("reduce accumulator"))?;
                 body_end = self.here();
             }
             BuiltInFunction::Every => {
-                let result = self.expr_any(call.body)?;
-                body_end = self.here();
-                early_exit = Some(self.emit_jump(Op::JmpIfFalse, result));
+                let (to_exit, end) = self.jumps_if_false(call.body)?;
+                body_end = end;
+                early_exit = to_exit;
             }
             BuiltInFunction::Some => {
-                let result = self.expr_any(call.body)?;
-                body_end = self.here();
-                let keep_going = self.emit_jump(Op::JmpIfFalse, result);
-                early_exit = Some(self.emit_jump(Op::Jmp, 0));
-                self.patch_jump(keep_going, self.here());
+                let (keep_going, end) = self.jumps_if_false(call.body)?;
+                body_end = end;
+                early_exit.push(self.emit_jump(Op::Jmp, 0));
+                for jump in keep_going {
+                    self.patch_jump(jump, self.here());
+                }
             }
             _ => unreachable!("not an inlinable built-in"),
         }
@@ -3366,7 +3627,9 @@ impl FnCompiler {
                 self.load_const(dst, Value::Bool(exhausted));
                 let to_end = self.emit_jump(Op::Jmp, 0);
 
-                self.patch_jump(early_exit.expect("early exit"), self.here());
+                for jump in early_exit {
+                    self.patch_jump(jump, self.here());
+                }
                 self.emit(Instr::abx(Op::AddDepth, 0, (-body_depth) as u32));
                 self.load_const(dst, Value::Bool(!exhausted));
 
@@ -3530,4 +3793,105 @@ fn compare_jump_opcodes(op: BinaryOp) -> Option<(Op, Op)> {
         BinaryOp::GreaterEq => (Op::JmpNotGe, Op::JmpNotGeK),
         _ => return None,
     })
+}
+
+/// The comparison that holds exactly where `op` does not, for numbers that are not NaN.
+fn negated_comparison(op: BinaryOp) -> BinaryOp {
+    match op {
+        BinaryOp::Equal => BinaryOp::NotEqual,
+        BinaryOp::NotEqual => BinaryOp::Equal,
+        BinaryOp::Less => BinaryOp::GreaterEq,
+        BinaryOp::LessEq => BinaryOp::Greater,
+        BinaryOp::Greater => BinaryOp::LessEq,
+        BinaryOp::GreaterEq => BinaryOp::Less,
+        _ => unreachable!("not a comparison"),
+    }
+}
+
+/// The comparison that holds for `b` and `a` exactly where `op` holds for `a` and `b`.
+fn swapped_comparison(op: BinaryOp) -> BinaryOp {
+    match op {
+        BinaryOp::Less => BinaryOp::Greater,
+        BinaryOp::LessEq => BinaryOp::GreaterEq,
+        BinaryOp::Greater => BinaryOp::Less,
+        BinaryOp::GreaterEq => BinaryOp::LessEq,
+        other => other,
+    }
+}
+
+/// Whether comparison `op` holds for two numbers that are not NaN.
+fn compare_numbers(op: BinaryOp, x: f64, y: f64) -> bool {
+    match op {
+        BinaryOp::Equal => x == y,
+        BinaryOp::NotEqual => x != y,
+        BinaryOp::Less => x < y,
+        BinaryOp::LessEq => x <= y,
+        BinaryOp::Greater => x > y,
+        BinaryOp::GreaterEq => x >= y,
+        _ => unreachable!("not a comparison"),
+    }
+}
+
+/// A condition made of `and`, `or` and `not` over comparisons of numbers, which the
+/// compiler can decide by jumps between the comparisons (see
+/// `FnCompiler::branch_on_numbers`).
+enum Logic {
+    Both(Box<Logic>, Box<Logic>),
+    Either(Box<Logic>, Box<Logic>),
+    Not(Box<Logic>),
+    Compare(BinaryOp, Term, Term),
+}
+
+/// An operand of a comparison in a [`Logic`] condition.
+#[derive(Clone, Copy)]
+enum Term {
+    Number(f64),
+
+    /// The value in a register: that of a variable, or of an expression that was computed
+    /// already.
+    Register(u16),
+
+    /// The remainder of the value in a register by a finite number other than zero.
+    Remainder(u16, f64),
+}
+
+impl Logic {
+    fn comparisons(&self) -> usize {
+        match self {
+            Logic::Both(first, second) | Logic::Either(first, second) => {
+                first.comparisons() + second.comparisons()
+            }
+            Logic::Not(operand) => operand.comparisons(),
+            Logic::Compare(..) => 1,
+        }
+    }
+
+    /// Whether the condition has an `and` or an `or` in it.
+    fn has_junction(&self) -> bool {
+        match self {
+            Logic::Both(..) | Logic::Either(..) => true,
+            Logic::Not(operand) => operand.has_junction(),
+            Logic::Compare(..) => false,
+        }
+    }
+
+    /// Add the registers that the terms of the condition read to `registers`, each once.
+    fn registers(&self, registers: &mut Vec<u16>) {
+        match self {
+            Logic::Both(first, second) | Logic::Either(first, second) => {
+                first.registers(registers);
+                second.registers(registers);
+            }
+            Logic::Not(operand) => operand.registers(registers),
+            Logic::Compare(_, left, right) => {
+                for term in [left, right] {
+                    if let Term::Register(reg) | Term::Remainder(reg, _) = term
+                        && !registers.contains(reg)
+                    {
+                        registers.push(*reg);
+                    }
+                }
+            }
+        }
+    }
 }

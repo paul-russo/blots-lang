@@ -11290,3 +11290,228 @@ mod record_loop_tests {
         assert!(passes > 0, "no pass");
     }
 }
+
+// A condition made of `and`, `or` and `not` over comparisons of numbers is decided by jumps
+// between the comparisons, which leave out those that cannot change how it comes out, for
+// as long as the variables that it reads hold finite numbers. The condition evaluates all of
+// its comparisons otherwise. Nothing may tell the two apart: not what the condition comes
+// to, and not what an error says and points at.
+#[cfg(test)]
+mod number_logic_tests {
+    use crate::ast::Expr;
+    use crate::bytecode::{Instr, Op};
+    use crate::compiler::{compile_chunk, compile_lambda};
+    use crate::environment::Environment;
+    use crate::error::RuntimeError;
+    use crate::expressions::evaluate_ast;
+    use crate::fast_parser::{Statement, parse_program};
+    use crate::heap::Heap;
+    use crate::values::Value;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Evaluate the statements of `code`, up to the value of the last one.
+    fn evaluate(code: &str, heap: &Rc<RefCell<Heap>>) -> Result<Value, RuntimeError> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let bindings = Rc::new(Environment::new());
+        let source: Rc<str> = code.into();
+
+        let mut result = Value::Null;
+        for statement in statements {
+            let (Statement::Expression(expr) | Statement::Output { expr, .. }) = statement else {
+                continue;
+            };
+            result = evaluate_ast(
+                &expr,
+                Rc::clone(heap),
+                Rc::clone(&bindings),
+                0,
+                Rc::clone(&source),
+            )?;
+        }
+
+        Ok(result)
+    }
+
+    /// What the statements of `code` come to, rendered: the value, or the message of the
+    /// error and the part of `code` that it points at.
+    fn outcome(code: &str) -> String {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+
+        match evaluate(code, &heap) {
+            Ok(value) => value.stringify_internal(&heap.borrow()),
+            Err(error) => {
+                let place = match error.span {
+                    Some(span) => &code[span.start_byte..span.end_byte],
+                    None => "nothing",
+                };
+
+                format!("{} at {place}", error.message)
+            }
+        }
+    }
+
+    /// `condition` as a part of a condition that is never decided by jumps: a constant is no
+    /// comparison. `x and true` is `x` for a boolean, and for a list of them.
+    fn evaluated(condition: &str) -> String {
+        format!("({condition}) and true")
+    }
+
+    /// What `code` with `condition` in place of `COND` comes to, which is what it comes to
+    /// when the condition evaluates all of its comparisons.
+    fn as_evaluated(code: &str, condition: &str) -> String {
+        let decided = code.replace("COND", condition);
+        let outcome = outcome(&decided);
+        let evaluated = self::outcome(&code.replace("COND", &evaluated(condition)))
+            .replace(&evaluated(condition), condition);
+
+        assert_eq!(outcome, evaluated, "{decided}");
+
+        outcome
+    }
+
+    /// The operations of the instructions of the function `code`.
+    fn operations(code: &str) -> Vec<Op> {
+        let statements = parse_program(code).expect("a program the fast parser reads");
+        let [Statement::Expression(expr)] = &statements[..] else {
+            panic!("{code} is not a single expression");
+        };
+        let Expr::Lambda { args, body, .. } = &expr.node else {
+            panic!("{code} is not a function");
+        };
+        let proto = compile_lambda(&Rc::new(args.clone()), body, true).unwrap();
+
+        let mut operations = Vec::new();
+        let mut pc = 0;
+        while pc < proto.code.len() {
+            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
+            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            operations.push(instr.op);
+            pc += 1 + instr.operand_words();
+        }
+
+        operations
+    }
+
+    #[test]
+    fn a_condition_over_numbers_is_decided_by_jumps() {
+        for (code, jumps) in [
+            ("n => if n % 3 == 0 and n % 5 != 1 then 1 else 2", true),
+            // A value is computed, whatever it is made of.
+            ("n => n % 3 == 0 and n % 5 != 1", false),
+            ("n => filter(range(n), x => x % 3 == 0 or x > 7)", true),
+            ("n => every([n], x => not (x < 2) and x != 9)", true),
+            ("(n, m) => if n < m or n == 3 then 1 else 2", true),
+            (
+                "(n, m) => if not (n >= 1 and m % 2 == 1) then 1 else 2",
+                true,
+            ),
+            ("n => some([n], x => 1 < x and 2 > x % 4)", true),
+            ("(n, k) => filter(range(n), x => x > k * 2 and x < 9)", true),
+            // A single comparison has its own jump, and so has a value that is no comparison.
+            ("n => if n % 3 == 0 then 1 else 2", false),
+            ("n => if not (n % 3 == 0) then 1 else 2", false),
+            ("n => if n and n > 1 then 1 else 2", false),
+            ("n => if n % 3 == 0 and g(n) then 1 else 2", false),
+            ("n => if [n][0] > 1 or n < 0 then 1 else 2", false),
+            ("n => if n % 0 == 0 or n > 1 then 1 else 2", false),
+            // A remainder that a branch reads again is computed whatever the condition does.
+            ("n => if n % 3 == 0 and n > 1 then n % 3 else 0", false),
+            ("n => if n % 3 == 0 and n > 1 then 1 else n % 3", false),
+        ] {
+            assert_eq!(
+                operations(code).contains(&Op::JmpNotFinite),
+                jumps,
+                "{code}"
+            );
+        }
+
+        // A name of the program is in its register once it was read.
+        let chunk = |code: &str| {
+            let statements = parse_program(code).unwrap();
+            let [Statement::Expression(expr)] = &statements[..] else {
+                panic!("{code} is not a single expression");
+            };
+            let chunk = compile_chunk(expr, true, &Environment::new()).unwrap();
+
+            (0..chunk.code.len()).any(|pc| {
+                // SAFETY: a number operand never decodes to this operation's opcode and
+                // operands together, so this only finds the instruction itself.
+                let instr = unsafe { Instr::decode(chunk.code[pc]) };
+                instr.op == Op::JmpNotFinite
+            })
+        };
+        assert!(!chunk("if k > 1 or k < 0 then 1 else 2"));
+        assert!(chunk("[k, if k > 1 or k < 0 then 1 else 2]"));
+    }
+
+    #[test]
+    fn a_condition_decided_by_jumps_comes_to_what_it_evaluates_to() {
+        let values = "[0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 14, 15, 21, 30, -3, -4, 2.5, -0.5, \
+                      1e300, 4503599627370497, inf, -inf, 0/0]";
+        let others = "[\"7\", [3, 5], [], null, true, {a: 1}, x => x]";
+        let conditions = [
+            "n % 3 == 0 and n % 5 != 1",
+            "n % 3 == 0 or n % 5 == 0",
+            "(n % 3 == 0 or n % 5 == 0) and not (n % 7 == 0) and (n % 2 == 1 or n % 11 == 0)",
+            "n % 2 == 1 && n % 4 != 3 || n % 8 == 0",
+            "!(n > 3) || n < -1",
+            "not (n >= 1 and n <= 10) or n == 5",
+            "n < 7 and n > 2 and n != 4",
+            "1 < n and 10 >= n",
+            "n % 2.5 == 0.5 or n % -4 == -1",
+            "n % 0.5 == 0 and n % 3 != 0",
+            "n == n and n % 2 == 0",
+            "n < m or n % m == 1",
+            "n % 7 > m % 3 and not (m == n)",
+            "1 < 2 and n > 3",
+            "1 > 2 or n > 3",
+        ];
+
+        for condition in conditions {
+            for code in [
+                format!("m = 3\nfilter({values}, n => COND)"),
+                format!("m = 3\nmap({values}, n => if COND then 1 else 0)"),
+                format!("m = 3\n{values} where (n => COND)"),
+                format!("m = 3\nmap({values}, n => every([n], n => COND))"),
+                format!("m = 3\nmap({values}, n => some([n, 1], n => COND))"),
+                format!("f = (n, m) => if COND then n else -1\nmap({values}, n => f(n, 3))"),
+                format!("f = (n, m) => filter([n, m], n => COND)\nmap({values}, n => f(n, 2))"),
+                format!("m = 3\nmap({values}, n => if COND then n % 3 else m)"),
+                format!("m = 3\nmap({others}, n => if COND then 1 else 0)"),
+                format!("m = 3\nfilter({others}, n => COND)"),
+                format!("m = 3\nmap({others}, n => every([n], n => COND))"),
+                format!("m = \"3\"\nmap({values}, n => if COND then 1 else 0)"),
+                format!("m = [1, 2]\nfilter({values}, n => COND)"),
+                format!("m = 0/0\nmap({values}, n => if COND then 1 else 0)"),
+            ] {
+                as_evaluated(&code, condition);
+            }
+        }
+
+        for (code, condition, expected) in [
+            (
+                "filter(range(30), n => COND)",
+                "(n % 3 == 0 or n % 5 == 0) and not (n % 7 == 0)",
+                "[3, 5, 6, 9, 10, 12, 15, 18, 20, 24, 25, 27]",
+            ),
+            (
+                "map([1, 2, 3], n => if COND then n else 0)",
+                "n < 2 or n > 2",
+                "[1, 0, 3]",
+            ),
+            (
+                "filter([1, \"a\", 3], n => COND)",
+                "n > 0 and n < 5",
+                "in built-in function \"filter\": in anonymous function: cannot compare string with number at n > 0",
+            ),
+            (
+                "filter([4, [1, 5]], n => COND)",
+                "n > 2 and n < 5",
+                "in built-in function \"filter\": expected a boolean, but got a list at ([4, [1, 5]], n => n > 2 and n < 5)",
+            ),
+        ] {
+            assert_eq!(as_evaluated(code, condition), expected, "{code}");
+        }
+    }
+}

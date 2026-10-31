@@ -1033,6 +1033,14 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     }
                     next!(1);
                 }
+                Op::JmpNotFinite => {
+                    if let Value::Number(number) = &*reg!(instr.a)
+                        && number.is_finite()
+                    {
+                        next!(1);
+                    }
+                    jump!(ip);
+                }
                 Op::LoadEntry => {
                     let state = reg!(instr.b);
 
