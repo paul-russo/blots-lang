@@ -170,6 +170,30 @@ unsafe fn store_value(dst: *mut Value, value: Value) {
     }
 }
 
+/// [`store_value`] into a register that is borrowed.
+#[inline(always)]
+fn store(register: &mut Value, value: Value) {
+    // SAFETY: a register that is borrowed mutably is valid for writes.
+    unsafe { store_value(register, value) }
+}
+
+/// A list of `values`, which are registers that may have been written just now (see
+/// [`copy_value`]).
+fn copy_registers(values: &[Value]) -> Vec<Value> {
+    let mut copy: Vec<Value> = Vec::with_capacity(values.len());
+
+    // SAFETY: the list has room for every value, and has them all by the time its length
+    // takes them in.
+    unsafe {
+        for (offset, value) in values.iter().enumerate() {
+            copy_value(copy.as_mut_ptr().add(offset), value);
+        }
+        copy.set_len(values.len());
+    }
+
+    copy
+}
+
 /// `x < y`, or `None` when the two cannot be ordered because one of them is NaN.
 ///
 /// Whether the two can be ordered is asked of them in the order they are compared in, so
@@ -414,19 +438,18 @@ unsafe fn entry_next(slot: *mut Value, record: &Record, x: u8, run: u64) -> Opti
     Some(true)
 }
 
-/// Take the accumulator `value` apart into the registers from `first` on, when it has the
-/// shape that `kind` and `apart` describe (see `Op::JmpNotApart`), and report whether it
-/// did. The layouts are those of `proto`.
-///
-/// # Safety
-/// `first` must point to as many registers of the innermost frame as the shape has parts.
-unsafe fn take_apart(
+/// Take the accumulator `value` apart, when it has the shape that `kind` and `apart` describe
+/// (see `Op::JmpNotApart`), and report whether it did: `put` is given each part, and how many
+/// registers its own is past the register of the first part. The layouts are those of
+/// `proto`.
+#[inline(never)]
+fn take_apart(
     slots: &[HeapValue],
     proto: &Proto,
     value: Value,
     kind: u8,
     apart: Apart,
-    first: *mut Value,
+    mut put: impl FnMut(usize, Value),
 ) -> bool {
     match (kind, value) {
         (APART_LIST, Value::List(pointer)) => {
@@ -438,8 +461,7 @@ unsafe fn take_apart(
             }
 
             for (offset, item) in items.iter().enumerate() {
-                // SAFETY: guaranteed by the caller, for each element of a list of that size.
-                unsafe { store_value(first.add(offset), *item) };
+                put(offset, *item);
             }
 
             true
@@ -456,9 +478,7 @@ unsafe fn take_apart(
             }
 
             for (offset, key) in keys.iter().enumerate() {
-                let value = record.get(key).copied().unwrap_or(Value::Null);
-                // SAFETY: guaranteed by the caller, for each key of the layout.
-                unsafe { store_value(first.add(offset), value) };
+                put(offset, record.get(key).copied().unwrap_or(Value::Null));
             }
 
             true
@@ -767,11 +787,14 @@ impl Frame {
         unsafe { self.def.as_ref() }
     }
 
+    /// The index of the code word of the frame's code that `ip` points at.
+    fn index_of(&self, ip: *const u64) -> usize {
+        ip.addr().wrapping_sub(self.proto().code.as_ptr().addr()) / size_of::<u64>()
+    }
+
     /// The index of the code word `ip` was saved after.
     fn pc_of(&self, ip: *const u64) -> usize {
-        // SAFETY: a saved `ip` points into (or one past) the frame's code.
-        let offset = unsafe { ip.offset_from(self.proto().code.as_ptr()) };
-        (offset as usize).wrapping_sub(1)
+        self.index_of(ip).wrapping_sub(1)
     }
 
     /// The index of the instruction the frame is executing (or suspended in).
@@ -1468,8 +1491,7 @@ impl Vm {
             return 0;
         }
 
-        // SAFETY: `top` points into the frame records whenever there are any.
-        unsafe { self.top.offset_from(self.frames.as_ptr()) as usize }
+        self.top.addr().wrapping_sub(self.frames.as_ptr().addr()) / size_of::<Frame>()
     }
 
     #[inline(always)]
@@ -1538,8 +1560,53 @@ impl Vm {
 
     /// The index of a stack slot that belongs to a frame.
     fn slot_index(&self, slot: *const Value) -> usize {
-        // SAFETY: frame registers always point into the value stack.
-        unsafe { slot.offset_from(self.stack.as_ptr()) as usize }
+        slot.addr().wrapping_sub(self.stack.as_ptr().addr()) / size_of::<Value>()
+    }
+
+    /// The index in the value stack of the register of the innermost frame that `operand`
+    /// names.
+    #[inline(always)]
+    fn register_slot(&self, operand: u16) -> usize {
+        self.slot_index(self.top().base) + register_index(operand)
+    }
+
+    /// The value in the register of the innermost frame that `operand` names.
+    #[inline(always)]
+    fn reg(&self, operand: u16) -> Value {
+        self.stack[self.register_slot(operand)]
+    }
+
+    /// Write a register of the innermost frame.
+    #[inline(always)]
+    fn set_reg(&mut self, operand: u16, value: Value) {
+        let slot = self.register_slot(operand);
+        store(&mut self.stack[slot], value);
+    }
+
+    /// The innermost active frame (or the placeholder), to change.
+    fn top_mut(&mut self) -> &mut Frame {
+        let count = self.frame_count();
+        &mut self.frames[count]
+    }
+
+    /// The code word `offset` words from the one that the saved `ip` of the innermost frame
+    /// points at.
+    fn code_word(&self, offset: isize) -> u64 {
+        let frame = self.top();
+        frame.proto().code[frame.index_of(frame.ip).wrapping_add_signed(offset)]
+    }
+
+    /// The counter or address in loop state register `slot` of the value stack (see
+    /// [`state`]).
+    fn state_at(&self, slot: usize) -> u64 {
+        match self.stack[slot] {
+            Value::Number(number) => number.to_bits(),
+            _ => unreachable!("loop state is kept in numbers"),
+        }
+    }
+
+    fn set_state_at(&mut self, slot: usize, bits: u64) {
+        self.stack[slot] = Value::Number(f64::from_bits(bits));
     }
 
     /// The base of a frame entered from native code: above every active frame, leaving one
@@ -2483,35 +2550,26 @@ impl Vm {
         def.scope.renamed();
     }
 
+    /// Build a list from `count` registers of the innermost frame, from the one that operand
+    /// `first` names on.
     #[inline(never)]
-    fn new_list(&mut self, first: *const Value, count: usize) -> Value {
-        let mut items: Vec<Value> = Vec::with_capacity(count);
-
-        // SAFETY: the elements are `count` consecutive registers of the innermost frame.
-        unsafe {
-            for offset in 0..count {
-                copy_value(items.as_mut_ptr().add(offset), first.add(offset));
-            }
-            items.set_len(count);
-        }
+    fn new_list(&mut self, first: u16, count: usize) -> Value {
+        let start = self.register_slot(first);
+        let items = copy_registers(&self.stack[start..start + count]);
 
         self.heap.borrow_mut().insert_list(items)
     }
 
-    /// Build a list from `count` registers starting at `first`, flattening spread values.
+    /// Build a list from `count` registers of the innermost frame, from the one that operand
+    /// `first` names on, flattening spread values.
     ///
     /// A list that starts with the elements of another one, like `[...list, item]`, follows
     /// that list: it shares the elements where it can instead of copying them (see
     /// [`Heap::extend_list`]).
     #[inline(never)]
-    fn new_list_spread(
-        &mut self,
-        first: *const Value,
-        count: usize,
-    ) -> Result<Value, RuntimeError> {
-        // SAFETY: the elements are `count` consecutive registers of the innermost frame,
-        // which nothing writes to before this returns.
-        let values = unsafe { std::slice::from_raw_parts(first, count) };
+    fn new_list_spread(&mut self, first: u16, count: usize) -> Result<Value, RuntimeError> {
+        let start = self.register_slot(first);
+        let values = &self.stack[start..start + count];
         let (base, rest) = match values.split_first() {
             Some((Value::Spread(IterablePointer::List(base)), rest)) => (Some(*base), rest),
             _ => (None, values),
@@ -2565,25 +2623,22 @@ impl Vm {
     /// Start building a list. `hint` selects the capacity: 1 = the length of the list in
     /// `source`, 2 = the element count of an inlined range in `source` (stored as the bit
     /// pattern of a number, like all loop counters), 3 = the number of entries of the record
-    /// in `source`.
+    /// in `source`. With a hint, `source` is what a loop state register holds.
     #[inline(never)]
-    fn list_begin(&mut self, hint: u8, source: *const Value) {
+    fn list_begin(&mut self, hint: u8, source: Value) {
         let capacity = match hint {
-            // SAFETY: with a hint, `source` is a loop state register of the innermost frame.
-            1 => match unsafe { *source } {
+            1 => match source {
                 Value::List(pointer) => match self.heap.borrow().get(pointer.index()) {
                     Some(HeapValue::List(items)) => items.len(),
                     _ => 0,
                 },
                 _ => 0,
             },
-            // SAFETY: as above.
-            2 => match unsafe { *source } {
+            2 => match source {
                 Value::Number(count) => count.to_bits() as usize,
                 _ => 0,
             },
-            // SAFETY: as above.
-            3 => match unsafe { *source } {
+            3 => match source {
                 Value::Record(pointer) => match self.heap.borrow().get(pointer.index()) {
                     Some(HeapValue::Record(record)) => record.len(),
                     _ => 0,
@@ -2597,17 +2652,17 @@ impl Vm {
             .push(Builder::List(Vec::with_capacity(capacity)));
     }
 
-    /// Append `count` registers starting at `first` to the list being built, flattening
-    /// spread values.
+    /// Append `count` registers of the innermost frame, from the one that operand `first`
+    /// names on, to the list being built, flattening spread values.
     #[inline(never)]
-    fn list_append(&mut self, first: *const Value, count: usize) -> Result<(), RuntimeError> {
+    fn list_append(&mut self, first: u16, count: usize) -> Result<(), RuntimeError> {
+        let start = self.register_slot(first);
         let Some(Builder::List(list)) = self.builders.last_mut() else {
             unreachable!("no list is being built");
         };
 
-        for offset in 0..count {
-            // SAFETY: the values are `count` consecutive registers of the innermost frame.
-            match unsafe { *first.add(offset) } {
+        for value in &self.stack[start..start + count] {
+            match *value {
                 Value::Spread(pointer) => {
                     let values = flatten_spread_value(&pointer, &self.heap)?;
                     list.extend(values.iter().copied());
@@ -2628,47 +2683,42 @@ impl Vm {
         self.heap.borrow_mut().insert_list(list)
     }
 
-    /// Build a record of layout `index` of the innermost frame's proto from the consecutive
-    /// registers starting at `first`.
+    /// Build a record of layout `index` of the innermost frame's proto from consecutive
+    /// registers of the frame, one per entry of the layout, from the one that operand `first`
+    /// names on.
     #[inline(never)]
-    fn new_record(&mut self, index: usize, first: *const Value) -> Value {
+    fn new_record(&mut self, index: usize, first: u16) -> Value {
+        let start = self.register_slot(first);
         let layout = &self.top().proto().layouts[index];
-        let count = layout.keys.len();
-        let mut values: Vec<Value> = Vec::with_capacity(count);
+        let entries = &self.stack[start..start + layout.slots.len()];
 
-        // SAFETY: the values are consecutive registers of the innermost frame, one per entry
-        // of the layout, and every position of the shape is the slot of at least one entry.
-        unsafe {
-            if layout.distinct {
-                for offset in 0..count {
-                    copy_value(values.as_mut_ptr().add(offset), first.add(offset));
+        let values = match layout.distinct {
+            true => copy_registers(entries),
+            false => {
+                // A later entry with the same key takes the place of an earlier one.
+                let mut values = vec![Value::Null; layout.keys.len()];
+                for (slot, value) in layout.slots.iter().zip(entries) {
+                    values[*slot as usize] = *value;
                 }
-            } else {
-                for (offset, slot) in layout.slots.iter().enumerate() {
-                    copy_value(values.as_mut_ptr().add(*slot as usize), first.add(offset));
-                }
+
+                values
             }
-            values.set_len(count);
-        }
+        };
 
         let record = Record::new(Rc::clone(&layout.keys), values.into_boxed_slice());
 
         self.heap.borrow_mut().insert_record(record)
     }
 
-    /// The record that the spread value in the register at `first` makes, with the values of
-    /// the registers that follow it under the keys of layout `index`, in order (see
-    /// `Op::UpdateRecord`).
+    /// The record that the spread value in the register of the innermost frame that operand
+    /// `first` names makes, with the values of the registers that follow it under the keys of
+    /// layout `index`, in order (see `Op::UpdateRecord`).
     #[inline(never)]
-    fn update_record(&mut self, index: usize, first: *const Value) -> Result<Value, RuntimeError> {
-        let proto = self.top().proto;
-        // SAFETY: the code of an active frame outlives it (see `Vm::proto_for`).
-        let keys = unsafe { &(&(*proto).layouts)[index].keys };
+    fn update_record(&mut self, index: usize, first: u16) -> Result<Value, RuntimeError> {
+        let start = self.register_slot(first);
+        let keys = &self.top().proto().layouts[index].keys;
         let count = keys.len();
-
-        // SAFETY: the spread value and the values are consecutive registers of the innermost
-        // frame, one value per key of the layout.
-        let spread = unsafe { *first };
+        let (spread, written) = (self.stack[start], &self.stack[start + 1..start + 1 + count]);
 
         // A record that has every one of the keys keeps its table, and a key keeps its place:
         // the values are copied once, and some of them replaced.
@@ -2676,13 +2726,12 @@ impl Vm {
             let heap = self.heap.borrow();
             let record = pointer.reify(&heap).as_record()?;
             let mut values: Box<[Value]> = record.as_slice().into();
-            let replaced = keys.first(count).iter().enumerate().all(|(offset, key)| {
+            let replaced = keys.first(count).iter().zip(written).all(|(key, value)| {
                 let Some(position) = record.position(key) else {
                     return false;
                 };
 
-                // SAFETY: as above.
-                values[position] = unsafe { *first.add(offset + 1) };
+                values[position] = *value;
                 true
             });
 
@@ -2698,9 +2747,8 @@ impl Vm {
         if let Value::Spread(iterable) = spread {
             spread_into_record(&self.heap, &mut entries, iterable)?;
         }
-        for (offset, key) in keys.first(count).iter().enumerate() {
-            // SAFETY: as above.
-            entries.insert(key, unsafe { *first.add(offset + 1) });
+        for (key, value) in keys.first(count).iter().zip(written) {
+            entries.insert(key, *value);
         }
 
         Ok(self.heap.borrow_mut().insert_built_record(entries))
@@ -2985,53 +3033,46 @@ impl Vm {
         })
     }
 
-    /// Advance the inlined loop over the entries of a record whose state starts at `slot`
-    /// (see `Op::IterRecord`), for the iteration instruction with operand `x`: when the
-    /// record has another entry, store the part of it that the loop goes through (and its
-    /// position, if the loop wants one) and report `true`.
-    ///
-    /// # Safety
-    /// `slot` must point to loop state registers set up by `Op::IterRecord`.
+    /// Advance the inlined loop over the entries of a record whose state starts at the
+    /// register of the innermost frame that operand `state` names (see `Op::IterRecord`), for
+    /// the iteration instruction with operand `x`: when the record has another entry, store
+    /// the part of it that the loop goes through (and its position, if the loop wants one)
+    /// and report `true`.
     #[inline(never)]
-    unsafe fn next_entry(&mut self, slot: *mut Value, x: u8) -> bool {
+    fn next_entry(&mut self, state: u16, x: u8) -> bool {
         let (part, with_index) = EntryPart::of_operand(x);
+        let slot = self.register_slot(state);
+        let position = self.state_at(slot) as usize;
+        let Some(element) = self.entry_part(self.stack[slot + 1], position, part) else {
+            return false;
+        };
 
-        // SAFETY: the caller guarantees that the registers are the state of a record loop.
-        unsafe {
-            let position = state(slot) as usize;
-            let Some(element) = self.entry_part(*slot.add(1), position, part) else {
-                return false;
-            };
-
-            store_value(slot.add(2), element);
-            if with_index {
-                slot.add(3).write(Value::Number(position as f64));
-            }
-            update_state(slot, position as u64 + 1);
+        store(&mut self.stack[slot + 2], element);
+        if with_index {
+            self.stack[slot + 3] = Value::Number(position as f64);
         }
+        self.set_state_at(slot, position as u64 + 1);
 
         true
     }
 
-    /// The part `part` of the entry that the record loop whose state starts at `slot` went
-    /// on to last.
-    ///
-    /// # Safety
-    /// `slot` must point to the state registers of a record loop that is at an entry.
+    /// The part `part` of the entry that the record loop whose state starts at the register
+    /// of the innermost frame that operand `state` names went on to last.
     #[inline(never)]
-    unsafe fn load_entry(&mut self, slot: *const Value, part: EntryPart) -> Value {
-        // SAFETY: the caller guarantees that the registers are the state of a record loop,
-        // which counts the entries that it went on to.
-        let (position, record) = unsafe { (state(slot) as usize, *slot.add(1)) };
+    fn load_entry(&mut self, state: u16, part: EntryPart) -> Value {
+        // The loop counts the entries that it went on to.
+        let slot = self.register_slot(state);
+        let (position, record) = (self.state_at(slot) as usize, self.stack[slot + 1]);
 
         self.entry_part(record, position - 1, part)
             .expect("a record keeps the entry that a loop is at")
     }
 
     /// Check the arguments of an inlined `range` call the way the built-in does, returning the
-    /// first element and the number of elements.
+    /// first element and the number of elements. The arguments are `count` registers of the
+    /// innermost frame, from the one that operand `first` names on.
     #[inline(never)]
-    fn range_bounds(&self, first: *const Value, count: usize) -> Result<(f64, u64), RuntimeError> {
+    fn range_bounds(&self, first: u16, count: usize) -> Result<(f64, u64), RuntimeError> {
         if self.top().depth() > MAX_CALL_DEPTH {
             return Err(RuntimeError::new(format!(
                 "maximum call depth of {} exceeded",
@@ -3039,9 +3080,8 @@ impl Vm {
             )));
         }
 
-        // SAFETY: the arguments are `count` consecutive registers of the innermost frame.
-        let args = unsafe { std::slice::from_raw_parts(first, count) };
-        let (start, end) = match args[..] {
+        let slot = self.register_slot(first);
+        let (start, end) = match self.stack[slot..slot + count] {
             [Value::Number(start)] => (0.0, start),
             [Value::Number(start), Value::Number(end)] => (start, end),
             _ => return Err(RuntimeError::from("range requires 1 or 2 numbers")),

@@ -7,8 +7,7 @@
 //! this way.
 
 use super::{
-    Builder, MAX_CALL_DEPTH, UNBOUND, Vm, depth_exceeded, is_of_type, is_unbound, list_next,
-    range_next, register, set_state, store_value, take_apart,
+    Builder, MAX_CALL_DEPTH, UNBOUND, Vm, depth_exceeded, is_of_type, is_unbound, take_apart,
 };
 use crate::{
     ast::BinaryOp,
@@ -16,6 +15,7 @@ use crate::{
         Apart, EntryPart, Instr, NOT_OF_TYPE, Op, RECIPROCAL, RemainderTest, register_index,
     },
     error::RuntimeError,
+    heap::HeapPointer,
     values::Value,
 };
 
@@ -65,33 +65,10 @@ fn operator_of(op: Op) -> BinaryOp {
 }
 
 impl Vm {
-    /// The value in the register of the innermost frame that `operand` names.
-    #[inline(always)]
-    fn reg(&self, operand: u16) -> Value {
-        // SAFETY: the compiler only emits register operands that lie within the frame.
-        unsafe { *register(self.top().base, operand) }
-    }
-
-    /// Write a register of the innermost frame, wherever the value stack is by now.
-    #[inline(always)]
-    fn set_reg(&mut self, operand: u16, value: Value) {
-        // SAFETY: as in `reg`.
-        unsafe { store_value(register(self.top().base, operand), value) }
-    }
-
-    /// The address of a register of the innermost frame. It is only good until the next call
-    /// that may grow the value stack.
-    #[inline(always)]
-    fn reg_ptr(&self, operand: u16) -> *mut Value {
-        // SAFETY: as in `reg`.
-        unsafe { register(self.top().base, operand) }
-    }
-
     /// The number operand in the code word after the instruction being executed.
     #[inline(always)]
     fn operand(&self) -> f64 {
-        // SAFETY: the saved `ip` points at the operand word of such an instruction.
-        f64::from_bits(unsafe { *self.top().ip })
+        f64::from_bits(self.code_word(0))
     }
 
     /// Move the saved `ip` of the innermost frame by `offset` code words. This comes last in
@@ -99,8 +76,8 @@ impl Vm {
     /// and for the visibility of variables.
     #[inline(always)]
     fn skip(&mut self, offset: isize) {
-        // SAFETY: operand words and jump targets lie within the frame's code.
-        unsafe { (*self.top).ip = (*self.top).ip.offset(offset) }
+        let frame = self.top_mut();
+        frame.ip = frame.ip.wrapping_offset(offset);
     }
 
     /// Execute `instr`, which adds two values, when both of them are strings: they are joined
@@ -140,12 +117,11 @@ impl Vm {
     /// An error is the one that the instruction raised: the frames of the current `run` are
     /// all still there, for [`Vm::abandon`] to go down.
     ///
-    /// # Safety
-    /// The state of the instruction loop must be published: `Vm::top` is the frame executing
-    /// `instr`, and its saved `ip` points at the code word after it.
+    /// The state of the instruction loop has to be published: `Vm::top` is the frame
+    /// executing `instr`, and its saved `ip` points at the code word after it.
     #[cold]
     #[inline(never)]
-    pub(super) unsafe fn step(&mut self, instr: Instr) -> Result<Flow, RuntimeError> {
+    pub(super) fn step(&mut self, instr: Instr) -> Result<Flow, RuntimeError> {
         let (a, b, c) = (instr.a, instr.b, instr.c);
 
         match instr.op {
@@ -234,8 +210,7 @@ impl Vm {
                     return Ok(Flow::Continue);
                 }
 
-                // SAFETY: the state of the loop is published, as `broadcast` needs it.
-                if (lhs.is_list() || rhs.is_list()) && unsafe { self.broadcast(instr) } {
+                if (lhs.is_list() || rhs.is_list()) && self.broadcast(instr) {
                     return Ok(Flow::Continue);
                 }
 
@@ -268,8 +243,7 @@ impl Vm {
             | Op::GeK => {
                 let lhs = self.reg(b);
 
-                // SAFETY: the state of the loop is published, as `broadcast` needs it.
-                if lhs.is_list() && unsafe { self.broadcast(instr) } {
+                if lhs.is_list() && self.broadcast(instr) {
                     return Ok(Flow::Continue);
                 }
 
@@ -289,8 +263,7 @@ impl Vm {
             Op::KAdd | Op::KSub | Op::KMul | Op::KDiv | Op::KMod | Op::KPow => {
                 let rhs = self.reg(b);
 
-                // SAFETY: the state of the loop is published, as `broadcast` needs it.
-                if rhs.is_list() && unsafe { self.broadcast(instr) } {
+                if rhs.is_list() && self.broadcast(instr) {
                     return Ok(Flow::Continue);
                 }
 
@@ -308,8 +281,8 @@ impl Vm {
             | Op::JmpNotGe => {
                 let holds = self.compare_slow(operator_of(instr.op), self.reg(b), self.reg(c))?;
 
-                // SAFETY: the comparison is followed by the jump to take when it does not hold.
-                let jump = Instr::decode(unsafe { *self.top().ip });
+                // The comparison is followed by the jump to take when it does not hold.
+                let jump = Instr::decode(self.code_word(0));
                 self.skip(if holds { 1 } else { 1 + jump.sbx() });
             }
             Op::JmpNotEqK
@@ -323,8 +296,7 @@ impl Vm {
                 self.skip(if holds { 1 } else { instr.sbx() });
             }
             Op::JmpNotRemEq | Op::JmpNotRemNe => {
-                // SAFETY: the instruction is followed by the two code words of its test.
-                let test = unsafe { RemainderTest::read(self.top().ip) };
+                let test = RemainderTest::of_words(self.code_word(0), self.code_word(1));
                 let (divisor, remainder) = test.operands();
                 let comparison = match instr.op {
                     Op::JmpNotRemEq => BinaryOp::Equal,
@@ -435,12 +407,11 @@ impl Vm {
                 let first = register_index(a) - func - 1;
                 let waiting = first..first + instr.x as usize;
                 let frame = *self.top();
+                let base = self.slot_index(frame.base);
                 let argc = frame.proto().params.len();
 
                 for index in (0..argc).filter(|index| !waiting.contains(index)) {
-                    // SAFETY: the parameters and the argument registers of the call lie
-                    // within the frame.
-                    unsafe { *frame.base.add(func + 1 + index) = *frame.base.add(index) };
+                    self.stack[base + func + 1 + index] = self.stack[base + index];
                 }
 
                 self.set_reg(c, frame.this_value());
@@ -452,9 +423,9 @@ impl Vm {
                     return Ok(Flow::Finished(value));
                 }
 
-                // The result goes where the call instruction of the caller wants it.
-                // SAFETY: the caller's saved `ip` points right after its call instruction.
-                let target = Instr::decode(unsafe { *self.top().ip.sub(1) }).c;
+                // The result goes where the call instruction of the caller wants it, which is
+                // right before the caller's saved `ip`.
+                let target = Instr::decode(self.code_word(-1)).c;
                 self.set_reg(target, value);
             }
 
@@ -464,16 +435,18 @@ impl Vm {
             }
 
             Op::NewList => {
-                let value = self.new_list(self.reg_ptr(b), c as usize);
+                let value = self.new_list(b, c as usize);
                 self.set_reg(a, value);
             }
             Op::NewListSpread => {
-                let value = self.new_list_spread(self.reg_ptr(b), c as usize)?;
+                let value = self.new_list_spread(b, c as usize)?;
                 self.set_reg(a, value);
             }
-            // SAFETY: the register after a loop state's first one lies within the frame.
-            Op::ListBegin => self.list_begin(instr.x, unsafe { self.reg_ptr(a).add(1) }),
-            Op::ListAppend => self.list_append(self.reg_ptr(a), b as usize)?,
+            Op::ListBegin => {
+                let source = self.stack[self.register_slot(a) + 1];
+                self.list_begin(instr.x, source);
+            }
+            Op::ListAppend => self.list_append(a, b as usize)?,
             Op::ListPush => {
                 let value = self.reg(a);
                 let Some(Builder::List(list)) = self.builders.last_mut() else {
@@ -487,11 +460,11 @@ impl Vm {
             }
 
             Op::NewRecord => {
-                let value = self.new_record(c as usize, self.reg_ptr(b));
+                let value = self.new_record(c as usize, b);
                 self.set_reg(a, value);
             }
             Op::UpdateRecord => {
-                let value = self.update_record(c as usize, self.reg_ptr(b))?;
+                let value = self.update_record(c as usize, b)?;
                 self.set_reg(a, value);
             }
             Op::RecordBegin => self.record_begin(instr.bx()),
@@ -528,8 +501,7 @@ impl Vm {
             Op::SetGlobal => self.set_global(instr.bx(), self.reg(a)),
 
             Op::AddDepth => {
-                // SAFETY: `top` is the innermost active frame.
-                let frame = unsafe { &mut *self.top };
+                let frame = self.top_mut();
                 frame.meta = frame.meta.wrapping_add(instr.sbx() as u64);
             }
             Op::CallbackDepth => {
@@ -539,87 +511,63 @@ impl Vm {
             }
 
             Op::RangePrep => {
-                let (first, count) = self.range_bounds(self.reg_ptr(b), c as usize)?;
-                let state = self.reg_ptr(a);
+                let (first, count) = self.range_bounds(b, c as usize)?;
+                let slot = self.register_slot(a);
 
-                // SAFETY: the loop state registers lie within the frame.
-                unsafe {
-                    set_state(state, 0);
-                    set_state(state.add(1), count);
-                    state.add(2).write(Value::Number(first));
-                }
+                self.set_state_at(slot, 0);
+                self.set_state_at(slot + 1, count);
+                self.stack[slot + 2] = Value::Number(first);
             }
             Op::ForRange => {
-                // SAFETY: the loop state was set up by `RangePrep`.
-                if !unsafe { range_next(self.reg_ptr(a), instr.x == 1) } {
+                if !self.range_next(a, instr.x == 1) {
                     self.skip(instr.sbx());
                 }
             }
             Op::ForRangeNext => {
-                // SAFETY: as in `ForRange`.
-                if unsafe { range_next(self.reg_ptr(a), instr.x == 1) } {
+                if self.range_next(a, instr.x == 1) {
                     self.skip(instr.sbx());
                 }
             }
             Op::IterPrep => {
-                // SAFETY: the loop state registers lie within the frame.
-                let list = unsafe { *self.reg_ptr(a).add(1) };
-                let (first, end) = self.iter_bounds(list)?;
-                let state = self.reg_ptr(a);
+                let slot = self.register_slot(a);
+                let (first, end) = self.iter_bounds(self.stack[slot + 1])?;
 
-                // SAFETY: the loop state registers lie within the frame.
-                unsafe {
-                    set_state(state, first as u64);
-                    set_state(state.add(4), end as u64);
-                }
+                self.set_state_at(slot, first as u64);
+                self.set_state_at(slot + 4, end as u64);
             }
             Op::IterList => {
-                // SAFETY: the loop state registers lie within the frame.
-                let list = unsafe { *self.reg_ptr(a).add(1) };
+                let slot = self.register_slot(a);
 
-                match self.list_bounds(list) {
+                match self.list_bounds(self.stack[slot + 1]) {
                     Some((first, end)) => {
-                        let state = self.reg_ptr(a);
-
-                        // SAFETY: as above.
-                        unsafe {
-                            set_state(state, first as u64);
-                            set_state(state.add(4), end as u64);
-                        }
+                        self.set_state_at(slot, first as u64);
+                        self.set_state_at(slot + 4, end as u64);
                     }
                     None => self.skip(instr.sbx()),
                 }
             }
             Op::ForList => {
-                // SAFETY: the loop state was set up by `IterPrep` or by `IterList`, and the
-                // list it points into is kept alive by the register holding it.
-                if !unsafe { list_next(self.reg_ptr(a), instr.x == 1, true) } {
+                if !self.list_next(a, instr.x == 1, true) {
                     self.skip(instr.sbx());
                 }
             }
             Op::ForListNext => {
-                // SAFETY: as in `ForList`.
-                if unsafe { list_next(self.reg_ptr(a), instr.x == 1, false) } {
+                if self.list_next(a, instr.x == 1, false) {
                     self.skip(instr.sbx());
                 }
             }
             Op::IterRecord => {
-                // SAFETY: the loop state registers lie within the frame.
-                let record = unsafe { *self.reg_ptr(a).add(1) };
-                self.check_record(record)?;
-
-                // SAFETY: as above.
-                unsafe { set_state(self.reg_ptr(a), 0) };
+                let slot = self.register_slot(a);
+                self.check_record(self.stack[slot + 1])?;
+                self.set_state_at(slot, 0);
             }
             Op::ForRecord => {
-                // SAFETY: the loop state was set up by `IterRecord`.
-                if !unsafe { self.next_entry(self.reg_ptr(a), instr.x) } {
+                if !self.next_entry(a, instr.x) {
                     self.skip(instr.sbx());
                 }
             }
             Op::ForRecordNext => {
-                // SAFETY: as in `ForRecord`.
-                if unsafe { self.next_entry(self.reg_ptr(a), instr.x) } {
+                if self.next_entry(a, instr.x) {
                     self.skip(instr.sbx());
                 }
             }
@@ -629,15 +577,14 @@ impl Vm {
                 }
             }
             Op::JmpNotApart => {
-                // SAFETY: the saved `ip` points at the operand word of the instruction.
-                let apart = Apart::decode(unsafe { *self.top().ip });
-                let first = self.reg_ptr(apart.first);
+                let apart = Apart::decode(self.code_word(0));
+                let (first, value, frame) =
+                    (self.register_slot(apart.first), self.reg(a), *self.top());
                 let heap = self.heap.borrow();
-                let (proto, value) = (self.top().proto(), self.reg(a));
+                let stack = &mut self.stack;
+                let put = |offset: usize, part| stack[first + offset] = part;
 
-                // SAFETY: the compiler gives the parts registers of the frame, one per part.
-                let taken =
-                    unsafe { take_apart(heap.slots(), proto, value, instr.x, apart, first) };
+                let taken = take_apart(heap.slots(), frame.proto(), value, instr.x, apart, put);
                 drop(heap);
                 self.skip(if taken { 1 } else { instr.sbx() });
             }
@@ -654,8 +601,7 @@ impl Vm {
                 }
             }
             Op::LoadEntry => {
-                // SAFETY: the loop whose state the instruction names is at an entry.
-                let value = unsafe { self.load_entry(self.reg_ptr(b), EntryPart::of(instr.x)) };
+                let value = self.load_entry(b, EntryPart::of(instr.x));
                 self.set_reg(a, value);
             }
         }
@@ -681,6 +627,67 @@ impl Vm {
             Some(value) => Ok(value),
             None => self.capture_fallback(reference, shadowable),
         }
+    }
+
+    /// Advance the inlined range loop whose state starts at the register that operand `state`
+    /// names, the way `super::range_next` does.
+    fn range_next(&mut self, state: u16, with_index: bool) -> bool {
+        let slot = self.register_slot(state);
+        let next = self.state_at(slot);
+        if next >= self.state_at(slot + 1) {
+            return false;
+        }
+
+        let Value::Number(first) = self.stack[slot + 2] else {
+            unreachable!("a range loop keeps its first element in a number");
+        };
+
+        let index = next as i64 as f64;
+        self.stack[slot + 3] = Value::Number(first + index);
+        if with_index {
+            self.stack[slot + 4] = Value::Number(index);
+        }
+        self.set_state_at(slot, next + 1);
+
+        true
+    }
+
+    /// Advance the inlined list loop whose state starts at the register that operand `state`
+    /// names, the way `super::list_next` does. The element at the cursor is looked up in the
+    /// list the loop goes through, which the register after the first one holds.
+    fn list_next(&mut self, state: u16, with_index: bool, first: bool) -> bool {
+        let slot = self.register_slot(state);
+        let cursor = self.state_at(slot);
+        if cursor == self.state_at(slot + 4) {
+            return false;
+        }
+
+        let element = {
+            let heap = self.heap.borrow();
+            let items = self.stack[slot + 1]
+                .as_list_pointer()
+                .and_then(|pointer| pointer.reify(&heap).as_list())
+                .expect("a list loop goes through a list");
+            let position =
+                (cursor as usize).wrapping_sub(items.as_ptr().addr()) / size_of::<Value>();
+
+            *items
+                .get(position)
+                .expect("the cursor of a list loop is at an element of the list")
+        };
+
+        self.stack[slot + 2] = element;
+        if with_index {
+            let index = match (first, self.stack[slot + 3]) {
+                (true, _) => 0.0,
+                (false, Value::Number(index)) => index + 1.0,
+                _ => unreachable!("a list loop counts its elements in a number"),
+            };
+            self.stack[slot + 3] = Value::Number(index);
+        }
+        self.set_state_at(slot, cursor + size_of::<Value>() as u64);
+
+        true
     }
 
     /// Compare the list `operand` against `null` with the (in)equality operator of `instr`,

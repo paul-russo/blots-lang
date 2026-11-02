@@ -799,19 +799,10 @@ impl RemainderTest {
         })
     }
 
-    /// The test in the two code words at `words`.
-    ///
-    /// # Safety
-    /// `words` must point at the code word after a fused remainder test.
+    /// The test in the two code words after a fused remainder test.
     #[inline(always)]
-    pub unsafe fn read(words: *const u64) -> Self {
-        // SAFETY: the instruction is followed by the two code words of its test.
-        unsafe {
-            Self {
-                mask: *words,
-                bits: *words.add(1),
-            }
-        }
+    pub fn of_words(mask: u64, bits: u64) -> Self {
+        Self { mask, bits }
     }
 
     /// The divisor and the remainder the test was made for.

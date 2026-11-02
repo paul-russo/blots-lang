@@ -135,15 +135,6 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 }};
             }
 
-            // The first of the `$count` registers from the one that an operand of the
-            // instruction names on, which is no register of the frame when there are none.
-            macro_rules! regs {
-                ($operand:expr, $count:expr) => {{
-                    debug_assert!(register_index($operand) + $count <= (*(*frame).proto).max_stack);
-                    register(base, $operand)
-                }};
-            }
-
             // What a pointer refers to in the heap, if it is in the heap at all.
             macro_rules! heap_value {
                 ($pointer:expr) => {
@@ -386,7 +377,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
             macro_rules! remainder_branch {
                 ($equal:expr) => {{
                     if let Value::Number(number) = &*reg!(instr.a) {
-                        let test = RemainderTest::read(ip.add(1));
+                        let test = RemainderTest::of_words(*ip.add(1), *ip.add(2));
                         let leaves = match whole(*number) {
                             Some(whole) => test.holds_for(whole),
                             None => leaves_remainder(*number, test),
@@ -1010,7 +1001,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     // A key that has no string yet in this run gets one, and the list of a
                     // key and a value is made for each entry.
                     publish!();
-                    if (*vm).next_entry(state, instr.x) {
+                    if (*vm).next_entry(instr.a, instr.x) {
                         added!();
                         next!(1);
                     }
@@ -1030,7 +1021,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     }
 
                     publish!();
-                    if (*vm).next_entry(state, instr.x) {
+                    if (*vm).next_entry(instr.a, instr.x) {
                         added!();
                         jump!(ip);
                     }
@@ -1048,8 +1039,9 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     let apart = Apart::decode(*ip.add(1));
                     let first = register(base, apart.first);
                     let value = *reg!(instr.a);
+                    let put = |offset: usize, part| store_value(first.add(offset), part);
 
-                    if take_apart(&*slots, &*(*frame).proto, value, instr.x, apart, first) {
+                    if take_apart(&*slots, &*(*frame).proto, value, instr.x, apart, put) {
                         next!(2);
                     }
                     jump!(ip);
@@ -1083,7 +1075,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     }
 
                     publish!();
-                    let value = (*vm).load_entry(state, EntryPart::of(instr.x));
+                    let value = (*vm).load_entry(instr.b, EntryPart::of(instr.x));
                     store_value(reg!(instr.a), value);
                     added!();
                     next!(1);
@@ -1127,29 +1119,26 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 }
                 Op::NewList => {
                     publish!();
-                    let first = regs!(instr.b, instr.c as usize);
-                    let value = (*vm).new_list(first, instr.c as usize);
+                    let value = (*vm).new_list(instr.b, instr.c as usize);
                     store_value(reg!(instr.a), value);
                     added!();
                     next!(1);
                 }
                 Op::NewListSpread => {
                     publish!();
-                    let first = regs!(instr.b, instr.c as usize);
-                    let value = done!((*vm).new_list_spread(first, instr.c as usize));
+                    let value = done!((*vm).new_list_spread(instr.b, instr.c as usize));
                     store_value(reg!(instr.a), value);
                     added!();
                     next!(1);
                 }
                 Op::ListBegin => {
                     publish!();
-                    (*vm).list_begin(instr.x, reg!(instr.a).add(1));
+                    (*vm).list_begin(instr.x, *reg!(instr.a).add(1));
                     next!(1);
                 }
                 Op::ListAppend => {
                     publish!();
-                    let first = regs!(instr.a, instr.b as usize);
-                    done!((*vm).list_append(first, instr.b as usize));
+                    done!((*vm).list_append(instr.a, instr.b as usize));
                     added!();
                     next!(1);
                 }
@@ -1162,14 +1151,14 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 }
                 Op::NewRecord => {
                     publish!();
-                    let value = (*vm).new_record(instr.c as usize, regs!(instr.b, 0));
+                    let value = (*vm).new_record(instr.c as usize, instr.b);
                     store_value(reg!(instr.a), value);
                     added!();
                     next!(1);
                 }
                 Op::UpdateRecord => {
                     publish!();
-                    let value = done!((*vm).update_record(instr.c as usize, reg!(instr.b)));
+                    let value = done!((*vm).update_record(instr.c as usize, instr.b));
                     store_value(reg!(instr.a), value);
                     added!();
                     next!(1);
@@ -1209,8 +1198,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 }
                 Op::RangePrep => {
                     publish!();
-                    let args = regs!(instr.b, instr.c as usize);
-                    let (first, count) = done!((*vm).range_bounds(args, instr.c as usize));
+                    let (first, count) = done!((*vm).range_bounds(instr.b, instr.c as usize));
                     let state = reg!(instr.a);
 
                     set_state(state, 0);

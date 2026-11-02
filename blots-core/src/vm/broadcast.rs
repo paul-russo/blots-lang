@@ -15,7 +15,7 @@
 //! has. Arithmetic on numbers has no side effects, so giving up part of the way through a
 //! chain is invisible.
 
-use super::{MAX_CALL_DEPTH, Vm, register, store_value};
+use super::{MAX_CALL_DEPTH, Vm};
 use crate::{
     bytecode::{Instr, LAST_USE_B, LAST_USE_C, Op, register_index},
     expressions::modulo,
@@ -255,12 +255,10 @@ impl Vm {
     /// with the instructions after it that carry its result further. Reports `false`, having
     /// changed nothing, when that takes the general implementation.
     ///
-    /// # Safety
-    /// As for [`Vm::step`]: `instr` is the instruction right before the saved `ip` of the
+    /// As for [`Vm::step`], `instr` is the instruction right before the saved `ip` of the
     /// innermost frame.
-    pub(super) unsafe fn broadcast(&mut self, instr: Instr) -> bool {
-        // SAFETY: guaranteed by the caller.
-        let Some((outcome, target, resume)) = (unsafe { self.evaluate_chain(instr) }) else {
+    pub(super) fn broadcast(&mut self, instr: Instr) -> bool {
+        let Some((outcome, target, resume)) = self.evaluate_chain(instr) else {
             return false;
         };
 
@@ -269,46 +267,32 @@ impl Vm {
             Outcome::Number(number) => Value::Number(number),
         };
 
-        // SAFETY: `target` names a register of the innermost frame, and `resume` points at
-        // the instruction after the last one of the chain.
-        unsafe {
-            store_value(register(self.top().base, target), value);
-            (*self.top).ip = resume;
-        }
+        self.set_reg(target, value);
+        let frame = self.top_mut();
+        frame.ip = frame.proto().code.as_ptr().wrapping_add(resume);
 
         true
     }
 
     /// Evaluate the chain that starts with `instr`: what it comes to, the operand naming the
-    /// register that gets it, and where execution continues.
-    ///
-    /// # Safety
-    /// As for [`Vm::broadcast`].
-    unsafe fn evaluate_chain(&self, instr: Instr) -> Option<(Outcome, u16, *const u64)> {
+    /// register that gets it, and the index of the code word where execution continues.
+    fn evaluate_chain(&self, instr: Instr) -> Option<(Outcome, u16, usize)> {
         let (op, form) = arithmetic_of(instr.op)?;
         let frame = self.top();
-        let value_in = |operand: u16| -> Value {
-            // SAFETY: the compiler only emits register operands that lie within the frame.
-            unsafe { *register(frame.base, operand) }
-        };
+        let code = &frame.proto().code;
 
-        // What every read through `cursor` below relies on: an arithmetic instruction is
-        // followed by its number operand, if it takes one, and then by at least one more
-        // instruction, since every path through a proto ends in a return or an error.
-        let mut cursor = frame.ip;
-        let number_operand = |operand: *const u64| {
-            // SAFETY: only ever called with the word that follows an instruction taking a
-            // number operand.
-            Value::Number(f64::from_bits(unsafe { *operand }))
-        };
+        // An arithmetic instruction is followed by its number operand, if it takes one, and
+        // then by at least one more instruction, since every path through a proto ends in a
+        // return or an error.
+        let mut pc = frame.index_of(frame.ip);
+        let number_operand = |pc: usize| Some(Value::Number(f64::from_bits(*code.get(pc)?)));
         let (lhs, rhs) = match form {
-            Form::Registers => (value_in(instr.b), value_in(instr.c)),
-            Form::NumberRight => (value_in(instr.b), number_operand(cursor)),
-            Form::NumberLeft => (number_operand(cursor), value_in(instr.b)),
+            Form::Registers => (self.reg(instr.b), self.reg(instr.c)),
+            Form::NumberRight => (self.reg(instr.b), number_operand(pc)?),
+            Form::NumberLeft => (number_operand(pc)?, self.reg(instr.b)),
         };
         if !matches!(form, Form::Registers) {
-            // SAFETY: the number operand is followed by an instruction.
-            cursor = unsafe { cursor.add(1) };
+            pc += 1;
         }
 
         let heap = self.heap.borrow();
@@ -341,8 +325,7 @@ impl Vm {
         // An instruction joins the chain when it is the last to read the result so far and
         // combines it with a number or with a list of the same length.
         while count < MAX_STEPS {
-            // SAFETY: `cursor` points at the instruction after the chain so far.
-            let next = Instr::decode(unsafe { *cursor });
+            let next = Instr::decode(*code.get(pc)?);
             let Some((op, form)) = arithmetic_of(next.op) else {
                 break;
             };
@@ -350,19 +333,13 @@ impl Vm {
             let takes = |operand: u16, flag: u8| operand == result && next.x & flag != 0;
             let (other, flipped) = match form {
                 Form::Registers if takes(next.b, LAST_USE_B) && next.c != result => {
-                    (value_in(next.c), false)
+                    (self.reg(next.c), false)
                 }
                 Form::Registers if takes(next.c, LAST_USE_C) && next.b != result => {
-                    (value_in(next.b), true)
+                    (self.reg(next.b), true)
                 }
-                Form::NumberRight if takes(next.b, LAST_USE_B) => {
-                    // SAFETY: an instruction of this form is followed by its number operand.
-                    (number_operand(unsafe { cursor.add(1) }), false)
-                }
-                Form::NumberLeft if takes(next.b, LAST_USE_B) => {
-                    // SAFETY: an instruction of this form is followed by its number operand.
-                    (number_operand(unsafe { cursor.add(1) }), true)
-                }
+                Form::NumberRight if takes(next.b, LAST_USE_B) => (number_operand(pc + 1)?, false),
+                Form::NumberLeft if takes(next.b, LAST_USE_B) => (number_operand(pc + 1)?, true),
                 _ => break,
             };
 
@@ -382,14 +359,9 @@ impl Vm {
             };
             count += 1;
             result = next.a;
-            // SAFETY: the instruction, and its number operand if it takes one, are followed
-            // by another instruction.
-            cursor = unsafe {
-                cursor.add(if matches!(form, Form::Registers) {
-                    1
-                } else {
-                    2
-                })
+            pc += match form {
+                Form::Registers => 1,
+                _ => 2,
             };
         }
 
@@ -397,19 +369,16 @@ impl Vm {
 
         // The call of an aggregate function with the result as its only argument can take the
         // numbers as they come, as long as the call is sure to succeed.
-        //
-        // SAFETY: `cursor` points at the instruction after the chain.
-        let after = Instr::decode(unsafe { *cursor });
+        let after = Instr::decode(*code.get(pc)?);
         if !source.is_empty()
             && let Some((fold, target)) = self.fold_after(after, result)
         {
             let number = reduce(source, steps, fold)?;
 
-            // SAFETY: a call is followed by another instruction.
-            return Some((Outcome::Number(number), target, unsafe { cursor.add(1) }));
+            return Some((Outcome::Number(number), target, pc + 1));
         }
 
-        Some((Outcome::List(map(source, steps)?), result, cursor))
+        Some((Outcome::List(map(source, steps)?), result, pc))
     }
 
     /// When `call` passes the register that operand `argument` names (and nothing else) to a
@@ -421,8 +390,7 @@ impl Vm {
         let function = match call.op {
             // The function is the value in the register in front of the argument.
             Op::Call if call.b == 1 && register_index(call.a) + 1 == register_index(argument) => {
-                // SAFETY: the compiler only emits register operands that lie within the frame.
-                unsafe { *register(frame.base, call.a) }
+                self.reg(call.a)
             }
             // The call names the function, which is a constant of the code.
             Op::CallBuiltIn if call.x == 1 && call.a == argument => {
