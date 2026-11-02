@@ -1204,6 +1204,231 @@ impl Proto {
         self.body.as_ref().is_some_and(|own| Rc::ptr_eq(own, body))
             && self.args.as_ref().is_some_and(|own| Rc::ptr_eq(own, args))
     }
+
+    /// Check what the instruction loop takes for granted about the code and does not check
+    /// as it runs: every instruction has its operand words, and another instruction after
+    /// it unless it is one that does not go on; every jump lands on an instruction; every
+    /// register that an instruction names is one of the frame; every index into a table of
+    /// the proto is one that the table has. Code that the compiler got wrong in one of these
+    /// ways would have the loop read or write memory that is not what it takes it for.
+    ///
+    /// # Panics
+    /// If the code does not hold up.
+    pub(crate) fn check(&self) {
+        let mut starts = vec![false; self.code.len()];
+        let mut pc = 0;
+        let mut last = None;
+        while pc < self.code.len() {
+            starts[pc] = true;
+            let instr = Instr::decode(self.code[pc]);
+            pc += 1 + instr.operand_words();
+            last = Some(instr.op);
+        }
+
+        assert!(
+            pc == self.code.len(),
+            "the last instruction of the code has its operand words"
+        );
+        assert!(
+            matches!(last, Some(Op::Return | Op::Jmp | Op::Raise)),
+            "the code ends with an instruction that does not go on"
+        );
+
+        let mut pc = 0;
+        while pc < self.code.len() {
+            let instr = Instr::decode(self.code[pc]);
+            self.check_instr(pc, instr, &starts);
+            pc += 1 + instr.operand_words();
+        }
+    }
+
+    /// [`Proto::check`] for the instruction `instr` at `pc`, where `starts` says which code
+    /// words are instructions.
+    fn check_instr(&self, pc: usize, instr: Instr, starts: &[bool]) {
+        let fail = |what: &str| -> ! { panic!("instruction {pc} ({:?}) {what}", instr.op) };
+
+        // The `count` registers from the one that `operand` names on are registers of the
+        // frame; none are named when there are none.
+        let registers = |operand: u16, count: usize| {
+            if count > 0
+                && (!(operand as usize).is_multiple_of(REGISTER_SCALE)
+                    || register_index(operand) + count > self.max_stack)
+            {
+                fail("names a register that the frame does not have");
+            }
+        };
+        let entry = |index: usize, len: usize| {
+            if index >= len {
+                fail("names an entry that a table of the code does not have");
+            }
+        };
+        let jump = || {
+            let target = (pc + 1).checked_add_signed(instr.sbx());
+            if target.is_none_or(|target| starts.get(target) != Some(&true)) {
+                fail("jumps to where no instruction is");
+            }
+        };
+        let restarts = || {
+            if instr.b as usize != pc + 1 {
+                fail("starts the frame over elsewhere than at the start of the code");
+            }
+        };
+
+        let (a, b, c, x, bx) = (instr.a, instr.b, instr.c, instr.x, instr.bx());
+        match instr.op {
+            Op::Call => {
+                registers(a, 1 + b as usize);
+                registers(c, 1);
+            }
+            Op::CallList => {
+                registers(a, 1);
+                registers(c, 1);
+            }
+            Op::CallSelf => {
+                registers(a, 1 + x as usize);
+                registers(c, 1);
+                restarts();
+            }
+            Op::TailSelf | Op::TailSelf0 | Op::TailSelf1 => {
+                // The arguments that still have to be moved go to parameters, which are as
+                // far below them as the first argument of the call is from the start of the
+                // frame. An ordinary call takes all of them from behind the scratch register.
+                let params = self.params.len();
+                registers(a, x as usize);
+                registers(c, 1 + params);
+                let first = register_index(a).checked_sub(register_index(c) + 1);
+                if x > 0 && first.is_none_or(|first| first + x as usize > params) {
+                    fail("moves arguments to registers that are no parameters");
+                }
+                restarts();
+            }
+            Op::CallBuiltIn => {
+                registers(a, x as usize);
+                registers(c, 1);
+                entry(b as usize, self.consts.len());
+                if !matches!(self.consts[b as usize], Value::BuiltIn(_)) {
+                    fail("calls a constant that is no built-in function");
+                }
+            }
+            Op::NewList | Op::NewListSpread => {
+                registers(a, 1);
+                registers(b, c as usize);
+            }
+            Op::ListBegin => registers(a, 2),
+            Op::ListAppend => registers(a, b as usize),
+            Op::NewRecord => {
+                entry(c as usize, self.layouts.len());
+                registers(a, 1);
+                registers(b, self.layouts[c as usize].slots.len());
+            }
+            Op::UpdateRecord => {
+                entry(c as usize, self.layouts.len());
+                registers(a, 1);
+                registers(b, 1 + self.layouts[c as usize].keys.len());
+            }
+            Op::RangePrep => {
+                registers(a, 3);
+                registers(b, c as usize);
+            }
+            Op::ForRange | Op::ForRangeNext => {
+                registers(a, 4 + (x == 1) as usize);
+                jump();
+            }
+            Op::IterPrep => registers(a, 5),
+            Op::IterList | Op::ForList | Op::ForListNext => {
+                registers(a, 5);
+                jump();
+            }
+            Op::IterRecord => registers(a, 2),
+            Op::ForRecord | Op::ForRecordNext => {
+                registers(a, 3 + EntryPart::of_operand(x).1 as usize);
+                jump();
+            }
+            Op::LoadEntry => {
+                registers(a, 1);
+                registers(b, 2);
+            }
+            Op::JmpNotApart => {
+                registers(a, 1);
+                let apart = Apart::decode(self.code[pc + 1]);
+                let parts = match x {
+                    APART_LIST => apart.size as usize,
+                    APART_RECORD => {
+                        entry(apart.size as usize, self.layouts.len());
+                        let keys = self.layouts[apart.size as usize].keys.len();
+                        if apart.required as usize > keys {
+                            fail("requires more keys than its layout has");
+                        }
+                        keys
+                    }
+                    _ => fail("takes apart something that is neither a list nor a record"),
+                };
+                registers(apart.first, parts);
+                jump();
+            }
+            Op::JmpNotEq
+            | Op::JmpNotNe
+            | Op::JmpNotLt
+            | Op::JmpNotLe
+            | Op::JmpNotGt
+            | Op::JmpNotGe => {
+                registers(b, 1);
+                registers(c, 1);
+                let next = self.code.get(pc + 1).map(|word| Instr::decode(*word).op);
+                if !starts.get(pc + 1).is_some_and(|start| *start) || next != Some(Op::Jmp) {
+                    fail("is not followed by the jump it takes");
+                }
+            }
+            _ => {
+                let operands = instr.op.registers();
+                for (operand, which) in [(a, OPERAND_A), (b, OPERAND_B), (c, OPERAND_C)] {
+                    if operands & which != 0 {
+                        registers(operand, 1);
+                    }
+                }
+
+                match instr.op {
+                    Op::LoadK => entry(bx, self.consts.len()),
+                    Op::LoadStr => {
+                        entry(bx, self.literals.len());
+                        entry(bx, self.strings.len());
+                    }
+                    Op::GetName
+                    | Op::EnsureGlobal
+                    | Op::EnsureName
+                    | Op::CheckUnbound
+                    | Op::NameLambda
+                    | Op::SetGlobal => entry(bx, self.names.len()),
+                    Op::GetCapture => entry(c as usize, self.slot_refs.len()),
+                    Op::GetCaptureRef | Op::GetEnvParam | Op::GetEnvCapture => {
+                        entry(bx, self.slot_refs.len());
+                    }
+                    Op::GetInput | Op::RecordSet | Op::Raise => entry(bx, self.strings.len()),
+                    Op::Closure => entry(bx, self.lambdas.len()),
+                    Op::GetField => {
+                        let site = c as usize | (x as usize) << 16;
+                        entry(site, self.field_caches.sites().len());
+                        entry(site, self.fields.len());
+                    }
+                    Op::Jmp
+                    | Op::JmpIfFalse
+                    | Op::JmpNotEqK
+                    | Op::JmpNotNeK
+                    | Op::JmpNotLtK
+                    | Op::JmpNotLeK
+                    | Op::JmpNotGtK
+                    | Op::JmpNotGeK
+                    | Op::JmpNotRemEq
+                    | Op::JmpNotRemNe
+                    | Op::JmpNotEqNull
+                    | Op::JmpNotNeNull
+                    | Op::JmpNotFinite
+                    | Op::JmpNotType => jump(),
+                    _ => {}
+                }
+            }
+        }
+    }
 }
 
 impl fmt::Debug for Proto {
@@ -1326,5 +1551,89 @@ mod tests {
     #[test]
     fn a_number_past_the_last_opcode_is_none() {
         assert_eq!(Op::of_number(Op::ALL.len() as u8), None);
+    }
+
+    /// The code of the chunk of `source`, a single expression, which was checked when it was
+    /// compiled.
+    fn chunk(source: &str) -> Proto {
+        use crate::{
+            compiler::compile_chunk,
+            environment::Environment,
+            fast_parser::{Statement, parse_program},
+        };
+
+        let statements = parse_program(source).unwrap();
+        let [Statement::Expression(expr)] = &statements[..] else {
+            panic!("{source} is not a single expression");
+        };
+
+        match Rc::try_unwrap(compile_chunk(expr, true, &Environment::new()).unwrap()) {
+            Ok(proto) => proto,
+            Err(_) => panic!("the code of a chunk is its own"),
+        }
+    }
+
+    /// The position of the first instruction of `proto` that `is_it`.
+    fn position(proto: &Proto, is_it: impl Fn(Instr) -> bool) -> usize {
+        let mut pc = 0;
+        loop {
+            let instr = Instr::decode(proto.code[pc]);
+            if is_it(instr) {
+                return pc;
+            }
+            pc += 1 + instr.operand_words();
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "names a register that the frame does not have")]
+    fn a_register_behind_the_frame_is_caught() {
+        let mut proto = chunk("[1, 2, 3]");
+        proto.max_stack -= 1;
+        proto.check();
+    }
+
+    #[test]
+    #[should_panic(expected = "jumps to where no instruction is")]
+    fn a_jump_into_an_operand_word_is_caught() {
+        let mut proto = chunk("do { k = 5; return if k > 1 then 1 else 2 }");
+        let pc = position(&proto, |instr| instr.op == Op::JmpNotGtK);
+        let mut instr = Instr::decode(proto.code[pc]);
+        instr.b = 0;
+        instr.c = 0;
+        proto.code[pc] = instr.encode();
+        proto.check();
+    }
+
+    #[test]
+    #[should_panic(expected = "names an entry that a table of the code does not have")]
+    fn a_constant_that_the_code_does_not_have_is_caught() {
+        let mut proto = chunk("[1, true]");
+        let pc = position(&proto, |instr| instr.op == Op::LoadK);
+        let mut instr = Instr::decode(proto.code[pc]);
+        instr.b = proto.consts.len() as u16;
+        proto.code[pc] = instr.encode();
+        proto.check();
+    }
+
+    #[test]
+    #[should_panic(expected = "the code ends with an instruction that does not go on")]
+    fn code_that_runs_off_its_end_is_caught() {
+        let mut proto = chunk("[1, 2]");
+        proto.code.pop();
+        proto.check();
+    }
+
+    #[test]
+    #[should_panic(expected = "moves arguments to registers that are no parameters")]
+    fn a_tail_call_that_moves_arguments_past_the_parameters_is_caught() {
+        let mut proto = chunk("[1, 2]");
+        proto.params.clear();
+        let mut call = Instr::abc(Op::TailSelf1, 2, 0, 0);
+        call.x = 1;
+        call.b = 1;
+        proto.code.insert(0, call.encode());
+        proto.max_stack = proto.max_stack.max(3);
+        proto.check();
     }
 }

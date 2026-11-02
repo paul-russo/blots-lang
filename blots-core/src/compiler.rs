@@ -1584,7 +1584,7 @@ impl FnCompiler {
             u32::MAX
         };
 
-        Proto {
+        let proto = Proto {
             code: self.code,
             consts: self.consts,
             literals: self
@@ -1617,7 +1617,10 @@ impl FnCompiler {
             max_stack: self.max_reg as usize,
             body,
             args,
-        }
+        };
+        proto.check();
+
+        proto
     }
 
     // ---------------------------------------------------------------------------------------
