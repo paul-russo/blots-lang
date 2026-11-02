@@ -564,9 +564,7 @@ fn wide_modulo(x: f64, y: f64) -> f64 {
     const EXACT_INTEGERS: f64 = 9_007_199_254_740_992.0;
 
     if x.abs() < EXACT_INTEGERS && y.abs() < EXACT_INTEGERS {
-        // SAFETY: both operands were just checked to be finite and well within `i64`.
-        let (dividend, divisor) =
-            unsafe { (x.to_int_unchecked::<i64>(), y.to_int_unchecked::<i64>()) };
+        let (dividend, divisor) = (x as i64, y as i64);
 
         if dividend as f64 == x && divisor as f64 == y && divisor != 0 {
             // A zero remainder keeps the sign of the dividend, as it does for `fmod`.
