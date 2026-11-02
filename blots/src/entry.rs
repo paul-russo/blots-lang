@@ -18,10 +18,12 @@
 //! The arguments need no forwarding: glibc hands them to the initializers of a program, and
 //! that is where the standard library takes them from.
 
-use std::ffi::{c_char, c_int, c_long, c_void};
+use std::ffi::{c_char, c_int, c_void};
+use std::fs::OpenOptions;
 use std::io::{self, Write};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, IntoRawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::{env, mem, panic, process, ptr};
+use std::{env, mem, panic, process, ptr, thread};
 
 /// The size of the stack that the handler of an invalid access runs on, the one it may have
 /// to report on being full.
@@ -47,10 +49,11 @@ static mut HANDLER_STACK: [u8; HANDLER_STACK_SIZE] = [0; HANDLER_STACK_SIZE];
 
 #[unsafe(no_mangle)]
 extern "C" fn main(_argc: c_int, _argv: *const *const c_char) -> c_int {
-    // SAFETY: nothing else has run yet, so there is no other thread, no file of ours that a
-    // descriptor could be confused with, and no handler that these would replace.
+    reopen_closed_streams();
+
+    // SAFETY: nothing else has run yet, so there is no other thread and no handler that these
+    // would replace.
     unsafe {
-        reopen_closed_streams();
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
         report_stack_overflows();
     }
@@ -83,13 +86,13 @@ fn __rust_begin_short_backtrace() -> ! {
 fn name_main_thread_in_panics() {
     static PANICKED: AtomicBool = AtomicBool::new(false);
 
+    let main = thread::current().id();
     let report = panic::take_hook();
 
     panic::set_hook(Box::new(move |info| {
         let plain = !PANICKED.swap(true, Ordering::Relaxed)
             && env::var_os("RUST_BACKTRACE").is_none_or(|style| style == "0")
-            // SAFETY: both calls are always sound.
-            && unsafe { libc::syscall(libc::SYS_gettid) == c_long::from(libc::getpid()) };
+            && thread::current().id() == main;
 
         match info.location() {
             Some(location) if plain => {
@@ -112,50 +115,32 @@ fn name_main_thread_in_panics() {
     }));
 }
 
-/// Open `/dev/null` in place of each of the standard streams that is closed.
+/// Open `/dev/null` in place of each of the standard streams that is closed, before anything
+/// else is opened.
 ///
-/// SAFETY: to be called before anything is opened.
-unsafe fn reopen_closed_streams() {
-    let mut streams = [0, 1, 2].map(|fd| libc::pollfd {
-        fd,
-        events: 0,
-        revents: 0,
-    });
-
-    // SAFETY: `streams` is three descriptors long.
-    while unsafe { libc::poll(streams.as_mut_ptr(), 3, 0) } == -1 {
-        // SAFETY: `__errno_location` returns the address of this thread's `errno`.
-        match unsafe { *libc::__errno_location() } {
-            libc::EINTR => continue,
-            // The limit on open files can be too low for `poll` to look at three of them.
-            libc::EINVAL | libc::EAGAIN | libc::ENOMEM => {
-                for stream in &mut streams {
-                    // SAFETY: asking for the flags of a descriptor is always sound.
-                    let closed = unsafe { libc::fcntl(stream.fd, libc::F_GETFD) } == -1
-                        && unsafe { *libc::__errno_location() } == libc::EBADF;
-
-                    stream.revents = if closed { libc::POLLNVAL } else { 0 };
-                }
-
-                break;
-            }
-            // SAFETY: `abort` is always sound.
-            _ => unsafe { libc::abort() },
+/// The lowest free descriptor is the one that is handed out, so `/dev/null` is opened until it
+/// lands past the standard streams, and fills each gap on the way. Leaving a gap would let an
+/// unrelated file be read or written as a standard stream.
+fn reopen_closed_streams() {
+    loop {
+        match OpenOptions::new().read(true).write(true).open("/dev/null") {
+            Ok(file) if file.as_raw_fd() > libc::STDERR_FILENO => return,
+            Ok(file) => _ = file.into_raw_fd(),
+            Err(_) if any_stream_closed() => process::abort(),
+            Err(_) => return,
         }
     }
+}
 
-    for stream in streams {
-        // The lowest free descriptor is the one that is handed out, so opening anything fills
-        // the gap. Leaving it open would let an unrelated file be read or written as a
-        // standard stream.
-        if stream.revents & libc::POLLNVAL != 0
-            // SAFETY: the path is a C string.
-            && unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDWR, 0) } == -1
-        {
-            // SAFETY: `abort` is always sound.
-            unsafe { libc::abort() };
-        }
-    }
+/// Whether one of the standard streams is closed, as far as can be told.
+fn any_stream_closed() -> bool {
+    let closed = |stream: BorrowedFd| {
+        stream
+            .try_clone_to_owned()
+            .is_err_and(|error| error.raw_os_error() == Some(libc::EBADF))
+    };
+
+    closed(io::stdin().as_fd()) || closed(io::stdout().as_fd()) || closed(io::stderr().as_fd())
 }
 
 /// Have an overflow of the stack reported before it ends the process.
@@ -208,16 +193,18 @@ unsafe extern "C" fn on_invalid_access(
         .wrapping_add(OVERFLOW_DISTANCE)
         < 2 * OVERFLOW_DISTANCE
     {
-        // SAFETY: the report is as long as is said, and both functions may be called from a
-        // signal handler.
+        // SAFETY: the report is as long as is said, and `write` may be called from a signal
+        // handler.
         unsafe {
             libc::write(
                 libc::STDERR_FILENO,
                 OVERFLOW_REPORT.as_ptr().cast(),
                 OVERFLOW_REPORT.len(),
-            );
-            libc::abort();
-        }
+            )
+        };
+
+        // `process::abort` only calls `abort`, which a handler may call too.
+        process::abort();
     }
 
     // Any other invalid access is not for this handler to explain. Returning runs the access

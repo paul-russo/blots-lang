@@ -1,23 +1,10 @@
-#![cfg_attr(
-    all(
-        not(test),
-        target_os = "linux",
-        target_env = "gnu",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    ),
-    no_main
-)]
+#![cfg_attr(all(not(test), blots_entry), no_main)]
 
 #[cfg(blots_pools)]
 mod allocator;
 mod cli;
 mod commands;
-#[cfg(all(
-    not(test),
-    target_os = "linux",
-    target_env = "gnu",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
+#[cfg(all(not(test), blots_entry))]
 mod entry;
 mod highlighter;
 
