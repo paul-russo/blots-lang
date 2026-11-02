@@ -157,7 +157,7 @@ mod pool {
 
     thread_local! {
         // A constant initialiser and nothing to drop: reaching the pools takes no check and
-        // never allocates.
+        // never allocates, on the targets with native thread-locals that `build.rs` allows.
         static POOLS: UnsafeCell<Pools> = const {
             UnsafeCell::new(Pools {
                 free: [ptr::null_mut(); CLASSES],

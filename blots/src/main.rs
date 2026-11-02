@@ -8,6 +8,7 @@
     no_main
 )]
 
+#[cfg(blots_pools)]
 mod allocator;
 mod cli;
 mod commands;
@@ -49,6 +50,7 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::rc::Rc;
 use std::sync::LazyLock;
 
+#[cfg(blots_pools)]
 #[global_allocator]
 static ALLOCATOR: allocator::Allocator = allocator::Allocator;
 

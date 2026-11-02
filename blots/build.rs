@@ -1,15 +1,22 @@
-//! Links the unwinder into the binary on Linux, where it is otherwise a shared library.
+//! Fits the runtime of the binary to the target.
 //!
-//! A panic unwinds the stack with `libgcc_s.so`, which the dynamic loader has to find, map
-//! and bind before the program starts, whether or not anything ever panics. That is a tenth
-//! of the time it takes to run a short script. The same code comes as a static library with
-//! every GCC, and linking that leaves nothing to load.
+//! The unwinder is linked into the binary on Linux, where it is otherwise a shared library. A
+//! panic unwinds the stack with `libgcc_s.so`, which the dynamic loader has to find, map and
+//! bind before the program starts, whether or not anything ever panics. That is a tenth of the
+//! time it takes to run a short script. The same code comes as a static library with every
+//! GCC, and linking that leaves nothing to load.
 //!
 //! It is only linked where it costs nothing else. Since GCC 12 the unwinder finds the unwind
 //! tables of a function with `_dl_find_object`, which glibc has had since 2.35. A binary with
 //! that unwinder inside does not start on an older glibc, where one that loads the shared
 //! library gets the unwinder of the system it runs on, and starts on any glibc the rest of it
 //! does.
+//!
+//! The allocator of the binary keeps its pools in a thread-local, which it can only do where
+//! a thread-local is a slot the thread has from the start. Elsewhere the standard library makes
+//! room for one the first time a thread uses it, with the allocator, which would then call
+//! itself until the stack ran out. The `blots_pools` configuration says that the pools can be
+//! used.
 
 use std::env;
 use std::ffi::OsString;
@@ -20,8 +27,10 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=RUSTC_LINKER");
+    println!("cargo:rustc-check-cfg=cfg(blots_pools)");
 
     let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let vendor = env::var("CARGO_CFG_TARGET_VENDOR").unwrap_or_default();
     let libc = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
 
     if os == "linux"
@@ -29,6 +38,22 @@ fn main() {
         && static_unwinder().is_some_and(|path| runs_on_any_glibc(&path))
     {
         println!("cargo:rustc-link-lib=static=gcc_eh");
+    }
+
+    if has_native_thread_locals(&os, &vendor, &libc) {
+        println!("cargo:rustc-cfg=blots_pools");
+    }
+}
+
+/// Whether the thread-locals of the target are native, as far as is known for certain.
+///
+/// Android, OpenBSD, illumos and Windows with the GNU toolchain are among the targets whose
+/// thread-locals are not.
+fn has_native_thread_locals(os: &str, vendor: &str, libc: &str) -> bool {
+    match os {
+        "linux" | "freebsd" | "netbsd" | "dragonfly" => true,
+        "windows" => libc == "msvc",
+        _ => vendor == "apple",
     }
 }
 
