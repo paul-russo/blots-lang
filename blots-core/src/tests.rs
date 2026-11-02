@@ -3317,8 +3317,7 @@ mod loop_invariant_tests {
         let mut instructions = Vec::new();
         let mut pc = 0;
         while pc < chunk.code.len() {
-            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
-            let instr = unsafe { Instr::decode(chunk.code[pc]) };
+            let instr = Instr::decode(chunk.code[pc]);
             instructions.push((pc, instr));
             pc += 1 + instr.operand_words();
         }
@@ -3744,8 +3743,7 @@ mod power_of_two_tests {
         let mut operations = Vec::new();
         let mut pc = 0;
         while pc < chunk.code.len() {
-            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
-            let instr = unsafe { Instr::decode(chunk.code[pc]) };
+            let instr = Instr::decode(chunk.code[pc]);
             operations.push(instr.op);
             pc += 1 + instr.operand_words();
         }
@@ -4696,8 +4694,7 @@ mod kept_value_tests {
         let mut count = 0;
         let mut pc = 0;
         while pc < proto.code.len() {
-            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
-            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            let instr = Instr::decode(proto.code[pc]);
             count += usize::from(instr.op == op);
             pc += 1 + instr.operand_words();
         }
@@ -7708,8 +7705,7 @@ mod built_in_call_tests {
         let mut count = 0;
         let mut pc = 0;
         while pc < proto.code.len() {
-            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
-            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            let instr = Instr::decode(proto.code[pc]);
             count += usize::from(instr.op == op);
             pc += 1 + instr.operand_words();
         }
@@ -8730,8 +8726,7 @@ mod loop_name_tests {
         let mut instructions = Vec::new();
         let mut pc = 0;
         while pc < proto.code.len() {
-            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
-            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            let instr = Instr::decode(proto.code[pc]);
             instructions.push((pc, instr));
             pc += 1 + instr.operand_words();
         }
@@ -9460,8 +9455,7 @@ mod instruction_call_tests {
         let mut operations = Vec::new();
         let mut pc = 0;
         while pc < proto.code.len() {
-            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
-            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            let instr = Instr::decode(proto.code[pc]);
             operations.push(instr.op);
             pc += 1 + instr.operand_words();
         }
@@ -10187,8 +10181,7 @@ mod operator_loop_tests {
         let mut operations = Vec::new();
         let mut pc = 0;
         while pc < proto.code.len() {
-            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
-            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            let instr = Instr::decode(proto.code[pc]);
             operations.push(instr.op);
             pc += 1 + instr.operand_words();
         }
@@ -10207,8 +10200,7 @@ mod operator_loop_tests {
         let mut operations = Vec::new();
         let mut pc = 0;
         while pc < chunk.code.len() {
-            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
-            let instr = unsafe { Instr::decode(chunk.code[pc]) };
+            let instr = Instr::decode(chunk.code[pc]);
             operations.push(instr.op);
             pc += 1 + instr.operand_words();
         }
@@ -10960,8 +10952,7 @@ mod record_loop_tests {
         let mut instructions = Vec::new();
         let mut pc = 0;
         while pc < proto.code.len() {
-            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
-            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            let instr = Instr::decode(proto.code[pc]);
             instructions.push(instr);
             pc += 1 + instr.operand_words();
         }
@@ -11385,8 +11376,7 @@ mod number_logic_tests {
         let mut operations = Vec::new();
         let mut pc = 0;
         while pc < proto.code.len() {
-            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
-            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            let instr = Instr::decode(proto.code[pc]);
             operations.push(instr.op);
             pc += 1 + instr.operand_words();
         }
@@ -11436,10 +11426,8 @@ mod number_logic_tests {
             let chunk = compile_chunk(expr, true, &Environment::new()).unwrap();
 
             (0..chunk.code.len()).any(|pc| {
-                // SAFETY: a number operand never decodes to this operation's opcode and
-                // operands together, so this only finds the instruction itself.
-                let instr = unsafe { Instr::decode(chunk.code[pc]) };
-                instr.op == Op::JmpNotFinite
+                // A number operand never has the opcode of this operation in its first byte.
+                Op::of_number(chunk.code[pc].to_ne_bytes()[0]) == Some(Op::JmpNotFinite)
             })
         };
         assert!(!chunk("if k > 1 or k < 0 then 1 else 2"));
@@ -11612,8 +11600,7 @@ mod accumulator_parts_tests {
         let mut operations = Vec::new();
         let mut pc = 0;
         while pc < proto.code.len() {
-            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
-            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            let instr = Instr::decode(proto.code[pc]);
             operations.push(instr.op);
             pc += 1 + instr.operand_words();
         }
@@ -12085,8 +12072,7 @@ mod type_test_tests {
         let mut operations = Vec::new();
         let mut pc = 0;
         while pc < proto.code.len() {
-            // SAFETY: `pc` only lands on instruction words, as number operands are skipped.
-            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            let instr = Instr::decode(proto.code[pc]);
             operations.push(instr.op);
             pc += 1 + instr.operand_words();
         }
@@ -12296,8 +12282,7 @@ mod guarded_parts_tests {
 
         let mut pc = 0;
         while pc < proto.code.len() {
-            // SAFETY: `pc` only lands on instruction words, as operand words are skipped.
-            let instr = unsafe { Instr::decode(proto.code[pc]) };
+            let instr = Instr::decode(proto.code[pc]);
             if instr.op == Op::JmpNotApart {
                 return true;
             }

@@ -309,7 +309,7 @@ impl Vm {
                 let holds = self.compare_slow(operator_of(instr.op), self.reg(b), self.reg(c))?;
 
                 // SAFETY: the comparison is followed by the jump to take when it does not hold.
-                let jump = unsafe { Instr::decode(*self.top().ip) };
+                let jump = Instr::decode(unsafe { *self.top().ip });
                 self.skip(if holds { 1 } else { 1 + jump.sbx() });
             }
             Op::JmpNotEqK
@@ -454,7 +454,7 @@ impl Vm {
 
                 // The result goes where the call instruction of the caller wants it.
                 // SAFETY: the caller's saved `ip` points right after its call instruction.
-                let target = unsafe { Instr::decode(*self.top().ip.sub(1)) }.c;
+                let target = Instr::decode(unsafe { *self.top().ip.sub(1) }).c;
                 self.set_reg(target, value);
             }
 

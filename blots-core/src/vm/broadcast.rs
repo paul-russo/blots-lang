@@ -342,7 +342,7 @@ impl Vm {
         // combines it with a number or with a list of the same length.
         while count < MAX_STEPS {
             // SAFETY: `cursor` points at the instruction after the chain so far.
-            let next = unsafe { Instr::decode(*cursor) };
+            let next = Instr::decode(unsafe { *cursor });
             let Some((op, form)) = arithmetic_of(next.op) else {
                 break;
             };
@@ -399,7 +399,7 @@ impl Vm {
         // numbers as they come, as long as the call is sure to succeed.
         //
         // SAFETY: `cursor` points at the instruction after the chain.
-        let after = unsafe { Instr::decode(*cursor) };
+        let after = Instr::decode(unsafe { *cursor });
         if !source.is_empty()
             && let Some((fold, target)) = self.fold_after(after, result)
         {

@@ -1688,8 +1688,7 @@ impl FnCompiler {
         let offset = target as i64 - (jump as i64 + 1);
         let bits = offset as i32 as u32;
 
-        // SAFETY: `jump` is the index of an instruction word returned by an emit method.
-        let mut instr = unsafe { Instr::decode(self.code[jump]) };
+        let mut instr = Instr::decode(self.code[jump]);
         instr.b = bits as u16;
         instr.c = (bits >> 16) as u16;
         self.code[jump] = instr.encode();

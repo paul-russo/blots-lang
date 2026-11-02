@@ -19,9 +19,24 @@ use std::{
     rc::Rc,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
-pub(crate) enum Op {
+/// Defines [`Op`] along with [`Op::ALL`], the table that turns the number of an opcode back
+/// into the opcode.
+macro_rules! opcodes {
+    ($($(#[$doc:meta])* $op:ident,)*) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        #[repr(u8)]
+        pub(crate) enum Op {
+            $($(#[$doc])* $op,)*
+        }
+
+        impl Op {
+            /// Every opcode, at the position of its number.
+            const ALL: &[Op] = &[$(Op::$op,)*];
+        }
+    };
+}
+
+opcodes! {
     /// `R[a] = R[b]`
     Move,
     /// `R[a] = K[bx]`
@@ -384,6 +399,11 @@ const OPERAND_B: u8 = 2;
 const OPERAND_C: u8 = 4;
 
 impl Op {
+    /// The opcode numbered `number`, if there is one.
+    pub fn of_number(number: u8) -> Option<Op> {
+        Op::ALL.get(number as usize).copied()
+    }
+
     /// The opcode of the instruction that calls `built_in` with `argc` arguments, when such
     /// a call has an instruction of its own. Its operands `b` and (for two arguments) `c`
     /// are the arguments, and `a` is where the result goes.
@@ -856,19 +876,30 @@ impl Instr {
         ((self.b as u32) | ((self.c as u32) << 16)) as i32 as isize
     }
 
-    /// The code word holding this instruction.
+    /// The code word holding this instruction, which has the bytes of the instruction in
+    /// memory.
     pub fn encode(self) -> u64 {
-        // SAFETY: `Instr` is eight bytes of plain data without padding.
-        unsafe { std::mem::transmute::<Instr, u64>(self) }
+        let [a0, a1] = self.a.to_ne_bytes();
+        let [b0, b1] = self.b.to_ne_bytes();
+        let [c0, c1] = self.c.to_ne_bytes();
+
+        u64::from_ne_bytes([self.op as u8, self.x, a0, a1, b0, b1, c0, c1])
     }
 
     /// The instruction held by a code word.
     ///
-    /// # Safety
-    /// `word` must have been produced by [`Instr::encode`].
-    pub unsafe fn decode(word: u64) -> Self {
-        // SAFETY: the caller guarantees the word holds a valid instruction.
-        unsafe { std::mem::transmute::<u64, Instr>(word) }
+    /// # Panics
+    /// If the word holds no instruction.
+    pub fn decode(word: u64) -> Self {
+        let [op, x, a0, a1, b0, b1, c0, c1] = word.to_ne_bytes();
+
+        Self {
+            op: Op::of_number(op).expect("a code word that holds an instruction"),
+            x,
+            a: u16::from_ne_bytes([a0, a1]),
+            b: u16::from_ne_bytes([b0, b1]),
+            c: u16::from_ne_bytes([c0, c1]),
+        }
     }
 
     /// Whether the instruction is followed by a code word holding a number operand.
@@ -1180,8 +1211,7 @@ impl fmt::Debug for Proto {
 
         let mut pc = 0;
         while pc < self.code.len() {
-            // SAFETY: `pc` only ever lands on instruction words; number operands are skipped.
-            let instr = unsafe { Instr::decode(self.code[pc]) };
+            let instr = Instr::decode(self.code[pc]);
 
             // Register operands are shown as the register indices they stand for.
             let registers = instr.op.registers();
@@ -1251,5 +1281,45 @@ pub(crate) fn binary_opcode(op: BinaryOp) -> Op {
         BinaryOp::Into => Op::Into,
         BinaryOp::Where => Op::Where,
         BinaryOp::Coalesce => Op::Coalesce,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_instruction_survives_its_code_word() {
+        for (number, &op) in Op::ALL.iter().enumerate() {
+            assert_eq!(op as usize, number);
+
+            let word = Instr {
+                op,
+                x: 0xA5,
+                a: 0x1234,
+                b: 0xFEDC,
+                c: 0x0102,
+            }
+            .encode();
+
+            let decoded = Instr::decode(word);
+            assert_eq!(
+                (decoded.op, decoded.x, decoded.a, decoded.b, decoded.c),
+                (op, 0xA5, 0x1234, 0xFEDC, 0x0102)
+            );
+
+            // SAFETY: an instruction is no larger and no more aligned than a code word, and
+            // the word was made from an instruction.
+            let read = unsafe { *ptr::from_ref(&word).cast::<Instr>() };
+            assert_eq!(
+                (read.op, read.x, read.a, read.b, read.c),
+                (op, 0xA5, 0x1234, 0xFEDC, 0x0102)
+            );
+        }
+    }
+
+    #[test]
+    fn a_number_past_the_last_opcode_is_none() {
+        assert_eq!(Op::of_number(Op::ALL.len() as u8), None);
     }
 }
