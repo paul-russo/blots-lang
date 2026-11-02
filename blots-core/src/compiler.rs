@@ -1163,7 +1163,7 @@ fn occurs(needle: &SpannedExpr, expr: &SpannedExpr, kept: &[Shared], budget: &mu
     }
     *budget -= 1;
 
-    if kept.iter().any(|kept| same_shape(kept.expr(), expr)) {
+    if kept.iter().any(|kept| same_shape(&kept.expr, expr)) {
         return false;
     }
 
@@ -1513,7 +1513,10 @@ enum Origin {
 /// An expression that a condition evaluates and that one of its branches evaluates again:
 /// the first value is kept in a register for as long as the branches last.
 struct Shared {
-    expr: *const SpannedExpr,
+    /// Where the expression is in the body being compiled, which tells it apart from those
+    /// that are spelled the same.
+    at: *const SpannedExpr,
+    expr: SpannedExpr,
     reg: u16,
 
     /// The registers of the variables that the expression reads, in the order it names them.
@@ -1523,14 +1526,6 @@ struct Shared {
 
     /// Whether the code up to the current point has computed the value.
     computed: bool,
-}
-
-impl Shared {
-    fn expr(&self) -> &SpannedExpr {
-        // SAFETY: the expression is part of the body that the compiler was given to compile,
-        // which outlives the compiler.
-        unsafe { &*self.expr }
-    }
 }
 
 impl FnCompiler {
@@ -2926,7 +2921,7 @@ impl FnCompiler {
             // The value may be on hand already, or about to be.
             let awaited = self.shared[first..]
                 .iter()
-                .any(|shared| !shared.computed && same_shape(shared.expr(), expr));
+                .any(|shared| !shared.computed && same_shape(&shared.expr, expr));
             if awaited || self.shared_reg(expr).is_some() {
                 return Ok(());
             }
@@ -2950,7 +2945,8 @@ impl FnCompiler {
                     None => (self.alloc()?, false),
                 };
                 self.shared.push(Shared {
-                    expr,
+                    at: expr,
+                    expr: expr.clone(),
                     reg,
                     variables,
                     computed,
@@ -2981,7 +2977,7 @@ impl FnCompiler {
     fn awaited_shared(&self, expr: &SpannedExpr) -> Option<usize> {
         self.shared
             .iter()
-            .position(|shared| !shared.computed && std::ptr::eq(shared.expr, expr))
+            .position(|shared| !shared.computed && std::ptr::eq(shared.at, expr))
     }
 
     /// The register that holds the value of `expr` already, when a condition around this
@@ -2992,8 +2988,7 @@ impl FnCompiler {
         self.shared
             .iter()
             .find(|shared| {
-                shared.computed
-                    && self.same_value(shared.expr(), &mut shared.variables.iter(), expr)
+                shared.computed && self.same_value(&shared.expr, &mut shared.variables.iter(), expr)
             })
             .map(|shared| shared.reg)
     }
