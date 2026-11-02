@@ -30,8 +30,7 @@ unsafe impl GlobalAlloc for Allocator {
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if pool::takes(layout.size(), layout.align()) {
-            // SAFETY: the pools take this layout.
-            return unsafe { pool::alloc(layout.size()) };
+            return pool::alloc(layout.size());
         }
 
         // SAFETY: the caller upholds the contract of `GlobalAlloc::alloc`.
@@ -44,8 +43,7 @@ unsafe impl GlobalAlloc for Allocator {
     #[inline]
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         if pool::takes(layout.size(), layout.align()) {
-            // SAFETY: the pools take this layout.
-            let block = unsafe { pool::alloc(layout.size()) };
+            let block = pool::alloc(layout.size());
             if !block.is_null() {
                 // SAFETY: the block is at least as long as the layout.
                 unsafe { ptr::write_bytes(block, 0, layout.size()) };
@@ -89,11 +87,13 @@ unsafe impl GlobalAlloc for Allocator {
             return block;
         }
 
-        // SAFETY: the caller guarantees that `new_size` makes a valid layout with the
-        // alignment of the old one; the two blocks are distinct, and each is at least as long
-        // as the smaller of the two sizes.
+        let Ok(new_layout) = Layout::from_size_align(new_size, layout.align()) else {
+            return ptr::null_mut();
+        };
+
+        // SAFETY: the new layout has a non-zero size, since the caller passes one; the two
+        // blocks are distinct, and each is at least as long as the smaller of the two sizes.
         unsafe {
-            let new_layout = Layout::from_size_align_unchecked(new_size, layout.align());
             let new_block = self.alloc(new_layout);
             if !new_block.is_null() {
                 ptr::copy_nonoverlapping(block, new_block, layout.size().min(new_size));
@@ -125,7 +125,7 @@ unsafe impl GlobalAlloc for Allocator {
 mod pool {
     use super::huge_pages;
     use std::alloc::{GlobalAlloc, Layout, System};
-    use std::cell::UnsafeCell;
+    use std::cell::Cell;
     use std::ptr;
 
     /// Block sizes are multiples of this, and blocks are aligned to it.
@@ -146,25 +146,25 @@ mod pool {
     struct Pools {
         /// For each size class, the block that was freed last. The first word of a free block
         /// holds the address of the one freed before it.
-        free: [*mut u8; CLASSES],
+        free: [Cell<*mut u8>; CLASSES],
 
         /// The part of the current chunk that has not been handed out.
-        fresh: *mut u8,
-        fresh_end: *mut u8,
+        fresh: Cell<*mut u8>,
+        fresh_end: Cell<*mut u8>,
 
-        next_chunk: usize,
+        next_chunk: Cell<usize>,
     }
 
     thread_local! {
         // A constant initialiser and nothing to drop: reaching the pools takes no check and
         // never allocates, on the targets with native thread-locals that `build.rs` allows.
-        static POOLS: UnsafeCell<Pools> = const {
-            UnsafeCell::new(Pools {
-                free: [ptr::null_mut(); CLASSES],
-                fresh: ptr::null_mut(),
-                fresh_end: ptr::null_mut(),
-                next_chunk: FIRST_CHUNK,
-            })
+        static POOLS: Pools = const {
+            Pools {
+                free: [const { Cell::new(ptr::null_mut()) }; CLASSES],
+                fresh: Cell::new(ptr::null_mut()),
+                fresh_end: Cell::new(ptr::null_mut()),
+                next_chunk: Cell::new(FIRST_CHUNK),
+            }
         };
     }
 
@@ -188,69 +188,74 @@ mod pool {
         class(size) == class(other_size)
     }
 
-    /// # Safety
-    /// `takes(size, align)` must hold for the alignment the caller needs.
+    /// A block that holds `size` bytes and is aligned to a granule, or null if there is none
+    /// to be had (or the pools do not take that size).
     #[inline(always)]
-    pub unsafe fn alloc(size: usize) -> *mut u8 {
+    pub fn alloc(size: usize) -> *mut u8 {
         POOLS.with(|pools| {
-            // SAFETY: nothing in this module runs while another reference to the pools of the
-            // thread exists, and free blocks hold the address of the next one (or null).
-            unsafe {
-                let pools = &mut *pools.get();
-                let class = class(size);
+            let class = class(size);
+            let Some(head) = pools.free.get(class) else {
+                return ptr::null_mut();
+            };
 
-                let block = *pools.free.get_unchecked(class);
-                if !block.is_null() {
-                    *pools.free.get_unchecked_mut(class) = block.cast::<*mut u8>().read();
+            let block = head.get();
+            if !block.is_null() {
+                // SAFETY: a free block holds the address of the one freed before it (or null).
+                head.set(unsafe { block.cast::<*mut u8>().read() });
 
-                    return block;
-                }
-
-                pools.cut((class + 1) * GRANULE)
+                return block;
             }
+
+            pools.cut((class + 1) * GRANULE)
         })
     }
 
     /// # Safety
     /// `block` must have come from [`alloc`] with a size of the same class as `size`, and
-    /// must not be used again.
+    /// must not be used again. It may be returned on another thread than the one it came
+    /// from because chunks are never given back to the system.
     #[inline(always)]
     pub unsafe fn dealloc(block: *mut u8, size: usize) {
         POOLS.with(|pools| {
-            // SAFETY: as in `alloc`; the block is at least a granule long and aligned to one,
-            // so there is room for an address in it.
-            unsafe {
-                let pools = &mut *pools.get();
-                let head = pools.free.get_unchecked_mut(class(size));
+            let Some(head) = pools.free.get(class(size)) else {
+                return;
+            };
 
-                block.cast::<*mut u8>().write(*head);
-                *head = block;
-            }
+            // SAFETY: the block is at least a granule long and aligned to one, so there is
+            // room for an address in it, and nothing else uses it any more.
+            unsafe { block.cast::<*mut u8>().write(head.get()) };
+            head.set(block);
         })
     }
 
     impl Pools {
         /// Cut a block of `bytes` bytes, a multiple of the granule, from the current chunk.
         #[inline(always)]
-        unsafe fn cut(&mut self, bytes: usize) -> *mut u8 {
-            if (self.fresh_end as usize) - (self.fresh as usize) < bytes {
-                // SAFETY: guaranteed by the caller.
-                return unsafe { self.cut_from_new_chunk(bytes) };
+        fn cut(&self, bytes: usize) -> *mut u8 {
+            let block = self.fresh.get();
+            if (self.fresh_end.get() as usize) - (block as usize) < bytes {
+                return self.cut_from_new_chunk(bytes);
             }
 
-            let block = self.fresh;
-            // SAFETY: the chunk has at least `bytes` bytes left.
-            self.fresh = unsafe { block.add(bytes) };
+            self.fresh.set(block.wrapping_add(bytes));
 
             block
         }
 
         #[cold]
         #[inline(never)]
-        unsafe fn cut_from_new_chunk(&mut self, bytes: usize) -> *mut u8 {
-            let size = self.next_chunk;
-            // SAFETY: chunk sizes are non-zero multiples of the granule, a power of two.
-            let chunk = unsafe { System.alloc(Layout::from_size_align_unchecked(size, GRANULE)) };
+        fn cut_from_new_chunk(&self, bytes: usize) -> *mut u8 {
+            let size = self.next_chunk.get();
+            if bytes > size {
+                return ptr::null_mut();
+            }
+
+            let Ok(layout) = Layout::from_size_align(size, GRANULE) else {
+                return ptr::null_mut();
+            };
+
+            // SAFETY: a chunk is at least `FIRST_CHUNK` bytes long.
+            let chunk = unsafe { System.alloc(layout) };
             if chunk.is_null() {
                 return chunk;
             }
@@ -258,25 +263,19 @@ mod pool {
             huge_pages::suggest(chunk, size);
 
             // What is left of the old chunk is too short for this block, but it is a whole
-            // number of granules: a block of a smaller size.
-            let rest = (self.fresh_end as usize) - (self.fresh as usize);
-            if rest != 0 {
-                // SAFETY: the rest of the chunk is unused, and `rest` is the size of a class.
-                unsafe {
-                    let head = self.free.get_unchecked_mut(class(rest));
-
-                    self.fresh.cast::<*mut u8>().write(*head);
-                    *head = self.fresh;
-                }
+            // number of granules: a block of a smaller size, unless it is empty.
+            let rest = self.fresh.get();
+            let rest_size = (self.fresh_end.get() as usize) - (rest as usize);
+            if let Some(head) = self.free.get(class(rest_size)) {
+                // SAFETY: the rest of the chunk is unused, at least a granule long and aligned
+                // to one.
+                unsafe { rest.cast::<*mut u8>().write(head.get()) };
+                head.set(rest);
             }
 
-            self.next_chunk = (size * 2).min(MAX_CHUNK);
-
-            // SAFETY: a chunk is longer than any block.
-            unsafe {
-                self.fresh = chunk.add(bytes);
-                self.fresh_end = chunk.add(size);
-            }
+            self.next_chunk.set((size * 2).min(MAX_CHUNK));
+            self.fresh.set(chunk.wrapping_add(bytes));
+            self.fresh_end.set(chunk.wrapping_add(size));
 
             chunk
         }
