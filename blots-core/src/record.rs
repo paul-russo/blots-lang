@@ -112,8 +112,7 @@ impl Keys {
 
         let mut room: Vec<Key> = Vec::with_capacity(capacity);
         let allocated = room.capacity();
-        // SAFETY: the pointer to the elements of a vector is never null.
-        let start = unsafe { NonNull::new_unchecked(room.as_mut_ptr()) };
+        let start = NonNull::new(room.as_mut_ptr()).expect("the keys of a vector are somewhere");
         std::mem::forget(room);
 
         let slots = match capacity > LINEAR_SEARCH_KEYS {
@@ -246,10 +245,7 @@ impl Keys {
             "a table has the keys it is asked for"
         );
 
-        // SAFETY: the table has a key wherever this is asked, as it has `count` of them.
-        self.position_where(count, head, |position| unsafe {
-            self.has_at(position, key)
-        })
+        self.position_where(count, head, |position| self.has_at(position, key))
     }
 
     /// The position, among the first `count` keys, of the key with this `head` that
@@ -263,13 +259,10 @@ impl Keys {
         is_sought: impl Fn(usize) -> bool,
     ) -> Option<usize> {
         if count <= LINEAR_SEARCH_KEYS {
-            // SAFETY: a table has room for the heads of as many keys as are searched
-            // linearly, at least.
-            let heads = unsafe {
-                &*self
-                    .heads
-                    .as_ptr()
-                    .cast::<[Cell<u64>; LINEAR_SEARCH_KEYS]>()
+            // A table has room for the heads of as many keys as are searched linearly, at
+            // least.
+            let Some(heads) = self.heads.first_chunk::<LINEAR_SEARCH_KEYS>() else {
+                keys_are_missing();
             };
 
             for (position, own) in heads.iter().enumerate() {
@@ -295,17 +288,17 @@ impl Keys {
         let mut slot = mixed(head) as usize & mask;
 
         loop {
-            // SAFETY: the table has a power of two of slots, which `mask` is one less
-            // than, so it keeps `slot` among them.
-            let entry = unsafe { self.slots.get_unchecked(slot) }.get();
+            // The table has a power of two of slots, which `mask` is one less than, so it
+            // keeps `slot` among them.
+            let entry = self.slots[slot].get();
             if entry == 0 {
                 return None;
             }
 
+            // A slot holds the position of a key that the table has, and with it that of
+            // the head of the key.
             let position = entry as usize - 1;
-            // SAFETY: a slot holds the position of a key that the table has, and with it
-            // that of the head of the key.
-            if unsafe { self.heads.get_unchecked(position) }.get() == head && is_sought(position) {
+            if self.heads[position].get() == head && is_sought(position) {
                 return (position < count).then_some(position);
             }
 
@@ -314,16 +307,10 @@ impl Keys {
     }
 
     /// Whether the key at `position` is `key`, which has more than [`HEAD_BYTES`] bytes.
-    ///
-    /// # Safety
-    /// The table must have a key at `position`.
     #[inline(always)]
-    unsafe fn has_at(&self, position: usize, key: &[u8]) -> bool {
-        // SAFETY: the table has a key at `position`, which nothing writes to.
-        is_long_key(
-            unsafe { &*self.start.as_ptr().add(position) }.as_bytes(),
-            key,
-        )
+    fn has_at(&self, position: usize, key: &[u8]) -> bool {
+        self.key(position)
+            .is_some_and(|own| is_long_key(own.as_bytes(), key))
     }
 
     /// Add `key`, whose head is `head` and which the table has room for and does not have
@@ -374,8 +361,7 @@ impl Keys {
             let is_there = self.heads[count].get() == head
                 && match key.len() <= HEAD_BYTES {
                     true => true,
-                    // SAFETY: the table has a key at `count`.
-                    false => unsafe { self.has_at(count, key.as_bytes()) },
+                    false => self.has_at(count, key.as_bytes()),
                 };
 
             if is_there {
@@ -445,25 +431,22 @@ impl fmt::Debug for Keys {
 fn word_of(bytes: &[u8]) -> u64 {
     let len = bytes.len();
     debug_assert!(len <= size_of::<u64>());
-    let start = bytes.as_ptr();
 
-    // SAFETY: every read is of bytes of the slice: four from its start and the four that
-    // end it when it has at least four, its first, middle and last one otherwise.
-    unsafe {
-        if len >= 4 {
-            let low = u32::from_le(start.cast::<u32>().read_unaligned()) as u64;
-            let high = u32::from_le(start.add(len - 4).cast::<u32>().read_unaligned()) as u64;
+    // Four bytes from the start and the four that end the bytes when there are at least
+    // four, the first, middle and last one otherwise.
+    if let (Some(low), Some(high)) = (bytes.first_chunk::<4>(), bytes.last_chunk::<4>()) {
+        let (low, high) = (
+            u32::from_le_bytes(*low) as u64,
+            u32::from_le_bytes(*high) as u64,
+        );
 
-            low | high << ((len - 4) * 8)
-        } else if len > 0 {
-            let first = *start as u64;
-            let middle = *start.add(len / 2) as u64;
-            let last = *start.add(len - 1) as u64;
+        low | high << ((len - 4) * 8)
+    } else if let (Some(&first), Some(&last)) = (bytes.first(), bytes.last()) {
+        let middle = bytes[len / 2] as u64;
 
-            first | middle << (len / 2 * 8) | last << ((len - 1) * 8)
-        } else {
-            0
-        }
+        first as u64 | middle << (len / 2 * 8) | (last as u64) << ((len - 1) * 8)
+    } else {
+        0
     }
 }
 
@@ -518,8 +501,7 @@ pub(crate) fn short_head(word: u64, len: usize) -> u64 {
 fn head_of(key: &[u8]) -> u64 {
     match key.len() {
         len if len < HEAD_BYTES => short_head(word_of(key), len),
-        // SAFETY: the key has just the eight bytes that are read.
-        HEAD_BYTES => unsafe { word_at(key, 0) },
+        HEAD_BYTES => word_at(key, 0),
         _ => long_head(key),
     }
 }
@@ -529,33 +511,30 @@ fn head_of(key: &[u8]) -> u64 {
 fn long_head(key: &[u8]) -> u64 {
     let last = key.len() - HEAD_BYTES;
 
-    // SAFETY: the key has eight bytes from every position up to `last`. The last eight
-    // reach back over bytes that were counted already where fewer than eight are left.
-    let hash = unsafe {
-        let mut hash = mixed(word_at(key, 0) ^ key.len() as u64);
+    // The last eight bytes reach back over bytes that were counted already where fewer than
+    // eight are left.
+    let mut hash = mixed(word_at(key, 0) ^ key.len() as u64);
 
-        let mut at = HEAD_BYTES;
-        while at < last {
-            hash = mixed(hash ^ word_at(key, at));
-            at += HEAD_BYTES;
-        }
+    let mut at = HEAD_BYTES;
+    while at < last {
+        hash = mixed(hash ^ word_at(key, at));
+        at += HEAD_BYTES;
+    }
 
-        mixed(hash ^ word_at(key, last))
-    };
+    let hash = mixed(hash ^ word_at(key, last));
 
     hash >> u8::BITS | LONG_KEY << (u64::BITS - u8::BITS)
 }
 
-/// The eight bytes of `bytes` from `at` on as a word, the first one lowest.
-///
-/// # Safety
-/// The bytes must be there.
+/// The eight bytes of `bytes` from `at` on as a word, the first one lowest. The bytes have
+/// to be there.
 #[inline(always)]
-unsafe fn word_at(bytes: &[u8], at: usize) -> u64 {
-    debug_assert!(at + HEAD_BYTES <= bytes.len());
+fn word_at(bytes: &[u8], at: usize) -> u64 {
+    let word = bytes[at..]
+        .first_chunk()
+        .expect("eight bytes are read from where they are");
 
-    // SAFETY: the eight bytes from `at` on are bytes of the slice.
-    u64::from_le(unsafe { bytes.as_ptr().add(at).cast::<u64>().read_unaligned() })
+    u64::from_le_bytes(*word)
 }
 
 /// Whether `own` is `key`, which has more than [`HEAD_BYTES`] bytes.
@@ -568,13 +547,13 @@ fn is_long_key(own: &[u8], key: &[u8]) -> bool {
     }
 
     match key.len() {
-        // SAFETY: both have at least eight bytes, which are read from their starts and
-        // as the eight that end them.
-        len if len <= 2 * HEAD_BYTES => unsafe {
+        // Both have at least eight bytes, which are read from their starts and as the eight
+        // that end them.
+        len if len <= 2 * HEAD_BYTES => {
             let last = len - HEAD_BYTES;
 
             word_at(own, 0) == word_at(key, 0) && word_at(own, last) == word_at(key, last)
-        },
+        }
         _ => own == key,
     }
 }
@@ -705,8 +684,7 @@ impl Values {
     /// [`Values::from_start`] takes to make it again.
     #[inline(always)]
     fn into_start(self) -> NonNull<Value> {
-        // SAFETY: an address within an allocation is not null.
-        let start = unsafe { NonNull::new_unchecked(self.start()) };
+        let start = NonNull::new(self.start()).expect("the values of a block are somewhere");
         std::mem::forget(self);
 
         start
@@ -723,8 +701,8 @@ impl Values {
     /// allocation has room for.
     #[inline(always)]
     fn start(&self) -> *mut Value {
-        // SAFETY: the values follow the block in the same allocation.
-        unsafe { self.block.as_ptr().add(1).cast() }
+        // The values follow the block in the same allocation.
+        self.block.as_ptr().wrapping_add(1).cast()
     }
 
     #[inline(always)]
@@ -759,8 +737,9 @@ impl Values {
             "a block has the values it is asked for"
         );
 
-        // SAFETY: the first `filled` values are initialised, and only the one hold that a
-        // block has left writes to them.
+        // SAFETY: the first `filled` values are initialised, and nothing writes to a value
+        // while it is lent out: a value is added behind every value that is read, and a
+        // compaction pass, which rewrites values in place, holds the heap mutably.
         unsafe { std::slice::from_raw_parts(self.start(), count) }
     }
 
@@ -884,11 +863,13 @@ impl Record {
     /// A record that has `values` to itself.
     fn owning(keys: Rc<Keys>, values: Box<[Value]>, place: Place) -> Self {
         assert!(values.len() <= keys.len(), "a record has one key per value");
-        debug_assert!(place != Place::Shared);
+        assert!(
+            place != Place::Shared,
+            "a record that owns its values has no block"
+        );
 
         let extent = Extent::new(values.len(), place);
-        // SAFETY: the address of what a box holds is never null.
-        let start = unsafe { NonNull::new_unchecked(Box::into_raw(values).cast::<Value>()) };
+        let start = NonNull::from(Box::leak(values)).cast::<Value>();
 
         Self {
             keys,
@@ -963,8 +944,7 @@ impl Record {
             .keys
             .position_of_short(self.len(), short_head(word, len))?;
 
-        // SAFETY: the record has a value for each of its keys, which the key is one of.
-        Some(unsafe { &*self.start.as_ptr().add(position) })
+        self.as_slice().get(position)
     }
 
     /// As [`Record::value_under`], for a key that is not all in its head.
