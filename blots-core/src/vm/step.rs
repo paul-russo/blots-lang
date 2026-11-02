@@ -394,7 +394,7 @@ impl Vm {
             Op::CallSelf => {
                 // The function calls itself through its own name: the value the frame was
                 // called through is the callee.
-                let callee = self.top().this_value();
+                let callee = self.this_value(self.top());
                 self.set_reg(a, callee);
                 self.call_slow(register_index(a), instr.x as usize, c)?;
             }
@@ -414,7 +414,7 @@ impl Vm {
                     self.stack[base + func + 1 + index] = self.stack[base + index];
                 }
 
-                self.set_reg(c, frame.this_value());
+                self.set_reg(c, self.this_value(&frame));
                 self.call_slow(func, argc, c)?;
             }
             Op::Return => {

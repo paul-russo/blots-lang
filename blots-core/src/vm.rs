@@ -224,19 +224,12 @@ fn less_eq(x: f64, y: f64) -> Option<bool> {
 }
 
 /// The texts of two strings in the heap whose slots are `slots`, if that is where they are.
-///
-/// # Safety
-/// `slots` must point to the slots of a heap that are not written to while the texts are in
-/// use.
 #[inline(always)]
-unsafe fn texts_of<'a>(
-    slots: *const [HeapValue],
+fn texts_of(
+    slots: &[HeapValue],
     first: StringPointer,
     second: StringPointer,
-) -> Option<(&'a Text, &'a Text)> {
-    // SAFETY: guaranteed by the caller.
-    let slots = unsafe { &*slots };
-
+) -> Option<(&Text, &Text)> {
     match (slots.get(first.index()), slots.get(second.index())) {
         (Some(HeapValue::String(first)), Some(HeapValue::String(second))) => Some((first, second)),
         _ => None,
@@ -244,46 +237,30 @@ unsafe fn texts_of<'a>(
 }
 
 /// Whether two strings are equal: they are when they have the same characters.
-///
-/// # Safety
-/// As for [`texts_of`].
 #[inline(never)]
-unsafe fn same_strings(
-    slots: *const [HeapValue],
-    first: StringPointer,
-    second: StringPointer,
-) -> Option<bool> {
-    // SAFETY: guaranteed by the caller.
-    let (first, second) = unsafe { texts_of(slots, first, second) }?;
+fn same_strings(slots: &[HeapValue], first: StringPointer, second: StringPointer) -> Option<bool> {
+    let (first, second) = texts_of(slots, first, second)?;
 
     Some(first == second)
 }
 
 /// How two strings are ordered: the way their characters are.
-///
-/// # Safety
-/// As for [`texts_of`].
 #[inline(never)]
-unsafe fn string_order(
-    slots: *const [HeapValue],
+fn string_order(
+    slots: &[HeapValue],
     first: StringPointer,
     second: StringPointer,
 ) -> Option<Ordering> {
-    // SAFETY: guaranteed by the caller.
-    let (first, second) = unsafe { texts_of(slots, first, second) }?;
+    let (first, second) = texts_of(slots, first, second)?;
 
     Some(first.cmp(second))
 }
 
 /// The register that `operand` names in the frame whose first register is `base` (see
 /// [`crate::bytecode::Instr`] for the form of an operand that names a register).
-///
-/// # Safety
-/// `operand` must name a register of that frame.
 #[inline(always)]
-unsafe fn register(base: *mut Value, operand: u16) -> *mut Value {
-    // SAFETY: guaranteed by the caller.
-    unsafe { base.byte_add(operand as usize * (size_of::<Value>() / REGISTER_SCALE)) }
+fn register(base: *mut Value, operand: u16) -> *mut Value {
+    base.wrapping_byte_add(operand as usize * (size_of::<Value>() / REGISTER_SCALE))
 }
 
 /// The number in a register that is known to hold one.
@@ -801,55 +778,6 @@ impl Frame {
     fn pc(&self) -> usize {
         self.pc_of(self.ip)
     }
-
-    /// The value the function was called through.
-    fn this_value(&self) -> Value {
-        // SAFETY: every function frame is laid out right above its callee value.
-        unsafe { *self.base.sub(1) }
-    }
-
-    /// What the innermost block variable called `name` holds that is visible at the
-    /// instruction the frame is executing (or suspended in) and that has been assigned.
-    #[inline(always)]
-    fn variable(&self, name: Symbol) -> Option<Value> {
-        let proto = self.proto();
-        if proto.locals.is_empty() {
-            return None;
-        }
-
-        let pc = self.pc() as u32;
-
-        for local in proto.locals.iter().rev() {
-            if local.name != name || pc < local.start || pc >= local.end {
-                continue;
-            }
-
-            // SAFETY: the registers of the proto's locals lie within the frame.
-            let value = unsafe { *self.base.add(local.reg as usize) };
-            if !is_unbound(&value) {
-                return Some(value);
-            }
-        }
-
-        None
-    }
-
-    /// What the function that the frame is running binds `name` to wherever its body is
-    /// at: a parameter, which shadows the function's own name, which shadows its captures.
-    #[inline(always)]
-    fn binding(&self, name: Symbol) -> Option<Value> {
-        if let Some(position) = self.proto().params.iter().position(|param| *param == name) {
-            // SAFETY: parameters occupy the first registers of the frame.
-            return Some(unsafe { *self.base.add(position) });
-        }
-
-        let def = self.def()?;
-        if def.name == Some(name) {
-            return Some(self.this_value());
-        }
-
-        def.scope.get(name)
-    }
 }
 
 /// The stacks of a VM that has finished.
@@ -1120,12 +1048,9 @@ impl Vm {
         self.stack_limit = if self.is_profiling() || self.stack.len() < FAST_FRAME_SLOTS {
             ptr::null_mut()
         } else {
-            // SAFETY: the stack is at least as long as the headroom.
-            unsafe {
-                self.stack
-                    .as_mut_ptr()
-                    .add(self.stack.len() - FAST_FRAME_SLOTS)
-            }
+            self.stack
+                .as_mut_ptr()
+                .wrapping_add(self.stack.len() - FAST_FRAME_SLOTS)
         };
 
         if self.frames.is_empty() {
@@ -1134,12 +1059,9 @@ impl Vm {
             return;
         }
 
-        // SAFETY: the records hold at least the placeholder and every active frame.
-        unsafe {
-            let start = self.frames.as_mut_ptr();
-            self.top = start.add(frame_count);
-            self.frame_limit = start.add(self.frames.len() - 1);
-        }
+        let start = self.frames.as_mut_ptr();
+        self.top = start.wrapping_add(frame_count);
+        self.frame_limit = start.wrapping_add(self.frames.len() - 1);
     }
 
     #[inline(always)]
@@ -1185,8 +1107,8 @@ impl Vm {
         }
         self.chunk_source = Some(source);
 
-        // SAFETY: the stack was just sized to hold the chunk's registers from `base` on.
-        let base = unsafe { self.stack.as_mut_ptr().add(base) };
+        let base = self.stack.as_mut_ptr().wrapping_add(base);
+
         self.push_frame(Frame {
             ip: chunk.code.as_ptr(),
             base,
@@ -1264,13 +1186,11 @@ impl Vm {
         let generic = self.proto_for(lambda)?;
         let proto = self.select_variant(generic, lambda, this_value);
 
-        // SAFETY: `proto_for` and `select_variant` return code that outlives the call.
-        let max_stack = unsafe { (*proto).max_stack };
         let base = self.entry_base();
-        self.ensure_stack(base + max_stack.max(args.len()));
+        self.ensure_stack(base + proto.max_stack.max(args.len()));
         self.stack[base - 1] = this_value;
         self.stack[base..base + args.len()].copy_from_slice(args);
-        self.bind_params(proto, base, args.len());
+        self.bind_params(&proto, base, args.len());
 
         #[allow(unused_mut)]
         let mut meta = (call_depth + 1) as u64 | ENTRY;
@@ -1284,13 +1204,12 @@ impl Vm {
             meta |= PROFILED;
         }
 
-        // SAFETY: the stack was just sized to hold the frame's registers from `base` on.
-        let base = unsafe { self.stack.as_mut_ptr().add(base) };
+        let base = self.stack.as_mut_ptr().wrapping_add(base);
+
         self.push_frame(Frame {
-            // SAFETY: as above.
-            ip: unsafe { (*proto).code.as_ptr() },
+            ip: proto.code.as_ptr(),
             base,
-            proto,
+            proto: Rc::as_ptr(&proto),
             def: Rc::as_ptr(lambda),
             meta,
             tail_ip: ptr::null(),
@@ -1307,19 +1226,19 @@ impl Vm {
     /// place (see [`Vm::select_variant`]). Profiling times every call, which this is not
     /// the place for.
     #[inline(always)]
-    fn settled_code(
+    fn settled_code<'a>(
         &self,
-        lambda: &LambdaDef,
+        lambda: &'a LambdaDef,
         this_value: Value,
         argc: usize,
-    ) -> Option<*const Proto> {
+    ) -> Option<&'a Proto> {
         let code = lambda.scope.code.get()?;
         let settled = code.simple_arity as usize == argc
             && code.belongs_to(&lambda.body, &lambda.args)
             && (code.self_refs.is_empty() || !matches!(this_value, Value::Lambda(_)))
             && !self.is_profiling();
 
-        settled.then_some(Rc::as_ptr(code))
+        settled.then_some(code)
     }
 
     /// [`Vm::call_function`] for a call that [`Vm::settled_code`] found `proto` to be the
@@ -1327,32 +1246,28 @@ impl Vm {
     #[inline(always)]
     fn enter_settled(
         &mut self,
-        proto: *const Proto,
+        code: &Proto,
         lambda: &Rc<LambdaDef>,
         this_value: Value,
         args: &[Value],
         call_depth: usize,
     ) -> Result<Value, RuntimeError> {
-        // SAFETY: the definition, which the caller holds on to, keeps its code alive.
-        let code = unsafe { &*proto };
         let base = self.entry_base();
         self.ensure_stack(base + code.max_stack.max(args.len()));
 
-        // SAFETY: the stack was just sized to hold the frame's registers from `base` on,
-        // which the arguments are the first of, and `base` is above the slot that every
-        // frame leaves for the value its function is called through.
-        let base = unsafe {
-            let base = self.stack.as_mut_ptr().add(base);
-            base.sub(1).write(this_value);
-            ptr::copy_nonoverlapping(args.as_ptr(), base, args.len());
+        // The arguments are the first registers of the frame, and the slot below them, which
+        // every frame leaves, holds the value the function is called through.
+        if let [callee, registers @ ..] = &mut self.stack[base - 1..base + args.len()] {
+            *callee = this_value;
+            registers.copy_from_slice(args);
+        }
 
-            base
-        };
+        let base = self.stack.as_mut_ptr().wrapping_add(base);
 
         self.push_frame(Frame {
             ip: code.code.as_ptr(),
             base,
-            proto,
+            proto: code,
             def: Rc::as_ptr(lambda),
             meta: (call_depth + 1) as u64 | ENTRY,
             tail_ip: ptr::null(),
@@ -1365,7 +1280,7 @@ impl Vm {
     /// Run the innermost frame, and every frame it calls, until it returns.
     fn run(&mut self) -> Result<Value, RuntimeError> {
         // The frame to run is the only one when the caller is not this VM: a run starts.
-        if self.frame_count() == 1 {
+        if self.has_frames(1) {
             self.run_number = next_run_number();
         }
 
@@ -1380,7 +1295,7 @@ impl Vm {
     fn leave_loop(&mut self) {
         self.loops -= 1;
 
-        if self.frame_count() == 0 {
+        if self.has_frames(0) {
             self.retired.clear();
         }
     }
@@ -1492,6 +1407,15 @@ impl Vm {
         }
 
         self.top.addr().wrapping_sub(self.frames.as_ptr().addr()) / size_of::<Frame>()
+    }
+
+    /// Whether `count` frames are active, which is told without counting them.
+    #[inline(always)]
+    fn has_frames(&self, count: usize) -> bool {
+        match self.top.is_null() {
+            true => count == 0,
+            false => ptr::eq(self.top, self.frames.as_ptr().wrapping_add(count)),
+        }
     }
 
     #[inline(always)]
@@ -1612,10 +1536,12 @@ impl Vm {
     /// The base of a frame entered from native code: above every active frame, leaving one
     /// slot for the value the function is called through.
     fn entry_base(&self) -> usize {
-        match self.active_frames().last() {
-            Some(frame) => self.slot_index(frame.base) + frame.proto().max_stack + 1,
-            None => 1,
+        if self.has_frames(0) {
+            return 1;
         }
+
+        let frame = self.top();
+        self.slot_index(frame.base) + frame.proto().max_stack + 1
     }
 
     /// Make sure the stack holds `needed` slots plus the headroom small frames rely on.
@@ -1642,8 +1568,7 @@ impl Vm {
 
         let start = self.stack.as_mut_ptr();
         for (frame, base) in self.active_frames_mut().iter_mut().zip(bases) {
-            // SAFETY: the new stack is at least as long as the old one.
-            frame.base = unsafe { start.add(base) };
+            frame.base = start.wrapping_add(base);
         }
 
         self.point_at_stacks(self.frame_count());
@@ -1691,12 +1616,63 @@ impl Vm {
         }
     }
 
+    /// The value the function of `frame` was called through.
+    fn this_value(&self, frame: &Frame) -> Value {
+        // Every function frame is laid out right above its callee value.
+        self.stack[self.slot_index(frame.base) - 1]
+    }
+
+    /// What the innermost block variable of `frame` called `name` holds that is visible at
+    /// the instruction the frame is executing (or suspended in) and that has been assigned.
+    #[inline(always)]
+    fn variable(&self, frame: &Frame, name: Symbol) -> Option<Value> {
+        let proto = frame.proto();
+        if proto.locals.is_empty() {
+            return None;
+        }
+
+        let pc = frame.pc() as u32;
+
+        for local in proto.locals.iter().rev() {
+            if local.name != name || pc < local.start || pc >= local.end {
+                continue;
+            }
+
+            let value = self.stack[self.slot_index(frame.base) + local.reg as usize];
+            if !is_unbound(&value) {
+                return Some(value);
+            }
+        }
+
+        None
+    }
+
+    /// What the function that `frame` is running binds `name` to wherever its body is at: a
+    /// parameter, which shadows the function's own name, which shadows its captures.
+    #[inline(always)]
+    fn binding(&self, frame: &Frame, name: Symbol) -> Option<Value> {
+        if let Some(position) = frame.proto().params.iter().position(|param| *param == name) {
+            // Parameters occupy the first registers of the frame.
+            return Some(self.stack[self.slot_index(frame.base) + position]);
+        }
+
+        let def = frame.def()?;
+        if def.name == Some(name) {
+            return Some(self.this_value(frame));
+        }
+
+        def.scope.get(name)
+    }
+
     /// Resolve a name through the scope chain: every active frame, innermost first, then the
     /// boundary environment. Within a frame, block variables shadow parameters, which shadow
     /// the function's own name, which shadows its captures.
     fn lookup(&self, name: Symbol) -> Option<Value> {
         for frame in self.active_frames().iter().rev() {
-            if let Some(value) = frame.variable(name).or_else(|| frame.binding(name)) {
+            if let Some(value) = self
+                .variable(frame, name)
+                .or_else(|| self.binding(frame, name))
+            {
                 return Some(value);
             }
         }
@@ -1742,11 +1718,10 @@ impl Vm {
         debug_assert!(self.frame_count() > 0, "the VM has no active frame");
 
         let top = self.top;
-        // SAFETY: `top` points at the innermost active frame.
-        let frame = unsafe { &*top };
+        let frame = self.top();
 
         let value = 'found: {
-            if let Some(value) = frame.variable(name) {
+            if let Some(value) = self.variable(frame, name) {
                 break 'found value;
             }
 
@@ -1756,7 +1731,7 @@ impl Vm {
                 break 'found value;
             }
 
-            if let Some(value) = frame.binding(name) {
+            if let Some(value) = self.binding(frame, name) {
                 break 'found value;
             }
 
@@ -1785,20 +1760,19 @@ impl Vm {
 
         // Whether the value is what a lookup found before, from `frame` on down.
         let (value, known) = loop {
-            // SAFETY: the frame records from the placeholder up to `top` are initialised,
-            // and `frame` is above the placeholder.
-            frame = unsafe { frame.sub(1) };
+            frame = frame.wrapping_sub(1);
             if ptr::eq(frame, placeholder) {
                 break (self.env.get(name).unwrap_or(UNBOUND), false);
             }
 
-            // SAFETY: as above.
+            // SAFETY: the frame records from the placeholder up to `top` are initialised,
+            // and `frame` is above the placeholder.
             let below = unsafe { &*frame };
 
             #[cfg(test)]
             FRAMES_SEARCHED.set(FRAMES_SEARCHED.get() + 1);
 
-            if let Some(value) = below.variable(name) {
+            if let Some(value) = self.variable(below, name) {
                 break (value, false);
             }
 
@@ -1808,22 +1782,21 @@ impl Vm {
                 break (value, true);
             }
 
-            if let Some(value) = below.binding(name) {
+            if let Some(value) = self.binding(below, name) {
                 break (value, false);
             }
         };
 
         // What the caller of `top` binds itself (or the environment, when `top` has no
         // caller) is found as fast as it would be remembered.
-        // SAFETY: `top` is above the placeholder.
-        if !known && ptr::eq(frame, unsafe { top.sub(1) }) {
+        if !known && ptr::eq(frame, top.wrapping_sub(1)) {
             return value;
         }
 
         // SAFETY: `frame` is below `top`, so the record above it is one of an active frame,
         // which was just stamped like every other one.
         unsafe {
-            self.stamp_through(top);
+            self.stamp_through(self.frame_count());
 
             match known {
                 true => self.finds.extend(name, (*top).stamp),
@@ -1836,34 +1809,26 @@ impl Vm {
         value
     }
 
-    /// Stamp the active frames up to `top` that have no stamp yet. They are the ones above
-    /// those that have one: a frame is only ever stamped together with every frame below
-    /// it, and a frame that is pushed has none.
-    ///
-    /// # Safety
-    /// `top` must point at an active frame.
-    unsafe fn stamp_through(&mut self, top: *mut Frame) {
-        let placeholder = self.frames.as_ptr();
-
-        // SAFETY: the frame records from the placeholder up to `top` are initialised.
-        unsafe {
-            let mut frame = top;
-            while (*frame).meta & STAMPED == 0 {
-                let below = frame.sub(1);
-                if ptr::eq(below, placeholder) || (*below).meta & STAMPED != 0 {
-                    break;
-                }
-                frame = below;
+    /// Stamp the active frames up to frame `top` that have no stamp yet. They are the ones
+    /// above those that have one: a frame is only ever stamped together with every frame
+    /// below it, and a frame that is pushed has none.
+    fn stamp_through(&mut self, top: usize) {
+        let mut index = top;
+        while self.frames[index].meta & STAMPED == 0 {
+            let below = index - 1;
+            if below == 0 || self.frames[below].meta & STAMPED != 0 {
+                break;
             }
+            index = below;
+        }
 
-            // `frame` is the lowest frame without a stamp, or `top` when every frame has
-            // one.
-            while frame <= top && (*frame).meta & STAMPED == 0 {
-                self.stamp += 1;
-                (*frame).stamp = self.stamp;
-                (*frame).meta |= STAMPED;
-                frame = frame.add(1);
-            }
+        // Frame `index` is the lowest frame without a stamp, or `top` when every frame has
+        // one.
+        while index <= top && self.frames[index].meta & STAMPED == 0 {
+            self.stamp += 1;
+            self.frames[index].stamp = self.stamp;
+            self.frames[index].meta |= STAMPED;
+            index += 1;
         }
     }
 
@@ -1874,17 +1839,16 @@ impl Vm {
     /// The compiled body of a function, compiling it first if this is the first time the
     /// definition is called. The code lives as long as the definition (or, for the rare
     /// definition that carries another one's code, as long as the VM).
-    fn proto_for(&mut self, def: &LambdaDef) -> Result<*const Proto, RuntimeError> {
+    fn proto_for(&mut self, def: &LambdaDef) -> Result<Rc<Proto>, RuntimeError> {
         let Some(code) = def.scope.code.get() else {
             let code = compile_lambda(&def.args, &def.body, self.inlines_callbacks())?;
-            let pointer = Rc::as_ptr(&code);
-            let _ = def.scope.code.set(code);
+            let _ = def.scope.code.set(Rc::clone(&code));
 
-            return Ok(pointer);
+            return Ok(code);
         };
 
         if code.belongs_to(&def.body, &def.args) {
-            return Ok(Rc::as_ptr(code));
+            return Ok(Rc::clone(code));
         }
 
         // A definition assembled from the parts of another one can carry that one's code.
@@ -1893,28 +1857,20 @@ impl Vm {
             .iter()
             .find(|orphan| orphan.belongs_to(&def.body, &def.args));
         if let Some(orphan) = known {
-            return Ok(Rc::as_ptr(orphan));
+            return Ok(Rc::clone(orphan));
         }
 
         let code = compile_lambda(&def.args, &def.body, self.inlines_callbacks())?;
-        let pointer = Rc::as_ptr(&code);
-        self.orphans.push(code);
+        self.orphans.push(Rc::clone(&code));
 
-        Ok(pointer)
+        Ok(code)
     }
 
     /// The code to run for a call of `def` through `this_value`: the variant of `generic` in
     /// which the function calls itself directly when the function's own name is known to
     /// resolve to the function (see [`crate::bytecode::SelfRef`]), `generic` otherwise.
-    fn select_variant(
-        &self,
-        generic: *const Proto,
-        def: &LambdaDef,
-        this_value: Value,
-    ) -> *const Proto {
-        // SAFETY: `generic` comes from `proto_for`.
-        let proto = unsafe { &*generic };
-        if proto.self_refs.is_empty() || self.is_profiling() {
+    fn select_variant(&self, generic: Rc<Proto>, def: &LambdaDef, this_value: Value) -> Rc<Proto> {
+        if generic.self_refs.is_empty() || self.is_profiling() {
             return generic;
         }
 
@@ -1932,7 +1888,7 @@ impl Vm {
             return generic;
         }
 
-        let self_ref = proto.self_refs.iter().find(|self_ref| {
+        let self_ref = generic.self_refs.iter().find(|self_ref| {
             self_ref.name == name && def.scope.slot_ref(self_ref.slot as usize).is_none()
         });
         let Some(self_ref) = self_ref else {
@@ -1952,16 +1908,14 @@ impl Vm {
         });
 
         match variant {
-            Some(variant) => Rc::as_ptr(variant),
+            Some(variant) => Rc::clone(variant),
             None => generic,
         }
     }
 
     /// Turn the `argc` arguments at `base` into the parameter registers the body expects:
     /// missing optional parameters become null and a rest parameter collects what is left.
-    fn bind_params(&mut self, proto: *const Proto, base: usize, argc: usize) {
-        // SAFETY: the caller passes code that is alive.
-        let proto = unsafe { &*proto };
+    fn bind_params(&mut self, proto: &Proto, base: usize, argc: usize) {
         if proto.simple_params && argc == proto.params.len() {
             return;
         }
@@ -2018,32 +1972,25 @@ impl Vm {
 
         match callee {
             Value::Lambda(pointer) => {
-                let def: *const LambdaDef = match self.heap.borrow().get(pointer.index()) {
-                    Some(HeapValue::Lambda(def)) => Rc::as_ptr(def),
+                let lambda = match self.heap.borrow().get(pointer.index()) {
+                    Some(HeapValue::Lambda(def)) => Rc::clone(def),
                     _ => panic!("Dangling pointer!"),
                 };
-
-                // SAFETY: the heap keeps the definition alive for as long as the VM runs; a
-                // definition that is replaced while it is in use is retired, not dropped.
-                let lambda = unsafe { &*def };
                 let generic = self
-                    .proto_for(lambda)
+                    .proto_for(&lambda)
                     .map_err(|error| self.at_call_site(error))?;
 
-                // SAFETY: `proto_for` returns code that is alive.
-                let simple = unsafe { (*generic).simple_arity } as usize == argc;
+                let simple = generic.simple_arity as usize == argc;
                 if !simple {
-                    check_lambda_arity(lambda, argc).map_err(|error| self.at_call_site(error))?;
+                    check_lambda_arity(&lambda, argc).map_err(|error| self.at_call_site(error))?;
                 }
 
                 if depth > MAX_CALL_DEPTH {
-                    return Err(self.at_call_site(depth_exceeded(&lambda_name(lambda))));
+                    return Err(self.at_call_site(depth_exceeded(&lambda_name(&lambda))));
                 }
 
                 #[cfg(not(target_arch = "wasm32"))]
                 let start = self.profiling.then(std::time::Instant::now);
-
-                let proto = self.select_variant(generic, lambda, callee);
 
                 // The next call of the function through its value in this run finds the code
                 // that was selected with the definition, as long as the definition keeps the
@@ -2052,15 +1999,14 @@ impl Vm {
                     .scope
                     .code
                     .get()
-                    .is_some_and(|code| ptr::eq(Rc::as_ptr(code), generic));
+                    .is_some_and(|code| Rc::ptr_eq(code, &generic));
+                let proto = self.select_variant(generic, &lambda, callee);
                 if owned {
-                    lambda.scope.entry.set(proto, self.run_number);
+                    lambda.scope.entry.set(Rc::as_ptr(&proto), self.run_number);
                 }
 
-                // SAFETY: as above.
-                let max_stack = unsafe { (*proto).max_stack };
-                self.ensure_stack(base + max_stack.max(argc));
-                self.bind_params(proto, base, argc);
+                self.ensure_stack(base + proto.max_stack.max(argc));
+                self.bind_params(&proto, base, argc);
 
                 #[allow(unused_mut)]
                 let mut meta = (depth + 1) as u64;
@@ -2074,14 +2020,13 @@ impl Vm {
                     meta |= PROFILED;
                 }
 
-                // SAFETY: the stack was just sized to hold the frame's registers.
-                let base = unsafe { self.stack.as_mut_ptr().add(base) };
+                let base = self.stack.as_mut_ptr().wrapping_add(base);
+
                 self.push_frame(Frame {
-                    // SAFETY: as above.
-                    ip: unsafe { (*proto).code.as_ptr() },
+                    ip: proto.code.as_ptr(),
                     base,
-                    proto,
-                    def,
+                    proto: Rc::as_ptr(&proto),
+                    def: Rc::as_ptr(&lambda),
                     meta,
                     tail_ip: ptr::null(),
                     stamp: 0,
@@ -2388,7 +2333,7 @@ impl Vm {
         let (_, name) = frame.proto().slot_refs[index];
 
         if !shadowable && frame.def().is_some_and(|def| def.name == Some(name)) {
-            return Ok(frame.this_value());
+            return Ok(self.this_value(frame));
         }
 
         self.find(name).ok_or_else(|| self.unknown_identifier(name))
@@ -2413,9 +2358,8 @@ impl Vm {
 
     #[inline(never)]
     fn input(&mut self, index: usize) -> Result<Value, RuntimeError> {
-        let proto = self.top().proto;
-        // SAFETY: the code of an active frame outlives it (see `Vm::proto_for`).
-        let field = unsafe { &(&(*proto).strings)[index] };
+        let frame = *self.top();
+        let field = &frame.proto().strings[index];
         let inputs = self
             .find(inputs_symbol())
             .ok_or_else(|| format!("inputs not found (required for #{} syntax)", field))?;
@@ -2454,8 +2398,7 @@ impl Vm {
         let literal = &proto.literals[index];
 
         if literal.run() == self.run_number {
-            // SAFETY: the literal holds a value.
-            return unsafe { literal.value().read() };
+            return literal.get();
         }
 
         let value = self
@@ -2472,16 +2415,14 @@ impl Vm {
     #[inline(never)]
     fn make_closure(&mut self, index: usize) -> Result<Value, RuntimeError> {
         let frame = *self.top();
-        // SAFETY: the code of an active frame outlives it (see `Vm::proto_for`).
-        let template = unsafe { &(&(*frame.proto).lambdas)[index] };
+        let template = &frame.proto().lambdas[index];
         let mut values = Vec::with_capacity(template.captures.len());
         let mut any_bound = false;
 
         for (name, source) in template.captures.iter().zip(&template.capture_sources) {
             let value = match source {
                 CaptureSource::Register(reg) => {
-                    // SAFETY: capture sources are registers of the creating frame.
-                    let value = unsafe { *frame.base.add(*reg as usize) };
+                    let value = self.stack[self.slot_index(frame.base) + *reg as usize];
                     (!is_unbound(&value)).then_some(value)
                 }
                 CaptureSource::Dynamic => self.find(*name),
@@ -2773,9 +2714,8 @@ impl Vm {
 
     #[inline(never)]
     fn record_set(&mut self, index: usize, value: Value) {
-        let proto = self.top().proto;
-        // SAFETY: the code of an active frame outlives it (see `Vm::proto_for`).
-        let key = unsafe { &(&(*proto).strings)[index] };
+        let frame = *self.top();
+        let key = &frame.proto().strings[index];
 
         self.record_builder().0.insert(key, value);
     }
@@ -3018,8 +2958,7 @@ impl Vm {
         let table = Rc::clone(record.table());
         let string = table.string_of(position);
         let key = match string.run() == self.run_number {
-            // SAFETY: the string was made in this run, so it holds a value.
-            true => unsafe { string.value().read() },
+            true => string.get(),
             false => {
                 let key = heap.insert_string(Text::new(&table.first(position + 1)[position]));
                 string.remember(self.run_number, key);

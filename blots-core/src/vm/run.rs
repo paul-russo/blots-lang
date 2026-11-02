@@ -289,7 +289,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     }
 
                     if let (Value::String(first), Value::String(second)) = (&*lhs, &*rhs)
-                        && let Some($found) = $strings(slots, *first, *second)
+                        && let Some($found) = $strings(&*slots, *first, *second)
                     {
                         store_value(reg!(instr.a), Value::Bool($string_holds));
                         next!(1);
@@ -342,7 +342,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     }
 
                     if let (Value::String(first), Value::String(second)) = (&*lhs, &*rhs)
-                        && let Some($found) = $strings(slots, *first, *second)
+                        && let Some($found) = $strings(&*slots, *first, *second)
                     {
                         if $string_holds {
                             next!(2);

@@ -1101,6 +1101,11 @@ impl Literal {
         self.value.as_ptr()
     }
 
+    /// The string of the literal, when it was made in the run in progress.
+    pub fn get(&self) -> Value {
+        self.value.get()
+    }
+
     /// Remember that `value` is the string of the literal for the rest of run `run`.
     pub fn remember(&self, run: u64, value: Value) {
         self.value.set(value);
