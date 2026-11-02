@@ -115,17 +115,15 @@ impl Buffer {
         unsafe { self.start.as_ref() }
     }
 
-    /// Where the byte at `position` is, which has to be within the room of the buffer or
-    /// right behind it.
+    /// Where the byte at `position` is, which is within the room of the buffer or right
+    /// behind it.
     #[inline(always)]
-    unsafe fn at(&self, position: usize) -> *mut u8 {
-        // SAFETY: the bytes follow the header in the same allocation.
-        unsafe {
-            self.start
-                .as_ptr()
-                .cast::<u8>()
-                .add(size_of::<Header>() + position)
-        }
+    fn at(&self, position: usize) -> *mut u8 {
+        // The bytes follow the header in the same allocation.
+        self.start
+            .as_ptr()
+            .cast::<u8>()
+            .wrapping_add(size_of::<Header>() + position)
     }
 
     /// Write `text` behind the bytes that were written before.
@@ -137,8 +135,9 @@ impl Buffer {
         let len = header.len.get();
         debug_assert!(header.capacity - len >= text.len());
 
-        // SAFETY: the room behind the written bytes is not part of any text, so it does
-        // not overlap `text` even when that is read from this buffer.
+        // SAFETY: the buffer has room for the bytes behind the ones that were written. That
+        // room is not part of any text, so it does not overlap `text` even when that is read
+        // from this buffer.
         unsafe { std::ptr::copy_nonoverlapping(text.as_ptr(), self.at(len), text.len()) };
         header.len.set(len + text.len());
     }
@@ -147,7 +146,12 @@ impl Buffer {
     #[inline(always)]
     fn hold(&self) {
         let header = self.header();
-        header.holders.set(header.holders.get() + 1);
+        let Some(holders) = header.holders.get().checked_add(1) else {
+            // The count would start over, and the buffer go while texts read from it.
+            std::process::abort();
+        };
+
+        header.holders.set(holders);
     }
 
     /// One text fewer reads from the buffer, which goes with the last one.
@@ -233,7 +237,10 @@ impl Text {
             });
         }
 
-        debug_assert!(capacity >= len);
+        assert!(
+            capacity >= len,
+            "a buffer has room for the text it is made for"
+        );
         let buffer = Buffer::new(capacity, followed);
 
         // SAFETY: the buffer has room for both.
