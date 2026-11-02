@@ -1221,10 +1221,10 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     if let Value::List(pointer) = &*state.add(1)
                         && let Some(HeapValue::List(items)) = heap_value!(pointer)
                     {
-                        let items = items.as_ptr_range();
+                        let (first, end) = items.bounds();
 
-                        set_state(state, items.start as u64);
-                        set_state(state.add(4), items.end as u64);
+                        set_state(state, first as u64);
+                        set_state(state.add(4), end as u64);
                         next!(1);
                     }
 

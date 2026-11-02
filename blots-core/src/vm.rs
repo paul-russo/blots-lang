@@ -2889,9 +2889,8 @@ impl Vm {
 
         let pointer = list.as_list_pointer()?;
         let heap = self.heap.borrow();
-        let items = pointer.reify(&heap).as_list()?.as_ptr_range();
 
-        Ok((items.start, items.end))
+        Ok(pointer.reify(&heap).as_list()?.bounds())
     }
 
     /// Where the elements of `value` are, when it is a list: the first one and the end of
@@ -2902,9 +2901,12 @@ impl Vm {
         };
 
         let heap = self.heap.borrow();
-        let items = pointer.reify(&heap).as_list().ok()?.as_ptr_range();
 
-        Some((items.start, items.end))
+        pointer
+            .reify(&heap)
+            .as_list()
+            .ok()
+            .map(|items| items.bounds())
     }
 
     /// Check the call depth the way the call of `typeof` that a test of the type of a value

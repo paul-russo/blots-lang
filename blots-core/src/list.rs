@@ -21,7 +21,6 @@ use std::{
     fmt,
     hash::{BuildHasherDefault, Hasher},
     ops::{Deref, Range},
-    ptr::NonNull,
     rc::Rc,
 };
 
@@ -63,7 +62,7 @@ pub struct List {
     /// The first element. It is derived from the buffer's own pointer to its elements, not
     /// from a reference to some of them, so that it stays valid for everything the buffer
     /// holds, including what is added behind the list later on.
-    start: NonNull<Value>,
+    start: *mut Value,
     len: usize,
     buffer: Rc<Buffer>,
 }
@@ -71,25 +70,33 @@ pub struct List {
 impl List {
     /// A list of `items`, which it takes over without copying them.
     pub fn new(items: Vec<Value>) -> Self {
-        Self::of(Buffer::new(items, false))
+        Self::of(items, false)
     }
 
-    /// The list of everything in `buffer`, which nothing else refers to yet.
-    fn of(buffer: Rc<Buffer>) -> Self {
-        // SAFETY: nothing else refers to the vector. Its element pointer is never null.
-        let (start, len) = unsafe {
-            let items = &mut *buffer.items.get();
-            (NonNull::new_unchecked(items.as_mut_ptr()), items.len())
-        };
+    /// The list of all of `items`, in a buffer of its own (see [`Buffer::extension`]).
+    fn of(mut items: Vec<Value>, extension: bool) -> Self {
+        // Moving the vector into the buffer leaves its elements where they are.
+        let (start, len) = (items.as_mut_ptr(), items.len());
 
-        Self { start, len, buffer }
+        Self {
+            start,
+            len,
+            buffer: Buffer::new(items, extension),
+        }
     }
 
     #[inline(always)]
     pub fn as_slice(&self) -> &[Value] {
         // SAFETY: a list covers `len` initialised elements of its buffer from `start` on,
         // which nothing writes to while a borrow of the list is alive.
-        unsafe { std::slice::from_raw_parts(self.start.as_ptr(), self.len) }
+        unsafe { std::slice::from_raw_parts(self.start, self.len) }
+    }
+
+    /// Where the elements of the list are: the first one and the end of the last one. The
+    /// addresses are derived from the buffer's own pointer, as `start` is, so they stay good
+    /// for reading the elements after a pass rewrites them in place.
+    pub(crate) fn bounds(&self) -> (*const Value, *const Value) {
+        (self.start, self.start.wrapping_add(self.len))
     }
 
     /// The elements of the list at the positions in `range`, which have to exist. The result
@@ -101,8 +108,7 @@ impl List {
         );
 
         List {
-            // SAFETY: the position is within the list, or just behind its last element.
-            start: unsafe { self.start.add(range.start) },
+            start: self.start.wrapping_add(range.start),
             len: range.end - range.start,
             buffer: Rc::clone(&self.buffer),
         }
@@ -111,33 +117,22 @@ impl List {
     /// The list followed by `items`. The result shares the elements of the list when the
     /// buffer ends with the list and has room for `items` behind it.
     pub fn followed_by(&self, items: &[Value]) -> List {
-        self.followed_by_each(items.len(), |room| {
-            // SAFETY: `room` has room for as many values as there are `items`, and is not
-            // part of any list yet, so it does not overlap them.
-            unsafe { std::ptr::copy_nonoverlapping(items.as_ptr(), room, items.len()) }
-        })
-    }
+        let count = items.len();
 
-    /// The list followed by the `count` values that `write` puts where it is told to.
-    fn followed_by_each(&self, count: usize, write: impl FnOnce(*mut Value)) -> List {
         // SAFETY: lists refer to the elements of the vector, never to the vector itself, so
         // nothing else has a reference to it.
         let buffer = unsafe { &mut *self.buffer.items.get() };
 
         // Neither pointer is read; they only tell whether the list ends where the buffer does.
-        let end = self.start.as_ptr().wrapping_add(self.len);
+        let end = self.start.wrapping_add(self.len);
         let buffer_end = buffer.as_ptr().wrapping_add(buffer.len());
         let ends_buffer = std::ptr::eq(end, buffer_end);
 
         if ends_buffer && buffer.capacity() - buffer.len() >= count {
             // The new elements go behind everything a list covers, into room the vector
-            // already has, so the elements it holds stay where they are.
-            // SAFETY: the vector has the capacity for `count` more elements, which `write`
-            // initialises before they are made part of it.
-            unsafe {
-                write(buffer.as_mut_ptr().add(buffer.len()));
-                buffer.set_len(buffer.len() + count);
-            }
+            // already has, so the elements it holds stay where they are. `items` may be
+            // elements of the vector, which are in front of where they go.
+            buffer.extend_from_slice(items);
 
             return List {
                 start: self.start,
@@ -158,14 +153,9 @@ impl List {
 
         let mut extended = Vec::with_capacity(capacity);
         extended.extend_from_slice(self);
-        // SAFETY: the vector has the capacity for `count` more elements, which `write`
-        // initialises before they are made part of it.
-        unsafe {
-            write(extended.as_mut_ptr().add(self.len));
-            extended.set_len(len);
-        }
+        extended.extend_from_slice(items);
 
-        List::of(Buffer::new(extended, true))
+        List::of(extended, true)
     }
 
     /// Whether the two lists read their elements from the same buffer.
@@ -176,8 +166,7 @@ impl List {
     /// The position of the list's first element in its buffer, whose elements start at
     /// `first`.
     fn position(&self, first: *const Value) -> usize {
-        // SAFETY: `start` points into the elements of the list's buffer (or just behind them).
-        unsafe { self.start.as_ptr().offset_from(first) as usize }
+        self.start.addr().wrapping_sub(first.addr()) / size_of::<Value>()
     }
 
     /// For a compaction pass in which the list survives: the elements that have to survive
@@ -254,17 +243,16 @@ impl List {
         }) = state.as_deref()
         {
             // Another list of the buffer has rewritten the elements, and may have moved them.
-            let position = (self.start.as_ptr() as usize - moved.from) / size_of::<Value>();
+            let position = (self.start.addr() - moved.from) / size_of::<Value>();
             if let Some(buffer) = &moved.buffer {
                 self.buffer = Rc::clone(buffer);
             }
 
-            // SAFETY: the buffer holds every element that a surviving list covers,
-            // `moved.dropped` positions further to the front than they were.
-            self.start = unsafe {
-                let items = &mut *self.buffer.items.get();
-                NonNull::new_unchecked(items.as_mut_ptr().add(position - moved.dropped))
-            };
+            // The buffer holds every element that a surviving list covers, `moved.dropped`
+            // positions further to the front than they were.
+            // SAFETY: nothing adds to a buffer during a compaction pass.
+            let first = unsafe { (*self.buffer.items.get()).as_mut_ptr() };
+            self.start = first.wrapping_add(position - moved.dropped);
 
             return 0;
         }
@@ -279,16 +267,19 @@ impl List {
             None => (position..position + self.len, 1),
         };
 
-        let moved = if !pinned && Rc::strong_count(&self.buffer) > lists {
+        // The values that were dropped no longer hold the buffer by now, so whatever holds it
+        // besides the lists of the pass is outside of it.
+        let outside = Rc::strong_count(&self.buffer) > lists;
+
+        let moved = if !pinned && outside {
             // Something outside of the pass reads the elements too.
             let items = buffer[covered.clone()]
                 .iter()
                 .map(|item| replace(*item))
                 .collect();
 
-            let replacement = List::of(Buffer::new(items, self.buffer.extension));
-            // SAFETY: the list lies within the elements that were copied.
-            self.start = unsafe { replacement.start.add(position - covered.start) };
+            let replacement = List::of(items, self.buffer.extension);
+            self.start = replacement.start.wrapping_add(position - covered.start);
             self.buffer = replacement.buffer;
 
             Moved {
@@ -302,8 +293,11 @@ impl List {
             }
 
             // What lies behind the last list that is left is given back, so that the list
-            // ends where the buffer does and can be followed in place again.
-            buffer.truncate(covered.end);
+            // ends where the buffer does and can be followed in place again. A list outside
+            // of the pass may read further, and has to go on reading what it read.
+            if !outside {
+                buffer.truncate(covered.end);
+            }
 
             let mut dropped = 0;
 
@@ -316,9 +310,8 @@ impl List {
                 dropped = covered.start;
             }
 
-            // SAFETY: the list lies within the elements that were kept.
-            self.start =
-                unsafe { NonNull::new_unchecked(buffer.as_mut_ptr().add(position - dropped)) };
+            // The list lies within the elements that were kept.
+            self.start = buffer.as_mut_ptr().wrapping_add(position - dropped);
 
             Moved {
                 from,
