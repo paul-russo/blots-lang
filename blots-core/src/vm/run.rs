@@ -911,8 +911,8 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     {
                         let site = instr.c as usize | (instr.x as usize) << 16;
                         let proto = &*(*frame).proto;
-                        debug_assert!(site < proto.field_caches.len());
-                        let cache = proto.field_caches.get_unchecked(site);
+                        debug_assert!(site < proto.field_caches.sites().len());
+                        let cache = proto.field_caches.sites().get_unchecked(site);
                         let position = cache.position();
                         let values = record.as_slice();
 

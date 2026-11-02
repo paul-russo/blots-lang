@@ -2837,7 +2837,7 @@ impl Vm {
             return Ok(Value::Null);
         };
 
-        proto.field_caches[site].remember(record.table(), position);
+        proto.field_caches.remember(site, record.table(), position);
 
         Ok(*value)
     }

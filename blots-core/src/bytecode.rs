@@ -1012,8 +1012,7 @@ pub(crate) struct RecordLayout {
 /// What a `GetField` access site remembers about the last record it found its field in.
 #[derive(Debug)]
 pub(crate) struct FieldCache {
-    /// The table of that record, or null. The site holds on to the table, so that nothing
-    /// else can be at its address: a record with a table at that address has that table.
+    /// The address of the table of that record, or null.
     keys: Cell<*const Keys>,
 
     /// The position the field was found at.
@@ -1021,13 +1020,6 @@ pub(crate) struct FieldCache {
 }
 
 impl FieldCache {
-    pub fn new() -> Self {
-        Self {
-            keys: Cell::new(ptr::null()),
-            position: Cell::new(0),
-        }
-    }
-
     /// The table of the record that the field was found in last, or null.
     #[inline(always)]
     pub fn keys(&self) -> *const Keys {
@@ -1039,27 +1031,44 @@ impl FieldCache {
     pub fn position(&self) -> usize {
         self.position.get() as usize
     }
-
-    /// Remember that the field is at `position` of the records whose keys are in `keys`.
-    pub fn remember(&self, keys: &Rc<Keys>, position: usize) {
-        let before = self.keys.replace(Rc::into_raw(Rc::clone(keys)));
-        self.position.set(position as u32);
-
-        if !before.is_null() {
-            // SAFETY: the site held on to the table it remembered.
-            drop(unsafe { Rc::from_raw(before) });
-        }
-    }
 }
 
-impl Drop for FieldCache {
-    fn drop(&mut self) {
-        let keys = self.keys.get();
+/// What the `GetField` access sites of a proto remember (see [`FieldCache`]).
+pub(crate) struct FieldCaches {
+    sites: Box<[FieldCache]>,
 
-        if !keys.is_null() {
-            // SAFETY: the site held on to the table it remembered.
-            drop(unsafe { Rc::from_raw(keys) });
+    /// For each site, the table whose address it remembers. The site holds on to the table,
+    /// so that nothing else can be at that address: a record with a table at that address has
+    /// that table.
+    tables: Box<[Cell<Option<Rc<Keys>>>]>,
+}
+
+impl FieldCaches {
+    pub fn new(count: usize) -> Self {
+        Self {
+            sites: (0..count)
+                .map(|_| FieldCache {
+                    keys: Cell::new(ptr::null()),
+                    position: Cell::new(0),
+                })
+                .collect(),
+            tables: (0..count).map(|_| Cell::new(None)).collect(),
         }
+    }
+
+    #[inline(always)]
+    pub fn sites(&self) -> &[FieldCache] {
+        &self.sites
+    }
+
+    /// Remember that the field of access site `site` is at `position` of the records whose
+    /// keys are in `keys`.
+    pub fn remember(&self, site: usize, keys: &Rc<Keys>, position: usize) {
+        let cache = &self.sites[site];
+
+        cache.keys.set(Rc::as_ptr(keys));
+        cache.position.set(position as u32);
+        self.tables[site].set(Some(Rc::clone(keys)));
     }
 }
 
@@ -1148,7 +1157,7 @@ pub(crate) struct Proto {
     pub handlers: Vec<Handler>,
 
     /// One inline cache per `GetField` access site.
-    pub field_caches: Vec<FieldCache>,
+    pub field_caches: FieldCaches,
 
     /// Parameter names in declaration order; parameter `i` lives in register `i`.
     pub params: Vec<Symbol>,

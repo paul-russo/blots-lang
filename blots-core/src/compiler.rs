@@ -25,7 +25,7 @@ use crate::{
         BinaryOp, Commented, Expr, PostfixOp, RecordEntry, RecordKey, Span, SpannedExpr, UnaryOp,
     },
     bytecode::{
-        APART_LIST, APART_RECORD, Apart, CaptureSource, EntryPart, FAST_FRAME_SLOTS, FieldCache,
+        APART_LIST, APART_RECORD, Apart, CaptureSource, EntryPart, FAST_FRAME_SLOTS, FieldCaches,
         Handler, Instr, LAST_USE_B, LAST_USE_C, LambdaTemplate, Literal, LocalVar, MAX_REGISTERS,
         NOT_OF_TYPE, Op, Proto, RECIPROCAL, RecordLayout, RemainderTest, SelfRef,
         TYPE_NAMED_NOTHING, Wrap, binary_opcode, exact_reciprocal, register_operand, small_divisor,
@@ -1604,7 +1604,7 @@ impl FnCompiler {
             self_refs: self.self_refs,
             lambdas: self.lambdas,
             layouts: self.layouts,
-            field_caches: self.fields.iter().map(|_| FieldCache::new()).collect(),
+            field_caches: FieldCaches::new(self.fields.len()),
             fields: self.fields,
             span_index: self.span_index,
             spans: self.spans,
