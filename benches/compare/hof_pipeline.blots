@@ -1,0 +1,4 @@
+xs = range(1000000)
+doubled = map(xs, x => x * 2 + 1)
+kept = filter(doubled, x => x % 3 == 0)
+print(reduce(kept, (acc, x) => acc + x, 0))

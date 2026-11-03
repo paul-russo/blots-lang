@@ -1,0 +1,3 @@
+make_adder = n => x => x + n
+adders = map(range(1000), make_adder)
+print(reduce(range(2000), (acc, i) => acc + reduce(adders, (a, f) => a + f(i), 0), 0))

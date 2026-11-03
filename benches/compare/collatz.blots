@@ -1,0 +1,5 @@
+steps = (n, acc) =>
+  if n == 1 then acc
+  else if n % 2 == 0 then steps(n / 2, acc + 1)
+  else steps(3 * n + 1, acc + 1)
+print(max(map(range(1, 100000), n => steps(n, 0))))

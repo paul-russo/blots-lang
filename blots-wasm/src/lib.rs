@@ -3,7 +3,7 @@ use blots_core::{
     ast::{Expr, Spanned},
     environment::Environment,
     error::RuntimeError,
-    expressions::{evaluate_pairs, pairs_to_expr_with_comments},
+    expressions::{evaluate_statement_pairs, pairs_to_expr_with_comments},
     formatter::{format_expr, join_statements_with_spacing},
     functions::get_built_in_function_idents,
     heap::{CONSTANTS, Heap},
@@ -201,12 +201,17 @@ pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
                         start_line_col.0, start_line_col.1, end_line_col.0, end_line_col.1
                     );
 
-                    let value = match evaluate_pairs(
+                    // The values of the statements so far are serialized at the end, so
+                    // they are what this statement has to leave reachable, wherever a
+                    // compaction pass in the middle of it moves them.
+                    let mut held: Vec<&mut Value> = values.values_mut().collect();
+
+                    let value = match evaluate_statement_pairs(
                         inner_pairs,
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
-                        0,
                         &expr_owned,
+                        &mut held,
                     ) {
                         Ok(v) => v,
                         Err(e) => {
@@ -426,12 +431,12 @@ fn evaluate_single_inline_expression(
                 if let Some(inner_pair) = pair.into_inner().next() {
                     let inner_pairs = inner_pair.into_inner();
 
-                    match evaluate_pairs(
+                    match evaluate_statement_pairs(
                         inner_pairs,
                         Rc::clone(&heap),
                         Rc::clone(&bindings),
-                        0,
                         expr,
+                        &mut [],
                     ) {
                         Ok(value) => match value.to_serializable_value(&heap.borrow()) {
                             Ok(serializable) => {

@@ -1,13 +1,14 @@
 use crate::{
+    distinct::distinct,
     environment::Environment,
     error::RuntimeError,
-    expressions::evaluate_ast,
     heap::{Heap, HeapPointer, IterablePointer},
+    text::{Draft, Text},
     units,
-    values::{FunctionArity, LambdaArg, LambdaDef, ReifiedValue, Value},
+    values::{FunctionArity, LambdaDef, ReifiedValue, Value, WHOLE_DIGITS, whole_digits},
+    vm::Vm,
 };
 use anyhow::Result as AnyhowResult;
-use dyn_fmt::AsStrFormatExt;
 use indexmap::IndexMap;
 use std::{cell::RefCell, rc::Rc, sync::LazyLock};
 
@@ -48,6 +49,11 @@ pub fn get_function_call_stats() -> Vec<FunctionCallStats> {
 pub fn clear_function_call_stats() {
     FUNCTION_CALLS.lock().unwrap().clear();
 }
+
+/// Calls a function value with the given `this` value and arguments at the given call depth,
+/// on behalf of a built-in or operator that takes callbacks.
+pub(crate) type Invoke<'a> =
+    dyn FnMut(&FunctionDef, Value, &[Value], usize) -> Result<Value, RuntimeError> + 'a;
 
 // Cache built-in function names since they're static
 pub static BUILTIN_FUNCTION_NAMES: LazyLock<Vec<&'static str>> =
@@ -398,6 +404,24 @@ impl BuiltInFunction {
         }
     }
 
+    /// Whether the built-in calls functions it is given, and can therefore re-enter the VM
+    /// while it runs.
+    pub(crate) fn takes_callback(&self) -> bool {
+        matches!(
+            self,
+            Self::Map
+                | Self::Filter
+                | Self::Reduce
+                | Self::Every
+                | Self::Some
+                | Self::SortBy
+                | Self::GroupBy
+                | Self::CountBy
+        )
+    }
+
+    /// Call the built-in from outside of a running VM. Callbacks it invokes (the functions
+    /// passed to `map`, `sort_by`, ...) resolve late-bound names through `bindings`.
     pub fn call(
         &self,
         args: &[Value],
@@ -405,6 +429,34 @@ impl BuiltInFunction {
         bindings: Rc<Environment>,
         call_depth: usize,
         source: &str,
+    ) -> Result<Value, RuntimeError> {
+        let callback_heap = Rc::clone(&heap);
+
+        self.call_with(
+            args,
+            &heap,
+            call_depth,
+            &mut |def, this_value, args, depth| {
+                def.call(
+                    this_value,
+                    args,
+                    Rc::clone(&callback_heap),
+                    Rc::clone(&bindings),
+                    depth,
+                    source,
+                )
+            },
+        )
+    }
+
+    /// The implementation of the built-in. `invoke` calls a function value on its behalf, at
+    /// the given call depth; the VM passes itself so callbacks run on the current VM stack.
+    pub(crate) fn call_with(
+        &self,
+        args: &[Value],
+        heap: &Rc<RefCell<Heap>>,
+        call_depth: usize,
+        invoke: &mut Invoke,
     ) -> Result<Value, RuntimeError> {
         match self {
             // Math functions
@@ -442,105 +494,40 @@ impl BuiltInFunction {
 
             // Aggregate functions
             Self::Min => {
-                let nums = if args.len() == 1 {
-                    // Check if single argument is a list
-                    match &args[0] {
-                        Value::List(_) => {
-                            let borrowed_heap = heap.borrow();
-                            let list = args[0].as_list(&borrowed_heap)?;
-                            list.iter()
-                                .map(|a| a.as_number())
-                                .collect::<AnyhowResult<Vec<f64>>>()?
-                        }
-                        _ => vec![args[0].as_number()?],
-                    }
-                } else {
-                    args.iter()
-                        .map(|a| a.as_number())
-                        .collect::<AnyhowResult<Vec<f64>>>()?
-                };
-
-                if nums.is_empty() {
+                let (min, count) = fold_numbers(args, heap, f64::INFINITY, f64::min)?;
+                if count == 0 {
                     return Err(RuntimeError::from("min requires at least one number"));
                 }
 
-                Ok(Value::Number(
-                    nums.iter().copied().fold(f64::INFINITY, f64::min),
-                ))
+                Ok(Value::Number(min))
             }
 
             Self::Max => {
-                let nums = if args.len() == 1 {
-                    // Check if single argument is a list
-                    match &args[0] {
-                        Value::List(_) => {
-                            let borrowed_heap = heap.borrow();
-                            let list = args[0].as_list(&borrowed_heap)?;
-                            list.iter()
-                                .map(|a| a.as_number())
-                                .collect::<AnyhowResult<Vec<f64>>>()?
-                        }
-                        _ => vec![args[0].as_number()?],
-                    }
-                } else {
-                    args.iter()
-                        .map(|a| a.as_number())
-                        .collect::<AnyhowResult<Vec<f64>>>()?
-                };
-
-                if nums.is_empty() {
+                let (max, count) = fold_numbers(args, heap, f64::NEG_INFINITY, f64::max)?;
+                if count == 0 {
                     return Err(RuntimeError::from("max requires at least one number"));
                 }
 
-                Ok(Value::Number(
-                    nums.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-                ))
+                Ok(Value::Number(max))
             }
 
             Self::Avg => {
-                let nums = if args.len() == 1 {
-                    match &args[0] {
-                        Value::List(_) => {
-                            let borrowed_heap = heap.borrow();
-                            let list = args[0].as_list(&borrowed_heap)?;
-                            list.iter()
-                                .map(|a| a.as_number())
-                                .collect::<AnyhowResult<Vec<f64>>>()?
-                        }
-                        _ => vec![args[0].as_number()?],
-                    }
-                } else {
-                    args.iter()
-                        .map(|a| a.as_number())
-                        .collect::<AnyhowResult<Vec<f64>>>()?
-                };
-                if nums.is_empty() {
+                let (sum, count) = fold_numbers(args, heap, sum_of_nothing(), |sum, n| sum + n)?;
+                if count == 0 {
                     return Err(RuntimeError::from("avg requires at least one number"));
                 }
-                Ok(Value::Number(nums.iter().sum::<f64>() / nums.len() as f64))
+
+                Ok(Value::Number(sum / count as f64))
             }
 
             Self::Prod => {
-                let nums = if args.len() == 1 {
-                    match &args[0] {
-                        Value::List(_) => {
-                            let borrowed_heap = heap.borrow();
-                            let list = args[0].as_list(&borrowed_heap)?;
-                            list.iter()
-                                .map(|a| a.as_number())
-                                .collect::<AnyhowResult<Vec<f64>>>()?
-                        }
-                        _ => vec![args[0].as_number()?],
-                    }
-                } else {
-                    args.iter()
-                        .map(|a| a.as_number())
-                        .collect::<AnyhowResult<Vec<f64>>>()?
-                };
-                if nums.is_empty() {
+                let (product, count) =
+                    fold_numbers(args, heap, product_of_nothing(), |product, n| product * n)?;
+                if count == 0 {
                     return Err(RuntimeError::from("prod requires at least one number"));
                 }
-                Ok(Value::Number(nums.iter().product()))
+
+                Ok(Value::Number(product))
             }
 
             Self::Range => {
@@ -580,26 +567,12 @@ impl BuiltInFunction {
             }
 
             Self::Sum => {
-                let nums = if args.len() == 1 {
-                    match &args[0] {
-                        Value::List(_) => {
-                            let borrowed_heap = heap.borrow();
-                            let list = args[0].as_list(&borrowed_heap)?;
-                            list.iter()
-                                .map(|a| a.as_number())
-                                .collect::<AnyhowResult<Vec<f64>>>()?
-                        }
-                        _ => vec![args[0].as_number()?],
-                    }
-                } else {
-                    args.iter()
-                        .map(|a| a.as_number())
-                        .collect::<AnyhowResult<Vec<f64>>>()?
-                };
-                if nums.is_empty() {
+                let (sum, count) = fold_numbers(args, heap, sum_of_nothing(), |sum, n| sum + n)?;
+                if count == 0 {
                     return Err(RuntimeError::from("sum requires at least one number"));
                 }
-                Ok(Value::Number(nums.iter().sum()))
+
+                Ok(Value::Number(sum))
             }
 
             // Remaining aggregate functions
@@ -673,41 +646,28 @@ impl BuiltInFunction {
                     .copied()
                     .unwrap_or(Value::Null)),
                 Value::String(p) => {
-                    let val = {
-                        p.reify(&heap.borrow())
-                            .as_string()?
-                            .get(0..1)
-                            .unwrap_or("")
-                            .to_string()
-                    };
+                    let mut heap = heap.borrow_mut();
+                    let text = p.reify(&heap).as_text()?;
+                    let head = text.part(0..1).unwrap_or_default();
 
-                    Ok(heap.borrow_mut().insert_string(val))
+                    Ok(heap.insert_string(head))
                 }
                 _ => Err(RuntimeError::from("argument must be a list or string")),
             },
 
             Self::Tail => match &args[0] {
                 Value::List(p) => {
-                    let val = {
-                        p.reify(&heap.borrow())
-                            .as_list()?
-                            .get(1..)
-                            .unwrap_or([].as_slice())
-                            .to_vec()
-                    };
+                    let mut heap = heap.borrow_mut();
+                    let len = p.reify(&heap).as_list()?.len();
 
-                    Ok(heap.borrow_mut().insert_list(val))
+                    Ok(heap.slice_list(*p, len.min(1)..len)?)
                 }
                 Value::String(s) => {
-                    let val = {
-                        s.reify(&heap.borrow())
-                            .as_string()?
-                            .get(1..)
-                            .unwrap_or("")
-                            .to_string()
-                    };
+                    let mut heap = heap.borrow_mut();
+                    let text = s.reify(&heap).as_text()?;
+                    let tail = text.part(1..text.len()).unwrap_or_default();
 
-                    Ok(heap.borrow_mut().insert_string(val))
+                    Ok(heap.insert_string(tail))
                 }
                 _ => Err(RuntimeError::from("argument must be a list or string")),
             },
@@ -717,33 +677,40 @@ impl BuiltInFunction {
                 let end = args[2].as_number()? as usize;
 
                 match args[0] {
-                    Value::List(_) => {
-                        let slice = {
-                            let borrowed_heap = heap.borrow();
-                            let list = args[0].as_list(&borrowed_heap)?;
-                            list.get(start..end)
-                                .ok_or_else(|| RuntimeError::from("index out of bounds"))?
-                                .to_vec()
-                        };
+                    Value::List(list) => {
+                        let mut heap = heap.borrow_mut();
+                        let len = list.reify(&heap).as_list()?.len();
+                        if start > end || end > len {
+                            return Err(RuntimeError::from("index out of bounds"));
+                        }
 
-                        Ok(heap.borrow_mut().insert_list(slice))
+                        Ok(heap.slice_list(list, start..end)?)
                     }
                     Value::String(_) => {
-                        let s = {
-                            let borrowed_heap = &heap.borrow();
-                            args[0].as_string(borrowed_heap)?.to_string()
-                        };
+                        let mut heap = heap.borrow_mut();
+                        let part = args[0].as_text(&heap)?.part(start..end);
 
-                        s.get(start..end)
-                            .map_or(Err(RuntimeError::from("index out of bounds")), |s| {
-                                Ok(heap.borrow_mut().insert_string(s.to_string()))
-                            })
+                        part.map_or(Err(RuntimeError::from("index out of bounds")), |part| {
+                            Ok(heap.insert_string(part))
+                        })
                     }
                     _ => Err(RuntimeError::from("argument must be a list or string")),
                 }
             }
 
             Self::Concat => {
+                // What follows a list goes behind its elements, which are shared with the
+                // result where they can be instead of being copied.
+                let (base, args) = match args.split_first() {
+                    Some((Value::List(base), rest)) => (Some(*base), rest),
+                    _ => (None, args),
+                };
+
+                if let (Some(base), [Value::List(only)]) = (base, args) {
+                    let items = only.reify(&heap.borrow()).as_list()?.clone();
+                    return Ok(heap.borrow_mut().extend_list(base, &items)?);
+                }
+
                 let mut list = vec![];
 
                 for &arg in args {
@@ -759,22 +726,19 @@ impl BuiltInFunction {
                             list.extend(values.iter().copied());
                         }
                         Value::Spread(IterablePointer::String(p)) => {
-                            let string = {
-                                let borrowed_heap = &heap.borrow();
-                                p.reify(borrowed_heap).as_string()?.to_string()
-                            };
+                            let mut heap = heap.borrow_mut();
+                            let text = p.reify(&heap).as_text()?.clone();
 
-                            list.extend(
-                                string
-                                    .chars()
-                                    .map(|c| heap.borrow_mut().insert_string(c.to_string())),
-                            );
+                            list.extend(text.chars().map(|c| heap.insert_string(c)));
                         }
                         _ => list.push(arg),
                     }
                 }
 
-                Ok(heap.borrow_mut().insert_list(list))
+                match base {
+                    Some(base) => Ok(heap.borrow_mut().extend_list(base, &list)?),
+                    None => Ok(heap.borrow_mut().insert_list(list)),
+                }
             }
 
             Self::Dot => {
@@ -796,31 +760,20 @@ impl BuiltInFunction {
             }
 
             Self::Unique => {
-                let mut unique_list = vec![];
-                let borrowed_heap = heap.borrow();
-                let list = args[0].as_list(&borrowed_heap)?;
+                let unique_list = {
+                    let borrowed_heap = heap.borrow();
+                    let list = args[0].as_list(&borrowed_heap)?;
 
-                for item in list.iter() {
-                    let mut is_duplicate = false;
-                    for existing in &unique_list {
-                        if item.equals(existing, &borrowed_heap)? {
-                            is_duplicate = true;
-                            break;
-                        }
-                    }
-                    if !is_duplicate {
-                        unique_list.push(*item);
-                    }
-                }
+                    distinct(list, &borrowed_heap)?
+                };
 
-                drop(borrowed_heap);
                 Ok(heap.borrow_mut().insert_list(unique_list))
             }
 
             Self::Sort => {
                 let mut list = {
                     let borrowed_heap = &heap.borrow();
-                    args[0].as_list(borrowed_heap)?.clone()
+                    args[0].as_list(borrowed_heap)?.to_vec()
                 };
                 let borrowed_heap = heap.borrow();
                 list.sort_by(|a, b| {
@@ -833,7 +786,7 @@ impl BuiltInFunction {
             }
 
             Self::Reverse => {
-                let mut list = { args[0].as_list(&heap.borrow())?.clone() };
+                let mut list = { args[0].as_list(&heap.borrow())?.to_vec() };
                 list.reverse();
                 Ok(heap.borrow_mut().insert_list(list))
             }
@@ -856,20 +809,20 @@ impl BuiltInFunction {
 
             // String functions
             Self::Split => {
-                let (s, delimeter) = {
-                    let borrowed_heap = &heap.borrow();
-                    (
-                        args[0].as_string(borrowed_heap)?.to_string(),
-                        args[1].as_string(borrowed_heap)?.to_string(),
-                    )
-                };
+                let mut heap = heap.borrow_mut();
+                let (text, delimeter) = (
+                    args[0].as_text(&heap)?.clone(),
+                    args[1].as_text(&heap)?.clone(),
+                );
 
-                let list = s
-                    .split(&delimeter)
-                    .map(|s| heap.borrow_mut().insert_string(s.to_string()))
+                // The pieces are parts of the string, which the long ones share their
+                // characters with.
+                let list = text
+                    .split(delimeter.as_str())
+                    .map(|piece| heap.insert_string(text.part_of(piece)))
                     .collect();
 
-                Ok(heap.borrow_mut().insert_list(list))
+                Ok(heap.insert_list(list))
             }
 
             Self::Join => {
@@ -889,22 +842,21 @@ impl BuiltInFunction {
             Self::Replace => {
                 let string = {
                     let borrowed_heap = heap.borrow();
-                    let old = args[1].as_string(&borrowed_heap)?.to_string();
-                    let new = args[2].as_string(&borrowed_heap)?.to_string();
-                    let s = args[0].as_string(&borrowed_heap)?.to_string();
-                    s.replace(&old, &new)
+                    let old = args[1].as_string(&borrowed_heap)?;
+                    let new = args[2].as_string(&borrowed_heap)?;
+                    let s = args[0].as_string(&borrowed_heap)?;
+                    s.replace(old, new)
                 };
 
                 Ok(heap.borrow_mut().insert_string(string))
             }
 
             Self::Trim => {
-                let string = {
-                    let borrowed_heap = heap.borrow();
-                    args[0].as_string(&borrowed_heap)?.trim().to_string()
-                };
+                let mut heap = heap.borrow_mut();
+                let text = args[0].as_text(&heap)?;
+                let trimmed = text.part_of(text.trim());
 
-                Ok(heap.borrow_mut().insert_string(string))
+                Ok(heap.insert_string(trimmed))
             }
 
             Self::Uppercase => {
@@ -931,16 +883,12 @@ impl BuiltInFunction {
                     }
                     // If haystack is a string, require needle to be a string and do substring search
                     ReifiedValue::String(s, _) => {
-                        let needle = {
-                            let borrowed_heap = &heap.borrow();
-                            args[1]
-                                .as_string(borrowed_heap)
-                                .map_err(|_| {
-                                    RuntimeError::from("second argument must be a string")
-                                })?
-                                .to_string()
-                        };
-                        Ok(Value::Bool(s.contains(&needle)))
+                        let borrowed_heap = heap.borrow();
+                        let needle = args[1]
+                            .as_string(&borrowed_heap)
+                            .map_err(|_| RuntimeError::from("second argument must be a string"))?;
+
+                        Ok(Value::Bool(s.contains(needle)))
                     }
                     _ => Err(RuntimeError::from(
                         "first argument must be a list or string",
@@ -949,31 +897,13 @@ impl BuiltInFunction {
             }
 
             Self::Format => {
-                let format_str = {
-                    let borrowed_heap = &heap.borrow();
-                    args[0]
-                        .as_string(borrowed_heap)
-                        .map_err(|_| RuntimeError::from("first argument must be a string"))?
-                        .to_string()
-                };
+                let formatted = formatted(args, &heap.borrow())?;
 
-                let format_args = {
-                    let borrowed_heap = &heap.borrow();
-                    &args[1..]
-                        .iter()
-                        .map(|v| v.stringify_for_display(borrowed_heap))
-                        .collect::<Vec<String>>()
-                };
-
-                Ok(heap
-                    .borrow_mut()
-                    .insert_string(format_str.format(format_args)))
+                Ok(heap.borrow_mut().insert_string(formatted))
             }
 
             // Type functions
-            Self::Typeof => Ok(heap
-                .borrow_mut()
-                .insert_string(args[0].get_type().to_string())),
+            Self::Typeof => Ok(heap.borrow_mut().insert_string(args[0].get_type().name())),
 
             Self::Arity => {
                 let arity = match args[0] {
@@ -995,18 +925,13 @@ impl BuiltInFunction {
 
             // Record functions
             Self::Keys => {
-                let key_strings = {
-                    let borrowed_heap = heap.borrow();
-                    args[0]
-                        .as_record(&borrowed_heap)?
-                        .keys()
-                        .cloned()
-                        .collect::<Vec<String>>()
-                };
                 let mut borrowed_heap = heap.borrow_mut();
-                let keys = key_strings
-                    .into_iter()
-                    .map(|k| borrowed_heap.insert_string(k))
+                let record = args[0].as_record(&borrowed_heap)?;
+                let (table, count) = (Rc::clone(record.table()), record.len());
+                let keys = table
+                    .first(count)
+                    .iter()
+                    .map(|k| borrowed_heap.insert_string(&**k))
                     .collect();
 
                 Ok(borrowed_heap.insert_list(keys))
@@ -1026,19 +951,15 @@ impl BuiltInFunction {
             }
 
             Self::Entries => {
-                let entries = {
-                    let borrowed_heap = heap.borrow();
-                    args[0]
-                        .as_record(&borrowed_heap)?
-                        .iter()
-                        .map(|(k, v)| (k.clone(), *v))
-                        .collect::<Vec<(String, Value)>>()
-                };
                 let mut borrowed_heap = heap.borrow_mut();
-                let entry_values = entries
-                    .into_iter()
+                let record = args[0].as_record(&borrowed_heap)?;
+                let (table, values) = (Rc::clone(record.table()), record.as_slice().to_vec());
+                let entry_values = table
+                    .first(values.len())
+                    .iter()
+                    .zip(values)
                     .map(|(k, v)| {
-                        let key = borrowed_heap.insert_string(k);
+                        let key = borrowed_heap.insert_string(&**k);
                         borrowed_heap.insert_list(vec![key, v])
                     })
                     .collect();
@@ -1057,19 +978,12 @@ impl BuiltInFunction {
                 };
                 let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list_rc()?
+                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
                 };
 
                 let mut groups: IndexMap<String, Vec<Value>> = IndexMap::new();
                 for &item in items.iter() {
-                    let key_result = func_def.call(
-                        Value::Null,
-                        &[item],
-                        Rc::clone(&heap),
-                        Rc::clone(&bindings),
-                        call_depth + 1,
-                        source,
-                    )?;
+                    let key_result = invoke(&func_def, Value::Null, &[item], call_depth + 1)?;
 
                     let key = match key_result {
                         Value::String(_) => key_result.as_string(&heap.borrow())?.to_string(),
@@ -1103,19 +1017,12 @@ impl BuiltInFunction {
                 };
                 let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list_rc()?
+                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
                 };
 
                 let mut counts: IndexMap<String, f64> = IndexMap::new();
                 for &item in items.iter() {
-                    let key_result = func_def.call(
-                        Value::Null,
-                        &[item],
-                        Rc::clone(&heap),
-                        Rc::clone(&bindings),
-                        call_depth + 1,
-                        source,
-                    )?;
+                    let key_result = invoke(&func_def, Value::Null, &[item], call_depth + 1)?;
 
                     let key = match key_result {
                         Value::String(_) => key_result.as_string(&heap.borrow())?.to_string(),
@@ -1204,18 +1111,19 @@ impl BuiltInFunction {
                     return Err(RuntimeError::from("chunk size must be greater than 0"));
                 }
 
-                let chunk_values = {
-                    let borrowed_heap = heap.borrow();
-                    let list = args[0].as_list(&borrowed_heap)?;
-                    list.chunks(n)
-                        .map(|chunk| chunk.to_vec())
-                        .collect::<Vec<_>>()
-                };
                 let mut borrowed_heap = heap.borrow_mut();
-                let chunks = chunk_values
-                    .into_iter()
-                    .map(|chunk| borrowed_heap.insert_list(chunk))
-                    .collect();
+                let len = args[0].as_list(&borrowed_heap)?.len();
+                let Value::List(list) = args[0] else {
+                    unreachable!("only a list is read as a list");
+                };
+
+                // The chunks are parts of the list, which they share their elements with.
+                let chunks = (0..len)
+                    .step_by(n)
+                    .map(|start| {
+                        borrowed_heap.slice_list(list, start..start.saturating_add(n).min(len))
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
 
                 Ok(borrowed_heap.insert_list(chunks))
             }
@@ -1223,6 +1131,16 @@ impl BuiltInFunction {
             // Conversion functions
             Self::ToString => match args[0] {
                 Value::String(_) => Ok(args[0]), // If it's already a string, just return it
+                Value::Number(number) => {
+                    // The digits of a whole number are a string as they are.
+                    let mut room = [0; WHOLE_DIGITS];
+                    let text = match whole_digits(number, &mut room) {
+                        Some(digits) => Text::new(digits),
+                        None => Text::from(number.to_string()),
+                    };
+
+                    Ok(heap.borrow_mut().insert_string(text))
+                }
                 _ => {
                     let string = args[0].stringify_internal(&heap.borrow());
                     Ok(heap.borrow_mut().insert_string(string))
@@ -1276,11 +1194,16 @@ impl BuiltInFunction {
                     let format_str = args[0].as_string(borrowed_heap).map_err(|_| {
                         RuntimeError::from("first argument must be a formatting string if multiple arguments are given")
                     })?;
-                    let format_args = &args[1..]
-                        .iter()
-                        .map(|v| v.stringify_internal(borrowed_heap))
-                        .collect::<Vec<String>>();
-                    format_str.format(format_args)
+                    let mut format_args = args[1..].iter();
+                    let mut output = Draft::new();
+
+                    fill_template(format_str, &mut output, |output| {
+                        if let Some(value) = format_args.next() {
+                            output.push_str(&value.stringify_internal(borrowed_heap));
+                        }
+                    });
+
+                    output.as_str().to_owned()
                 };
 
                 // Print to stderr, to not pollute stdout
@@ -1311,7 +1234,7 @@ impl BuiltInFunction {
                 // slower.
                 let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list_rc()?
+                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
                 };
                 let func_accepts_two_args = func_def.arity().can_accept(2);
 
@@ -1324,14 +1247,7 @@ impl BuiltInFunction {
                         &call_args[..1]
                     };
 
-                    let result = func_def.call(
-                        Value::Null,
-                        call_args,
-                        Rc::clone(&heap),
-                        Rc::clone(&bindings),
-                        call_depth + 1,
-                        source,
-                    )?;
+                    let result = invoke(&func_def, Value::Null, call_args, call_depth + 1)?;
                     mapped_list.push(result);
                 }
 
@@ -1348,7 +1264,7 @@ impl BuiltInFunction {
                 };
                 let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list_rc()?
+                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
                 };
                 let func_accepts_two_args = func_def.arity().can_accept(2);
 
@@ -1361,14 +1277,7 @@ impl BuiltInFunction {
                         &call_args[..1]
                     };
 
-                    let result = func_def.call(
-                        Value::Null,
-                        call_args,
-                        Rc::clone(&heap),
-                        Rc::clone(&bindings),
-                        call_depth + 1,
-                        source,
-                    )?;
+                    let result = invoke(&func_def, Value::Null, call_args, call_depth + 1)?;
                     if result.as_bool()? {
                         filtered_list.push(item);
                     }
@@ -1388,7 +1297,7 @@ impl BuiltInFunction {
                 };
                 let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list_rc()?
+                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
                 };
                 let func_accepts_three_args = func_def.arity().can_accept(3);
 
@@ -1401,14 +1310,7 @@ impl BuiltInFunction {
                         &call_args[..2]
                     };
 
-                    accumulator = func_def.call(
-                        Value::Null,
-                        call_args,
-                        Rc::clone(&heap),
-                        Rc::clone(&bindings),
-                        call_depth + 1,
-                        source,
-                    )?;
+                    accumulator = invoke(&func_def, Value::Null, call_args, call_depth + 1)?;
                 }
 
                 Ok(accumulator)
@@ -1424,7 +1326,7 @@ impl BuiltInFunction {
                 };
                 let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list_rc()?
+                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
                 };
                 let func_accepts_two_args = func_def.arity().can_accept(2);
 
@@ -1436,14 +1338,7 @@ impl BuiltInFunction {
                         &call_args[..1]
                     };
 
-                    let result = func_def.call(
-                        Value::Null,
-                        call_args,
-                        Rc::clone(&heap),
-                        Rc::clone(&bindings),
-                        call_depth + 1,
-                        source,
-                    )?;
+                    let result = invoke(&func_def, Value::Null, call_args, call_depth + 1)?;
                     if !result.as_bool()? {
                         return Ok(Value::Bool(false));
                     }
@@ -1462,7 +1357,7 @@ impl BuiltInFunction {
                 };
                 let items = {
                     let borrowed_heap = heap.borrow();
-                    list_ptr.reify(&borrowed_heap).as_list_rc()?
+                    list_ptr.reify(&borrowed_heap).as_list()?.clone()
                 };
                 let func_accepts_two_args = func_def.arity().can_accept(2);
 
@@ -1474,14 +1369,7 @@ impl BuiltInFunction {
                         &call_args[..1]
                     };
 
-                    let result = func_def.call(
-                        Value::Null,
-                        call_args,
-                        Rc::clone(&heap),
-                        Rc::clone(&bindings),
-                        call_depth + 1,
-                        source,
-                    )?;
+                    let result = invoke(&func_def, Value::Null, call_args, call_depth + 1)?;
                     if result.as_bool()? {
                         return Ok(Value::Bool(true));
                     }
@@ -1494,7 +1382,7 @@ impl BuiltInFunction {
                 let func = &args[1];
                 let mut list = {
                     let borrowed_heap = &heap.borrow();
-                    args[0].as_list(borrowed_heap)?.clone()
+                    args[0].as_list(borrowed_heap)?.to_vec()
                 };
 
                 // Look up (and clone) the key function once rather than once per comparison.
@@ -1505,22 +1393,8 @@ impl BuiltInFunction {
 
                 list.sort_by(|a, b| match &func_def {
                     Some(fd) => {
-                        let result_a = fd.call(
-                            Value::Null,
-                            &[*a],
-                            Rc::clone(&heap),
-                            Rc::clone(&bindings),
-                            call_depth + 1,
-                            source,
-                        );
-                        let result_b = fd.call(
-                            Value::Null,
-                            &[*b],
-                            Rc::clone(&heap),
-                            Rc::clone(&bindings),
-                            call_depth + 1,
-                            source,
-                        );
+                        let result_a = invoke(fd, Value::Null, &[*a], call_depth + 1);
+                        let result_b = invoke(fd, Value::Null, &[*b], call_depth + 1);
 
                         match (result_a, result_b) {
                             (Ok(val_a), Ok(val_b)) => val_a
@@ -1645,11 +1519,7 @@ impl FunctionDef {
             FunctionDef::BuiltIn(built_in) => {
                 format!("built-in function \"{}\"", built_in.name())
             }
-            FunctionDef::Lambda(def) => def
-                .name
-                .map_or(String::from("anonymous function"), |n| {
-                    format!("function \"{}\"", n)
-                }),
+            FunctionDef::Lambda(def) => lambda_name(def),
         }
     }
 
@@ -1701,52 +1571,12 @@ impl FunctionDef {
                     }
                 }
             },
-            FunctionDef::Lambda(def) => {
-                let arity = def.get_arity();
-
-                match arity {
-                    FunctionArity::Exact(expected) => {
-                        if arg_count == expected {
-                            Ok(())
-                        } else {
-                            Err(RuntimeError::new(format!(
-                                "{} takes exactly {} arguments, but {} were given",
-                                self.get_name(),
-                                expected,
-                                arg_count
-                            )))
-                        }
-                    }
-                    FunctionArity::AtLeast(expected) => {
-                        if arg_count >= expected {
-                            Ok(())
-                        } else {
-                            Err(RuntimeError::new(format!(
-                                "{} takes at least {} arguments, but {} were given",
-                                self.get_name(),
-                                expected,
-                                arg_count
-                            )))
-                        }
-                    }
-                    FunctionArity::Between(min, max) => {
-                        if arg_count >= min && arg_count <= max {
-                            Ok(())
-                        } else {
-                            Err(RuntimeError::new(format!(
-                                "{} takes between {} and {} arguments, but {} were given",
-                                self.get_name(),
-                                min,
-                                max,
-                                arg_count
-                            )))
-                        }
-                    }
-                }
-            }
+            FunctionDef::Lambda(def) => check_lambda_arity(def, arg_count),
         }
     }
 
+    /// Call the function from outside of a running VM. Late-bound names resolve through
+    /// `bindings`, which plays the role of the call site.
     pub fn call(
         &self,
         this_value: Value,
@@ -1754,101 +1584,157 @@ impl FunctionDef {
         heap: Rc<RefCell<Heap>>,
         bindings: Rc<Environment>,
         call_depth: usize,
-        source: &str,
+        _source: &str,
     ) -> Result<Value, RuntimeError> {
-        // Per-call timing is only recorded when profiling has been enabled by the embedder
-        // (e.g. `blots --profile`); otherwise calls skip the timestamps and stats push entirely.
-        #[cfg(not(target_arch = "wasm32"))]
-        let profiling_start = is_profiling_enabled().then(std::time::Instant::now);
+        Vm::new(heap, bindings).call_function(self, this_value, args, call_depth)
+    }
+}
 
-        self.check_arity(args.len())?;
+/// Fold the numbers an aggregate function was called with, in order: the elements of its
+/// argument when that is a single list, the arguments themselves otherwise. Returns the
+/// result together with how many numbers there were.
+fn fold_numbers(
+    args: &[Value],
+    heap: &Rc<RefCell<Heap>>,
+    init: f64,
+    fold: impl Fn(f64, f64) -> f64,
+) -> AnyhowResult<(f64, usize)> {
+    let heap = heap.borrow();
+    let numbers = match args {
+        [list @ Value::List(_)] => list.as_list(&heap)?.as_slice(),
+        _ => args,
+    };
 
-        if call_depth > 1000 {
-            return Err(RuntimeError::new(format!(
-                "in {}: maximum call depth of 1000 exceeded",
-                self.get_name()
-            )));
+    let mut result = init;
+    for number in numbers {
+        result = fold(result, number.as_number()?);
+    }
+
+    Ok((result, numbers.len()))
+}
+
+/// Write `template` behind the pieces of `draft`, with what `argument` writes in the place
+/// of every `{}`.
+///
+/// A brace that does not open a `{}` is left out, and the character behind it is written as
+/// it is, whatever it is: `{{` and `}{` come to `{`, `}}` to `}`, and `{x}` to `x`. A brace
+/// that ends the template is left out as well.
+fn fill_template(template: &str, draft: &mut Draft, mut argument: impl FnMut(&mut Draft)) {
+    let bytes = template.as_bytes();
+
+    // Where the characters start that were not written yet, and the first one that may be
+    // a brace: the ones from `written` to `at` are written as they are.
+    let mut written = 0;
+    let mut at = 0;
+
+    while let Some(&byte) = bytes.get(at) {
+        if byte != b'{' && byte != b'}' {
+            at += 1;
+            continue;
         }
 
-        match self {
-            FunctionDef::Lambda(def) => {
-                #[cfg(not(target_arch = "wasm32"))]
-                let start_var_env = profiling_start.map(|_| std::time::Instant::now());
+        // A brace is one byte, so it has whole characters on both of its sides.
+        if written < at {
+            draft.push_str(&template[written..at]);
+        }
 
-                // Build the positional argument slots for this call (no per-call map, no
-                // hashing). Slots line up with the parameter declaration order so resolved
-                // `ParamSlot` references index them directly: required and optional parameters
-                // fill by position (a missing optional becomes null, as before), and a rest
-                // parameter collects the remaining arguments into a list.
-                let mut slot_values = Vec::with_capacity(def.args.len());
-
-                for (idx, expected_arg) in def.args.iter().enumerate() {
-                    match expected_arg {
-                        LambdaArg::Required(_) => slot_values.push(args[idx]),
-                        LambdaArg::Optional(_) => {
-                            slot_values.push(args.get(idx).copied().unwrap_or(Value::Null))
-                        }
-                        LambdaArg::Rest(_) => slot_values.push(
-                            heap.borrow_mut()
-                                .insert_list(args.iter().skip(idx).copied().collect()),
-                        ),
-                    }
-                }
-
-                #[cfg(not(target_arch = "wasm32"))]
-                let end_var_env = profiling_start.map(|_| std::time::Instant::now());
-
-                // The frame holds the arguments, the optional self-reference for named
-                // recursion, and the captured scope; everything else, including the late-bound
-                // `inputs` keyword, resolves through the call-site environment chain.
-                let new_env = Rc::new(Environment::extend_frame(
-                    Rc::clone(&bindings),
-                    Rc::clone(&def.args),
-                    def.name.map(|fn_name| (fn_name, this_value)),
-                    slot_values,
-                    def.scope.clone(),
-                ));
-
-                let return_value = evaluate_ast(
-                    &def.body,
-                    Rc::clone(&heap),
-                    new_env,
-                    call_depth + 1,
-                    def.source.clone(),
-                )
-                .map_err(|error| error.with_function_context(&self.get_name()));
-
-                #[cfg(not(target_arch = "wasm32"))]
-                if let Some(start) = profiling_start {
-                    FUNCTION_CALLS.lock().unwrap().push(FunctionCallStats {
-                        name: self.get_name(),
-                        start,
-                        end: std::time::Instant::now(),
-                        start_var_env,
-                        end_var_env,
-                    });
-                }
-
-                return_value
+        match bytes.get(at + 1) {
+            None => return,
+            Some(b'}') if byte == b'{' => {
+                argument(draft);
+                written = at + 2;
+                at = written;
             }
-            FunctionDef::BuiltIn(built_in) => {
-                let return_value = built_in
-                    .call(args, heap, bindings, call_depth + 1, source)
-                    .map_err(|error| error.with_function_context(&self.get_name()));
-
-                #[cfg(not(target_arch = "wasm32"))]
-                if let Some(start) = profiling_start {
-                    FUNCTION_CALLS.lock().unwrap().push(FunctionCallStats {
-                        name: self.get_name(),
-                        start,
-                        end: std::time::Instant::now(),
-                        start_var_env: None,
-                        end_var_env: None,
-                    });
-                }
-
-                return_value
+            Some(_) => {
+                written = at + 1;
+                at = written + 1;
             }
+        }
+    }
+
+    if written < bytes.len() {
+        draft.push_str(&template[written..]);
+    }
+}
+
+/// What `format` makes of its arguments: the first one, a string, with each of the others
+/// in the place of a `{}` of it, the way it is displayed. An argument that has no `{}` to
+/// go to is left out, and so is a `{}` that has no argument.
+#[inline(never)]
+fn formatted(args: &[Value], heap: &Heap) -> Result<Text, RuntimeError> {
+    let template = args[0]
+        .as_string(heap)
+        .map_err(|_| RuntimeError::from("first argument must be a string"))?;
+    let mut rest = args[1..].iter();
+    let mut draft = Draft::new();
+
+    fill_template(template, &mut draft, |draft| {
+        if let Some(value) = rest.next() {
+            value.display_into(heap, draft);
+        }
+    });
+
+    Ok(Text::from(&draft))
+}
+
+/// What the standard library takes the sum of no numbers at all to be, which is where it
+/// starts every sum from.
+pub(crate) fn sum_of_nothing() -> f64 {
+    std::iter::empty::<f64>().sum()
+}
+
+/// The same for products.
+pub(crate) fn product_of_nothing() -> f64 {
+    std::iter::empty::<f64>().product()
+}
+
+/// The name a user-defined function goes by in error messages and profiles.
+pub(crate) fn lambda_name(def: &LambdaDef) -> String {
+    match def.name {
+        Some(name) => format!("function \"{}\"", name),
+        None => String::from("anonymous function"),
+    }
+}
+
+/// Check that a user-defined function can be called with `arg_count` arguments.
+pub(crate) fn check_lambda_arity(def: &LambdaDef, arg_count: usize) -> Result<(), RuntimeError> {
+    match def.get_arity() {
+        FunctionArity::Exact(expected) => {
+            if arg_count == expected {
+                return Ok(());
+            }
+
+            Err(RuntimeError::new(format!(
+                "{} takes exactly {} arguments, but {} were given",
+                lambda_name(def),
+                expected,
+                arg_count
+            )))
+        }
+        FunctionArity::AtLeast(expected) => {
+            if arg_count >= expected {
+                return Ok(());
+            }
+
+            Err(RuntimeError::new(format!(
+                "{} takes at least {} arguments, but {} were given",
+                lambda_name(def),
+                expected,
+                arg_count
+            )))
+        }
+        FunctionArity::Between(min, max) => {
+            if arg_count >= min && arg_count <= max {
+                return Ok(());
+            }
+
+            Err(RuntimeError::new(format!(
+                "{} takes between {} and {} arguments, but {} were given",
+                lambda_name(def),
+                min,
+                max,
+                arg_count
+            )))
         }
     }
 }
@@ -3223,5 +3109,114 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result, Value::Bool(false));
+    }
+
+    /// What [`fill_template`] makes of `template` with `arguments` for its `{}`s.
+    fn filled(template: &str, arguments: &[&str]) -> String {
+        let mut rest = arguments.iter();
+        let mut draft = Draft::new();
+
+        fill_template(template, &mut draft, |draft| {
+            if let Some(argument) = rest.next() {
+                draft.push_str(argument);
+            }
+        });
+
+        draft.as_str().to_owned()
+    }
+
+    #[test]
+    fn a_template_is_filled_the_way_the_formatting_crate_fills_it() {
+        use dyn_fmt::AsStrFormatExt;
+
+        // Every template of up to eight of these characters: the braces, and characters
+        // of one byte and of several.
+        let characters = ["{", "}", "a", "é"];
+        let mut templates = vec![String::new()];
+        let mut longest = templates.clone();
+
+        for _ in 0..8 {
+            longest = longest
+                .iter()
+                .flat_map(|template| characters.map(|character| format!("{template}{character}")))
+                .collect();
+            templates.extend(longest.iter().cloned());
+        }
+        assert_eq!(templates.len(), 87_381);
+
+        let mut filled_in = 0;
+        for template in &templates {
+            for arguments in [
+                &[][..],
+                &["1"],
+                &["1", "", "22"],
+                &["{}", "}", "{", "é", "x"],
+            ] {
+                let expected = template.format(arguments);
+
+                assert_eq!(
+                    filled(template, arguments),
+                    expected,
+                    "{template:?} with {arguments:?}"
+                );
+                filled_in += usize::from(expected.len() != template.len());
+            }
+        }
+
+        // Most templates are not what they come to.
+        assert!(filled_in > 300_000, "{filled_in} templates");
+    }
+
+    #[test]
+    fn a_template_is_filled_with_one_argument_for_each_pair_of_braces() {
+        for (template, arguments, expected) in [
+            ("", &["1"][..], ""),
+            ("plain", &["1"], "plain"),
+            ("{}", &["1"], "1"),
+            ("{}", &[], ""),
+            ("{} and {}", &["1", "2"], "1 and 2"),
+            ("{} and {}", &["1"], "1 and "),
+            ("{} and {}", &["1", "2", "3"], "1 and 2"),
+            ("{}{}{}", &["1", "2", "3"], "123"),
+            // A brace that opens no pair goes, and what follows it stays as it is.
+            ("{{}}{}", &["1", "2"], "{}1"),
+            ("{{{}}}x{y}", &["1", "2", "3"], "{1}xy"),
+            ("{{{}}}x{{}", &["1", "2", "3"], "{1}x{"),
+            ("{{}}x{{}{}}y{", &["1", "2", "3"], "{}x{{}y"),
+            ("{", &["1"], ""),
+            ("}", &["1"], ""),
+            ("a{", &["1"], "a"),
+            ("a}", &["1"], "a"),
+            ("}{}", &["1"], "{"),
+            ("{x}", &["1"], "x"),
+            ("{ }", &["1"], " "),
+            ("}}{}", &["1"], "}1"),
+            ("é{}é{é}日本{}", &["ü", "2"], "éüéé日本2"),
+        ] {
+            assert_eq!(
+                filled(template, arguments),
+                expected,
+                "{template:?} with {arguments:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_template_is_filled_beyond_the_room_of_a_draft() {
+        use dyn_fmt::AsStrFormatExt;
+
+        let piece = "0123456789 {} é ";
+        let argument = "-".repeat(50);
+
+        for pieces in [1, 5, 7, 8, 20, 400] {
+            let template = piece.repeat(pieces);
+            let arguments = vec![argument.as_str(); pieces / 2 + 1];
+
+            assert_eq!(
+                filled(&template, &arguments),
+                template.format(&arguments),
+                "{pieces} pieces"
+            );
+        }
     }
 }
