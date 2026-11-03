@@ -17,10 +17,6 @@
 //! room for one the first time a thread uses it, with the allocator, which would then call
 //! itself until the stack ran out. The `blots_pools` configuration says that the pools can be
 //! used.
-//!
-//! The binary has an entry point of its own on Linux with glibc, on the architectures whose
-//! stack pointer it knows how to find in a signal handler. The `blots_entry` configuration says
-//! so.
 
 use std::env;
 use std::ffi::OsString;
@@ -32,12 +28,10 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=RUSTC_LINKER");
     println!("cargo:rustc-check-cfg=cfg(blots_pools)");
-    println!("cargo:rustc-check-cfg=cfg(blots_entry)");
 
     let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let vendor = env::var("CARGO_CFG_TARGET_VENDOR").unwrap_or_default();
     let libc = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
-    let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
 
     if os == "linux"
         && libc == "gnu"
@@ -48,10 +42,6 @@ fn main() {
 
     if has_native_thread_locals(&os, &vendor, &libc) {
         println!("cargo:rustc-cfg=blots_pools");
-    }
-
-    if os == "linux" && libc == "gnu" && (arch == "x86_64" || arch == "aarch64") {
-        println!("cargo:rustc-cfg=blots_entry");
     }
 }
 

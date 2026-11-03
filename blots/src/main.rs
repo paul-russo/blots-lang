@@ -1,11 +1,7 @@
-#![cfg_attr(all(not(test), blots_entry), no_main)]
-
 #[cfg(blots_pools)]
 mod allocator;
 mod cli;
 mod commands;
-#[cfg(all(not(test), blots_entry))]
-mod entry;
 mod highlighter;
 
 use blots_core::ast::{Expr, Spanned};
