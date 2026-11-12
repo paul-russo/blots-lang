@@ -1,0 +1,2 @@
+points = map(range(400000), i => { x: i, y: i * 2, z: i % 7 })
+print(reduce(points, (acc, p) => acc + p.x + p.y * p.z, 0))

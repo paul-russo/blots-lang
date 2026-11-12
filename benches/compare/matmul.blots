@@ -1,0 +1,5 @@
+n = 160
+a = map(range(n), i => map(range(n), j => i + j))
+b = map(range(n), i => map(range(n), j => i - j))
+c = map(range(n), i => map(range(n), j => reduce(range(n), (acc, k) => acc + a[i][k] * b[k][j], 0)))
+print(sum(map(c, row => sum(row))))

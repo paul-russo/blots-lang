@@ -1,0 +1,3 @@
+xs = map(range(400000), i => (i * 7919 + 13) % 100003)
+sorted = sort(xs)
+print(sorted[0] + sorted[200000] + sorted[399999])

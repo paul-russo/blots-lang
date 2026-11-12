@@ -1,0 +1,703 @@
+//! The complete implementation of every instruction, one instruction at a time.
+//!
+//! The instruction loop in [`super::run`] only covers the common case of each instruction.
+//! Everything else comes through [`Vm::step`]: operands of other types (broadcasting, strings,
+//! every error), calls that need more than a frame record, allocation, name lookups. Nothing
+//! here assumes that the loop tried its own path first, so any instruction can be executed
+//! this way.
+
+use super::{
+    Builder, MAX_CALL_DEPTH, UNBOUND, Vm, depth_exceeded, is_of_type, is_unbound, take_apart,
+};
+use crate::{
+    ast::BinaryOp,
+    bytecode::{
+        Apart, EntryPart, Instr, NOT_OF_TYPE, Op, RECIPROCAL, RemainderTest, register_index,
+    },
+    error::RuntimeError,
+    heap::HeapPointer,
+    values::Value,
+};
+
+/// What the instruction loop does after an instruction it handed over.
+pub(super) enum Flow {
+    /// Carry on with the innermost frame, whichever that is now.
+    Continue,
+    /// The frame the loop was entered through returned this value.
+    Finished(Value),
+}
+
+/// The operator applied by a binary operator instruction, in any of its forms.
+fn operator_of(op: Op) -> BinaryOp {
+    match op {
+        Op::Add | Op::AddK | Op::KAdd => BinaryOp::Add,
+        Op::Sub | Op::SubK | Op::KSub => BinaryOp::Subtract,
+        Op::Mul | Op::MulK | Op::KMul => BinaryOp::Multiply,
+        Op::Div | Op::DivK | Op::KDiv => BinaryOp::Divide,
+        Op::Mod | Op::ModK | Op::KMod => BinaryOp::Modulo,
+        Op::Pow | Op::PowK | Op::KPow => BinaryOp::Power,
+        Op::Eq | Op::EqK | Op::JmpNotEq | Op::JmpNotEqK | Op::EqNull | Op::JmpNotEqNull => {
+            BinaryOp::Equal
+        }
+        Op::Ne | Op::NeK | Op::JmpNotNe | Op::JmpNotNeK | Op::NeNull | Op::JmpNotNeNull => {
+            BinaryOp::NotEqual
+        }
+        Op::Lt | Op::LtK | Op::JmpNotLt | Op::JmpNotLtK => BinaryOp::Less,
+        Op::Le | Op::LeK | Op::JmpNotLe | Op::JmpNotLeK => BinaryOp::LessEq,
+        Op::Gt | Op::GtK | Op::JmpNotGt | Op::JmpNotGtK => BinaryOp::Greater,
+        Op::Ge | Op::GeK | Op::JmpNotGe | Op::JmpNotGeK => BinaryOp::GreaterEq,
+        Op::DotEq => BinaryOp::DotEqual,
+        Op::DotNe => BinaryOp::DotNotEqual,
+        Op::DotLt => BinaryOp::DotLess,
+        Op::DotLe => BinaryOp::DotLessEq,
+        Op::DotGt => BinaryOp::DotGreater,
+        Op::DotGe => BinaryOp::DotGreaterEq,
+        Op::And => BinaryOp::And,
+        Op::NaturalAnd => BinaryOp::NaturalAnd,
+        Op::Or => BinaryOp::Or,
+        Op::NaturalOr => BinaryOp::NaturalOr,
+        Op::Via => BinaryOp::Via,
+        Op::Into => BinaryOp::Into,
+        Op::Where => BinaryOp::Where,
+        Op::Coalesce => BinaryOp::Coalesce,
+        _ => unreachable!("not a binary operator instruction"),
+    }
+}
+
+impl Vm {
+    /// The number operand in the code word after the instruction being executed.
+    #[inline(always)]
+    fn operand(&self) -> f64 {
+        f64::from_bits(self.code_word(0))
+    }
+
+    /// Move the saved `ip` of the innermost frame by `offset` code words. This comes last in
+    /// an instruction: until then the saved `ip` identifies the instruction, for error spans
+    /// and for the visibility of variables.
+    #[inline(always)]
+    fn skip(&mut self, offset: isize) {
+        let frame = self.top_mut();
+        frame.ip = frame.ip.wrapping_offset(offset);
+    }
+
+    /// Execute `instr`, which adds two values, when both of them are strings: they are joined
+    /// right in the heap. Whether they were is what comes back.
+    #[inline(never)]
+    pub(super) fn join(&mut self, instr: Instr) -> Result<bool, RuntimeError> {
+        let (Value::String(first), Value::String(second)) = (self.reg(instr.b), self.reg(instr.c))
+        else {
+            return Ok(false);
+        };
+
+        let value = self.heap.borrow_mut().join_strings(first, second)?;
+        self.set_reg(instr.a, value);
+
+        Ok(true)
+    }
+
+    /// Execute `instr`, which indexes a value, when that value is a string and the index is a
+    /// number: the character there is a string of its own. Whether it was one is what comes
+    /// back. Lists and records are indexed far more often, which is what `cold` says.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn character(&mut self, instr: Instr) -> Result<bool, RuntimeError> {
+        let (string @ Value::String(_), index @ Value::Number(_)) =
+            (self.reg(instr.b), self.reg(instr.c))
+        else {
+            return Ok(false);
+        };
+
+        let value = self.index(string, index)?;
+        self.set_reg(instr.a, value);
+
+        Ok(true)
+    }
+
+    /// Execute `instr`, the instruction right before the saved `ip` of the innermost frame.
+    /// An error is the one that the instruction raised: the frames of the current `run` are
+    /// all still there, for [`Vm::abandon`] to go down.
+    ///
+    /// The state of the instruction loop has to be published: `Vm::top` is the frame
+    /// executing `instr`, and its saved `ip` points at the code word after it.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn step(&mut self, instr: Instr) -> Result<Flow, RuntimeError> {
+        let (a, b, c) = (instr.a, instr.b, instr.c);
+
+        match instr.op {
+            Op::Move => self.set_reg(a, self.reg(b)),
+            Op::LoadK => {
+                let value = self.top().proto().consts[instr.bx()];
+                self.set_reg(a, value);
+            }
+            Op::LoadNum => {
+                let number = self.operand();
+                self.set_reg(a, Value::Number(number));
+                self.skip(1);
+            }
+            Op::LoadStr => {
+                let value = self.load_string(instr.bx());
+                self.set_reg(a, value);
+            }
+            Op::LoadUnbound => self.set_reg(a, UNBOUND),
+
+            Op::GetName => {
+                let value = self.get_name(instr.bx(), instr.x == 1)?;
+                self.set_reg(a, value);
+            }
+            Op::EnsureGlobal => {
+                if is_unbound(&self.reg(a)) {
+                    let value = self.get_global(instr.bx())?;
+                    self.set_reg(a, value);
+                }
+            }
+            Op::EnsureName => {
+                if is_unbound(&self.reg(a)) {
+                    let value = self.get_name(instr.bx(), false)?;
+                    self.set_reg(a, value);
+                }
+            }
+            Op::GetCapture => {
+                let value = self.capture(b as usize, c as usize, instr.x == 1)?;
+                self.set_reg(a, value);
+            }
+            Op::GetCaptureRef => {
+                let (slot, _) = self.top().proto().slot_refs[instr.bx()];
+                let value = self.capture(slot as usize, instr.bx(), instr.x == 1)?;
+                self.set_reg(a, value);
+            }
+            Op::GetEnvParam => {
+                let value = self.env_slot(instr.bx(), true)?;
+                self.set_reg(a, value);
+            }
+            Op::GetEnvCapture => {
+                let value = self.env_slot(instr.bx(), false)?;
+                self.set_reg(a, value);
+            }
+            Op::GetInput => {
+                let value = self.input(instr.bx())?;
+                self.set_reg(a, value);
+            }
+
+            Op::Add
+            | Op::Sub
+            | Op::Mul
+            | Op::Div
+            | Op::Mod
+            | Op::Pow
+            | Op::Eq
+            | Op::Ne
+            | Op::Lt
+            | Op::Le
+            | Op::Gt
+            | Op::Ge
+            | Op::DotEq
+            | Op::DotNe
+            | Op::DotLt
+            | Op::DotLe
+            | Op::DotGt
+            | Op::DotGe
+            | Op::And
+            | Op::NaturalAnd
+            | Op::Or
+            | Op::NaturalOr
+            | Op::Via
+            | Op::Into
+            | Op::Where => {
+                let (lhs, rhs) = (self.reg(b), self.reg(c));
+
+                if instr.op == Op::Add && self.join(instr)? {
+                    return Ok(Flow::Continue);
+                }
+
+                if (lhs.is_list() || rhs.is_list()) && self.broadcast(instr) {
+                    return Ok(Flow::Continue);
+                }
+
+                let value = self.binary_slow(operator_of(instr.op), lhs, rhs)?;
+                self.set_reg(a, value);
+            }
+            Op::Coalesce => {
+                let (lhs, rhs) = (self.reg(b), self.reg(c));
+                let value = match (lhs, rhs) {
+                    (Value::List(_), _) | (_, Value::List(_)) => {
+                        self.binary_slow(BinaryOp::Coalesce, lhs, rhs)?
+                    }
+                    (Value::Null, _) => rhs,
+                    _ => lhs,
+                };
+                self.set_reg(a, value);
+            }
+
+            Op::AddK
+            | Op::SubK
+            | Op::MulK
+            | Op::DivK
+            | Op::ModK
+            | Op::PowK
+            | Op::EqK
+            | Op::NeK
+            | Op::LtK
+            | Op::LeK
+            | Op::GtK
+            | Op::GeK => {
+                let lhs = self.reg(b);
+
+                if lhs.is_list() && self.broadcast(instr) {
+                    return Ok(Flow::Continue);
+                }
+
+                // A multiplication that stands for a division by a power of two is that
+                // division for everything but numbers.
+                let (operator, operand) = match instr.op {
+                    Op::MulK if instr.x & RECIPROCAL != 0 => {
+                        (BinaryOp::Divide, 1.0 / self.operand())
+                    }
+                    op => (operator_of(op), self.operand()),
+                };
+
+                let value = self.binary_slow(operator, lhs, Value::Number(operand))?;
+                self.set_reg(a, value);
+                self.skip(1);
+            }
+            Op::KAdd | Op::KSub | Op::KMul | Op::KDiv | Op::KMod | Op::KPow => {
+                let rhs = self.reg(b);
+
+                if rhs.is_list() && self.broadcast(instr) {
+                    return Ok(Flow::Continue);
+                }
+
+                let lhs = Value::Number(self.operand());
+                let value = self.binary_slow(operator_of(instr.op), lhs, rhs)?;
+                self.set_reg(a, value);
+                self.skip(1);
+            }
+
+            Op::JmpNotEq
+            | Op::JmpNotNe
+            | Op::JmpNotLt
+            | Op::JmpNotLe
+            | Op::JmpNotGt
+            | Op::JmpNotGe => {
+                let holds = self.compare_slow(operator_of(instr.op), self.reg(b), self.reg(c))?;
+
+                // The comparison is followed by the jump to take when it does not hold.
+                let jump = Instr::decode(self.code_word(0));
+                self.skip(if holds { 1 } else { 1 + jump.sbx() });
+            }
+            Op::JmpNotEqK
+            | Op::JmpNotNeK
+            | Op::JmpNotLtK
+            | Op::JmpNotLeK
+            | Op::JmpNotGtK
+            | Op::JmpNotGeK => {
+                let rhs = Value::Number(self.operand());
+                let holds = self.compare_slow(operator_of(instr.op), self.reg(a), rhs)?;
+                self.skip(if holds { 1 } else { instr.sbx() });
+            }
+            Op::JmpNotRemEq | Op::JmpNotRemNe => {
+                let test = RemainderTest::of_words(self.code_word(0), self.code_word(1));
+                let (divisor, remainder) = test.operands();
+                let comparison = match instr.op {
+                    Op::JmpNotRemEq => BinaryOp::Equal,
+                    _ => BinaryOp::NotEqual,
+                };
+
+                // The remainder is taken at the instruction, and it is compared one code word
+                // further on: that is where an error of each of the two is located.
+                let value =
+                    self.binary_slow(BinaryOp::Modulo, self.reg(a), Value::Number(divisor))?;
+                self.skip(1);
+                let holds = self.compare_slow(comparison, value, Value::Number(remainder))?;
+                self.skip(if holds { 1 } else { instr.sbx() - 1 });
+            }
+
+            Op::EqNull | Op::NeNull => {
+                let operand = self.reg(b);
+                let value = match operand {
+                    Value::List(_) => self.null_comparison(instr, operand)?,
+                    _ => {
+                        let is_null = matches!(operand, Value::Null);
+                        Value::Bool(is_null == (instr.op == Op::EqNull))
+                    }
+                };
+                self.set_reg(a, value);
+            }
+            Op::JmpNotEqNull | Op::JmpNotNeNull => {
+                let operand = self.reg(a);
+                let holds = match operand {
+                    Value::List(_) => self.null_comparison(instr, operand)?.as_bool()?,
+                    _ => matches!(operand, Value::Null) == (instr.op == Op::JmpNotEqNull),
+                };
+
+                if !holds {
+                    self.skip(instr.sbx());
+                }
+            }
+
+            Op::Neg => {
+                let number = self.reg(b).as_number()?;
+                self.set_reg(a, Value::Number(-number));
+            }
+            Op::Not => {
+                let boolean = self.reg(b).as_bool()?;
+                self.set_reg(a, Value::Bool(!boolean));
+            }
+            Op::Factorial => {
+                let value = self.factorial(self.reg(b))?;
+                self.set_reg(a, value);
+            }
+
+            Op::Jmp => self.skip(instr.sbx()),
+            Op::JmpIfFalse => {
+                if !self.reg(a).as_bool()? {
+                    self.skip(instr.sbx());
+                }
+            }
+
+            Op::Call => self.call_slow(register_index(a), b as usize, c)?,
+            Op::CallBuiltIn => self.call_named_built_in(instr)?,
+            Op::Sqrt
+            | Op::Sin
+            | Op::Cos
+            | Op::Tan
+            | Op::Asin
+            | Op::Acos
+            | Op::Atan
+            | Op::Log
+            | Op::Log10
+            | Op::Exp
+            | Op::Abs
+            | Op::Floor
+            | Op::Ceil
+            | Op::Round
+            | Op::Trunc
+            | Op::Len
+            | Op::Min
+            | Op::Max => {
+                let Some((built_in, argc)) = instr.op.built_in_call() else {
+                    unreachable!("the instruction calls a built-in function");
+                };
+
+                // Operand `c` only names a register where there is a second argument.
+                let args = match argc {
+                    1 => [self.reg(b), Value::Null],
+                    _ => [self.reg(b), self.reg(c)],
+                };
+                let value = self.call_plain_built_in(built_in, &args[..argc])?;
+                self.set_reg(a, value);
+            }
+            Op::CallList => {
+                let argc = self.place_list_args(register_index(a));
+                self.call_slow(register_index(a), argc, c)?;
+            }
+            Op::CallSelf => {
+                // The function calls itself through its own name: the value the frame was
+                // called through is the callee.
+                let callee = self.this_value(self.top());
+                self.set_reg(a, callee);
+                self.call_slow(register_index(a), instr.x as usize, c)?;
+            }
+            Op::TailSelf | Op::TailSelf0 | Op::TailSelf1 => {
+                // A tail call that cannot replace the frame is an ordinary call, whose result
+                // the following instruction returns. Of its arguments, only those that were
+                // waiting to be moved into their parameters are where a call wants them; the
+                // parameters themselves hold the others.
+                let func = register_index(c);
+                let first = register_index(a) - func - 1;
+                let waiting = first..first + instr.x as usize;
+                let frame = *self.top();
+                let base = self.slot_index(frame.base);
+                let argc = frame.proto().params.len();
+
+                for index in (0..argc).filter(|index| !waiting.contains(index)) {
+                    self.stack[base + func + 1 + index] = self.stack[base + index];
+                }
+
+                self.set_reg(c, self.this_value(&frame));
+                self.call_slow(func, argc, c)?;
+            }
+            Op::Return => {
+                let value = self.reg(a);
+                if self.finish_frame() {
+                    return Ok(Flow::Finished(value));
+                }
+
+                // The result goes where the call instruction of the caller wants it, which is
+                // right before the caller's saved `ip`.
+                let target = Instr::decode(self.code_word(-1)).c;
+                self.set_reg(target, value);
+            }
+
+            Op::Closure => {
+                let value = self.make_closure(instr.bx())?;
+                self.set_reg(a, value);
+            }
+
+            Op::NewList => {
+                let value = self.new_list(b, c as usize);
+                self.set_reg(a, value);
+            }
+            Op::NewListSpread => {
+                let value = self.new_list_spread(b, c as usize)?;
+                self.set_reg(a, value);
+            }
+            Op::ListBegin => {
+                let source = self.stack[self.register_slot(a) + 1];
+                self.list_begin(instr.x, source);
+            }
+            Op::ListAppend => self.list_append(a, b as usize)?,
+            Op::ListPush => {
+                let value = self.reg(a);
+                let Some(Builder::List(list)) = self.builders.last_mut() else {
+                    unreachable!("no list is being built");
+                };
+                list.push(value);
+            }
+            Op::ListEnd => {
+                let value = self.list_end();
+                self.set_reg(a, value);
+            }
+
+            Op::NewRecord => {
+                let value = self.new_record(c as usize, b);
+                self.set_reg(a, value);
+            }
+            Op::UpdateRecord => {
+                let value = self.update_record(c as usize, b)?;
+                self.set_reg(a, value);
+            }
+            Op::RecordBegin => self.record_begin(instr.bx()),
+            Op::RecordSet => self.record_set(instr.bx(), self.reg(a)),
+            Op::RecordKey => self.record_key(self.reg(a))?,
+            Op::RecordValue => self.record_value(self.reg(a)),
+            Op::RecordSpread => self.record_spread(self.reg(a))?,
+            Op::RecordEnd => {
+                let value = self.record_end();
+                self.set_reg(a, value);
+            }
+
+            Op::Index => {
+                let value = self.index(self.reg(b), self.reg(c))?;
+                self.set_reg(a, value);
+            }
+            Op::GetField => {
+                let site = c as usize | (instr.x as usize) << 16;
+                let value = self.field(self.reg(b), site)?;
+                self.set_reg(a, value);
+            }
+            Op::Spread => {
+                let value = self.spread(self.reg(b))?;
+                self.set_reg(a, value);
+            }
+
+            Op::Raise => return Err(self.raise(instr.bx())),
+            Op::CheckUnbound => self.check_unbound(instr.bx())?,
+            Op::NameLambda => {
+                if let Value::Lambda(pointer) = self.reg(a) {
+                    self.name_lambda(pointer, instr.bx(), instr.x == 1);
+                }
+            }
+            Op::SetGlobal => self.set_global(instr.bx(), self.reg(a)),
+
+            Op::AddDepth => {
+                let frame = self.top_mut();
+                frame.meta = frame.meta.wrapping_add(instr.sbx() as u64);
+            }
+            Op::CallbackDepth => {
+                if self.top().depth() + b as usize > MAX_CALL_DEPTH {
+                    return Err(depth_exceeded("anonymous function"));
+                }
+            }
+
+            Op::RangePrep => {
+                let (first, count) = self.range_bounds(b, c as usize)?;
+                let slot = self.register_slot(a);
+
+                self.set_state_at(slot, 0);
+                self.set_state_at(slot + 1, count);
+                self.stack[slot + 2] = Value::Number(first);
+            }
+            Op::ForRange => {
+                if !self.range_next(a, instr.x == 1) {
+                    self.skip(instr.sbx());
+                }
+            }
+            Op::ForRangeNext => {
+                if self.range_next(a, instr.x == 1) {
+                    self.skip(instr.sbx());
+                }
+            }
+            Op::IterPrep => {
+                let slot = self.register_slot(a);
+                let (first, end) = self.iter_bounds(self.stack[slot + 1])?;
+
+                self.set_state_at(slot, first as u64);
+                self.set_state_at(slot + 4, end as u64);
+            }
+            Op::IterList => {
+                let slot = self.register_slot(a);
+
+                match self.list_bounds(self.stack[slot + 1]) {
+                    Some((first, end)) => {
+                        self.set_state_at(slot, first as u64);
+                        self.set_state_at(slot + 4, end as u64);
+                    }
+                    None => self.skip(instr.sbx()),
+                }
+            }
+            Op::ForList => {
+                if !self.list_next(a, instr.x == 1, true) {
+                    self.skip(instr.sbx());
+                }
+            }
+            Op::ForListNext => {
+                if self.list_next(a, instr.x == 1, false) {
+                    self.skip(instr.sbx());
+                }
+            }
+            Op::IterRecord => {
+                let slot = self.register_slot(a);
+                self.check_record(self.stack[slot + 1])?;
+                self.set_state_at(slot, 0);
+            }
+            Op::ForRecord => {
+                if !self.next_entry(a, instr.x) {
+                    self.skip(instr.sbx());
+                }
+            }
+            Op::ForRecordNext => {
+                if self.next_entry(a, instr.x) {
+                    self.skip(instr.sbx());
+                }
+            }
+            Op::JmpNotFinite => {
+                if !matches!(self.reg(a), Value::Number(number) if number.is_finite()) {
+                    self.skip(instr.sbx());
+                }
+            }
+            Op::JmpNotApart => {
+                let apart = Apart::decode(self.code_word(0));
+                let (first, value, frame) =
+                    (self.register_slot(apart.first), self.reg(a), *self.top());
+                let heap = self.heap.borrow();
+                let stack = &mut self.stack;
+                let put = |offset: usize, part| stack[first + offset] = part;
+
+                let taken = take_apart(heap.slots(), frame.proto(), value, instr.x, apart, put);
+                drop(heap);
+                self.skip(if taken { 1 } else { instr.sbx() });
+            }
+            Op::IsType => {
+                self.typeof_depth()?;
+                let holds = is_of_type(&self.reg(b), instr.x) != (c == 1);
+                self.set_reg(a, Value::Bool(holds));
+            }
+            Op::JmpNotType => {
+                self.typeof_depth()?;
+                let negated = instr.x & NOT_OF_TYPE != 0;
+                if is_of_type(&self.reg(a), instr.x & !NOT_OF_TYPE) == negated {
+                    self.skip(instr.sbx());
+                }
+            }
+            Op::LoadEntry => {
+                let value = self.load_entry(b, EntryPart::of(instr.x));
+                self.set_reg(a, value);
+            }
+        }
+
+        Ok(Flow::Continue)
+    }
+
+    /// Read capture slot `slot` of the function the innermost frame is running, which is
+    /// slot reference `reference` of its proto. A slot that was unbound when the closure was
+    /// created is resolved late (see `Vm::capture_fallback`).
+    fn capture(
+        &mut self,
+        slot: usize,
+        reference: usize,
+        shadowable: bool,
+    ) -> Result<Value, RuntimeError> {
+        let bound = self
+            .top()
+            .def()
+            .and_then(|def| def.scope.slot_ref(slot).copied());
+
+        match bound {
+            Some(value) => Ok(value),
+            None => self.capture_fallback(reference, shadowable),
+        }
+    }
+
+    /// Advance the inlined range loop whose state starts at the register that operand `state`
+    /// names, the way `super::range_next` does.
+    fn range_next(&mut self, state: u16, with_index: bool) -> bool {
+        let slot = self.register_slot(state);
+        let next = self.state_at(slot);
+        if next >= self.state_at(slot + 1) {
+            return false;
+        }
+
+        let Value::Number(first) = self.stack[slot + 2] else {
+            unreachable!("a range loop keeps its first element in a number");
+        };
+
+        let index = next as i64 as f64;
+        self.stack[slot + 3] = Value::Number(first + index);
+        if with_index {
+            self.stack[slot + 4] = Value::Number(index);
+        }
+        self.set_state_at(slot, next + 1);
+
+        true
+    }
+
+    /// Advance the inlined list loop whose state starts at the register that operand `state`
+    /// names, the way `super::list_next` does. The element at the cursor is looked up in the
+    /// list the loop goes through, which the register after the first one holds.
+    fn list_next(&mut self, state: u16, with_index: bool, first: bool) -> bool {
+        let slot = self.register_slot(state);
+        let cursor = self.state_at(slot);
+        if cursor == self.state_at(slot + 4) {
+            return false;
+        }
+
+        let element = {
+            let heap = self.heap.borrow();
+            let items = self.stack[slot + 1]
+                .as_list_pointer()
+                .and_then(|pointer| pointer.reify(&heap).as_list())
+                .expect("a list loop goes through a list");
+            let position =
+                (cursor as usize).wrapping_sub(items.as_ptr().addr()) / size_of::<Value>();
+
+            *items
+                .get(position)
+                .expect("the cursor of a list loop is at an element of the list")
+        };
+
+        self.stack[slot + 2] = element;
+        if with_index {
+            let index = match (first, self.stack[slot + 3]) {
+                (true, _) => 0.0,
+                (false, Value::Number(index)) => index + 1.0,
+                _ => unreachable!("a list loop counts its elements in a number"),
+            };
+            self.stack[slot + 3] = Value::Number(index);
+        }
+        self.set_state_at(slot, cursor + size_of::<Value>() as u64);
+
+        true
+    }
+
+    /// Compare the list `operand` against `null` with the (in)equality operator of `instr`,
+    /// which broadcasts over the elements of the list.
+    fn null_comparison(&mut self, instr: Instr, operand: Value) -> Result<Value, RuntimeError> {
+        let (lhs, rhs) = match instr.x {
+            1 => (Value::Null, operand),
+            _ => (operand, Value::Null),
+        };
+
+        self.binary_slow(operator_of(instr.op), lhs, rhs)
+    }
+}

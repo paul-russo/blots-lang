@@ -332,6 +332,45 @@ mod evaluate_tests {
     }
 
     #[wasm_bindgen_test]
+    fn test_evaluate_keeps_statement_values_while_a_later_statement_runs() {
+        // The last statement leaves enough behind for the heap to be compacted while it
+        // runs. That gives up what the first statement left behind, and so moves what the
+        // two after it evaluated to, which no name is bound to.
+        let source = [
+            "sum(map(range(1000), i => len([i])))",
+            "[[1, 2], \"three\"]",
+            "{a: [4], b: \"five\"}",
+            "kept = [\"six\", [7]]",
+            "sum(map(range(50000), i => len([i, [i]])))",
+        ]
+        .join("\n");
+        let inputs = serde_wasm_bindgen::to_value(&serde_json::json!({})).unwrap();
+
+        let result = evaluate(&source, inputs).unwrap();
+        let result_obj: serde_json::Value = serde_wasm_bindgen::from_value(result).unwrap();
+        let values = &result_obj["result"]["values"];
+
+        assert_eq!(values["1-1__1-37"]["Number"], serde_json::json!(1000));
+        assert_eq!(
+            values["2-1__2-18"],
+            serde_json::json!({
+                "List": [{"List": [{"Number": 1}, {"Number": 2}]}, {"String": "three"}]
+            })
+        );
+        assert_eq!(
+            values["3-1__3-20"],
+            serde_json::json!({
+                "Record": {"a": {"List": [{"Number": 4}]}, "b": {"String": "five"}}
+            })
+        );
+        assert_eq!(values["5-1__5-43"]["Number"], serde_json::json!(100000));
+        assert_eq!(
+            result_obj["result"]["bindings"]["kept"],
+            serde_json::json!({"List": [{"String": "six"}, {"List": [{"Number": 7}]}]})
+        );
+    }
+
+    #[wasm_bindgen_test]
     fn test_evaluate_invalid_syntax() {
         let source = "output result = 1 +";
         let inputs = serde_wasm_bindgen::to_value(&serde_json::json!({})).unwrap();
