@@ -15,6 +15,7 @@ pub mod formatter;
 pub mod functions;
 pub mod heap;
 pub mod intern;
+pub mod json;
 pub mod list;
 pub mod parser;
 pub mod precedence;
