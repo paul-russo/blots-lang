@@ -313,6 +313,17 @@ impl Keys {
             .is_some_and(|own| is_long_key(own.as_bytes(), key))
     }
 
+    /// Whether the keys of the table are just `keys`, whose heads are `heads`, in that order.
+    fn has_just<'k>(&self, keys: impl Iterator<Item = &'k str>, heads: &[u64]) -> bool {
+        self.filled.get() == heads.len()
+            && keys.zip(heads).enumerate().all(|(position, (key, head))| {
+                // A key of at most as many bytes as its head holds is the only one with
+                // that head. A longer one is compared with the key that has the head.
+                self.heads[position].get() == *head
+                    && (key.len() <= HEAD_BYTES || self.has_at(position, key.as_bytes()))
+            })
+    }
+
     /// Add `key`, whose head is `head` and which the table has room for and does not have
     /// yet.
     fn push(&self, key: Key, head: u64) {
@@ -419,6 +430,61 @@ impl Drop for Keys {
 impl fmt::Debug for Keys {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_list().entries(self.first(self.len())).finish()
+    }
+}
+
+/// The tables of records that are made from whole lists of keys which come from outside of
+/// a program, like the objects of a document: one table for every list of keys, which all
+/// the records with those keys in that order share.
+///
+/// A record that is built one key at a time shares the tables of the first one like it only
+/// while those tables are alive and remembered (see [`Keys::followed_by`]), which records
+/// of more than a few keys, and the records of a document with many kinds of objects,
+/// cannot count on. Here a list of keys finds its table by the heads of the keys, however
+/// many lists there are. The tables are not canonical: they are gone with their records.
+#[derive(Default)]
+pub struct Shapes {
+    /// The table that was made last for a list of keys whose heads come to a hash.
+    tables: HashMap<usize, Rc<Keys>, BuildHasherDefault<AddressHasher>>,
+
+    /// The heads of the keys of the list that is being looked up.
+    heads: Vec<u64>,
+}
+
+impl Shapes {
+    /// The table that has just `keys`, which are distinct, in that order. It is the table
+    /// that an equal list of keys got before, unless another list with the same hash got
+    /// one in between.
+    pub fn table_of<'k>(&mut self, keys: impl Iterator<Item = &'k str> + Clone) -> Rc<Keys> {
+        self.heads.clear();
+        self.heads
+            .extend(keys.clone().map(|key| head_of(key.as_bytes())));
+
+        if self.heads.is_empty() {
+            return Keys::empty();
+        }
+
+        let hash = self
+            .heads
+            .iter()
+            .fold(self.heads.len() as u64, |hash, head| mixed(hash ^ head))
+            as usize;
+
+        if let Some(table) = self.tables.get(&hash)
+            && table.has_just(keys.clone(), &self.heads)
+        {
+            return Rc::clone(table);
+        }
+
+        let table = Keys::with_room(self.heads.len(), false);
+        for (key, head) in keys.zip(&self.heads) {
+            table.push(Key::from(key), *head);
+        }
+
+        let table = Rc::new(table);
+        self.tables.insert(hash, Rc::clone(&table));
+
+        table
     }
 }
 
@@ -1627,6 +1693,40 @@ mod tests {
         assert!(first.is_interned());
         assert!(Rc::ptr_eq(&Keys::empty(), &Keys::interned([].into_iter())));
         assert!(Keys::empty().is_empty());
+    }
+
+    #[test]
+    fn shapes_share_a_table_per_key_list() {
+        let mut shapes = Shapes::default();
+
+        // Keys that a head holds, keys that are longer, and enough of them for slots.
+        let all = [
+            numbered("k", 6),
+            numbered("a key that is longer than a head ", 6),
+        ]
+        .concat();
+        let all: Vec<&str> = all.iter().map(String::as_str).collect();
+
+        let first = shapes.table_of(all.iter().copied());
+        let again = shapes.table_of(all.iter().copied());
+        let shorter = shapes.table_of(all[..11].iter().copied());
+        let reordered = shapes.table_of(all.iter().rev().copied());
+
+        assert!(Rc::ptr_eq(&first, &again));
+        assert!(!Rc::ptr_eq(&first, &shorter));
+        assert!(!Rc::ptr_eq(&first, &reordered));
+        assert!(!first.is_interned());
+
+        assert_eq!(first.len(), all.len());
+        for (position, key) in all.iter().enumerate() {
+            assert_eq!(first.position(all.len(), key), Some(position));
+            assert_eq!(
+                reordered.position(all.len(), key),
+                Some(all.len() - 1 - position)
+            );
+        }
+
+        assert!(Rc::ptr_eq(&shapes.table_of([].into_iter()), &Keys::empty()));
     }
 
     #[test]
