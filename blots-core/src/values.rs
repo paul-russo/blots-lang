@@ -868,6 +868,10 @@ pub enum SerializableIterableValue {
     Record(IndexMap<String, SerializableValue>),
 }
 
+/// The key that a JSON object has a function under: the object stands for that function
+/// when what is under the key is the name of a built-in function or the source of a lambda.
+pub(crate) const FUNCTION_KEY: &str = "__blots_function";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SerializableValue {
     Number(f64),
@@ -893,19 +897,11 @@ impl SerializableValue {
             }
             serde_json::Value::Object(obj) => {
                 // Check if this is a function object
-                if let Some(func_value) = obj.get("__blots_function")
+                if let Some(func_value) = obj.get(FUNCTION_KEY)
                     && let Some(func_str) = func_value.as_str()
+                    && let Some(function) = Self::function_from_source(func_str)
                 {
-                    // Try to parse as a built-in function first (just a name)
-                    if crate::functions::BuiltInFunction::from_ident(func_str).is_some() {
-                        return SerializableValue::BuiltIn(func_str.to_string());
-                    }
-
-                    // Otherwise, parse as a lambda function
-                    // We need to parse the function source and convert it to a SerializableLambdaDef
-                    if let Ok(lambda_def) = Self::parse_function_source(func_str) {
-                        return SerializableValue::Lambda(lambda_def);
-                    }
+                    return function;
                 }
 
                 // Regular record
@@ -916,6 +912,22 @@ impl SerializableValue {
                 SerializableValue::Record(map)
             }
         }
+    }
+
+    /// The function that a JSON object stands for when it has `source` under
+    /// [`FUNCTION_KEY`], or `None` when the source is not that of a function: the object is
+    /// then a record like any other.
+    pub(crate) fn function_from_source(source: &str) -> Option<SerializableValue> {
+        // Try to parse as a built-in function first (just a name)
+        if crate::functions::BuiltInFunction::from_ident(source).is_some() {
+            return Some(SerializableValue::BuiltIn(source.to_string()));
+        }
+
+        // Otherwise, parse as a lambda function
+        // We need to parse the function source and convert it to a SerializableLambdaDef
+        Self::parse_function_source(source)
+            .ok()
+            .map(SerializableValue::Lambda)
     }
 
     /// Parse a function source string into a SerializableLambdaDef
