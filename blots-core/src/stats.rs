@@ -167,7 +167,7 @@ impl ProfilingSummary {
         if !self.calls_by_name.is_empty() {
             println!("Top functions by total time:");
             let mut sorted: Vec<_> = self.calls_by_name.iter().collect();
-            sorted.sort_by(|a, b| b.1.total_ms.partial_cmp(&a.1.total_ms).unwrap());
+            sorted.sort_by(|a, b| b.1.total_ms.total_cmp(&a.1.total_ms));
 
             for (name, stats) in sorted.iter().take(10) {
                 let var_env_pct = if stats.total_ms > 0.0 {

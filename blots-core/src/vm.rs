@@ -52,6 +52,16 @@ use std::{
 /// A call made from a body that is itself nested this deep fails.
 const MAX_CALL_DEPTH: usize = 1000;
 
+/// The most instruction loops that may run at once on the native call stack.
+#[cfg(debug_assertions)]
+const MAX_REENTRY_DEPTH: usize = 8;
+
+#[cfg(all(not(debug_assertions), target_arch = "wasm32"))]
+const MAX_REENTRY_DEPTH: usize = 32;
+
+#[cfg(all(not(debug_assertions), not(target_arch = "wasm32")))]
+const MAX_REENTRY_DEPTH: usize = 64;
+
 /// The smallest value stack worth allocating.
 const MIN_STACK: usize = 1024;
 
@@ -971,6 +981,9 @@ pub struct Vm {
     /// calling a function back.
     loops: usize,
 
+    /// Remaining execution steps before the run aborts, or `u64::MAX` when unlimited.
+    fuel: u64,
+
     /// Whether the heap may be compacted in the middle of a run (see [`Vm::compact`]).
     compacts: bool,
 
@@ -1023,6 +1036,7 @@ impl Vm {
             orphans: Vec::new(),
             run_number: NOT_RUNNING,
             loops: 0,
+            fuel: u64::MAX,
             compacts: false,
             held: Vec::new(),
             finds: Finds::default(),
@@ -1119,7 +1133,22 @@ impl Vm {
             stamp: 0,
         });
 
-        self.run()
+        if self.heap.borrow().exceeds_max_memory() {
+            if self.compacts {
+                self.compact();
+            }
+            if self.heap.borrow().exceeds_max_memory() {
+                self.finish_frame();
+                return Err(RuntimeError::new("memory limit exceeded".to_string()));
+            }
+        }
+
+        let value = self.run()?;
+        if self.heap.borrow().exceeds_max_memory() {
+            return Err(RuntimeError::new("memory limit exceeded".to_string()));
+        }
+
+        Ok(value)
     }
 
     /// [`Vm::run_chunk`] for a caller that holds on to nothing in the heap but the bindings
@@ -1155,6 +1184,15 @@ impl Vm {
         args: &[Value],
         call_depth: usize,
     ) -> Result<Value, RuntimeError> {
+        if self.loops == 0 {
+            return self.call_function_root(def, this_value, args, call_depth);
+        }
+
+        if self.fuel == 0 {
+            return Err(self.step_limit_exceeded());
+        }
+        self.fuel -= 1;
+
         // A built-in function that calls a function once for every element of a list calls
         // it the same way every time, and all but the first of those calls have nothing to
         // find out about it.
@@ -1165,6 +1203,57 @@ impl Vm {
             return self.enter_settled(proto, lambda, this_value, args, call_depth);
         }
 
+        self.call_function_unsettled(def, this_value, args, call_depth)
+    }
+
+    #[cold]
+    fn call_function_root(
+        &mut self,
+        def: &FunctionDef,
+        this_value: Value,
+        args: &[Value],
+        call_depth: usize,
+    ) -> Result<Value, RuntimeError> {
+        if self.heap.borrow().exceeds_max_memory() {
+            return Err(RuntimeError::new("memory limit exceeded".to_string()));
+        }
+
+        if self.fuel == u64::MAX {
+            self.fuel = self.heap.borrow_mut().take_fuel();
+        }
+
+        if self.fuel == 0 {
+            self.heap.borrow_mut().return_fuel(0);
+            return Err(RuntimeError::new(
+                "execution step limit exceeded".to_string(),
+            ));
+        }
+        self.fuel -= 1;
+
+        let result = if let FunctionDef::Lambda(lambda) = def
+            && call_depth <= MAX_CALL_DEPTH
+            && let Some(proto) = self.settled_code(lambda, this_value, args.len())
+        {
+            self.enter_settled(proto, lambda, this_value, args, call_depth)
+        } else {
+            self.call_function_unsettled(def, this_value, args, call_depth)
+        };
+        self.heap.borrow_mut().return_fuel(self.fuel);
+
+        if result.is_ok() && self.heap.borrow().exceeds_max_memory() {
+            return Err(RuntimeError::new("memory limit exceeded".to_string()));
+        }
+
+        result
+    }
+
+    fn call_function_unsettled(
+        &mut self,
+        def: &FunctionDef,
+        this_value: Value,
+        args: &[Value],
+        call_depth: usize,
+    ) -> Result<Value, RuntimeError> {
         def.check_arity(args.len())?;
 
         if call_depth > MAX_CALL_DEPTH {
@@ -1279,9 +1368,20 @@ impl Vm {
 
     /// Run the innermost frame, and every frame it calls, until it returns.
     fn run(&mut self) -> Result<Value, RuntimeError> {
+        if self.loops >= MAX_REENTRY_DEPTH {
+            self.finish_frame();
+            return Err(RuntimeError::new(format!(
+                "maximum callback nesting depth of {} exceeded",
+                MAX_REENTRY_DEPTH
+            )));
+        }
+
         // The frame to run is the only one when the caller is not this VM: a run starts.
         if self.has_frames(1) {
             self.run_number = next_run_number();
+            if self.fuel == u64::MAX {
+                self.fuel = self.heap.borrow_mut().take_fuel();
+            }
         }
 
         self.loops += 1;
@@ -1294,6 +1394,10 @@ impl Vm {
     #[inline(always)]
     fn leave_loop(&mut self) {
         self.loops -= 1;
+
+        if self.loops == 0 {
+            self.heap.borrow_mut().return_fuel(self.fuel);
+        }
 
         if self.has_frames(0) {
             self.retired.clear();
@@ -1590,6 +1694,18 @@ impl Vm {
             Some(span) => RuntimeError::with_span(message, span, self.source_of(frame)),
             None => RuntimeError::new(message),
         }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn step_limit_exceeded(&self) -> RuntimeError {
+        self.span_error("execution step limit exceeded".to_string())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn memory_limit_exceeded(&self) -> RuntimeError {
+        self.span_error("memory limit exceeded".to_string())
     }
 
     fn unknown_identifier(&self, name: Symbol) -> RuntimeError {
@@ -1965,6 +2081,11 @@ impl Vm {
     /// frame.
     #[inline(never)]
     fn call_slow(&mut self, a: usize, argc: usize, dst: u16) -> Result<(), RuntimeError> {
+        if self.fuel == 0 {
+            return Err(self.step_limit_exceeded());
+        }
+        self.fuel -= 1;
+
         let frame = *self.top();
         let depth = frame.depth();
         let base = self.slot_index(frame.base) + a + 1;
@@ -2380,10 +2501,13 @@ impl Vm {
     fn factorial(&self, value: Value) -> Result<Value, RuntimeError> {
         let n = value.as_number()?;
 
-        if n >= 0.0 && n == (n as u64) as f64 {
-            return Ok(Value::Number(
-                (1..(n as u64) + 1).map(|x| x as f64).product::<f64>(),
-            ));
+        if n.is_finite() && n >= 0.0 && n.fract() == 0.0 {
+            if n > 170.0 {
+                return Ok(Value::Number(f64::INFINITY));
+            }
+
+            let k = n as u64;
+            return Ok(Value::Number((1..=k).map(|x| x as f64).product()));
         }
 
         Err(self.span_error("factorial only works on non-negative integers".to_string()))

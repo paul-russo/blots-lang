@@ -208,6 +208,15 @@ pub struct Heap {
     /// which is about what the next one has to go through.
     pass_values: usize,
 
+    /// Optional upper bound on estimated heap memory (`approx_bytes`).
+    max_bytes: Option<usize>,
+
+    /// Optional upper bound on VM execution steps.
+    max_steps: Option<u64>,
+
+    /// Remaining VM execution steps when a step budget is active.
+    remaining_steps: Option<u64>,
+
     /// The number of passes so far that were not refused.
     #[cfg(test)]
     passes: usize,
@@ -221,6 +230,9 @@ impl Heap {
             compact_threshold_bytes: COMPACT_MIN_BYTES,
             compact_growth_factor: COMPACT_GROWTH_FACTOR,
             pass_values: 0,
+            max_bytes: None,
+            max_steps: None,
+            remaining_steps: None,
             #[cfg(test)]
             passes: 0,
         };
@@ -369,6 +381,48 @@ impl Heap {
         self.values.is_empty()
     }
 
+    pub fn set_max_memory(&mut self, max_bytes: Option<usize>) {
+        self.max_bytes = max_bytes;
+    }
+
+    pub fn max_memory(&self) -> Option<usize> {
+        self.max_bytes
+    }
+
+    pub fn memory_used(&self) -> usize {
+        self.approx_bytes
+    }
+
+    #[inline(always)]
+    pub(crate) fn exceeds_max_memory(&self) -> bool {
+        self.max_bytes.is_some_and(|max| self.approx_bytes > max)
+    }
+
+    pub fn set_max_steps(&mut self, max_steps: Option<u64>) {
+        self.max_steps = max_steps;
+        self.remaining_steps = max_steps;
+    }
+
+    pub fn max_steps(&self) -> Option<u64> {
+        self.max_steps
+    }
+
+    pub fn remaining_steps(&self) -> Option<u64> {
+        self.remaining_steps
+    }
+
+    #[inline(always)]
+    pub(crate) fn take_fuel(&mut self) -> u64 {
+        self.remaining_steps.unwrap_or(u64::MAX)
+    }
+
+    #[inline(always)]
+    pub(crate) fn return_fuel(&mut self, remaining: u64) {
+        if self.remaining_steps.is_some() {
+            self.remaining_steps = Some(remaining);
+        }
+    }
+
     /// The estimate of the bytes that the values of the heap hold.
     #[cfg(test)]
     pub(crate) fn approx_bytes(&self) -> usize {
@@ -407,9 +461,9 @@ impl Heap {
     ///
     /// The run goes on with what it has, so the pass leaves alone what the run reads by its
     /// address: the elements of every list stay where they are (see [`List::rewrite`]), and
-    /// so does every function definition. A definition that something else holds on to as
-    /// well cannot be rewritten where it is: the pass then leaves the heap as it is, and
-    /// says so.
+    /// so does every function definition. A list buffer or function definition that something
+    /// else holds on to as well cannot be rewritten where it is: the pass then leaves the
+    /// heap as it is, and says so.
     pub(crate) fn compact_in_run(&mut self, roots: &mut dyn Roots) -> Pass {
         self.pass(roots, true)
     }
@@ -497,6 +551,18 @@ impl Heap {
                     }
                 }
                 HeapValue::String(_) => {}
+            }
+        }
+
+        if in_run {
+            for (slot, is_live) in reachable.iter().enumerate() {
+                if !*is_live && let HeapValue::List(list) = &self.values[slot] {
+                    shared.note_dead_list(list);
+                }
+            }
+
+            if shared.has_outside_holders() {
+                return Pass::Refused;
             }
         }
 
@@ -733,6 +799,9 @@ impl Clone for Heap {
             compact_threshold_bytes: self.compact_threshold_bytes,
             compact_growth_factor: self.compact_growth_factor,
             pass_values: self.pass_values,
+            max_bytes: self.max_bytes,
+            max_steps: self.max_steps,
+            remaining_steps: self.remaining_steps,
             #[cfg(test)]
             passes: self.passes,
         }
@@ -845,5 +914,118 @@ impl Display for IterablePointer {
             IterablePointer::String(pointer) => write!(f, "{}", pointer),
             IterablePointer::Record(pointer) => write!(f, "{}", pointer),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct SliceRoots<'a>(&'a mut [Value]);
+
+    impl Roots for SliceRoots<'_> {
+        fn each(&self, look: &mut dyn FnMut(&[Value])) {
+            look(self.0);
+        }
+
+        fn rewrite(&mut self, replace: &mut dyn FnMut(&mut [Value])) {
+            replace(self.0);
+        }
+    }
+
+    #[test]
+    fn compact_in_run_refuses_externally_held_list_and_preserves_slice() {
+        let mut heap = Heap::new();
+        let _garbage = heap.insert_string("garbage");
+        let kept_str = heap.insert_string("kept");
+        let list_val = heap.insert_list(vec![kept_str, Value::Number(42.0)]);
+
+        let external = list_val.as_list(&heap).unwrap().clone();
+        let live_slice: &[Value] = external.as_slice();
+
+        let mut roots = [list_val];
+        let pass = heap.compact_in_run(&mut SliceRoots(&mut roots));
+
+        assert_eq!(pass, Pass::Refused);
+        assert_eq!(heap.passes(), 0);
+        assert_eq!(roots[0], list_val);
+        assert_eq!(live_slice, &[kept_str, Value::Number(42.0)]);
+
+        drop(external);
+
+        let pass = heap.compact_in_run(&mut SliceRoots(&mut roots));
+
+        assert_eq!(pass, Pass::Moved);
+        assert_eq!(heap.passes(), 1);
+        let items = roots[0].as_list(&heap).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].as_string(&heap).unwrap(), "kept");
+        assert_eq!(items[1], Value::Number(42.0));
+    }
+
+    #[test]
+    fn compact_in_run_allows_buffer_shared_only_with_dead_heap_list() {
+        let mut heap = Heap::new();
+        let _garbage = heap.insert_string("garbage");
+        let kept_str = heap.insert_string("kept");
+        let dead_list = heap.insert_list(vec![kept_str, Value::Number(1.0), Value::Number(2.0)]);
+        let surviving = heap
+            .slice_list(dead_list.as_list_pointer().unwrap(), 0..2)
+            .unwrap();
+
+        assert!(
+            dead_list
+                .as_list(&heap)
+                .unwrap()
+                .shares_buffer_with(surviving.as_list(&heap).unwrap())
+        );
+
+        let mut roots = [surviving];
+        let pass = heap.compact_in_run(&mut SliceRoots(&mut roots));
+
+        assert_eq!(pass, Pass::Moved);
+        assert_eq!(heap.passes(), 1);
+        let items = roots[0].as_list(&heap).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].as_string(&heap).unwrap(), "kept");
+        assert_eq!(items[1], Value::Number(1.0));
+    }
+
+    #[test]
+    fn memory_and_step_budgets_track_and_clone() {
+        let mut heap = Heap::new();
+        assert_eq!(heap.max_memory(), None);
+        assert_eq!(heap.max_steps(), None);
+        assert_eq!(heap.remaining_steps(), None);
+        assert!(heap.memory_used() > 0);
+        assert!(!heap.exceeds_max_memory());
+        assert_eq!(heap.take_fuel(), u64::MAX);
+
+        heap.return_fuel(123);
+        assert_eq!(heap.remaining_steps(), None);
+
+        let baseline = heap.memory_used();
+        heap.set_max_memory(Some(baseline));
+        assert_eq!(heap.max_memory(), Some(baseline));
+        assert!(!heap.exceeds_max_memory());
+
+        let _more = heap.insert_list(vec![Value::Number(1.0)]);
+        assert!(heap.memory_used() > baseline);
+        assert!(heap.exceeds_max_memory());
+
+        heap.set_max_steps(Some(500));
+        assert_eq!(heap.max_steps(), Some(500));
+        assert_eq!(heap.remaining_steps(), Some(500));
+        assert_eq!(heap.take_fuel(), 500);
+
+        heap.return_fuel(320);
+        assert_eq!(heap.max_steps(), Some(500));
+        assert_eq!(heap.remaining_steps(), Some(320));
+
+        let cloned = heap.clone();
+        assert_eq!(cloned.max_memory(), Some(baseline));
+        assert_eq!(cloned.max_steps(), Some(500));
+        assert_eq!(cloned.remaining_steps(), Some(320));
+        assert!(cloned.exceeds_max_memory());
     }
 }

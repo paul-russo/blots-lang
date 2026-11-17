@@ -1,6 +1,7 @@
 use anyhow::Result;
 use blots_core::{
     ast::{Expr, Spanned},
+    ast_to_source::is_valid_identifier,
     environment::Environment,
     error::RuntimeError,
     expressions::{evaluate_statement_pairs, pairs_to_expr_with_comments},
@@ -17,6 +18,9 @@ use serde::{Deserialize, Serialize};
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use string_offsets::StringOffsets;
 use wasm_bindgen::prelude::*;
+
+const WASM_MAX_MEMORY_BYTES: usize = 256 << 20; // 256 MiB
+const WASM_MAX_STEPS: u64 = 50_000_000;
 
 #[cfg(test)]
 mod wasm_tests;
@@ -107,6 +111,10 @@ pub fn evaluate(expr: &str, inputs_js: JsValue) -> Result<JsValue, JsError> {
         };
 
     let heap = Rc::new(RefCell::new(Heap::new()));
+    heap.borrow_mut()
+        .set_max_memory(Some(WASM_MAX_MEMORY_BYTES));
+    heap.borrow_mut().set_max_steps(Some(WASM_MAX_STEPS));
+
     let inputs = match inputs_given
         .into_iter()
         .map(|(key, value)| {
@@ -393,12 +401,25 @@ fn evaluate_single_inline_expression(
     inputs_given: &IndexMap<String, SerializableValue>,
 ) -> ExpressionResult {
     let heap = Rc::new(RefCell::new(Heap::new()));
+    heap.borrow_mut()
+        .set_max_memory(Some(WASM_MAX_MEMORY_BYTES));
+    heap.borrow_mut().set_max_steps(Some(WASM_MAX_STEPS));
 
     // Convert inputs to Values
-    let inputs: IndexMap<String, _> = inputs_given
-        .iter()
-        .map(|(key, value)| (key.clone(), value.to_value(&mut heap.borrow_mut()).unwrap()))
-        .collect();
+    let mut inputs = IndexMap::with_capacity(inputs_given.len());
+
+    for (key, value) in inputs_given {
+        match value.to_value(&mut heap.borrow_mut()) {
+            Ok(v) => {
+                inputs.insert(key.clone(), v);
+            }
+            Err(e) => {
+                return ExpressionResult::Error {
+                    error: format!("Failed to convert input '{}': {}", key, e),
+                };
+            }
+        }
+    }
 
     let bindings = Rc::new(Environment::new());
 
@@ -408,9 +429,12 @@ fn evaluate_single_inline_expression(
         heap.borrow_mut().insert_record(inputs.clone()),
     );
 
-    // Inject all input values directly into bindings for inline access
+    // Inject valid identifier input values directly into bindings for inline access,
+    // without shadowing `inputs` or interning arbitrary non-identifier strings.
     for (key, value) in inputs {
-        bindings.insert(Symbol::intern(&key), value);
+        if key != "inputs" && is_valid_identifier(&key) {
+            bindings.insert(Symbol::intern(&key), value);
+        }
     }
 
     // Parse the expression

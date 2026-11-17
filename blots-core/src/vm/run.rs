@@ -158,18 +158,6 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 }};
             }
 
-            // The frame starts over with the arguments that are now in its parameters: one
-            // level deeper than `$meta` says it was, and remembering where it did so for
-            // error reports.
-            macro_rules! restart {
-                ($meta:expr) => {{
-                    (*frame).meta = $meta + 1 + (1 << TAIL_SHIFT);
-                    (*frame).tail_ip = ip.add(1);
-                    ip = ip.add(1).sub(instr.b as usize);
-                    continue 'run;
-                }};
-            }
-
             // The loop tells the rest of the VM where it is: which frame is the innermost one,
             // and that the instruction it is executing is the one before its saved `ip`.
             macro_rules! publish {
@@ -179,17 +167,56 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 }};
             }
 
+            macro_rules! tick {
+                () => {{
+                    if (*vm).fuel == 0 {
+                        rare();
+                        publish!();
+                        fail!((*vm).step_limit_exceeded());
+                    }
+                    (*vm).fuel -= 1;
+                }};
+            }
+
+            // The frame starts over with the arguments that are now in its parameters: one
+            // level deeper than `$meta` says it was, and remembering where it did so for
+            // error reports.
+            macro_rules! restart {
+                ($meta:expr) => {{
+                    tick!();
+                    (*frame).meta = $meta + 1 + (1 << TAIL_SHIFT);
+                    (*frame).tail_ip = ip.add(1);
+                    ip = ip.add(1).sub(instr.b as usize);
+                    continue 'run;
+                }};
+            }
+
             // What the loop just called may have added to the heap: that is where the heap is
             // found to have grown, and between two instructions is where it can be compacted,
             // since everything the run goes on with is where the VM can find it. The slots of
             // the heap are looked up again.
             macro_rules! added {
                 () => {{
+                    let mut compacted = false;
                     if (*vm).compaction_is_due(&*heap) {
                         (*vm).compact();
+                        compacted = true;
                     }
 
                     slots = (*heap).slots();
+
+                    if (*heap).exceeds_max_memory() {
+                        rare();
+                        if !compacted && (*vm).compacts && (*vm).loops == 1 {
+                            (*vm).compact();
+                            slots = (*heap).slots();
+                        }
+                        if (*heap).exceeds_max_memory() {
+                            // Every caller of `added!` has already published the frame state,
+                            // and callbacks may have moved the frame stack since.
+                            fail!((*vm).memory_limit_exceeded());
+                        }
+                    }
                 }};
             }
 
@@ -697,6 +724,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                             && frame != (*vm).frame_limit
                             && (meta & DEPTH_MASK) as usize <= MAX_CALL_DEPTH
                         {
+                            tick!();
                             (*frame).ip = ip.add(1);
                             frame = frame.add(1);
                             (*frame).base = callee_base;
@@ -719,6 +747,8 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                         && callee_base <= (*vm).stack_limit
                         && frame != (*vm).frame_limit
                     {
+                        tick!();
+
                         // The function calls itself through its own name: the value the frame
                         // was called through is the callee.
                         copy_value(callee_base.sub(1), base.sub(1));
@@ -958,6 +988,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 }
                 Op::ForRangeNext => {
                     if range_next(reg!(instr.a), instr.x == 1) {
+                        tick!();
                         jump!(ip);
                     }
                     next!(1);
@@ -970,6 +1001,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                 }
                 Op::ForListNext => {
                     if list_next(reg!(instr.a), instr.x == 1, false) {
+                        tick!();
                         jump!(ip);
                     }
                     next!(1);
@@ -1015,6 +1047,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                         && let Some(more) = entry_next(state, record, instr.x, (*vm).run_number)
                     {
                         if more {
+                            tick!();
                             jump!(ip);
                         }
                         next!(1);
@@ -1023,6 +1056,7 @@ pub(super) unsafe fn execute(vm: &mut Vm) -> Result<Value, RuntimeError> {
                     publish!();
                     if (*vm).next_entry(instr.a, instr.x) {
                         added!();
+                        tick!();
                         jump!(ip);
                     }
                     next!(1);

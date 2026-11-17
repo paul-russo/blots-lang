@@ -525,6 +525,10 @@ impl Vm {
             }
             Op::ForRangeNext => {
                 if self.range_next(a, instr.x == 1) {
+                    if self.fuel == 0 {
+                        return Err(self.step_limit_exceeded());
+                    }
+                    self.fuel -= 1;
                     self.skip(instr.sbx());
                 }
             }
@@ -553,6 +557,10 @@ impl Vm {
             }
             Op::ForListNext => {
                 if self.list_next(a, instr.x == 1, false) {
+                    if self.fuel == 0 {
+                        return Err(self.step_limit_exceeded());
+                    }
+                    self.fuel -= 1;
                     self.skip(instr.sbx());
                 }
             }
@@ -568,6 +576,10 @@ impl Vm {
             }
             Op::ForRecordNext => {
                 if self.next_entry(a, instr.x) {
+                    if self.fuel == 0 {
+                        return Err(self.step_limit_exceeded());
+                    }
+                    self.fuel -= 1;
                     self.skip(instr.sbx());
                 }
             }

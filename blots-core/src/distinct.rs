@@ -7,6 +7,9 @@
 use crate::heap::{Heap, HeapPointer, IterablePointer};
 use crate::values::Value;
 use anyhow::Result;
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Up to this many distinct values are compared with one another directly, which is cheaper
 /// than hashing them.
@@ -133,55 +136,80 @@ impl Kept {
     }
 }
 
+static HASH_SEED: AtomicU64 = AtomicU64::new(0);
+
+#[inline(always)]
+fn hash_seed() -> u64 {
+    let seed = HASH_SEED.load(Ordering::Relaxed);
+    if seed != 0 {
+        return seed;
+    }
+
+    init_hash_seed()
+}
+
+#[cold]
+#[inline(never)]
+fn init_hash_seed() -> u64 {
+    let seed = RandomState::new().hash_one(0xFF51_AFD7_ED55_8CCD_u64) | 1;
+
+    match HASH_SEED.compare_exchange(0, seed, Ordering::Relaxed, Ordering::Relaxed) {
+        Ok(_) => seed,
+        Err(existing) => existing,
+    }
+}
+
 /// A number that is the same for values that are equal (see [`Value::equals`]), and that is
 /// almost always different for values that are not. A value that is known to be equal to
 /// nothing, not even to itself, has none: that is one with a number in it that is not a
 /// number, no deeper than a hash takes in.
 fn hash(value: &Value, heap: &Heap) -> Result<Option<u64>> {
-    hash_within(value, heap, HASHED_DEPTH)
+    hash_within(value, heap, HASHED_DEPTH, hash_seed())
 }
 
 /// The hash of `value`, taking in what is at most `depth` lists and records deep in it.
-fn hash_within(value: &Value, heap: &Heap, depth: usize) -> Result<Option<u64>> {
+fn hash_within(value: &Value, heap: &Heap, depth: usize, seed: u64) -> Result<Option<u64>> {
     Ok(Some(match value {
         Value::Number(number) if number.is_nan() => return Ok(None),
         // Zero is equal to its negative.
-        Value::Number(number) if *number == 0.0 => mix(0),
-        Value::Number(number) => mix(number.to_bits()),
-        Value::Bool(bool) => mix(BOOL + u64::from(*bool)),
-        Value::Null => mix(NULL),
-        Value::String(pointer) => hash_string(pointer.reify(heap).as_string()?),
+        Value::Number(number) if *number == 0.0 => mix(seed),
+        Value::Number(number) => mix(number.to_bits() ^ seed),
+        Value::Bool(bool) => mix((BOOL + u64::from(*bool)) ^ seed),
+        Value::Null => mix(NULL ^ seed),
+        Value::String(pointer) => hash_string(pointer.reify(heap).as_string()?, seed),
         Value::List(pointer) => {
             let items = pointer.reify(heap).as_list()?;
+            let mut list = mix(LIST ^ (items.len() as u64).rotate_left(32) ^ seed);
 
-            let mut list = LIST ^ items.len() as u64;
             if let Some(depth) = depth.checked_sub(1) {
                 for item in items {
-                    let Some(item) = hash_within(item, heap, depth)? else {
+                    let Some(item) = hash_within(item, heap, depth, seed)? else {
                         return Ok(None);
                     };
                     list = mix(list.rotate_left(5) ^ item);
                 }
             }
 
-            mix(list)
+            list
         }
         Value::Record(pointer) => {
             let record = pointer.reify(heap).as_record()?;
 
             // Records are equal whatever order their keys are in, so the entries are added
             // up, which comes to the same in any order.
-            let mut entries = record.len() as u64;
+            let mut entries = RECORD ^ (record.len() as u64).rotate_left(32) ^ seed;
+
             if let Some(depth) = depth.checked_sub(1) {
                 for (key, value) in record.iter() {
-                    let Some(value) = hash_within(value, heap, depth)? else {
+                    let Some(value) = hash_within(value, heap, depth, seed)? else {
                         return Ok(None);
                     };
-                    entries = entries.wrapping_add(mix(hash_string(key) ^ value.rotate_left(32)));
+                    entries =
+                        entries.wrapping_add(mix(hash_string(key, seed) ^ value.rotate_left(32)));
                 }
             }
 
-            mix(RECORD ^ entries)
+            mix(entries)
         }
         // Functions are equal when they are written the same way. The number of their
         // parameters stands in for the rest: there is no telling two bodies apart by a
@@ -189,46 +217,50 @@ fn hash_within(value: &Value, heap: &Heap, depth: usize) -> Result<Option<u64>> 
         Value::Lambda(pointer) => {
             let lambda = pointer.reify(heap).as_lambda()?;
 
-            mix(LAMBDA + lambda.args.len() as u64)
+            mix((LAMBDA + lambda.args.len() as u64) ^ seed)
         }
-        Value::BuiltIn(function) => mix(BUILT_IN + *function as u64),
+        Value::BuiltIn(function) => mix((BUILT_IN + *function as u64) ^ seed),
         Value::Spread(pointer) => {
             let spread = match pointer {
                 IterablePointer::List(pointer) => Value::List(*pointer),
                 IterablePointer::String(pointer) => Value::String(*pointer),
                 IterablePointer::Record(pointer) => Value::Record(*pointer),
             };
-            let Some(spread) = hash_within(&spread, heap, depth)? else {
+
+            let Some(spread) = hash_within(&spread, heap, depth, seed)? else {
                 return Ok(None);
             };
 
-            mix(SPREAD ^ spread)
+            mix(SPREAD ^ spread ^ seed)
         }
     }))
 }
 
-fn hash_string(string: &str) -> u64 {
+fn hash_string(string: &str, seed: u64) -> u64 {
     let bytes = string.as_bytes();
-    let mut hash = STRING ^ bytes.len() as u64;
+    let mut hash = mix(STRING ^ (bytes.len() as u64).rotate_left(32) ^ seed);
 
     let mut words = bytes.chunks_exact(8);
+
     for word in &mut words {
         let word = u64::from_le_bytes(word.try_into().expect("a chunk of eight bytes"));
-        hash = (hash.rotate_left(5) ^ word).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        hash = mix(hash.rotate_left(5) ^ word);
     }
 
     let rest = words.remainder();
+
     if !rest.is_empty() {
         let mut word = [0; 8];
         word[..rest.len()].copy_from_slice(rest);
-        hash = (hash.rotate_left(5) ^ u64::from_le_bytes(word)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        hash = mix(hash.rotate_left(5) ^ u64::from_le_bytes(word));
     }
 
-    mix(hash)
+    hash
 }
 
 /// Spread every bit of `bits` over all of the result (the finalizer of MurmurHash3), so that
 /// numbers that differ in a few bits anywhere pick different slots.
+#[inline(always)]
 fn mix(mut bits: u64) -> u64 {
     bits ^= bits >> 33;
     bits = bits.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
@@ -676,5 +708,14 @@ mod tests {
 
         assert_eq!(found.len(), 20_011);
         assert_eq!(found[..20_011], items[..20_011]);
+    }
+
+    #[test]
+    fn hash_seed_is_initialized_and_consistent() {
+        let first = hash_seed();
+        let second = hash_seed();
+
+        assert_ne!(first, 0);
+        assert_eq!(first, second);
     }
 }
