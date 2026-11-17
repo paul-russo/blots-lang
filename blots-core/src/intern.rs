@@ -39,6 +39,12 @@ impl Symbol {
         Symbol(leaked)
     }
 
+    /// Look up `text` if it has already been interned, without allocating or leaking it.
+    pub fn get_interned(text: &str) -> Option<Symbol> {
+        let interner = INTERNER.lock().unwrap();
+        interner.get(text).copied().map(Symbol)
+    }
+
     /// The interned text. Free of locks or lookups: the string is owned by the interner for
     /// the life of the process.
     pub fn as_str(&self) -> &'static str {
@@ -176,5 +182,21 @@ mod tests {
         assert_eq!(map.get(&Symbol::intern("x")), Some(&1));
         assert_eq!(map.get(&Symbol::intern("y")), Some(&2));
         assert_eq!(map.get(&Symbol::intern("z")), None);
+    }
+
+    #[test]
+    fn get_interned_does_not_intern_missing_symbols() {
+        let missing = "never_interned_before_get_interned_test";
+        assert_eq!(Symbol::get_interned(missing), None);
+        assert_eq!(Symbol::get_interned(missing), None);
+
+        let present = "present_after_intern_in_get_interned_test";
+        assert_eq!(Symbol::get_interned(present), None);
+
+        let interned = Symbol::intern(present);
+        let found = Symbol::get_interned(present).expect("the symbol was just interned");
+
+        assert_eq!(found, interned);
+        assert_eq!(found.as_str().as_ptr(), interned.as_str().as_ptr());
     }
 }

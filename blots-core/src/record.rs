@@ -25,12 +25,16 @@ use indexmap::IndexMap;
 use std::{
     alloc::{Layout, alloc, dealloc, handle_alloc_error},
     cell::{Cell, OnceCell, RefCell},
-    collections::{HashMap, hash_map::Entry},
+    collections::{
+        HashMap,
+        hash_map::{Entry, RandomState},
+    },
     fmt,
-    hash::BuildHasherDefault,
+    hash::{BuildHasher, BuildHasherDefault},
     mem::ManuallyDrop,
     ptr::NonNull,
     rc::{Rc, Weak},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 /// A key of a record. The tables that have a key share its characters.
@@ -46,13 +50,19 @@ const MIN_GROWING_CAPACITY: usize = 4;
 /// The number of tables made from a table that the table remembers.
 const KEPT_FORKS: usize = 8;
 
+/// The number of interned tables at which dead tables are swept before inserting another.
+const INTERN_GC_THRESHOLD: usize = 1024;
+
+/// The most live interned tables that a thread remembers at once.
+const MAX_INTERNED_TABLES: usize = 4096;
+
 thread_local! {
     /// The canonical table of every key list that was interned on this thread.
     static INTERNED: RefCell<HashMap<Vec<Key>, Rc<Keys>>> = RefCell::new(HashMap::new());
 
     /// The canonical table without keys, which every record that is built key by key starts
     /// from.
-    static EMPTY: Rc<Keys> = Keys::interned(std::iter::empty());
+    static EMPTY: Rc<Keys> = Rc::new(Keys::with_room(0, true));
 }
 
 /// The keys of records, in the order they were added.
@@ -134,15 +144,23 @@ impl Keys {
     }
 
     /// The canonical table of `keys`, which are distinct: the same one for every call with
-    /// an equal list of keys. A canonical table stays alive for as long as its thread does.
+    /// an equal list of keys while a handle to it is alive (up to [`MAX_INTERNED_TABLES`]
+    /// simultaneously live lists).
     pub fn interned<'k>(keys: impl Iterator<Item = &'k str>) -> Rc<Keys> {
         // The lists are few and short, and only looked up when code is compiled, so a list
         // of keys is made to look a list up by.
         let list: Vec<Key> = keys.map(Key::from).collect();
+        if list.is_empty() {
+            return Self::empty();
+        }
 
         INTERNED.with_borrow_mut(|tables| {
             if let Some(table) = tables.get(&list) {
                 return Rc::clone(table);
+            }
+
+            if tables.len() >= INTERN_GC_THRESHOLD {
+                tables.retain(|_, table| Rc::strong_count(table) > 1);
             }
 
             let table = Keys::with_room(list.len(), true);
@@ -151,7 +169,9 @@ impl Keys {
             }
 
             let table = Rc::new(table);
-            tables.insert(list, Rc::clone(&table));
+            if tables.len() < MAX_INTERNED_TABLES {
+                tables.insert(list, Rc::clone(&table));
+            }
 
             table
         })
@@ -433,6 +453,12 @@ impl fmt::Debug for Keys {
     }
 }
 
+/// The most tables remembered per hash bucket in [`Shapes`].
+const MAX_SHAPES_PER_BUCKET: usize = 4;
+
+/// The most tables remembered across all buckets in [`Shapes`] before starting fresh.
+const MAX_CACHED_SHAPES: usize = 4096;
+
 /// The tables of records that are made from whole lists of keys which come from outside of
 /// a program, like the objects of a document: one table for every list of keys, which all
 /// the records with those keys in that order share.
@@ -440,12 +466,16 @@ impl fmt::Debug for Keys {
 /// A record that is built one key at a time shares the tables of the first one like it only
 /// while those tables are alive and remembered (see [`Keys::followed_by`]), which records
 /// of more than a few keys, and the records of a document with many kinds of objects,
-/// cannot count on. Here a list of keys finds its table by the heads of the keys, however
-/// many lists there are. The tables are not canonical: they are gone with their records.
+/// cannot count on. Here a list of keys finds its table by the heads of the keys, among
+/// the tables that were made recently. The tables are not canonical: they are gone with
+/// their records.
 #[derive(Default)]
 pub struct Shapes {
-    /// The table that was made last for a list of keys whose heads come to a hash.
-    tables: HashMap<usize, Rc<Keys>, BuildHasherDefault<AddressHasher>>,
+    /// The tables that were made recently for lists of keys whose heads come to a hash.
+    tables: HashMap<usize, Vec<Rc<Keys>>, BuildHasherDefault<AddressHasher>>,
+
+    /// The number of tables across all buckets in `tables`.
+    cached: usize,
 
     /// The heads of the keys of the list that is being looked up.
     heads: Vec<u64>,
@@ -453,8 +483,7 @@ pub struct Shapes {
 
 impl Shapes {
     /// The table that has just `keys`, which are distinct, in that order. It is the table
-    /// that an equal list of keys got before, unless another list with the same hash got
-    /// one in between.
+    /// that an equal list of keys got before, while that table is still remembered.
     pub fn table_of<'k>(&mut self, keys: impl Iterator<Item = &'k str> + Clone) -> Rc<Keys> {
         self.heads.clear();
         self.heads
@@ -470,8 +499,10 @@ impl Shapes {
             .fold(self.heads.len() as u64, |hash, head| mixed(hash ^ head))
             as usize;
 
-        if let Some(table) = self.tables.get(&hash)
-            && table.has_just(keys.clone(), &self.heads)
+        if let Some(bucket) = self.tables.get(&hash)
+            && let Some(table) = bucket
+                .iter()
+                .find(|table| table.has_just(keys.clone(), &self.heads))
         {
             return Rc::clone(table);
         }
@@ -482,7 +513,20 @@ impl Shapes {
         }
 
         let table = Rc::new(table);
-        self.tables.insert(hash, Rc::clone(&table));
+
+        if self.cached >= MAX_CACHED_SHAPES {
+            self.tables.clear();
+            self.cached = 0;
+        }
+
+        let bucket = self.tables.entry(hash).or_default();
+
+        if bucket.len() == MAX_SHAPES_PER_BUCKET {
+            bucket.remove(0);
+            self.cached -= 1;
+        }
+        bucket.push(Rc::clone(&table));
+        self.cached += 1;
 
         table
     }
@@ -624,12 +668,35 @@ fn is_long_key(own: &[u8], key: &[u8]) -> bool {
     }
 }
 
+static HASH_SEED: AtomicU64 = AtomicU64::new(0);
+
+#[inline(always)]
+fn hash_seed() -> u64 {
+    let seed = HASH_SEED.load(Ordering::Relaxed);
+    if seed != 0 {
+        return seed;
+    }
+
+    init_hash_seed()
+}
+
+#[cold]
+#[inline(never)]
+fn init_hash_seed() -> u64 {
+    let seed = RandomState::new().hash_one(0x9E37_79B9_7F4A_7C15_u64) | 1;
+
+    match HASH_SEED.compare_exchange(0, seed, Ordering::Relaxed, Ordering::Relaxed) {
+        Ok(_) => seed,
+        Err(existing) => existing,
+    }
+}
+
 /// A word that every bit of `word` has a say in all over: the two halves of its product
-/// with a constant, one over the other. The lower bits of what this makes of the head of
-/// a key pick the slot of the key.
+/// with a constant, one over the other, after mixing in the per-process seed. The lower
+/// bits of what this makes of the head of a key pick the slot of the key.
 #[inline(always)]
 fn mixed(word: u64) -> u64 {
-    let product = u128::from(word) * 0x9E37_79B9_7F4A_7C15_u128;
+    let product = u128::from(word ^ hash_seed()) * 0x9E37_79B9_7F4A_7C15_u128;
 
     product as u64 ^ (product >> u64::BITS) as u64
 }
@@ -1727,6 +1794,77 @@ mod tests {
         }
 
         assert!(Rc::ptr_eq(&shapes.table_of([].into_iter()), &Keys::empty()));
+    }
+
+    #[test]
+    fn dead_interned_tables_are_reclaimed_while_live_ones_stay_canonical() {
+        let kept = Keys::interned(["kept-live-a", "kept-live-b"].into_iter());
+
+        for index in 0..INTERN_GC_THRESHOLD + 16 {
+            let key = format!("ephemeral-interned-{index}");
+            let transient = Keys::interned([key.as_str()].into_iter());
+            assert!(transient.is_interned());
+        }
+
+        INTERNED.with_borrow(|tables| {
+            assert!(tables.len() < INTERN_GC_THRESHOLD, "{}", tables.len());
+        });
+        assert!(Rc::ptr_eq(
+            &kept,
+            &Keys::interned(["kept-live-a", "kept-live-b"].into_iter())
+        ));
+
+        let live: Vec<Rc<Keys>> = (0..MAX_INTERNED_TABLES + 32)
+            .map(|index| {
+                let key = format!("live-interned-{index}");
+                Keys::interned([key.as_str()].into_iter())
+            })
+            .collect();
+
+        INTERNED.with_borrow(|tables| {
+            assert_eq!(tables.len(), MAX_INTERNED_TABLES);
+        });
+        assert_eq!(
+            live.last()
+                .unwrap()
+                .position(1, &format!("live-interned-{}", MAX_INTERNED_TABLES + 31)),
+            Some(0)
+        );
+
+        drop(live);
+        let _ = Keys::interned(["sweep-after-live-drop"].into_iter());
+
+        INTERNED.with_borrow(|tables| {
+            assert!(tables.len() < INTERN_GC_THRESHOLD, "{}", tables.len());
+        });
+        assert!(Rc::ptr_eq(
+            &kept,
+            &Keys::interned(["kept-live-a", "kept-live-b"].into_iter())
+        ));
+        assert!(Rc::ptr_eq(&Keys::empty(), &Keys::interned([].into_iter())));
+    }
+
+    #[test]
+    fn shapes_stay_bounded_across_many_distinct_key_lists() {
+        let mut shapes = Shapes::default();
+
+        for index in 0..MAX_CACHED_SHAPES + 64 {
+            let key = format!("shape-key-{index}");
+            let table = shapes.table_of([key.as_str()].into_iter());
+            assert_eq!(table.position(1, &key), Some(0));
+        }
+
+        assert!(shapes.cached <= MAX_CACHED_SHAPES);
+        assert_eq!(
+            shapes.tables.values().map(Vec::len).sum::<usize>(),
+            shapes.cached
+        );
+        assert!(
+            shapes
+                .tables
+                .values()
+                .all(|bucket| bucket.len() <= MAX_SHAPES_PER_BUCKET)
+        );
     }
 
     #[test]

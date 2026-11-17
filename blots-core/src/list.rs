@@ -177,7 +177,8 @@ impl List {
     /// first of them to the last element of the last, so that the pass looks at every element
     /// once however many lists cover it.
     pub(crate) fn unmarked(&self, shared: &mut SharedBuffers) -> [&[Value]; 2] {
-        if Rc::strong_count(&self.buffer) == 1 {
+        let strong_count = Rc::strong_count(&self.buffer);
+        if strong_count == 1 {
             return [self.as_slice(), &[]];
         }
 
@@ -191,6 +192,8 @@ impl List {
                 entry.insert(Shared {
                     covered,
                     lists: 1,
+                    dead_lists: 0,
+                    strong_count,
                     rewritten: None,
                 });
 
@@ -222,7 +225,7 @@ impl List {
     /// A pass in the middle of a run is one that the elements are `pinned` in: a loop of the
     /// run that is going through a list has the addresses of its elements, and finds them
     /// there after the pass, replaced. Every element then stays where it is, whatever room
-    /// that leaves unused in front of it, and whoever else reads it.
+    /// that leaves unused in front of it.
     ///
     /// # Safety
     /// Every list that survives the pass has to be rewritten in it, with the `shared` that
@@ -270,6 +273,10 @@ impl List {
         // The values that were dropped no longer hold the buffer by now, so whatever holds it
         // besides the lists of the pass is outside of it.
         let outside = Rc::strong_count(&self.buffer) > lists;
+        debug_assert!(
+            !pinned || !outside,
+            "in-run compaction must refuse externally shared list buffers"
+        );
 
         let moved = if !pinned && outside {
             // Something outside of the pass reads the elements too.
@@ -337,6 +344,12 @@ struct Shared {
     /// The number of surviving lists seen so far.
     lists: usize,
 
+    /// The number of unreachable heap lists recorded for this buffer.
+    dead_lists: usize,
+
+    /// Total `Rc` strong references to this buffer when first seen in the pass.
+    strong_count: usize,
+
     /// Set once the elements have been rewritten.
     rewritten: Option<Moved>,
 }
@@ -357,6 +370,23 @@ struct Moved {
 #[derive(Default)]
 pub(crate) struct SharedBuffers {
     buffers: HashMap<*const Buffer, Shared, BuildHasherDefault<AddressHasher>>,
+}
+
+impl SharedBuffers {
+    /// Account for an unreachable heap list slot so its `Rc` reference is not treated as an
+    /// external holder outside the heap.
+    pub(crate) fn note_dead_list(&mut self, list: &List) {
+        if let Some(state) = self.buffers.get_mut(&Rc::as_ptr(&list.buffer)) {
+            state.dead_lists += 1;
+        }
+    }
+
+    /// Whether any surviving list's buffer has `Rc` holders outside the heap.
+    pub(crate) fn has_outside_holders(&self) -> bool {
+        self.buffers
+            .values()
+            .any(|state| state.strong_count > state.lists + state.dead_lists)
+    }
 }
 
 /// Hashes the address of a buffer, which is all a pass looks buffers up by (the buffers of
@@ -811,18 +841,47 @@ mod tests {
     }
 
     #[test]
-    fn a_pass_in_a_run_replaces_the_elements_that_something_else_reads_too() {
-        let held = roomy(0..3, 8);
-        let mut lists = [held.clone()];
+    fn shared_buffers_distinguish_dead_lists_from_outside_holders() {
+        // A buffer with a single surviving holder has no outside holders.
+        let solo = roomy(0..3, 8);
+        let mut solo_shared = SharedBuffers::default();
+        let _ = solo.unmarked(&mut solo_shared);
+        assert!(!solo_shared.has_outside_holders());
 
-        assert_eq!(double_in_place(&mut lists), 3);
+        // A dead list whose buffer has no surviving list is ignored.
+        let dead_only = roomy(0..2, 4);
+        solo_shared.note_dead_list(&dead_only);
+        assert!(!solo_shared.has_outside_holders());
 
-        assert!(lists[0].shares_buffer_with(&held));
-        assert_eq!(lists[0].as_ptr(), held.as_ptr());
+        // A buffer shared between a surviving list and a dead list has no outside holders
+        // once the dead list is accounted for, and can be rewritten in place after the dead
+        // list is dropped.
+        let dead = roomy(0..4, 8);
+        let mut lists = [dead.slice(1..3)];
+        let mut shared = SharedBuffers::default();
+        let _ = lists[0].unmarked(&mut shared);
+        assert!(shared.has_outside_holders());
+
+        shared.note_dead_list(&dead);
+        assert!(!shared.has_outside_holders());
+
+        drop(dead);
+        assert_eq!(double_in_place(&mut lists), 2);
         assert_eq!(
-            held.as_slice(),
-            [Value::Number(0.0), Value::Number(2.0), Value::Number(4.0)]
+            lists[0].as_slice(),
+            [Value::Number(2.0), Value::Number(4.0)]
         );
+
+        // When an external clone also holds the buffer alongside a dead list, outside
+        // holders are still detected even after accounting for the dead list.
+        let held = roomy(0..4, 8);
+        let dead_peer = held.slice(0..2);
+        let surviving = held.slice(2..4);
+        let mut held_shared = SharedBuffers::default();
+        let _ = surviving.unmarked(&mut held_shared);
+        held_shared.note_dead_list(&dead_peer);
+        assert!(held_shared.has_outside_holders());
+        assert_eq!(held.as_slice(), numbers(0..4));
     }
 
     #[test]

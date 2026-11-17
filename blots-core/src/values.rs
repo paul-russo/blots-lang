@@ -10,7 +10,7 @@ use std::{
 use crate::{
     ast::SpannedExpr,
     bytecode::Proto,
-    expressions::truncate,
+    expressions::{pairs_to_expr, truncate},
     functions::BuiltInFunction,
     heap::{
         Heap, HeapPointer, HeapValue, IterablePointer, LambdaPointer, ListPointer, RecordPointer,
@@ -18,9 +18,13 @@ use crate::{
     },
     intern::Symbol,
     list::List,
+    parser::{Rule, get_pairs},
     record::Record,
     text::{Draft, Text},
 };
+
+/// Maximum nesting depth allowed when recursively traversing `Value` or `SerializableValue` trees.
+pub(crate) const MAX_VALUE_DEPTH: usize = 128;
 
 /// A comma and the three digits of every whole number below a thousand, with zeros in the
 /// place of the digits that a short one does not have: what three digits of a longer number
@@ -887,14 +891,24 @@ pub enum SerializableValue {
 impl SerializableValue {
     /// Convert from serde_json::Value to SerializableValue
     pub fn from_json(value: &serde_json::Value) -> SerializableValue {
+        Self::from_json_with_depth(value, 0)
+    }
+
+    fn from_json_with_depth(value: &serde_json::Value, depth: usize) -> SerializableValue {
+        if depth > MAX_VALUE_DEPTH {
+            return SerializableValue::Null;
+        }
+
         match value {
             serde_json::Value::Number(n) => SerializableValue::Number(n.as_f64().unwrap_or(0.0)),
             serde_json::Value::Bool(b) => SerializableValue::Bool(*b),
             serde_json::Value::Null => SerializableValue::Null,
             serde_json::Value::String(s) => SerializableValue::String(s.clone()),
-            serde_json::Value::Array(arr) => {
-                SerializableValue::List(arr.iter().map(Self::from_json).collect())
-            }
+            serde_json::Value::Array(arr) => SerializableValue::List(
+                arr.iter()
+                    .map(|v| Self::from_json_with_depth(v, depth + 1))
+                    .collect(),
+            ),
             serde_json::Value::Object(obj) => {
                 // Check if this is a function object
                 if let Some(func_value) = obj.get(FUNCTION_KEY)
@@ -907,7 +921,7 @@ impl SerializableValue {
                 // Regular record
                 let map: IndexMap<String, SerializableValue> = obj
                     .iter()
-                    .map(|(k, v)| (k.clone(), Self::from_json(v)))
+                    .map(|(k, v)| (k.clone(), Self::from_json_with_depth(v, depth + 1)))
                     .collect();
                 SerializableValue::Record(map)
             }
@@ -932,17 +946,14 @@ impl SerializableValue {
 
     /// Parse a function source string into a SerializableLambdaDef
     fn parse_function_source(source: &str) -> Result<SerializableLambdaDef> {
-        use crate::expressions::pairs_to_expr;
-        use crate::parser::get_pairs;
-
         // Parse the source as an expression
         let pairs = get_pairs(source)?;
 
         // Extract the lambda expression from the parsed pairs
         for pair in pairs {
-            if let crate::parser::Rule::statement = pair.as_rule()
+            if let Rule::statement = pair.as_rule()
                 && let Some(inner_pair) = pair.into_inner().next()
-                && let crate::parser::Rule::expression = inner_pair.as_rule()
+                && let Rule::expression = inner_pair.as_rule()
             {
                 // Parse the expression to get an AST
                 let expr = pairs_to_expr(inner_pair.into_inner())?;
@@ -966,6 +977,14 @@ impl SerializableValue {
 
     /// Convert SerializableValue to clean serde_json::Value
     pub fn to_json(&self) -> serde_json::Value {
+        self.to_json_with_depth(0)
+    }
+
+    fn to_json_with_depth(&self, depth: usize) -> serde_json::Value {
+        if depth > MAX_VALUE_DEPTH {
+            return serde_json::Value::Null;
+        }
+
         match self {
             SerializableValue::Number(n) => serde_json::Value::Number(
                 serde_json::Number::from_f64(*n).unwrap_or_else(|| serde_json::Number::from(0)),
@@ -973,13 +992,16 @@ impl SerializableValue {
             SerializableValue::Bool(b) => serde_json::Value::Bool(*b),
             SerializableValue::Null => serde_json::Value::Null,
             SerializableValue::String(s) => serde_json::Value::String(s.clone()),
-            SerializableValue::List(items) => {
-                serde_json::Value::Array(items.iter().map(|v| v.to_json()).collect())
-            }
+            SerializableValue::List(items) => serde_json::Value::Array(
+                items
+                    .iter()
+                    .map(|v| v.to_json_with_depth(depth + 1))
+                    .collect(),
+            ),
             SerializableValue::Record(fields) => {
                 let map: serde_json::Map<String, serde_json::Value> = fields
                     .iter()
-                    .map(|(k, v)| (k.clone(), v.to_json()))
+                    .map(|(k, v)| (k.clone(), v.to_json_with_depth(depth + 1)))
                     .collect();
                 serde_json::Value::Object(map)
             }
@@ -1020,6 +1042,21 @@ impl SerializableValue {
     }
 
     pub fn from_value(value: &Value, heap: &Heap) -> Result<SerializableValue> {
+        Self::from_value_with_depth(value, heap, 0)
+    }
+
+    pub(crate) fn from_value_with_depth(
+        value: &Value,
+        heap: &Heap,
+        depth: usize,
+    ) -> Result<SerializableValue> {
+        if depth > MAX_VALUE_DEPTH {
+            return Err(anyhow!(
+                "maximum value nesting depth of {} exceeded",
+                MAX_VALUE_DEPTH
+            ));
+        }
+
         match value {
             Value::Number(n) => Ok(SerializableValue::Number(*n)),
             Value::Bool(b) => Ok(SerializableValue::Bool(*b)),
@@ -1028,7 +1065,7 @@ impl SerializableValue {
                 let list = p.reify(heap).as_list()?;
                 let serialized_list = list
                     .iter()
-                    .map(|v| SerializableValue::from_value(v, heap))
+                    .map(|v| Self::from_value_with_depth(v, heap, depth + 1))
                     .collect::<Result<Vec<SerializableValue>>>()?;
                 Ok(SerializableValue::List(serialized_list))
             }
@@ -1040,7 +1077,12 @@ impl SerializableValue {
                 let record = p.reify(heap).as_record()?;
                 let serialized_record = record
                     .iter()
-                    .map(|(k, v)| Ok((k.to_string(), SerializableValue::from_value(v, heap)?)))
+                    .map(|(k, v)| {
+                        Ok((
+                            k.to_string(),
+                            Self::from_value_with_depth(v, heap, depth + 1)?,
+                        ))
+                    })
                     .collect::<Result<IndexMap<String, SerializableValue>>>()?;
                 Ok(SerializableValue::Record(serialized_record))
             }
@@ -1052,7 +1094,8 @@ impl SerializableValue {
                     .scope
                     .iter()
                     .map(|(k, v)| {
-                        SerializableValue::from_value(v, heap).map(|sv| (k.to_string(), sv))
+                        Self::from_value_with_depth(v, heap, depth + 1)
+                            .map(|sv| (k.to_string(), sv))
                     })
                     .collect::<Result<IndexMap<String, SerializableValue>>>()?;
 
@@ -1075,6 +1118,17 @@ impl SerializableValue {
     }
 
     pub fn to_value(&self, heap: &mut Heap) -> Result<Value> {
+        self.to_value_with_depth(heap, 0)
+    }
+
+    fn to_value_with_depth(&self, heap: &mut Heap, depth: usize) -> Result<Value> {
+        if depth > MAX_VALUE_DEPTH {
+            return Err(anyhow!(
+                "maximum value nesting depth of {} exceeded",
+                MAX_VALUE_DEPTH
+            ));
+        }
+
         match self {
             SerializableValue::Number(n) => Ok(Value::Number(*n)),
             SerializableValue::Bool(b) => Ok(Value::Bool(*b)),
@@ -1082,7 +1136,7 @@ impl SerializableValue {
             SerializableValue::List(list) => {
                 let deserialized_list = list
                     .iter()
-                    .map(|v| SerializableValue::to_value(v, heap))
+                    .map(|v| v.to_value_with_depth(heap, depth + 1))
                     .collect::<Result<Vec<Value>>>()?;
 
                 Ok(heap.insert_list(deserialized_list))
@@ -1091,7 +1145,7 @@ impl SerializableValue {
             SerializableValue::Record(record) => {
                 let deserialized_record = record
                     .iter()
-                    .map(|(k, v)| Ok((k.to_string(), SerializableValue::to_value(v, heap)?)))
+                    .map(|(k, v)| Ok((k.to_string(), v.to_value_with_depth(heap, depth + 1)?)))
                     .collect::<Result<IndexMap<String, Value>>>()?;
                 Ok(heap.insert_record(deserialized_record))
             }
@@ -1100,7 +1154,7 @@ impl SerializableValue {
                     let pairs = scope
                         .iter()
                         .map(|(k, v)| {
-                            Ok((Symbol::intern(k), SerializableValue::to_value(v, heap)?))
+                            Ok((Symbol::intern(k), v.to_value_with_depth(heap, depth + 1)?))
                         })
                         .collect::<Result<Vec<(Symbol, Value)>>>()?;
 
@@ -1109,14 +1163,40 @@ impl SerializableValue {
                     CapturedScope::default()
                 };
 
-                // For now, parse the body string back to AST
-                // In a real implementation, we'd want to serialize/deserialize the AST properly
-                let body_ast = crate::expressions::pairs_to_expr(
-                    crate::parser::get_pairs(&s_lambda.body)?
-                        .next()
-                        .unwrap()
-                        .into_inner(),
-                )?;
+                let mut expr_pair = None;
+
+                for pair in get_pairs(&s_lambda.body)? {
+                    match pair.as_rule() {
+                        Rule::statement => {
+                            if let Some(inner_pair) = pair.into_inner().next() {
+                                match inner_pair.as_rule() {
+                                    Rule::comment => continue,
+                                    Rule::expression => {
+                                        if expr_pair.is_some() {
+                                            return Err(anyhow!(
+                                                "invalid lambda body in serialized function"
+                                            ));
+                                        }
+                                        expr_pair = Some(inner_pair);
+                                    }
+                                    _ => {
+                                        return Err(anyhow!(
+                                            "invalid lambda body in serialized function"
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        Rule::EOI => {}
+                        _ => {
+                            return Err(anyhow!("invalid lambda body in serialized function"));
+                        }
+                    }
+                }
+
+                let expr_pair = expr_pair
+                    .ok_or_else(|| anyhow!("invalid lambda body in serialized function"))?;
+                let body_ast = pairs_to_expr(expr_pair.into_inner())?;
 
                 let lambda = LambdaDef {
                     name: s_lambda.name.as_deref().map(Symbol::intern),
@@ -1187,6 +1267,17 @@ pub enum Value {
 impl Value {
     /// Compare two values for equality by their actual content, not by reference
     pub fn equals(&self, other: &Value, heap: &Heap) -> Result<bool> {
+        self.equals_with_depth(other, heap, 0)
+    }
+
+    fn equals_with_depth(&self, other: &Value, heap: &Heap, depth: usize) -> Result<bool> {
+        if depth > MAX_VALUE_DEPTH {
+            return Err(anyhow!(
+                "maximum value nesting depth of {} exceeded",
+                MAX_VALUE_DEPTH
+            ));
+        }
+
         match (self, other) {
             // Primitive types - compare directly
             (Value::Number(a), Value::Number(b)) => Ok(a == b),
@@ -1210,7 +1301,7 @@ impl Value {
                 }
 
                 for (a_elem, b_elem) in a_list.iter().zip(b_list.iter()) {
-                    if !a_elem.equals(b_elem, heap)? {
+                    if !a_elem.equals_with_depth(b_elem, heap, depth + 1)? {
                         return Ok(false);
                     }
                 }
@@ -1229,7 +1320,7 @@ impl Value {
                 for (key, a_value) in a_record.iter() {
                     match b_record.get(key) {
                         Some(b_value) => {
-                            if !a_value.equals(b_value, heap)? {
+                            if !a_value.equals_with_depth(b_value, heap, depth + 1)? {
                                 return Ok(false);
                             }
                         }
@@ -1266,13 +1357,13 @@ impl Value {
             // Spread values - compare the underlying iterable
             (Value::Spread(a_ptr), Value::Spread(b_ptr)) => match (a_ptr, b_ptr) {
                 (IterablePointer::List(a), IterablePointer::List(b)) => {
-                    Value::List(*a).equals(&Value::List(*b), heap)
+                    Value::List(*a).equals_with_depth(&Value::List(*b), heap, depth + 1)
                 }
                 (IterablePointer::String(a), IterablePointer::String(b)) => {
-                    Value::String(*a).equals(&Value::String(*b), heap)
+                    Value::String(*a).equals_with_depth(&Value::String(*b), heap, depth + 1)
                 }
                 (IterablePointer::Record(a), IterablePointer::Record(b)) => {
-                    Value::Record(*a).equals(&Value::Record(*b), heap)
+                    Value::Record(*a).equals_with_depth(&Value::Record(*b), heap, depth + 1)
                 }
                 _ => Ok(false),
             },
@@ -1284,6 +1375,22 @@ impl Value {
 
     /// Compare two values for ordering
     pub fn compare(&self, other: &Value, heap: &Heap) -> Result<Option<std::cmp::Ordering>> {
+        self.compare_with_depth(other, heap, 0)
+    }
+
+    fn compare_with_depth(
+        &self,
+        other: &Value,
+        heap: &Heap,
+        depth: usize,
+    ) -> Result<Option<std::cmp::Ordering>> {
+        if depth > MAX_VALUE_DEPTH {
+            return Err(anyhow!(
+                "maximum value nesting depth of {} exceeded",
+                MAX_VALUE_DEPTH
+            ));
+        }
+
         match (self, other) {
             // Numbers have natural ordering
             (Value::Number(a), Value::Number(b)) => Ok(a.partial_cmp(b)),
@@ -1304,7 +1411,7 @@ impl Value {
                 let b_list = b_ptr.reify(heap).as_list()?;
 
                 for (a_elem, b_elem) in a_list.iter().zip(b_list.iter()) {
-                    match a_elem.compare(b_elem, heap)? {
+                    match a_elem.compare_with_depth(b_elem, heap, depth + 1)? {
                         Some(std::cmp::Ordering::Equal) => continue,
                         other => return Ok(other),
                     }
@@ -1531,6 +1638,16 @@ impl Value {
     }
 
     fn stringify(&self, heap: &Heap, wrap_strings: bool, display_format: bool) -> String {
+        self.stringify_with_depth(heap, wrap_strings, display_format, 0)
+    }
+
+    fn stringify_with_depth(
+        &self,
+        heap: &Heap,
+        wrap_strings: bool,
+        display_format: bool,
+        depth: usize,
+    ) -> String {
         match self {
             Value::String(p) => p
                 .reify(heap)
@@ -1544,11 +1661,20 @@ impl Value {
                 })
                 .unwrap(),
             Value::List(p) => {
+                if depth > MAX_VALUE_DEPTH {
+                    return "[...]".to_string();
+                }
+
                 let mut result = String::from("[");
                 let list = p.reify(heap).as_list().unwrap();
 
                 for (i, value) in list.iter().enumerate() {
-                    result.push_str(&value.stringify(heap, wrap_strings, display_format));
+                    result.push_str(&value.stringify_with_depth(
+                        heap,
+                        wrap_strings,
+                        display_format,
+                        depth + 1,
+                    ));
                     if i < list.len() - 1 {
                         result.push_str(", ");
                     }
@@ -1557,6 +1683,10 @@ impl Value {
                 result
             }
             Value::Record(p) => {
+                if depth > MAX_VALUE_DEPTH {
+                    return "{...}".to_string();
+                }
+
                 let mut result = String::from("{");
                 let record = p.reify(heap).as_record().unwrap();
 
@@ -1564,7 +1694,7 @@ impl Value {
                     result.push_str(&format!(
                         "{}: {}",
                         key,
-                        value.stringify(heap, wrap_strings, display_format)
+                        value.stringify_with_depth(heap, wrap_strings, display_format, depth + 1)
                     ));
                     if i < record.len() - 1 {
                         result.push_str(", ");
@@ -1589,7 +1719,7 @@ impl Value {
                     .scope
                     .iter()
                     .filter_map(|(k, v)| {
-                        SerializableValue::from_value(v, heap)
+                        SerializableValue::from_value_with_depth(v, heap, depth + 1)
                             .ok()
                             .map(|sv| (k.to_string(), sv))
                     })
@@ -1604,40 +1734,58 @@ impl Value {
             Value::BuiltIn(built_in) => {
                 format!("{} (built-in)", built_in.name())
             }
-            Value::Spread(p) => match p {
-                IterablePointer::List(l) => {
-                    let list = l.reify(heap).as_list().unwrap();
-                    let mut result = String::from("...");
-                    result.push_str(
-                        &list
-                            .iter()
-                            .map(|v| v.stringify(heap, wrap_strings, display_format))
-                            .collect::<String>(),
-                    );
-                    result
+            Value::Spread(p) => {
+                if depth > MAX_VALUE_DEPTH {
+                    return "...".to_string();
                 }
-                IterablePointer::String(s) => {
-                    let string = s.reify(heap).as_string().unwrap();
-                    format!("...{}", string)
-                }
-                IterablePointer::Record(r) => {
-                    let record = r.reify(heap).as_record().unwrap();
-                    let mut result = String::from("...");
-                    result.push('{');
-                    for (i, (key, value)) in record.iter().enumerate() {
-                        result.push_str(&format!(
-                            "{}: {}",
-                            key,
-                            value.stringify(heap, wrap_strings, display_format)
-                        ));
-                        if i < record.len() - 1 {
-                            result.push_str(", ");
-                        }
+
+                match p {
+                    IterablePointer::List(l) => {
+                        let list = l.reify(heap).as_list().unwrap();
+                        let mut result = String::from("...");
+                        result.push_str(
+                            &list
+                                .iter()
+                                .map(|v| {
+                                    v.stringify_with_depth(
+                                        heap,
+                                        wrap_strings,
+                                        display_format,
+                                        depth + 1,
+                                    )
+                                })
+                                .collect::<String>(),
+                        );
+                        result
                     }
-                    result.push('}');
-                    result
+                    IterablePointer::String(s) => {
+                        let string = s.reify(heap).as_string().unwrap();
+                        format!("...{}", string)
+                    }
+                    IterablePointer::Record(r) => {
+                        let record = r.reify(heap).as_record().unwrap();
+                        let mut result = String::from("...");
+                        result.push('{');
+                        for (i, (key, value)) in record.iter().enumerate() {
+                            result.push_str(&format!(
+                                "{}: {}",
+                                key,
+                                value.stringify_with_depth(
+                                    heap,
+                                    wrap_strings,
+                                    display_format,
+                                    depth + 1
+                                )
+                            ));
+                            if i < record.len() - 1 {
+                                result.push_str(", ");
+                            }
+                        }
+                        result.push('}');
+                        result
+                    }
                 }
-            },
+            }
             Value::Number(n) => {
                 if display_format {
                     format_display_number(*n)
@@ -1962,5 +2110,85 @@ mod tests {
                 assert_eq!(plain_number(number), number.to_string(), "{number:e}");
             }
         }
+    }
+
+    #[test]
+    fn test_deep_value_nesting_bounds() {
+        let mut heap = Heap::new();
+        let mut deep_list_a = Value::Null;
+        let mut deep_list_b = Value::Null;
+        let mut deep_record = Value::Null;
+
+        for _ in 0..2000 {
+            deep_list_a = heap.insert_list(vec![deep_list_a]);
+            deep_list_b = heap.insert_list(vec![deep_list_b]);
+
+            let mut fields = IndexMap::new();
+            fields.insert("k".to_string(), deep_record);
+            deep_record = heap.insert_record(fields);
+        }
+
+        let eq_err = deep_list_a.equals(&deep_list_b, &heap).unwrap_err();
+        assert!(eq_err.to_string().contains("maximum value nesting depth"));
+
+        let cmp_err = deep_list_a.compare(&deep_list_b, &heap).unwrap_err();
+        assert!(cmp_err.to_string().contains("maximum value nesting depth"));
+
+        let list_str = deep_list_a.stringify_internal(&heap);
+        assert!(list_str.contains("[...]"));
+
+        let record_str = deep_record.stringify_internal(&heap);
+        assert!(record_str.contains("{...}"));
+
+        let ser_err = SerializableValue::from_value(&deep_list_a, &heap).unwrap_err();
+        assert!(ser_err.to_string().contains("maximum value nesting depth"));
+
+        let mut deep_serializable = SerializableValue::Null;
+        let mut deep_json = serde_json::Value::Number(serde_json::Number::from(1));
+
+        for _ in 0..(MAX_VALUE_DEPTH + 10) {
+            deep_serializable = SerializableValue::List(vec![deep_serializable]);
+            deep_json = serde_json::Value::Array(vec![deep_json]);
+        }
+
+        let deser_err = deep_serializable.to_value(&mut heap).unwrap_err();
+        assert!(
+            deser_err
+                .to_string()
+                .contains("maximum value nesting depth")
+        );
+
+        let converted_json = deep_serializable.to_json();
+        assert!(converted_json.is_array());
+
+        let converted_ser = SerializableValue::from_json(&deep_json);
+        assert!(matches!(converted_ser, SerializableValue::List(_)));
+    }
+
+    #[test]
+    fn test_deserializing_invalid_lambda_body_returns_error() {
+        let mut heap = Heap::new();
+
+        for bad_body in ["", "   ", "// comment", "output x = 1", "1\n2"] {
+            let val = SerializableValue::Lambda(SerializableLambdaDef {
+                name: None,
+                args: vec![],
+                body: bad_body.to_string(),
+                scope: None,
+            });
+            assert!(
+                val.to_value(&mut heap).is_err(),
+                "expected error for lambda body {:?}",
+                bad_body
+            );
+        }
+
+        let valid = SerializableValue::Lambda(SerializableLambdaDef {
+            name: None,
+            args: vec![LambdaArg::Required(Symbol::intern("x"))],
+            body: "// leading comment\nx + 1 // trailing comment".to_string(),
+            scope: None,
+        });
+        assert!(valid.to_value(&mut heap).is_ok());
     }
 }

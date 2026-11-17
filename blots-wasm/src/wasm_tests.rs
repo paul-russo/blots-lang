@@ -200,6 +200,7 @@ mod format_blots_tests {
 #[cfg(test)]
 mod evaluate_tests {
     use crate::*;
+    use blots_core::values::SerializableLambdaDef;
     use wasm_bindgen_test::*;
 
     #[wasm_bindgen_test]
@@ -219,7 +220,6 @@ mod evaluate_tests {
     fn test_evaluate_with_inputs() {
         let source = "output doubled = inputs.x * 2";
         // Create inputs using SerializableValue directly
-        use indexmap::IndexMap;
         let mut inputs_map: IndexMap<String, SerializableValue> = IndexMap::new();
         inputs_map.insert("x".to_string(), SerializableValue::Number(5.0));
         let inputs = serde_wasm_bindgen::to_value(&inputs_map).unwrap();
@@ -241,7 +241,6 @@ mod evaluate_tests {
     fn test_evaluate_input_reference() {
         let source = "output result = inputs.x + inputs.y";
         // Create inputs using SerializableValue directly
-        use indexmap::IndexMap;
         let mut inputs_map: IndexMap<String, SerializableValue> = IndexMap::new();
         inputs_map.insert("x".to_string(), SerializableValue::Number(3.0));
         inputs_map.insert("y".to_string(), SerializableValue::Number(7.0));
@@ -274,7 +273,6 @@ mod evaluate_tests {
     #[wasm_bindgen_test]
     fn test_evaluate_multiline_source() {
         let source = "x = inputs.a * 2\ny = inputs.b + 10\noutput result = x + y";
-        use indexmap::IndexMap;
         let mut inputs_map: IndexMap<String, SerializableValue> = IndexMap::new();
         inputs_map.insert("a".to_string(), SerializableValue::Number(5.0));
         inputs_map.insert("b".to_string(), SerializableValue::Number(3.0));
@@ -309,7 +307,6 @@ mod evaluate_tests {
     #[wasm_bindgen_test]
     fn test_evaluate_multiline_with_comments() {
         let source = "x = inputs.a * 2\ny = inputs.b + 10\n\n// hi\noutput result = x + y";
-        use indexmap::IndexMap;
         let mut inputs_map: IndexMap<String, SerializableValue> = IndexMap::new();
         inputs_map.insert("a".to_string(), SerializableValue::Number(5.0));
         inputs_map.insert("b".to_string(), SerializableValue::Number(3.0));
@@ -380,6 +377,59 @@ mod evaluate_tests {
         assert!(result_obj["error"]["message"].is_string());
         // Should have a range for parsing errors
         assert!(result_obj["error"]["range"].is_object() || result_obj["error"]["range"].is_null());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_evaluate_invalid_serialized_lambda_body_returns_error() {
+        for bad_body in ["", "// comment", "output x = 1", "1\n2"] {
+            let mut inputs_map: IndexMap<String, SerializableValue> = IndexMap::new();
+            inputs_map.insert(
+                "f".to_string(),
+                SerializableValue::Lambda(SerializableLambdaDef {
+                    name: None,
+                    args: vec![],
+                    body: bad_body.to_string(),
+                    scope: None,
+                }),
+            );
+            let inputs = serde_wasm_bindgen::to_value(&inputs_map).unwrap();
+
+            let result = evaluate("output result = 1", inputs).unwrap();
+            let result_obj: serde_json::Value = serde_wasm_bindgen::from_value(result).unwrap();
+            assert!(
+                result_obj["error"].is_object(),
+                "expected error object for lambda body {:?}",
+                bad_body
+            );
+            assert!(
+                result_obj["error"]["message"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("Failed to convert input 'f'"),
+                "unexpected error message for {:?}: {:?}",
+                bad_body,
+                result_obj
+            );
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn test_evaluate_reentry_and_factorial_bounds_in_wasm() {
+        let empty_inputs =
+            serde_wasm_bindgen::to_value(&IndexMap::<String, SerializableValue>::new()).unwrap();
+        let reentry =
+            evaluate("f = x => (x into f)\noutput r = f(1)", empty_inputs.clone()).unwrap();
+        let reentry_obj: serde_json::Value = serde_wasm_bindgen::from_value(reentry).unwrap();
+        assert!(
+            reentry_obj["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("maximum callback nesting depth")
+        );
+
+        let fact = evaluate("output big = (2 ^ 60)!", empty_inputs).unwrap();
+        let fact_obj: serde_json::Value = serde_wasm_bindgen::from_value(fact).unwrap();
+        assert!(fact_obj["result"].is_object());
     }
 }
 
@@ -510,11 +560,7 @@ mod error_position_tests {
 
         if let Some(pos) = range.get("pos") {
             let pos_val = pos.as_u64().unwrap() as usize;
-            assert!(
-                pos_val <= 13,
-                "Position {} too large for UTF-16",
-                pos_val
-            );
+            assert!(pos_val <= 13, "Position {} too large for UTF-16", pos_val);
         }
     }
 
@@ -532,11 +578,7 @@ mod error_position_tests {
         if let Some(pos) = range.get("pos") {
             let pos_val = pos.as_u64().unwrap() as usize;
             // UTF-8 would be ~32, UTF-16 should be ~18
-            assert!(
-                pos_val <= 22,
-                "Position {} too large for UTF-16",
-                pos_val
-            );
+            assert!(pos_val <= 22, "Position {} too large for UTF-16", pos_val);
         }
     }
 
@@ -556,11 +598,7 @@ mod error_position_tests {
 
         if let Some(pos) = range.get("pos") {
             let pos_val = pos.as_u64().unwrap() as usize;
-            assert!(
-                pos_val <= 16,
-                "Position {} too large for UTF-16",
-                pos_val
-            );
+            assert!(pos_val <= 16, "Position {} too large for UTF-16", pos_val);
         }
     }
 
@@ -780,10 +818,7 @@ y = undefined_variable"#;
                 end_pos
             );
         } else {
-            panic!(
-                "Expected error range with start/end, got: {:?}",
-                range
-            );
+            panic!("Expected error range with start/end, got: {:?}", range);
         }
     }
 
@@ -830,7 +865,10 @@ y = undefined_variable"#;
         // Error right after unicode with nothing else
         let source = r#""🎉" +"#;
         let range = get_error_range(source).expect("Should have error range");
-        assert!(range.is_object() || range.is_null(), "Should have range or null");
+        assert!(
+            range.is_object() || range.is_null(),
+            "Should have range or null"
+        );
     }
 
     #[wasm_bindgen_test]
@@ -983,7 +1021,6 @@ mod evaluate_inline_expressions_tests {
     fn test_evaluate_inline_expressions_multiple() {
         let expressions = serde_wasm_bindgen::to_value(&vec!["x * 2", "x + 5", "x - 1"]).unwrap();
         // Create inputs using SerializableValue directly
-        use indexmap::IndexMap;
         let mut inputs_map: IndexMap<String, SerializableValue> = IndexMap::new();
         inputs_map.insert("x".to_string(), SerializableValue::Number(10.0));
         let inputs = serde_wasm_bindgen::to_value(&inputs_map).unwrap();
@@ -1012,7 +1049,6 @@ mod evaluate_inline_expressions_tests {
         let expressions =
             serde_wasm_bindgen::to_value(&vec!["\"Hello, \" + name", "age >= 18"]).unwrap();
         // Create inputs using SerializableValue directly
-        use indexmap::IndexMap;
         let mut inputs_map: IndexMap<String, SerializableValue> = IndexMap::new();
         inputs_map.insert(
             "name".to_string(),
@@ -1029,5 +1065,50 @@ mod evaluate_inline_expressions_tests {
             serde_json::json!("Hello, Alice")
         );
         assert_eq!(results[1]["value"]["Bool"], serde_json::json!(true));
+    }
+
+    #[wasm_bindgen_test]
+    fn test_evaluate_inline_expressions_unknown_builtin_returns_error() {
+        let expressions = serde_wasm_bindgen::to_value(&vec!["1 + 2"]).unwrap();
+        let mut inputs_map: IndexMap<String, SerializableValue> = IndexMap::new();
+        inputs_map.insert(
+            "bad_fn".to_string(),
+            SerializableValue::BuiltIn("not_a_real_builtin".to_string()),
+        );
+        let inputs = serde_wasm_bindgen::to_value(&inputs_map).unwrap();
+
+        let result = evaluate_inline_expressions(expressions, inputs).unwrap();
+        let results: Vec<serde_json::Value> = serde_wasm_bindgen::from_value(result).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0]["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Failed to convert input 'bad_fn'")
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn test_evaluate_inline_expressions_inputs_key_does_not_clobber_inputs() {
+        let expressions = serde_wasm_bindgen::to_value(&vec![
+            "inputs.x",
+            "inputs.inputs",
+            "x",
+            "inputs[\"non-ident key\"]",
+        ])
+        .unwrap();
+        let mut inputs_map: IndexMap<String, SerializableValue> = IndexMap::new();
+        inputs_map.insert("inputs".to_string(), SerializableValue::Number(99.0));
+        inputs_map.insert("x".to_string(), SerializableValue::Number(7.0));
+        inputs_map.insert("non-ident key".to_string(), SerializableValue::Number(42.0));
+        let inputs = serde_wasm_bindgen::to_value(&inputs_map).unwrap();
+
+        let result = evaluate_inline_expressions(expressions, inputs).unwrap();
+        let results: Vec<serde_json::Value> = serde_wasm_bindgen::from_value(result).unwrap();
+        assert_eq!(results.len(), 4);
+        assert_eq!(results[0]["value"]["Number"], serde_json::json!(7));
+        assert_eq!(results[1]["value"]["Number"], serde_json::json!(99));
+        assert_eq!(results[2]["value"]["Number"], serde_json::json!(7));
+        assert_eq!(results[3]["value"]["Number"], serde_json::json!(42));
     }
 }

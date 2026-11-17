@@ -531,6 +531,8 @@ impl BuiltInFunction {
             }
 
             Self::Range => {
+                const MAX_MATERIALIZED_RANGE: i64 = 1 << 24;
+
                 let (start, end) = match args[..] {
                     [Value::Number(start)] => (0.0, start),
                     [Value::Number(start), Value::Number(end)] => (start, end),
@@ -549,18 +551,36 @@ impl BuiltInFunction {
 
                 let start_i64 = start as i64;
                 let end_i64 = end as i64;
-                let length = end_i64 - start_i64;
-
-                if length > u32::MAX as i64 {
+                let Some(length) = end_i64
+                    .checked_sub(start_i64)
+                    .filter(|&len| len <= MAX_MATERIALIZED_RANGE)
+                else {
+                    let full_len = i128::from(end_i64) - i128::from(start_i64);
                     return Err(RuntimeError::new(format!(
-                        "list would be longer than the maximum length of {}",
-                        u32::MAX
+                        "range of {} elements exceeds maximum materialized list length of {}",
+                        full_len, MAX_MATERIALIZED_RANGE
                     )));
+                };
+
+                let len_usize = length as usize;
+                {
+                    let borrowed_heap = heap.borrow();
+                    if let Some(max_mem) = borrowed_heap.max_memory()
+                        && len_usize
+                            .saturating_mul(size_of::<Value>())
+                            .saturating_add(borrowed_heap.memory_used())
+                            > max_mem
+                    {
+                        return Err(RuntimeError::from("memory limit exceeded"));
+                    }
                 }
 
-                let values = (start_i64..end_i64)
-                    .map(|e| Value::Number(e as f64))
-                    .collect();
+                let mut values = Vec::new();
+                values
+                    .try_reserve_exact(len_usize)
+                    .map_err(|_| RuntimeError::from("out of memory allocating range"))?;
+                values.extend((start_i64..end_i64).map(|e| Value::Number(e as f64)));
+
                 let list = heap.borrow_mut().insert_list(values);
 
                 Ok(list)
@@ -598,7 +618,13 @@ impl BuiltInFunction {
                     return Err(RuntimeError::from("median requires at least one number"));
                 }
 
-                nums.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                if nums.iter().any(|n| n.is_nan()) {
+                    return Err(RuntimeError::from(
+                        "median cannot be calculated with NaN values",
+                    ));
+                }
+
+                nums.sort_by(f64::total_cmp);
                 let len = nums.len();
                 if len % 2 == 0 {
                     Ok(Value::Number((nums[len / 2 - 1] + nums[len / 2]) / 2.0))
@@ -612,7 +638,7 @@ impl BuiltInFunction {
                 let heap = &heap.borrow();
                 let list = args[0].as_list(heap)?;
 
-                if !(0.0..=100.0).contains(&p) {
+                if p.is_nan() || !(0.0..=100.0).contains(&p) {
                     return Err(RuntimeError::from("percentile must be between 0 and 100"));
                 }
 
@@ -621,7 +647,19 @@ impl BuiltInFunction {
                     .map(|a| a.as_number())
                     .collect::<AnyhowResult<Vec<f64>>>()?;
 
-                nums.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                if nums.is_empty() {
+                    return Err(RuntimeError::from(
+                        "percentile requires at least one number",
+                    ));
+                }
+
+                if nums.iter().any(|n| n.is_nan()) {
+                    return Err(RuntimeError::from(
+                        "percentile cannot be calculated with NaN values",
+                    ));
+                }
+
+                nums.sort_by(f64::total_cmp);
                 let index = (p / 100.0 * (nums.len() - 1) as f64).round() as usize;
 
                 Ok(Value::Number(nums[index]))
@@ -776,12 +814,26 @@ impl BuiltInFunction {
                     args[0].as_list(borrowed_heap)?.to_vec()
                 };
                 let borrowed_heap = heap.borrow();
+                let mut compare_err = None;
+
                 list.sort_by(|a, b| {
-                    a.compare(b, &borrowed_heap)
-                        .unwrap_or(None)
-                        .unwrap_or(std::cmp::Ordering::Equal)
+                    if compare_err.is_some() {
+                        return std::cmp::Ordering::Equal;
+                    }
+                    match a.compare(b, &borrowed_heap) {
+                        Ok(ord) => ord.unwrap_or(std::cmp::Ordering::Equal),
+                        Err(err) => {
+                            compare_err = Some(err);
+                            std::cmp::Ordering::Equal
+                        }
+                    }
                 });
                 drop(borrowed_heap);
+
+                if let Some(err) = compare_err {
+                    return Err(err.into());
+                }
+
                 Ok(heap.borrow_mut().insert_list(list))
             }
 
@@ -1216,7 +1268,7 @@ impl BuiltInFunction {
             Self::TimeNow => Ok(Value::Number(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
+                    .unwrap_or_default()
                     .as_secs_f64(),
             )),
 
@@ -1390,22 +1442,38 @@ impl BuiltInFunction {
                     let borrowed_heap = heap.borrow();
                     get_function_def(func, &borrowed_heap)
                 };
+                let mut compare_err = None;
 
-                list.sort_by(|a, b| match &func_def {
-                    Some(fd) => {
-                        let result_a = invoke(fd, Value::Null, &[*a], call_depth + 1);
-                        let result_b = invoke(fd, Value::Null, &[*b], call_depth + 1);
-
-                        match (result_a, result_b) {
-                            (Ok(val_a), Ok(val_b)) => val_a
-                                .compare(&val_b, &heap.borrow())
-                                .unwrap_or(None)
-                                .unwrap_or(std::cmp::Ordering::Equal),
-                            _ => std::cmp::Ordering::Equal,
-                        }
+                list.sort_by(|a, b| {
+                    if compare_err.is_some() {
+                        return std::cmp::Ordering::Equal;
                     }
-                    _ => std::cmp::Ordering::Equal,
+
+                    match &func_def {
+                        Some(fd) => {
+                            let result_a = invoke(fd, Value::Null, &[*a], call_depth + 1);
+                            let result_b = invoke(fd, Value::Null, &[*b], call_depth + 1);
+
+                            match (result_a, result_b) {
+                                (Ok(val_a), Ok(val_b)) => {
+                                    match val_a.compare(&val_b, &heap.borrow()) {
+                                        Ok(ord) => ord.unwrap_or(std::cmp::Ordering::Equal),
+                                        Err(err) => {
+                                            compare_err = Some(err);
+                                            std::cmp::Ordering::Equal
+                                        }
+                                    }
+                                }
+                                _ => std::cmp::Ordering::Equal,
+                            }
+                        }
+                        _ => std::cmp::Ordering::Equal,
+                    }
                 });
+
+                if let Some(err) = compare_err {
+                    return Err(err.into());
+                }
 
                 Ok(heap.borrow_mut().insert_list(list))
             }
@@ -3218,5 +3286,123 @@ mod tests {
                 "{pieces} pieces"
             );
         }
+    }
+
+    #[test]
+    fn test_median_and_percentile_nan_and_empty() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        let nan_list = heap
+            .borrow_mut()
+            .insert_list(vec![Value::Number(1.0), Value::Number(f64::NAN)]);
+        let median_err = BuiltInFunction::Median
+            .call(&[nan_list], heap.clone(), bindings.clone(), 0, "")
+            .unwrap_err();
+        assert!(median_err.message.contains("NaN"));
+
+        let median_args_err = BuiltInFunction::Median
+            .call(
+                &[Value::Number(1.0), Value::Number(f64::NAN)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap_err();
+        assert!(median_args_err.message.contains("NaN"));
+
+        let empty_list = heap.borrow_mut().insert_list(vec![]);
+        let empty_pct_err = BuiltInFunction::Percentile
+            .call(
+                &[empty_list, Value::Number(50.0)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap_err();
+        assert!(
+            empty_pct_err
+                .message
+                .contains("percentile requires at least one number")
+        );
+
+        let nan_pct_err = BuiltInFunction::Percentile
+            .call(
+                &[nan_list, Value::Number(50.0)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap_err();
+        assert!(nan_pct_err.message.contains("NaN"));
+
+        let valid_list = heap
+            .borrow_mut()
+            .insert_list(vec![Value::Number(1.0), Value::Number(2.0)]);
+        let nan_p_err = BuiltInFunction::Percentile
+            .call(
+                &[valid_list, Value::Number(f64::NAN)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap_err();
+        assert!(
+            nan_p_err
+                .message
+                .contains("percentile must be between 0 and 100")
+        );
+    }
+
+    #[test]
+    fn test_range_materialized_cap_and_overflow() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        let too_long_err = BuiltInFunction::Range
+            .call(
+                &[Value::Number(20_000_000.0)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap_err();
+        assert!(
+            too_long_err
+                .message
+                .contains("exceeds maximum materialized list length")
+        );
+
+        let overflow_err = BuiltInFunction::Range
+            .call(
+                &[Value::Number(-1e18), Value::Number(1e18)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap_err();
+        assert!(
+            overflow_err
+                .message
+                .contains("exceeds maximum materialized list length")
+        );
+
+        heap.borrow_mut().set_max_memory(Some(1024));
+        let mem_err = BuiltInFunction::Range
+            .call(
+                &[Value::Number(1000.0)],
+                heap.clone(),
+                bindings.clone(),
+                0,
+                "",
+            )
+            .unwrap_err();
+        assert!(mem_err.message.contains("memory limit exceeded"));
     }
 }

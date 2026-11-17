@@ -15,7 +15,7 @@
 use crate::{
     heap::{Heap, HeapPointer},
     record::{Keys, Record, Shapes},
-    values::{FUNCTION_KEY, SerializableValue, Value},
+    values::{FUNCTION_KEY, MAX_VALUE_DEPTH, SerializableValue, Value},
 };
 use serde::{
     de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor},
@@ -308,6 +308,7 @@ pub fn to_text(value: &Value, heap: &Heap) -> serde_json::Result<String> {
         value,
         heap,
         orders: &orders,
+        depth: 0,
     })
 }
 
@@ -355,17 +356,29 @@ struct Written<'w> {
     value: &'w Value,
     heap: &'w Heap,
     orders: &'w Orders,
+    depth: usize,
 }
 
 impl<'w> Written<'w> {
     /// `value`, which is in the same heap, for serde to write.
     fn with(&self, value: &'w Value) -> Written<'w> {
-        Written { value, ..*self }
+        Written {
+            value,
+            depth: self.depth + 1,
+            ..*self
+        }
     }
 }
 
 impl Serialize for Written<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.depth > MAX_VALUE_DEPTH {
+            return Err(S::Error::custom(format!(
+                "maximum value nesting depth of {} exceeded",
+                MAX_VALUE_DEPTH
+            )));
+        }
+
         match self.value {
             Value::Number(number) if number.is_finite() => serializer.serialize_f64(*number),
             Value::Number(_) => serializer.serialize_u64(0),
@@ -420,7 +433,7 @@ impl Serialize for Written<'_> {
             // A function is written as the object that it is read from, which takes its
             // source: that is made the way it always was.
             Value::Lambda(_) | Value::BuiltIn(_) | Value::Spread(_) => {
-                SerializableValue::from_value(self.value, self.heap)
+                SerializableValue::from_value_with_depth(self.value, self.heap, self.depth)
                     .map_err(S::Error::custom)?
                     .to_json()
                     .serialize(serializer)
@@ -769,5 +782,18 @@ mod tests {
             to_text(&list, &heap).unwrap(),
             "[0,0,0,1.7976931348623157e308,-0.0,1.0]"
         );
+    }
+
+    #[test]
+    fn refuses_to_write_values_nested_past_max_depth() {
+        let mut heap = Heap::new();
+        let mut deep = Value::Null;
+
+        for _ in 0..(MAX_VALUE_DEPTH + 10) {
+            deep = heap.insert_list(vec![deep]);
+        }
+
+        let err = to_text(&deep, &heap).unwrap_err();
+        assert!(err.to_string().contains("maximum value nesting depth"));
     }
 }

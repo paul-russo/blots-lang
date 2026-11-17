@@ -150,103 +150,133 @@ pub fn evaluate_statement(
     vm.run_chunk_compacting(&chunk, source, 0, held)
 }
 
+const MAX_AST_DEPTH: usize = 200;
+const MAX_PORTABLE_VALUE_DEPTH: usize = crate::values::MAX_VALUE_DEPTH;
+
+enum FreeVarTask<'a> {
+    Visit(&'a SpannedExpr),
+    Bind(Symbol),
+    Restore(HashSet<Symbol>),
+}
+
 // Helper function to collect free variables in an expression
 fn collect_free_variables(expr: &SpannedExpr, vars: &mut Vec<Symbol>, bound: &mut HashSet<Symbol>) {
-    match &expr.node {
-        // Slot variants are name references just like plain identifiers; they appear inside
-        // already-resolved nested lambda bodies and must still count as free variables of any
-        // enclosing lambda so capture propagation keeps working.
-        Expr::Identifier(name) | Expr::ParamSlot { name, .. } | Expr::CaptureSlot { name, .. } => {
-            // `inputs` is excluded because it is a late-bound keyword: like the `#field`
-            // shorthand, it must resolve against the calling document's inputs at call time,
-            // never get captured into a lambda's scope or inlined during serialization.
-            if !bound.contains(name)
-                && !matches!(name.as_str(), "infinity" | "inf" | "constants" | "inputs")
-            {
-                vars.push(*name);
-            }
-        }
-        Expr::Lambda { args, body, .. } => {
-            let mut new_bound = bound.clone();
-            for arg in args {
-                new_bound.insert(arg.get_name());
-            }
-            collect_free_variables(body, vars, &mut new_bound);
-        }
-        Expr::BinaryOp { op: _, left, right } => {
-            collect_free_variables(left, vars, bound);
-            collect_free_variables(right, vars, bound);
-        }
-        Expr::UnaryOp { op: _, expr } | Expr::PostfixOp { op: _, expr } | Expr::Spread(expr) => {
-            collect_free_variables(expr, vars, bound);
-        }
-        Expr::Call { func, args } => {
-            collect_free_variables(func, vars, bound);
-            for arg in args {
-                collect_free_variables(arg, vars, bound);
-            }
-        }
-        Expr::Access { expr, index } => {
-            collect_free_variables(expr, vars, bound);
-            collect_free_variables(index, vars, bound);
-        }
-        Expr::DotAccess { expr, field: _ } => {
-            collect_free_variables(expr, vars, bound);
-        }
-        Expr::Conditional {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            collect_free_variables(condition, vars, bound);
-            collect_free_variables(then_expr, vars, bound);
-            collect_free_variables(else_expr, vars, bound);
-        }
-        Expr::Assignment { ident: _, value } => {
-            collect_free_variables(value, vars, bound);
-        }
-        Expr::List(exprs) => {
-            for commented_expr in exprs {
-                collect_free_variables(&commented_expr.node, vars, bound);
-            }
-        }
-        Expr::Record(entries) => {
-            for commented_entry in entries {
-                let entry = &commented_entry.node;
-                match &entry.key {
-                    RecordKey::Dynamic(expr) | RecordKey::Spread(expr) => {
-                        collect_free_variables(expr, vars, bound);
-                    }
-                    _ => {}
-                }
-                if !matches!(entry.key, RecordKey::Shorthand(_) | RecordKey::Spread(_)) {
-                    collect_free_variables(&entry.value, vars, bound);
-                }
-            }
-        }
-        Expr::DoBlock {
-            statements,
-            return_expr,
-        } => {
-            // Create a new scope for the do block
-            let mut block_bound = bound.clone();
+    let mut stack = vec![FreeVarTask::Visit(expr)];
 
-            for stmt in statements {
-                let expr = &stmt.node;
-                // Check if this is an assignment and add the variable to block scope
-                if let Expr::Assignment { ident, value } = &expr.node {
-                    // First collect free variables from the value
-                    collect_free_variables(value, vars, &mut block_bound);
-                    // Then add the assigned variable to the block's bound set
-                    block_bound.insert(*ident);
-                } else {
-                    collect_free_variables(expr, vars, &mut block_bound);
-                }
+    while let Some(task) = stack.pop() {
+        match task {
+            FreeVarTask::Bind(ident) => {
+                bound.insert(ident);
             }
-            collect_free_variables(&return_expr.node, vars, &mut block_bound);
+            FreeVarTask::Restore(prev) => {
+                *bound = prev;
+            }
+            FreeVarTask::Visit(expr) => match &expr.node {
+                // Slot variants are name references just like plain identifiers; they appear
+                // inside already-resolved nested lambda bodies and must still count as free
+                // variables of any enclosing lambda so capture propagation keeps working.
+                Expr::Identifier(name)
+                | Expr::ParamSlot { name, .. }
+                | Expr::CaptureSlot { name, .. } => {
+                    // `inputs` is excluded because it is a late-bound keyword: like the `#field`
+                    // shorthand, it must resolve against the calling document's inputs at call
+                    // time, never get captured into a lambda's scope or inlined during
+                    // serialization.
+                    if !bound.contains(name)
+                        && !matches!(name.as_str(), "infinity" | "inf" | "constants" | "inputs")
+                    {
+                        vars.push(*name);
+                    }
+                }
+                Expr::Lambda { args, body, .. } => {
+                    let prev = bound.clone();
+                    for arg in args {
+                        bound.insert(arg.get_name());
+                    }
+                    stack.push(FreeVarTask::Restore(prev));
+                    stack.push(FreeVarTask::Visit(body));
+                }
+                Expr::BinaryOp { op: _, left, right } => {
+                    stack.push(FreeVarTask::Visit(right));
+                    stack.push(FreeVarTask::Visit(left));
+                }
+                Expr::UnaryOp { op: _, expr }
+                | Expr::PostfixOp { op: _, expr }
+                | Expr::Spread(expr) => {
+                    stack.push(FreeVarTask::Visit(expr));
+                }
+                Expr::Call { func, args } => {
+                    for arg in args.iter().rev() {
+                        stack.push(FreeVarTask::Visit(arg));
+                    }
+                    stack.push(FreeVarTask::Visit(func));
+                }
+                Expr::Access { expr, index } => {
+                    stack.push(FreeVarTask::Visit(index));
+                    stack.push(FreeVarTask::Visit(expr));
+                }
+                Expr::DotAccess { expr, field: _ } => {
+                    stack.push(FreeVarTask::Visit(expr));
+                }
+                Expr::Conditional {
+                    condition,
+                    then_expr,
+                    else_expr,
+                } => {
+                    stack.push(FreeVarTask::Visit(else_expr));
+                    stack.push(FreeVarTask::Visit(then_expr));
+                    stack.push(FreeVarTask::Visit(condition));
+                }
+                Expr::Assignment { ident: _, value } => {
+                    stack.push(FreeVarTask::Visit(value));
+                }
+                Expr::List(exprs) => {
+                    for commented_expr in exprs.iter().rev() {
+                        stack.push(FreeVarTask::Visit(&commented_expr.node));
+                    }
+                }
+                Expr::Record(entries) => {
+                    for commented_entry in entries.iter().rev() {
+                        let entry = &commented_entry.node;
+                        if !matches!(entry.key, RecordKey::Shorthand(_) | RecordKey::Spread(_)) {
+                            stack.push(FreeVarTask::Visit(&entry.value));
+                        }
+                        if let RecordKey::Dynamic(expr) | RecordKey::Spread(expr) = &entry.key {
+                            stack.push(FreeVarTask::Visit(expr));
+                        }
+                    }
+                }
+                Expr::DoBlock {
+                    statements,
+                    return_expr,
+                } => {
+                    // Create a new scope for the do block
+                    let prev = bound.clone();
+                    stack.push(FreeVarTask::Restore(prev));
+                    stack.push(FreeVarTask::Visit(&return_expr.node));
+
+                    for stmt in statements.iter().rev() {
+                        let expr = &stmt.node;
+                        // Check if this is an assignment and add the variable to block scope
+                        if let Expr::Assignment { ident, value } = &expr.node {
+                            // First collect free variables from the value, then bind the variable
+                            stack.push(FreeVarTask::Bind(*ident));
+                            stack.push(FreeVarTask::Visit(value));
+                        } else {
+                            stack.push(FreeVarTask::Visit(expr));
+                        }
+                    }
+                }
+                _ => {}
+            },
         }
-        _ => {}
     }
+}
+
+enum ResolveTask<'a> {
+    Visit(&'a mut SpannedExpr),
+    Shadow(Symbol),
+    Restore(HashSet<Symbol>),
 }
 
 /// Rewrite parameter and capture references in a lambda body into slot-indexed accesses.
@@ -267,122 +297,139 @@ fn resolve_lambda_expr(
     captures: &[Symbol],
     shadowed: &mut HashSet<Symbol>,
 ) {
-    match &mut expr.node {
-        Expr::Identifier(name) => {
-            let name = *name;
+    let mut stack = vec![ResolveTask::Visit(expr)];
 
-            // Names with special evaluation rules keep their dynamic lookup: shadowed names
-            // must see the do-block local, and the constant identifiers are handled before any
-            // environment lookup at evaluation time.
-            if shadowed.contains(&name) || matches!(name.as_str(), "infinity" | "inf" | "constants")
-            {
-                return;
+    while let Some(task) = stack.pop() {
+        match task {
+            ResolveTask::Shadow(ident) => {
+                shadowed.insert(ident);
             }
-
-            if let Some(index) = args.iter().position(|arg| arg.get_name() == name) {
-                if let Ok(index) = u16::try_from(index) {
-                    expr.node = Expr::ParamSlot { name, index };
-                }
-                return;
+            ResolveTask::Restore(prev) => {
+                *shadowed = prev;
             }
-
-            if let Some(index) = captures.iter().position(|capture| *capture == name)
-                && let Ok(index) = u16::try_from(index)
-            {
-                expr.node = Expr::CaptureSlot { name, index };
-            }
-        }
-        // Nested lambdas were already resolved against their own parameters and captures when
-        // their parse arm ran; their bodies must not be rewritten against this lambda's frame.
-        Expr::Lambda { .. } => {}
-        Expr::BinaryOp { left, right, .. } => {
-            resolve_lambda_expr(left, args, captures, shadowed);
-            resolve_lambda_expr(right, args, captures, shadowed);
-        }
-        Expr::UnaryOp { expr: inner, .. }
-        | Expr::PostfixOp { expr: inner, .. }
-        | Expr::Spread(inner)
-        | Expr::DotAccess { expr: inner, .. }
-        | Expr::Assignment { value: inner, .. }
-        | Expr::Output { expr: inner } => {
-            resolve_lambda_expr(inner, args, captures, shadowed);
-        }
-        Expr::Call {
-            func,
-            args: call_args,
-        } => {
-            resolve_lambda_expr(func, args, captures, shadowed);
-            for arg in call_args {
-                resolve_lambda_expr(arg, args, captures, shadowed);
-            }
-        }
-        Expr::Access { expr: inner, index } => {
-            resolve_lambda_expr(inner, args, captures, shadowed);
-            resolve_lambda_expr(index, args, captures, shadowed);
-        }
-        Expr::Conditional {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            resolve_lambda_expr(condition, args, captures, shadowed);
-            resolve_lambda_expr(then_expr, args, captures, shadowed);
-            resolve_lambda_expr(else_expr, args, captures, shadowed);
-        }
-        Expr::List(items) => {
-            for item in items {
-                resolve_lambda_expr(&mut item.node, args, captures, shadowed);
-            }
-        }
-        Expr::Record(entries) => {
-            for commented_entry in entries {
-                let entry = &mut commented_entry.node;
-
-                match &mut entry.key {
-                    RecordKey::Dynamic(key_expr) | RecordKey::Spread(key_expr) => {
-                        resolve_lambda_expr(key_expr, args, captures, shadowed);
+            ResolveTask::Visit(expr) => {
+                if let Expr::Identifier(name) = expr.node {
+                    // Names with special evaluation rules keep their dynamic lookup: shadowed
+                    // names must see the do-block local, and the constant identifiers are handled
+                    // before any environment lookup at evaluation time.
+                    if shadowed.contains(&name)
+                        || matches!(name.as_str(), "infinity" | "inf" | "constants")
+                    {
+                        continue;
                     }
-                    _ => {}
+
+                    if let Some(index) = args.iter().position(|arg| arg.get_name() == name) {
+                        if let Ok(index) = u16::try_from(index) {
+                            expr.node = Expr::ParamSlot { name, index };
+                        }
+                        continue;
+                    }
+
+                    if let Some(index) = captures.iter().position(|capture| *capture == name)
+                        && let Ok(index) = u16::try_from(index)
+                    {
+                        expr.node = Expr::CaptureSlot { name, index };
+                    }
+                    continue;
                 }
 
-                // Shorthand entries are evaluated through their key name (the value node is
-                // unused), and spread entries carry their expression in the key, so only the
-                // remaining entry kinds have a value worth resolving. Mirrors
-                // collect_free_variables.
-                if !matches!(entry.key, RecordKey::Shorthand(_) | RecordKey::Spread(_)) {
-                    resolve_lambda_expr(&mut entry.value, args, captures, shadowed);
+                match &mut expr.node {
+                    // Nested lambdas were already resolved against their own parameters and
+                    // captures when their parse arm ran; their bodies must not be rewritten
+                    // against this lambda's frame.
+                    Expr::Lambda { .. } => {}
+                    Expr::BinaryOp { left, right, .. } => {
+                        stack.push(ResolveTask::Visit(right));
+                        stack.push(ResolveTask::Visit(left));
+                    }
+                    Expr::UnaryOp { expr: inner, .. }
+                    | Expr::PostfixOp { expr: inner, .. }
+                    | Expr::Spread(inner)
+                    | Expr::DotAccess { expr: inner, .. }
+                    | Expr::Assignment { value: inner, .. }
+                    | Expr::Output { expr: inner } => {
+                        stack.push(ResolveTask::Visit(inner));
+                    }
+                    Expr::Call {
+                        func,
+                        args: call_args,
+                    } => {
+                        for arg in call_args.iter_mut().rev() {
+                            stack.push(ResolveTask::Visit(arg));
+                        }
+                        stack.push(ResolveTask::Visit(func));
+                    }
+                    Expr::Access { expr: inner, index } => {
+                        stack.push(ResolveTask::Visit(index));
+                        stack.push(ResolveTask::Visit(inner));
+                    }
+                    Expr::Conditional {
+                        condition,
+                        then_expr,
+                        else_expr,
+                    } => {
+                        stack.push(ResolveTask::Visit(else_expr));
+                        stack.push(ResolveTask::Visit(then_expr));
+                        stack.push(ResolveTask::Visit(condition));
+                    }
+                    Expr::List(items) => {
+                        for item in items.iter_mut().rev() {
+                            stack.push(ResolveTask::Visit(&mut item.node));
+                        }
+                    }
+                    Expr::Record(entries) => {
+                        for commented_entry in entries.iter_mut().rev() {
+                            let RecordEntry { key, value } = &mut commented_entry.node;
+
+                            // Shorthand entries are evaluated through their key name (the value
+                            // node is unused), and spread entries carry their expression in the
+                            // key, so only the remaining entry kinds have a value worth resolving.
+                            // Mirrors collect_free_variables.
+                            if !matches!(key, RecordKey::Shorthand(_) | RecordKey::Spread(_)) {
+                                stack.push(ResolveTask::Visit(value));
+                            }
+
+                            if let RecordKey::Dynamic(key_expr) | RecordKey::Spread(key_expr) = key
+                            {
+                                stack.push(ResolveTask::Visit(key_expr));
+                            }
+                        }
+                    }
+                    Expr::DoBlock {
+                        statements,
+                        return_expr,
+                    } => {
+                        // Mirror the runtime scoping: a block-local assignment shadows the name
+                        // only for the statements (and return expression) that come after it, so
+                        // references before the assignment still resolve to the parameter or
+                        // capture.
+                        let prev = shadowed.clone();
+                        stack.push(ResolveTask::Restore(prev));
+                        stack.push(ResolveTask::Visit(&mut return_expr.node));
+
+                        for stmt in statements.iter_mut().rev() {
+                            if matches!(stmt.node.node, Expr::Assignment { .. }) {
+                                if let Expr::Assignment { ident, value } = &mut stmt.node.node {
+                                    stack.push(ResolveTask::Shadow(*ident));
+                                    stack.push(ResolveTask::Visit(value));
+                                }
+                            } else {
+                                stack.push(ResolveTask::Visit(&mut stmt.node));
+                            }
+                        }
+                    }
+                    Expr::Identifier(_)
+                    | Expr::Number(_)
+                    | Expr::String(_)
+                    | Expr::Bool(_)
+                    | Expr::Null
+                    | Expr::InputReference(_)
+                    | Expr::BuiltIn(_)
+                    | Expr::ParamSlot { .. }
+                    | Expr::CaptureSlot { .. } => {}
                 }
             }
         }
-        Expr::DoBlock {
-            statements,
-            return_expr,
-        } => {
-            // Mirror the runtime scoping: a block-local assignment shadows the name only for
-            // the statements (and return expression) that come after it, so references before
-            // the assignment still resolve to the parameter or capture.
-            let mut block_shadowed = shadowed.clone();
-
-            for stmt in statements {
-                if let Expr::Assignment { ident, value } = &mut stmt.node.node {
-                    let ident = *ident;
-                    resolve_lambda_expr(value, args, captures, &mut block_shadowed);
-                    block_shadowed.insert(ident);
-                } else {
-                    resolve_lambda_expr(&mut stmt.node, args, captures, &mut block_shadowed);
-                }
-            }
-
-            resolve_lambda_expr(&mut return_expr.node, args, captures, &mut block_shadowed);
-        }
-        Expr::Number(_)
-        | Expr::String(_)
-        | Expr::Bool(_)
-        | Expr::Null
-        | Expr::InputReference(_)
-        | Expr::BuiltIn(_)
-        | Expr::ParamSlot { .. }
-        | Expr::CaptureSlot { .. } => {}
     }
 }
 
@@ -427,6 +474,22 @@ pub fn validate_portable_value(
     heap: &Heap,
     bindings: &Environment,
 ) -> AnyhowResult<()> {
+    validate_portable_value_inner(value, heap, bindings, 0)
+}
+
+fn validate_portable_value_inner(
+    value: &Value,
+    heap: &Heap,
+    bindings: &Environment,
+    depth: usize,
+) -> AnyhowResult<()> {
+    if depth > MAX_PORTABLE_VALUE_DEPTH {
+        return Err(anyhow!(
+            "value exceeds maximum nesting depth of {}",
+            MAX_PORTABLE_VALUE_DEPTH
+        ));
+    }
+
     match value {
         Value::Lambda(lambda_ptr) => {
             // Get the lambda definition
@@ -473,7 +536,7 @@ pub fn validate_portable_value(
             // Recursively validate list elements
             let list = list_ptr.reify(heap).as_list()?;
             for item in list {
-                validate_portable_value(item, heap, bindings)?;
+                validate_portable_value_inner(item, heap, bindings, depth + 1)?;
             }
             Ok(())
         }
@@ -481,7 +544,7 @@ pub fn validate_portable_value(
             // Recursively validate record values
             let record = record_ptr.reify(heap).as_record()?;
             for value in record.values() {
-                validate_portable_value(value, heap, bindings)?;
+                validate_portable_value_inner(value, heap, bindings, depth + 1)?;
             }
             Ok(())
         }
@@ -1525,7 +1588,11 @@ fn span_from_pair(pair: &Pair<Rule>) -> Span {
 }
 
 // Helper function to parse a record entry (pair, shorthand, or spread)
-fn parse_record_entry(pair: Pair<Rule>, preserve_comments: bool) -> AnyhowResult<RecordEntry> {
+fn parse_record_entry(
+    pair: Pair<Rule>,
+    preserve_comments: bool,
+    depth: usize,
+) -> AnyhowResult<RecordEntry> {
     match pair.as_rule() {
         Rule::record_pair => {
             let mut inner_pairs = pair.into_inner();
@@ -1544,11 +1611,15 @@ fn parse_record_entry(pair: Pair<Rule>, preserve_comments: bool) -> AnyhowResult
                 Rule::record_key_dynamic => RecordKey::Dynamic(Box::new(pairs_to_expr_inner(
                     key_pair.into_inner(),
                     preserve_comments,
+                    depth + 1,
                 )?)),
                 _ => unreachable!(),
             };
-            let value =
-                pairs_to_expr_inner(inner_pairs.next().unwrap().into_inner(), preserve_comments)?;
+            let value = pairs_to_expr_inner(
+                inner_pairs.next().unwrap().into_inner(),
+                preserve_comments,
+                depth + 1,
+            )?;
             Ok(RecordEntry { key, value })
         }
         Rule::record_shorthand => {
@@ -1559,7 +1630,7 @@ fn parse_record_entry(pair: Pair<Rule>, preserve_comments: bool) -> AnyhowResult
             })
         }
         Rule::spread_expression => {
-            let spread_expr = pairs_to_expr_inner(pair.into_inner(), preserve_comments)?;
+            let spread_expr = pairs_to_expr_inner(pair.into_inner(), preserve_comments, depth + 1)?;
             Ok(RecordEntry {
                 key: RecordKey::Spread(Box::new(spread_expr)),
                 value: Spanned::dummy(Expr::Null),
@@ -1571,16 +1642,27 @@ fn parse_record_entry(pair: Pair<Rule>, preserve_comments: bool) -> AnyhowResult
 
 // Convert Pest pairs to our AST (without comment preservation)
 pub fn pairs_to_expr(pairs: Pairs<Rule>) -> AnyhowResult<SpannedExpr> {
-    pairs_to_expr_inner(pairs, false)
+    pairs_to_expr_inner(pairs, false, 0)
 }
 
 // Convert Pest pairs to our AST (with comment preservation for formatting)
 pub fn pairs_to_expr_with_comments(pairs: Pairs<Rule>) -> AnyhowResult<SpannedExpr> {
-    pairs_to_expr_inner(pairs, true)
+    pairs_to_expr_inner(pairs, true, 0)
 }
 
 // Internal function that handles comment preservation
-fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowResult<SpannedExpr> {
+fn pairs_to_expr_inner(
+    pairs: Pairs<Rule>,
+    preserve_comments: bool,
+    depth: usize,
+) -> AnyhowResult<SpannedExpr> {
+    if depth > MAX_AST_DEPTH {
+        return Err(anyhow!(
+            "expression exceeds maximum nesting depth of {}",
+            MAX_AST_DEPTH
+        ));
+    }
+
     PRATT
         .map_primary(|primary| {
             let span = span_from_pair(&primary);
@@ -1626,7 +1708,7 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                             .parse::<f64>()
                             .map_err(anyhow::Error::from)?
                     };
-                    Ok(Spanned::new(Expr::Number(value), span))
+                    Ok((Spanned::new(Expr::Number(value), span), depth))
                 }
                 Rule::list => {
                     let list_pairs = primary.into_inner();
@@ -1644,8 +1726,11 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                                 let mut inner = pair.into_inner();
                                 // First is the spreadable_expression
                                 let expr_pair = inner.next().unwrap();
-                                let expr =
-                                    pairs_to_expr_inner(expr_pair.into_inner(), preserve_comments)?;
+                                let expr = pairs_to_expr_inner(
+                                    expr_pair.into_inner(),
+                                    preserve_comments,
+                                    depth + 1,
+                                )?;
                                 // Optional eol_comment
                                 let trailing = if preserve_comments {
                                     inner.next().map(|p| p.as_str().to_string())
@@ -1660,8 +1745,11 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                             }
                             _ => {
                                 // Fallback for other rules (shouldn't happen with updated grammar)
-                                let expr =
-                                    pairs_to_expr_inner(pair.into_inner(), preserve_comments)?;
+                                let expr = pairs_to_expr_inner(
+                                    pair.into_inner(),
+                                    preserve_comments,
+                                    depth + 1,
+                                )?;
                                 elements.push(Commented::new(expr));
                             }
                         }
@@ -1681,7 +1769,7 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                             last.trailing = Some(trailing);
                         }
                     }
-                    Ok(Spanned::new(Expr::List(elements), span))
+                    Ok((Spanned::new(Expr::List(elements), span), depth))
                 }
                 Rule::record => {
                     let record_pairs = primary.into_inner();
@@ -1698,7 +1786,8 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                             Rule::record_item => {
                                 let mut inner = pair.into_inner();
                                 let entry_pair = inner.next().unwrap();
-                                let entry = parse_record_entry(entry_pair, preserve_comments)?;
+                                let entry =
+                                    parse_record_entry(entry_pair, preserve_comments, depth)?;
                                 // Optional eol_comment
                                 let trailing = if preserve_comments {
                                     inner.next().map(|p| p.as_str().to_string())
@@ -1713,7 +1802,7 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                             }
                             Rule::record_pair => {
                                 // Fallback for direct record_pair (old grammar or edge case)
-                                let entry = parse_record_entry(pair, preserve_comments)?;
+                                let entry = parse_record_entry(pair, preserve_comments, depth)?;
                                 entries.push(Commented::with_comments(
                                     std::mem::take(&mut pending_comments),
                                     entry,
@@ -1732,8 +1821,11 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                                 ));
                             }
                             Rule::spread_expression => {
-                                let spread_expr =
-                                    pairs_to_expr_inner(pair.into_inner(), preserve_comments)?;
+                                let spread_expr = pairs_to_expr_inner(
+                                    pair.into_inner(),
+                                    preserve_comments,
+                                    depth + 1,
+                                )?;
                                 entries.push(Commented::with_comments(
                                     std::mem::take(&mut pending_comments),
                                     RecordEntry {
@@ -1760,7 +1852,7 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                         }
                     }
 
-                    Ok(Spanned::new(Expr::Record(entries), span))
+                    Ok((Spanned::new(Expr::Record(entries), span), depth))
                 }
                 Rule::bool => {
                     let bool_str = primary.as_str();
@@ -1769,12 +1861,12 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                         "false" => false,
                         _ => unreachable!(),
                     };
-                    Ok(Spanned::new(Expr::Bool(value), span))
+                    Ok((Spanned::new(Expr::Bool(value), span), depth))
                 }
-                Rule::null => Ok(Spanned::new(Expr::Null, span)),
+                Rule::null => Ok((Spanned::new(Expr::Null, span), depth)),
                 Rule::string => {
                     let value = primary.into_inner().as_str().to_string();
-                    Ok(Spanned::new(Expr::String(value), span))
+                    Ok((Spanned::new(Expr::String(value), span), depth))
                 }
                 Rule::assignment => {
                     let mut inner_pairs = primary.into_inner();
@@ -1782,8 +1874,9 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                     let value = Box::new(pairs_to_expr_inner(
                         inner_pairs.next().unwrap().into_inner(),
                         preserve_comments,
+                        depth + 1,
                     )?);
-                    Ok(Spanned::new(Expr::Assignment { ident, value }, span))
+                    Ok((Spanned::new(Expr::Assignment { ident, value }, span), depth))
                 }
                 Rule::lambda => {
                     let mut inner_pairs = primary.into_inner();
@@ -1812,31 +1905,38 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                         }
                     }
 
-                    let body = pairs_to_expr_inner(body_pairs.into_inner(), preserve_comments)?;
+                    let body =
+                        pairs_to_expr_inner(body_pairs.into_inner(), preserve_comments, depth + 1)?;
 
-                    Ok(lambda_expr(args, body, span))
+                    Ok((lambda_expr(args, body, span), depth))
                 }
                 Rule::conditional => {
                     let mut inner_pairs = primary.into_inner();
                     let condition = Box::new(pairs_to_expr_inner(
                         inner_pairs.next().unwrap().into_inner(),
                         preserve_comments,
+                        depth + 1,
                     )?);
                     let then_expr = Box::new(pairs_to_expr_inner(
                         inner_pairs.next().unwrap().into_inner(),
                         preserve_comments,
+                        depth + 1,
                     )?);
                     let else_expr = Box::new(pairs_to_expr_inner(
                         inner_pairs.next().unwrap().into_inner(),
                         preserve_comments,
+                        depth + 1,
                     )?);
-                    Ok(Spanned::new(
-                        Expr::Conditional {
-                            condition,
-                            then_expr,
-                            else_expr,
-                        },
-                        span,
+                    Ok((
+                        Spanned::new(
+                            Expr::Conditional {
+                                condition,
+                                then_expr,
+                                else_expr,
+                            },
+                            span,
+                        ),
+                        depth,
                     ))
                 }
                 Rule::do_block => {
@@ -1854,6 +1954,7 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                                         let expr = pairs_to_expr_inner(
                                             first.into_inner(),
                                             preserve_comments,
+                                            depth + 1,
                                         )?;
                                         // Check for optional trailing comment
                                         let trailing = if preserve_comments {
@@ -1880,6 +1981,7 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                                 let expr = pairs_to_expr_inner(
                                     return_expr_pair.into_inner(),
                                     preserve_comments,
+                                    depth + 1,
                                 )?;
                                 return_expr = Box::new(Commented::with_comments(
                                     std::mem::take(&mut pending_comments),
@@ -1896,12 +1998,15 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                         }
                     }
 
-                    Ok(Spanned::new(
-                        Expr::DoBlock {
-                            statements,
-                            return_expr,
-                        },
-                        span,
+                    Ok((
+                        Spanned::new(
+                            Expr::DoBlock {
+                                statements,
+                                return_expr,
+                            },
+                            span,
+                        ),
+                        depth,
                     ))
                 }
                 Rule::identifier => {
@@ -1909,89 +2014,128 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
 
                     // Check if it's a built-in function
                     if let Some(built_in) = BuiltInFunction::from_ident(ident) {
-                        Ok(Spanned::new(Expr::BuiltIn(built_in), span))
+                        Ok((Spanned::new(Expr::BuiltIn(built_in), span), depth))
                     } else {
-                        Ok(Spanned::new(Expr::Identifier(Symbol::intern(ident)), span))
+                        Ok((
+                            Spanned::new(Expr::Identifier(Symbol::intern(ident)), span),
+                            depth,
+                        ))
                     }
                 }
                 Rule::input_reference => {
                     // Strip the leading '#' and create an InputReference
                     let field = primary.as_str()[1..].to_string();
-                    Ok(Spanned::new(Expr::InputReference(field), span))
+                    Ok((Spanned::new(Expr::InputReference(field), span), depth))
                 }
-                Rule::expression => pairs_to_expr_inner(primary.into_inner(), preserve_comments),
+                Rule::expression => Ok((
+                    pairs_to_expr_inner(primary.into_inner(), preserve_comments, depth + 1)?,
+                    depth + 1,
+                )),
                 _ => unreachable!("{}", primary.as_str()),
             }
         })
         .map_prefix(|op, rhs| {
+            let (rhs, rhs_depth) = rhs?;
+            let next_depth = rhs_depth + 1;
+            if next_depth > MAX_AST_DEPTH {
+                return Err(anyhow!(
+                    "expression exceeds maximum nesting depth of {}",
+                    MAX_AST_DEPTH
+                ));
+            }
+
             let span = span_from_pair(&op);
-            match op.as_rule() {
-                Rule::negation => Ok(Spanned::new(
+            let expr = match op.as_rule() {
+                Rule::negation => Spanned::new(
                     Expr::UnaryOp {
                         op: UnaryOp::Negate,
-                        expr: Box::new(rhs?),
+                        expr: Box::new(rhs),
                     },
                     span,
-                )),
-                Rule::spread_operator => Ok(Spanned::new(Expr::Spread(Box::new(rhs?)), span)),
-                Rule::invert | Rule::natural_not => Ok(Spanned::new(
+                ),
+                Rule::spread_operator => Spanned::new(Expr::Spread(Box::new(rhs)), span),
+                Rule::invert | Rule::natural_not => Spanned::new(
                     Expr::UnaryOp {
                         op: UnaryOp::Not,
-                        expr: Box::new(rhs?),
+                        expr: Box::new(rhs),
                     },
                     span,
-                )),
+                ),
                 _ => unreachable!(),
-            }
+            };
+            Ok((expr, next_depth))
         })
         .map_postfix(|lhs, op| {
+            let (lhs, lhs_depth) = lhs?;
+            let next_depth = lhs_depth + 1;
+            if next_depth > MAX_AST_DEPTH {
+                return Err(anyhow!(
+                    "expression exceeds maximum nesting depth of {}",
+                    MAX_AST_DEPTH
+                ));
+            }
+
             let span = span_from_pair(&op);
-            match op.as_rule() {
-                Rule::factorial => Ok(Spanned::new(
+            let expr = match op.as_rule() {
+                Rule::factorial => Spanned::new(
                     Expr::PostfixOp {
                         op: PostfixOp::Factorial,
-                        expr: Box::new(lhs?),
+                        expr: Box::new(lhs),
                     },
                     span,
-                )),
+                ),
                 Rule::access => {
-                    let index_expr = pairs_to_expr_inner(op.into_inner(), preserve_comments)?;
-                    Ok(Spanned::new(
+                    let index_expr =
+                        pairs_to_expr_inner(op.into_inner(), preserve_comments, next_depth)?;
+                    Spanned::new(
                         Expr::Access {
-                            expr: Box::new(lhs?),
+                            expr: Box::new(lhs),
                             index: Box::new(index_expr),
                         },
                         span,
-                    ))
+                    )
                 }
                 Rule::dot_access => {
                     let field = op.into_inner().as_str().to_string();
-                    Ok(Spanned::new(
+                    Spanned::new(
                         Expr::DotAccess {
-                            expr: Box::new(lhs?),
+                            expr: Box::new(lhs),
                             field,
                         },
                         span,
-                    ))
+                    )
                 }
                 Rule::call_list => {
                     let call_list = op.into_inner();
                     let args = call_list
                         .into_iter()
-                        .map(|arg| pairs_to_expr_inner(arg.into_inner(), preserve_comments))
+                        .map(|arg| {
+                            pairs_to_expr_inner(arg.into_inner(), preserve_comments, next_depth)
+                        })
                         .collect::<AnyhowResult<Vec<SpannedExpr>>>()?;
-                    Ok(Spanned::new(
+                    Spanned::new(
                         Expr::Call {
-                            func: Box::new(lhs?),
+                            func: Box::new(lhs),
                             args,
                         },
                         span,
-                    ))
+                    )
                 }
                 _ => unreachable!(),
-            }
+            };
+            Ok((expr, next_depth))
         })
         .map_infix(|lhs, op, rhs| {
+            let (lhs, lhs_depth) = lhs?;
+            let (rhs, rhs_depth) = rhs?;
+            let next_depth = lhs_depth.max(rhs_depth) + 1;
+            if next_depth > MAX_AST_DEPTH {
+                return Err(anyhow!(
+                    "expression exceeds maximum nesting depth of {}",
+                    MAX_AST_DEPTH
+                ));
+            }
+
             let span = span_from_pair(&op);
             let op_type = match op.as_rule() {
                 Rule::add => BinaryOp::Add,
@@ -2022,16 +2166,20 @@ fn pairs_to_expr_inner(pairs: Pairs<Rule>, preserve_comments: bool) -> AnyhowRes
                 Rule::coalesce => BinaryOp::Coalesce,
                 _ => unreachable!(),
             };
-            Ok(Spanned::new(
-                Expr::BinaryOp {
-                    op: op_type,
-                    left: Box::new(lhs?),
-                    right: Box::new(rhs?),
-                },
-                span,
+            Ok((
+                Spanned::new(
+                    Expr::BinaryOp {
+                        op: op_type,
+                        left: Box::new(lhs),
+                        right: Box::new(rhs),
+                    },
+                    span,
+                ),
+                next_depth,
             ))
         })
         .parse(pairs)
+        .map(|(expr, _)| expr)
 }
 
 #[cfg(test)]
@@ -4230,5 +4378,183 @@ mod tests {
         let result = parse_and_evaluate("null .> 0", None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("cannot compare"));
+    }
+
+    #[test]
+    fn large_factorials_return_infinity_immediately_without_overflow() {
+        assert_eq!(
+            parse_and_evaluate("170!", None, None).unwrap(),
+            Value::Number((1..=170u64).map(|x| x as f64).product())
+        );
+        assert_eq!(
+            parse_and_evaluate("171!", None, None).unwrap(),
+            Value::Number(f64::INFINITY)
+        );
+        assert_eq!(
+            parse_and_evaluate("(2 ^ 60)!", None, None).unwrap(),
+            Value::Number(f64::INFINITY)
+        );
+        assert_eq!(
+            parse_and_evaluate("(2 ^ 64)!", None, None).unwrap(),
+            Value::Number(f64::INFINITY)
+        );
+    }
+
+    #[test]
+    fn parser_and_value_nesting_limits_prevent_stack_overflow() {
+        let deep_parens = format!("{}1{}", "(".repeat(500), ")".repeat(500));
+        assert!(get_pairs(&deep_parens).is_err());
+
+        let deep_prefix = format!("{}1", "-".repeat(500));
+        assert!(get_pairs(&deep_prefix).is_err());
+
+        let deep_if = format!("{}1", "if true then 0 else ".repeat(500));
+        assert!(get_pairs(&deep_if).is_err());
+
+        // Iteratively build a 2,000-deep nested list and verify recursive operations fail cleanly.
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+        let deep = parse_and_evaluate(
+            "deep = reduce(range(2000), (acc, _) => [acc], null)",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+
+        assert!(
+            parse_and_evaluate(
+                "deep .== deep",
+                Some(Rc::clone(&heap)),
+                Some(Rc::clone(&bindings))
+            )
+            .is_err()
+        );
+        assert!(
+            parse_and_evaluate(
+                "deep .< deep",
+                Some(Rc::clone(&heap)),
+                Some(Rc::clone(&bindings))
+            )
+            .is_err()
+        );
+        assert!(
+            parse_and_evaluate(
+                "unique([deep, deep])",
+                Some(Rc::clone(&heap)),
+                Some(Rc::clone(&bindings))
+            )
+            .is_err()
+        );
+        let rendered = parse_and_evaluate(
+            "to_string(deep)",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        assert!(
+            rendered
+                .as_string(&heap.borrow())
+                .unwrap()
+                .contains("[...]")
+        );
+        assert!(validate_portable_value(&deep, &heap.borrow(), &bindings).is_err());
+    }
+
+    #[test]
+    fn callback_reentry_limit_prevents_native_stack_overflow() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+        parse_and_evaluate(
+            "f = x => (x into f)",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+
+        let err = parse_and_evaluate("f(1)", Some(heap), Some(bindings)).unwrap_err();
+        assert!(err.to_string().contains("maximum callback nesting depth"));
+    }
+
+    #[test]
+    fn external_list_slice_stays_sound_across_mid_run_compaction() {
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        let bindings = Rc::new(Environment::new());
+
+        parse_and_evaluate(
+            "dead_pad = ['pad_a', 'pad_b']",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        parse_and_evaluate(
+            "kept = ['hello', 'world']",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+
+        // Clone the public `List` handle and hold a live `&[Value]` slice while `Heap` is unborrowed.
+        let external_list = bindings
+            .get(Symbol::intern("kept"))
+            .unwrap()
+            .as_list(&heap.borrow())
+            .unwrap()
+            .clone();
+        let slice_before: Vec<Value> = external_list.as_slice().to_vec();
+        let live_slice: &[Value] = external_list.as_slice();
+
+        // Run a statement via `evaluate_statement` that generates > 2 MiB of garbage to trigger `compact_in_run`.
+        let stmt_source = "reduce(range(20000), (acc, i) => acc + 1, len(to_string(range(50000))))";
+        let mut pairs = get_pairs(stmt_source).unwrap();
+        let inner = pairs
+            .next()
+            .unwrap()
+            .into_inner()
+            .next()
+            .unwrap()
+            .into_inner();
+        evaluate_statement_pairs(
+            inner,
+            Rc::clone(&heap),
+            Rc::clone(&bindings),
+            stmt_source,
+            &mut [],
+        )
+        .unwrap();
+
+        // `compact_in_run` must refuse in-place rewrite while `external_list` shares the buffer.
+        assert_eq!(live_slice, slice_before.as_slice());
+    }
+
+    #[test]
+    fn step_and_memory_budgets_halt_runaway_programs_cleanly() {
+        // 1. Step fuel halts exponential recursion cleanly.
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        heap.borrow_mut().set_max_steps(Some(5_000));
+        let bindings = Rc::new(Environment::new());
+        parse_and_evaluate(
+            "fib = n => if n < 2 then n else fib(n - 1) + fib(n - 2)",
+            Some(Rc::clone(&heap)),
+            Some(Rc::clone(&bindings)),
+        )
+        .unwrap();
+        let step_err = parse_and_evaluate("fib(30)", Some(heap), Some(bindings)).unwrap_err();
+        assert!(
+            step_err
+                .to_string()
+                .contains("execution step limit exceeded")
+        );
+
+        // 2. Memory budget halts exponential string doubling cleanly.
+        let heap = Rc::new(RefCell::new(Heap::new()));
+        heap.borrow_mut().set_max_memory(Some(256 << 10));
+        let bindings = Rc::new(Environment::new());
+        let mem_err = parse_and_evaluate(
+            "reduce(range(30), (s, _) => s + s, 'abcdefgh')",
+            Some(heap),
+            Some(bindings),
+        )
+        .unwrap_err();
+        assert!(mem_err.to_string().contains("memory limit exceeded"));
     }
 }

@@ -285,10 +285,12 @@ impl Completer for BlotsHighlighter {
     ) -> rustyline::Result<(usize, Vec<String>)> {
         let maybe_last_word = line.split_whitespace().last();
 
-        // If the cursor is at the last position, try matching for completions
+        // If the cursor is right at the end of the last word (no trailing whitespace),
+        // try matching for completions.
         if let Some(last_word) = maybe_last_word
             && let Some(last_word_pos) = line.match_indices(last_word).last()
             && pos == line.len()
+            && last_word_pos.0 + last_word.len() == pos
         {
             let rel_pos = pos - last_word_pos.0;
 
@@ -332,6 +334,7 @@ impl Helper for BlotsHighlighter {}
 mod tests {
     use super::HighlightType::{Comment, InputReference, Keyword, Number, Operator, String};
     use super::*;
+    use rustyline::history::MemHistory;
 
     /// The highlighted stretches of `line`: the text of each, and its kind.
     fn highlights(line: &str) -> Vec<(&str, HighlightType)> {
@@ -474,5 +477,21 @@ mod tests {
                 ("// b", Comment),
             ]
         );
+    }
+
+    #[test]
+    fn completes_prefix_at_word_end_and_ignores_trailing_whitespace() {
+        let bindings = Rc::new(Environment::new());
+        let highlighter = BlotsHighlighter::new(bindings);
+        let history = MemHistory::new();
+        let ctx = Context::new(&history);
+
+        let (pos, completions) = highlighter.complete("sum   ", 6, &ctx).unwrap();
+        assert_eq!(pos, 6);
+        assert!(completions.is_empty());
+
+        let (pos, completions) = highlighter.complete("su", 2, &ctx).unwrap();
+        assert_eq!(pos, 2);
+        assert!(completions.iter().any(|c| c == "m"));
     }
 }

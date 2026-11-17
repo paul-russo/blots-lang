@@ -116,6 +116,9 @@ const MAX_SCANNED_ENTRIES: usize = 16;
 /// `FnCompiler::branch_on_numbers`), which compiles the condition a second time.
 const MAX_LOGIC_COMPARISONS: usize = 16;
 
+/// Upper bound on expression recursion depth during compilation and AST inspection.
+const MAX_COMPILE_DEPTH: usize = 200;
+
 /// The distinct strings or names an instruction of a function refers to by index, in the
 /// order they were first used.
 ///
@@ -138,32 +141,33 @@ impl<T: Clone + Eq + Hash> Table<T> {
     }
 
     /// The index of `entry`, which is added if the table does not hold it yet.
-    fn index_of<Q>(&mut self, entry: &Q) -> u32
+    fn index_of<Q>(&mut self, entry: &Q) -> Option<u32>
     where
         T: Borrow<Q>,
         Q: Eq + Hash + ToOwned<Owned = T> + ?Sized,
     {
-        let next = self.entries.len() as u32;
-
         if self.entries.len() <= MAX_SCANNED_ENTRIES {
             let found = self.entries.iter().position(|own| own.borrow() == entry);
             if let Some(position) = found {
-                return position as u32;
+                return Some(position as u32);
             }
         } else {
             if self.positions.is_empty() {
                 self.positions = self.entries.iter().cloned().zip(0..).collect();
             }
 
-            match self.positions.get(entry) {
-                Some(position) => return *position,
-                None => self.positions.insert(entry.to_owned(), next),
-            };
+            if let Some(position) = self.positions.get(entry) {
+                return Some(*position);
+            }
         }
 
+        let next = u32::try_from(self.entries.len()).ok()?;
+        if self.entries.len() > MAX_SCANNED_ENTRIES {
+            self.positions.insert(entry.to_owned(), next);
+        }
         self.entries.push(entry.to_owned());
 
-        next
+        Some(next)
     }
 }
 
@@ -263,8 +267,7 @@ fn inline_callback(
     }
 
     let mut assigned = Vec::new();
-    collect_assignment_exprs(body, &mut assigned);
-    if !assigned.is_empty() {
+    if !collect_assignment_exprs(body, &mut assigned, 0) || !assigned.is_empty() {
         return None;
     }
 
@@ -410,7 +413,9 @@ fn takes_entries_apart(call: &InlineCall, name: Symbol) -> bool {
         _ => false,
     };
 
-    distinct_params(call) && !is_constant_name(name) && reads_only_parts(call.body, name, &is_part)
+    distinct_params(call)
+        && !is_constant_name(name)
+        && reads_only_parts(call.body, name, &is_part, 0)
 }
 
 /// Whether the parameters of the callback of `call` have names of their own.
@@ -428,8 +433,13 @@ fn reads_only_parts(
     expr: &SpannedExpr,
     name: Symbol,
     is_part: &dyn Fn(&SpannedExpr) -> bool,
+    depth: usize,
 ) -> bool {
-    let apart = |expr: &SpannedExpr| reads_only_parts(expr, name, is_part);
+    if depth > MAX_COMPILE_DEPTH {
+        return false;
+    }
+
+    let apart = |expr: &SpannedExpr| reads_only_parts(expr, name, is_part, depth + 1);
 
     if is_part(expr) {
         return true;
@@ -600,8 +610,9 @@ fn accumulator_shape(call: &InlineCall, records: bool) -> Option<Shape> {
     };
 
     let name = call.params[0].get_name();
-    let shaped =
-        distinct_params(call) && !is_constant_name(name) && updates_parts(call.body, name, &shape);
+    let shaped = distinct_params(call)
+        && !is_constant_name(name)
+        && updates_parts(call.body, name, &shape, 0);
 
     shaped.then_some(shape)
 }
@@ -628,7 +639,7 @@ fn guarded_shape(call: &InlineCall, records: bool) -> Option<(Shape, usize)> {
     }
 
     let mut leaves = Vec::new();
-    made_accumulators(call.body, name, &mut leaves)?;
+    made_accumulators(call.body, name, &mut leaves, 0)?;
 
     let (shape, written) = match &leaves.first()?.node {
         Expr::List(items) => {
@@ -665,7 +676,7 @@ fn guarded_shape(call: &InlineCall, records: bool) -> Option<(Shape, usize)> {
 
             let written = keys.len();
             let read = RefCell::new(Vec::new());
-            read_keys(call.body, name, &read);
+            read_keys(call.body, name, &read, 0);
             for key in read.into_inner() {
                 if !keys.contains(&key) {
                     keys.push(key);
@@ -680,7 +691,7 @@ fn guarded_shape(call: &InlineCall, records: bool) -> Option<(Shape, usize)> {
         _ => return None,
     };
 
-    updates_parts(call.body, name, &shape).then_some((shape, written))
+    updates_parts(call.body, name, &shape, 0).then_some((shape, written))
 }
 
 /// Collect the accumulators that `body` comes to in `leaves`, other than the accumulator
@@ -690,7 +701,12 @@ fn made_accumulators<'e>(
     body: &'e SpannedExpr,
     name: Symbol,
     leaves: &mut Vec<&'e SpannedExpr>,
+    depth: usize,
 ) -> Option<()> {
+    if depth > MAX_COMPILE_DEPTH {
+        return None;
+    }
+
     if variable_name(body) == Some(name) {
         return Some(());
     }
@@ -714,8 +730,8 @@ fn made_accumulators<'e>(
             else_expr,
             ..
         } => {
-            made_accumulators(then_expr, name, leaves)?;
-            made_accumulators(else_expr, name, leaves)?;
+            made_accumulators(then_expr, name, leaves, depth + 1)?;
+            made_accumulators(else_expr, name, leaves, depth + 1)?;
         }
         _ => return None,
     }
@@ -725,7 +741,11 @@ fn made_accumulators<'e>(
 
 /// Add the keys that the conditions of `body` and the values that it writes read of the
 /// record `name` to `keys` (see [`made_accumulators`]).
-fn read_keys(body: &SpannedExpr, name: Symbol, keys: &RefCell<Vec<String>>) {
+fn read_keys(body: &SpannedExpr, name: Symbol, keys: &RefCell<Vec<String>>, depth: usize) {
+    if depth > MAX_COMPILE_DEPTH {
+        return;
+    }
+
     let read = |expr: &SpannedExpr| {
         reads_only_parts(
             expr,
@@ -737,6 +757,7 @@ fn read_keys(body: &SpannedExpr, name: Symbol, keys: &RefCell<Vec<String>>) {
                 }
                 None => false,
             },
+            depth + 1,
         );
     };
 
@@ -747,8 +768,8 @@ fn read_keys(body: &SpannedExpr, name: Symbol, keys: &RefCell<Vec<String>>) {
             else_expr,
         } => {
             read(condition);
-            read_keys(then_expr, name, keys);
-            read_keys(else_expr, name, keys);
+            read_keys(then_expr, name, keys, depth + 1);
+            read_keys(else_expr, name, keys, depth + 1);
         }
         Expr::Record(entries) => {
             for entry in entries {
@@ -791,11 +812,18 @@ fn read_key(expr: &SpannedExpr, name: Symbol) -> Option<&str> {
 /// accumulator `name` and nothing else of it: `name` itself, a list of as many elements,
 /// a record that spreads `name` and writes some of its keys, or one that writes all of
 /// them in the same order; or a condition that comes to one of those either way.
-fn updates_parts(body: &SpannedExpr, name: Symbol, shape: &Shape) -> bool {
+fn updates_parts(body: &SpannedExpr, name: Symbol, shape: &Shape, depth: usize) -> bool {
+    if depth > MAX_COMPILE_DEPTH {
+        return false;
+    }
+
     let reads = |expr: &SpannedExpr| {
-        reads_only_parts(expr, name, &|part: &SpannedExpr| {
-            shape.part(part, name).is_some()
-        })
+        reads_only_parts(
+            expr,
+            name,
+            &|part: &SpannedExpr| shape.part(part, name).is_some(),
+            depth + 1,
+        )
     };
 
     if variable_name(body) == Some(name) {
@@ -823,8 +851,8 @@ fn updates_parts(body: &SpannedExpr, name: Symbol, shape: &Shape) -> bool {
             else_expr,
         } => {
             reads(condition)
-                && updates_parts(then_expr, name, shape)
-                && updates_parts(else_expr, name, shape)
+                && updates_parts(then_expr, name, shape, depth + 1)
+                && updates_parts(else_expr, name, shape, depth + 1)
         }
         _ => false,
     }
@@ -877,15 +905,21 @@ fn literal_values(init: &SpannedExpr) -> Vec<&SpannedExpr> {
 
 /// Collect the names assigned by assignment expressions that execute directly in the scope
 /// `expr` is evaluated in (do-blocks and lambdas open their own scopes and are skipped).
-fn collect_assignment_exprs(expr: &SpannedExpr, out: &mut Vec<Symbol>) {
+/// Returns `false` when `expr` exceeds [`MAX_COMPILE_DEPTH`].
+fn collect_assignment_exprs(expr: &SpannedExpr, out: &mut Vec<Symbol>, depth: usize) -> bool {
+    if depth > MAX_COMPILE_DEPTH {
+        return false;
+    }
+
+    let next = depth + 1;
     match &expr.node {
         Expr::Assignment { ident, value } => {
             if !out.contains(ident) {
                 out.push(*ident);
             }
-            collect_assignment_exprs(value, out);
+            collect_assignment_exprs(value, out, next)
         }
-        Expr::DoBlock { .. } | Expr::Lambda { .. } => {}
+        Expr::DoBlock { .. } | Expr::Lambda { .. } => true,
         Expr::Number(_)
         | Expr::String(_)
         | Expr::Bool(_)
@@ -894,55 +928,49 @@ fn collect_assignment_exprs(expr: &SpannedExpr, out: &mut Vec<Symbol>) {
         | Expr::InputReference(_)
         | Expr::BuiltIn(_)
         | Expr::ParamSlot { .. }
-        | Expr::CaptureSlot { .. } => {}
-        Expr::List(items) => {
-            for item in items {
-                collect_assignment_exprs(&item.node, out);
-            }
-        }
-        Expr::Record(entries) => {
-            for entry in entries {
-                let entry = &entry.node;
+        | Expr::CaptureSlot { .. } => true,
+        Expr::List(items) => items
+            .iter()
+            .all(|item| collect_assignment_exprs(&item.node, out, next)),
+        Expr::Record(entries) => entries.iter().all(|entry| {
+            let entry = &entry.node;
 
-                match &entry.key {
-                    RecordKey::Dynamic(key) | RecordKey::Spread(key) => {
-                        collect_assignment_exprs(key, out);
-                    }
-                    RecordKey::Static(_) | RecordKey::Shorthand(_) => {}
+            let key_ok = match &entry.key {
+                RecordKey::Dynamic(key) | RecordKey::Spread(key) => {
+                    collect_assignment_exprs(key, out, next)
                 }
+                RecordKey::Static(_) | RecordKey::Shorthand(_) => true,
+            };
 
-                if matches!(entry.key, RecordKey::Static(_) | RecordKey::Dynamic(_)) {
-                    collect_assignment_exprs(&entry.value, out);
-                }
-            }
-        }
+            key_ok
+                && (!matches!(entry.key, RecordKey::Static(_) | RecordKey::Dynamic(_))
+                    || collect_assignment_exprs(&entry.value, out, next))
+        }),
         Expr::Conditional {
             condition,
             then_expr,
             else_expr,
         } => {
-            collect_assignment_exprs(condition, out);
-            collect_assignment_exprs(then_expr, out);
-            collect_assignment_exprs(else_expr, out);
+            collect_assignment_exprs(condition, out, next)
+                && collect_assignment_exprs(then_expr, out, next)
+                && collect_assignment_exprs(else_expr, out, next)
         }
-        Expr::Output { expr } => collect_assignment_exprs(expr, out),
+        Expr::Output { expr } => collect_assignment_exprs(expr, out, next),
         Expr::Call { func, args } => {
-            collect_assignment_exprs(func, out);
-            for arg in args {
-                collect_assignment_exprs(arg, out);
-            }
+            collect_assignment_exprs(func, out, next)
+                && args
+                    .iter()
+                    .all(|arg| collect_assignment_exprs(arg, out, next))
         }
         Expr::Access { expr, index } => {
-            collect_assignment_exprs(expr, out);
-            collect_assignment_exprs(index, out);
+            collect_assignment_exprs(expr, out, next) && collect_assignment_exprs(index, out, next)
         }
-        Expr::DotAccess { expr, .. } => collect_assignment_exprs(expr, out),
+        Expr::DotAccess { expr, .. } => collect_assignment_exprs(expr, out, next),
         Expr::BinaryOp { left, right, .. } => {
-            collect_assignment_exprs(left, out);
-            collect_assignment_exprs(right, out);
+            collect_assignment_exprs(left, out, next) && collect_assignment_exprs(right, out, next)
         }
         Expr::UnaryOp { expr, .. } | Expr::PostfixOp { expr, .. } | Expr::Spread(expr) => {
-            collect_assignment_exprs(expr, out);
+            collect_assignment_exprs(expr, out, next)
         }
     }
 }
@@ -953,13 +981,15 @@ fn collect_block_assignment_exprs(
     statements: &[Commented<SpannedExpr>],
     return_expr: &SpannedExpr,
     out: &mut Vec<Symbol>,
-) {
-    for statement in statements.iter().map(|s| &s.node).chain([return_expr]) {
-        match &statement.node {
-            Expr::Assignment { value, .. } => collect_assignment_exprs(value, out),
-            _ => collect_assignment_exprs(statement, out),
-        }
-    }
+) -> bool {
+    statements
+        .iter()
+        .map(|s| &s.node)
+        .chain([return_expr])
+        .all(|statement| match &statement.node {
+            Expr::Assignment { value, .. } => collect_assignment_exprs(value, out, 0),
+            _ => collect_assignment_exprs(statement, out, 0),
+        })
 }
 
 /// Collect the names that `expr` may read without binding them, so each can be given a cache
@@ -968,7 +998,12 @@ fn collect_block_assignment_exprs(
 /// This over-approximates (a name that turns out to be a variable is told apart where it is
 /// read), except that a name is left out where a statement of a block has bound it; lambdas
 /// that are not inlined resolve their own names.
-fn collect_late_names(expr: &SpannedExpr, in_callback: bool, out: &mut Vec<Symbol>) {
+fn collect_late_names(expr: &SpannedExpr, in_callback: bool, out: &mut Vec<Symbol>, depth: usize) {
+    if depth > MAX_COMPILE_DEPTH {
+        return;
+    }
+
+    let next = depth + 1;
     let mut add = |name: Symbol| {
         if out.len() < MAX_CACHED_GLOBALS && !out.contains(&name) {
             out.push(name);
@@ -996,7 +1031,7 @@ fn collect_late_names(expr: &SpannedExpr, in_callback: bool, out: &mut Vec<Symbo
         | Expr::Lambda { .. } => {}
         Expr::List(items) => {
             for item in items {
-                collect_late_names(&item.node, in_callback, out);
+                collect_late_names(&item.node, in_callback, out, next);
             }
         }
         Expr::Record(entries) => {
@@ -1005,13 +1040,13 @@ fn collect_late_names(expr: &SpannedExpr, in_callback: bool, out: &mut Vec<Symbo
 
                 match &entry.key {
                     RecordKey::Dynamic(key) | RecordKey::Spread(key) => {
-                        collect_late_names(key, in_callback, out);
+                        collect_late_names(key, in_callback, out, next);
                     }
                     RecordKey::Static(_) | RecordKey::Shorthand(_) => {}
                 }
 
                 if matches!(entry.key, RecordKey::Static(_) | RecordKey::Dynamic(_)) {
-                    collect_late_names(&entry.value, in_callback, out);
+                    collect_late_names(&entry.value, in_callback, out, next);
                 }
             }
         }
@@ -1020,9 +1055,9 @@ fn collect_late_names(expr: &SpannedExpr, in_callback: bool, out: &mut Vec<Symbo
             then_expr,
             else_expr,
         } => {
-            collect_late_names(condition, in_callback, out);
-            collect_late_names(then_expr, in_callback, out);
-            collect_late_names(else_expr, in_callback, out);
+            collect_late_names(condition, in_callback, out, next);
+            collect_late_names(then_expr, in_callback, out, next);
+            collect_late_names(else_expr, in_callback, out, next);
         }
         Expr::DoBlock {
             statements,
@@ -1037,7 +1072,7 @@ fn collect_late_names(expr: &SpannedExpr, in_callback: bool, out: &mut Vec<Symbo
                 .map(|s| &s.node)
                 .chain([&return_expr.node])
             {
-                collect_late_names(statement, in_callback, &mut read);
+                collect_late_names(statement, in_callback, &mut read, next);
                 for name in read.drain(..) {
                     if !bound.contains(&name) {
                         add(name);
@@ -1049,40 +1084,40 @@ fn collect_late_names(expr: &SpannedExpr, in_callback: bool, out: &mut Vec<Symbo
                 }
             }
         }
-        Expr::Assignment { value, .. } => collect_late_names(value, in_callback, out),
-        Expr::Output { expr } => collect_late_names(expr, in_callback, out),
+        Expr::Assignment { value, .. } => collect_late_names(value, in_callback, out, next),
+        Expr::Output { expr } => collect_late_names(expr, in_callback, out, next),
         Expr::Call { func, args } => {
             if let Some(inline) = inline_call(func, args) {
-                collect_late_names(inline.list, in_callback, out);
-                collect_late_names(inline.body, true, out);
+                collect_late_names(inline.list, in_callback, out, next);
+                collect_late_names(inline.body, true, out, next);
                 if let Some(init) = inline.init {
-                    collect_late_names(init, in_callback, out);
+                    collect_late_names(init, in_callback, out, next);
                 }
                 return;
             }
 
-            collect_late_names(func, in_callback, out);
+            collect_late_names(func, in_callback, out, next);
             for arg in args {
-                collect_late_names(arg, in_callback, out);
+                collect_late_names(arg, in_callback, out, next);
             }
         }
         Expr::Access { expr, index } => {
-            collect_late_names(expr, in_callback, out);
-            collect_late_names(index, in_callback, out);
+            collect_late_names(expr, in_callback, out, next);
+            collect_late_names(index, in_callback, out, next);
         }
-        Expr::DotAccess { expr, .. } => collect_late_names(expr, in_callback, out),
+        Expr::DotAccess { expr, .. } => collect_late_names(expr, in_callback, out, next),
         Expr::BinaryOp { op, left, right } => {
             if let Some(inline) = inline_operator(*op, left, right) {
-                collect_late_names(inline.list, in_callback, out);
-                collect_late_names(inline.body, true, out);
+                collect_late_names(inline.list, in_callback, out, next);
+                collect_late_names(inline.body, true, out, next);
                 return;
             }
 
-            collect_late_names(left, in_callback, out);
-            collect_late_names(right, in_callback, out);
+            collect_late_names(left, in_callback, out, next);
+            collect_late_names(right, in_callback, out, next);
         }
         Expr::UnaryOp { expr, .. } | Expr::PostfixOp { expr, .. } | Expr::Spread(expr) => {
-            collect_late_names(expr, in_callback, out);
+            collect_late_names(expr, in_callback, out, next);
         }
     }
 }
@@ -1105,7 +1140,12 @@ fn variable_name(expr: &SpannedExpr) -> Option<Symbol> {
 /// Whether two expressions are spelled alike, as far as they are made of constants, names
 /// and the operators that call no function. Where the names mean the same variables in
 /// both, the two come to the same value.
-fn same_shape(a: &SpannedExpr, b: &SpannedExpr) -> bool {
+fn same_shape(a: &SpannedExpr, b: &SpannedExpr, depth: usize) -> bool {
+    if depth > MAX_COMPILE_DEPTH {
+        return false;
+    }
+
+    let next = depth + 1;
     match (&a.node, &b.node) {
         (Expr::Number(x), Expr::Number(y)) => x.to_bits() == y.to_bits(),
         (Expr::Bool(x), Expr::Bool(y)) => x == y,
@@ -1118,35 +1158,39 @@ fn same_shape(a: &SpannedExpr, b: &SpannedExpr) -> bool {
                 left: other_left,
                 right: other_right,
             },
-        ) => op == other_op && same_shape(left, other_left) && same_shape(right, other_right),
+        ) => {
+            op == other_op
+                && same_shape(left, other_left, next)
+                && same_shape(right, other_right, next)
+        }
         (
             Expr::Access { expr, index },
             Expr::Access {
                 expr: other,
                 index: other_index,
             },
-        ) => same_shape(expr, other) && same_shape(index, other_index),
+        ) => same_shape(expr, other, next) && same_shape(index, other_index, next),
         (
             Expr::DotAccess { expr, field },
             Expr::DotAccess {
                 expr: other,
                 field: other_field,
             },
-        ) => field == other_field && same_shape(expr, other),
+        ) => field == other_field && same_shape(expr, other, next),
         (
             Expr::UnaryOp { op, expr },
             Expr::UnaryOp {
                 op: other_op,
                 expr: other,
             },
-        ) => op == other_op && same_shape(expr, other),
+        ) => op == other_op && same_shape(expr, other, next),
         (
             Expr::PostfixOp { op, expr },
             Expr::PostfixOp {
                 op: other_op,
                 expr: other,
             },
-        ) => op == other_op && same_shape(expr, other),
+        ) => op == other_op && same_shape(expr, other, next),
         _ => match (variable_name(a), variable_name(b)) {
             (Some(name), Some(other)) => name == other,
             _ => false,
@@ -1157,20 +1201,27 @@ fn same_shape(a: &SpannedExpr, b: &SpannedExpr) -> bool {
 /// Whether `expr` holds an expression that is spelled like `needle` (see [`same_shape`]),
 /// looking at no more than `budget` of its nodes, and not into the expressions that are
 /// spelled like one of `kept`: the value of such an expression is taken as a whole.
-fn occurs(needle: &SpannedExpr, expr: &SpannedExpr, kept: &[Shared], budget: &mut usize) -> bool {
-    if *budget == 0 {
+fn occurs(
+    needle: &SpannedExpr,
+    expr: &SpannedExpr,
+    kept: &[Shared],
+    budget: &mut usize,
+    depth: usize,
+) -> bool {
+    if *budget == 0 || depth > MAX_COMPILE_DEPTH {
         return false;
     }
     *budget -= 1;
 
-    if kept.iter().any(|kept| same_shape(&kept.expr, expr)) {
+    if kept.iter().any(|kept| same_shape(&kept.expr, expr, 0)) {
         return false;
     }
 
-    if same_shape(needle, expr) {
+    if same_shape(needle, expr, 0) {
         return true;
     }
 
+    let next = depth + 1;
     match &expr.node {
         Expr::Number(_)
         | Expr::String(_)
@@ -1183,28 +1234,29 @@ fn occurs(needle: &SpannedExpr, expr: &SpannedExpr, kept: &[Shared], budget: &mu
         | Expr::CaptureSlot { .. } => false,
         Expr::List(items) => items
             .iter()
-            .any(|item| occurs(needle, &item.node, kept, budget)),
+            .any(|item| occurs(needle, &item.node, kept, budget, next)),
         Expr::Record(entries) => entries.iter().any(|entry| {
             let entry = &entry.node;
 
             match &entry.key {
                 RecordKey::Dynamic(key) => {
-                    occurs(needle, key, kept, budget) || occurs(needle, &entry.value, kept, budget)
+                    occurs(needle, key, kept, budget, next)
+                        || occurs(needle, &entry.value, kept, budget, next)
                 }
-                RecordKey::Spread(key) => occurs(needle, key, kept, budget),
-                RecordKey::Static(_) => occurs(needle, &entry.value, kept, budget),
+                RecordKey::Spread(key) => occurs(needle, key, kept, budget, next),
+                RecordKey::Static(_) => occurs(needle, &entry.value, kept, budget, next),
                 RecordKey::Shorthand(_) => false,
             }
         }),
-        Expr::Lambda { body, .. } => occurs(needle, body, kept, budget),
+        Expr::Lambda { body, .. } => occurs(needle, body, kept, budget, next),
         Expr::Conditional {
             condition,
             then_expr,
             else_expr,
         } => {
-            occurs(needle, condition, kept, budget)
-                || occurs(needle, then_expr, kept, budget)
-                || occurs(needle, else_expr, kept, budget)
+            occurs(needle, condition, kept, budget, next)
+                || occurs(needle, then_expr, kept, budget, next)
+                || occurs(needle, else_expr, kept, budget, next)
         }
         Expr::DoBlock {
             statements,
@@ -1212,25 +1264,27 @@ fn occurs(needle: &SpannedExpr, expr: &SpannedExpr, kept: &[Shared], budget: &mu
         } => {
             statements
                 .iter()
-                .any(|statement| occurs(needle, &statement.node, kept, budget))
-                || occurs(needle, &return_expr.node, kept, budget)
+                .any(|statement| occurs(needle, &statement.node, kept, budget, next))
+                || occurs(needle, &return_expr.node, kept, budget, next)
         }
         Expr::Call { func, args } => {
-            occurs(needle, func, kept, budget)
-                || args.iter().any(|arg| occurs(needle, arg, kept, budget))
+            occurs(needle, func, kept, budget, next)
+                || args
+                    .iter()
+                    .any(|arg| occurs(needle, arg, kept, budget, next))
         }
         Expr::Access { expr, index } => {
-            occurs(needle, expr, kept, budget) || occurs(needle, index, kept, budget)
+            occurs(needle, expr, kept, budget, next) || occurs(needle, index, kept, budget, next)
         }
         Expr::BinaryOp { left, right, .. } => {
-            occurs(needle, left, kept, budget) || occurs(needle, right, kept, budget)
+            occurs(needle, left, kept, budget, next) || occurs(needle, right, kept, budget, next)
         }
         Expr::Assignment { value: operand, .. }
         | Expr::Output { expr: operand }
         | Expr::DotAccess { expr: operand, .. }
         | Expr::UnaryOp { expr: operand, .. }
         | Expr::PostfixOp { expr: operand, .. }
-        | Expr::Spread(operand) => occurs(needle, operand, kept, budget),
+        | Expr::Spread(operand) => occurs(needle, operand, kept, budget, next),
     }
 }
 
@@ -1255,7 +1309,11 @@ fn plain_operands(expr: &SpannedExpr) -> Option<[Option<&SpannedExpr>; 2]> {
 }
 
 /// Whether evaluating `expr` can produce a function value (which an assignment then names).
-fn may_be_lambda(expr: &SpannedExpr) -> bool {
+fn may_be_lambda(mut expr: &SpannedExpr) -> bool {
+    while let Expr::Output { expr: inner } = &expr.node {
+        expr = inner;
+    }
+
     match &expr.node {
         Expr::Number(_)
         | Expr::String(_)
@@ -1271,7 +1329,6 @@ fn may_be_lambda(expr: &SpannedExpr) -> bool {
             op,
             BinaryOp::Via | BinaryOp::Into | BinaryOp::Where | BinaryOp::Coalesce
         ),
-        Expr::Output { expr } => may_be_lambda(expr),
         _ => true,
     }
 }
@@ -1297,7 +1354,7 @@ pub(crate) fn compile_chunk(
     let mut compiler = FnCompiler::new(true, Vec::new(), false, inline);
 
     let mut names = Vec::new();
-    collect_late_names(expr, false, &mut names);
+    collect_late_names(expr, false, &mut names, 0);
     for name in names {
         let reg = compiler.alloc()?;
         compiler.globals.push((name, reg));
@@ -1316,6 +1373,10 @@ pub(crate) fn compile_chunk(
         base: compiler.free_reg,
     });
     compiler.expr_return(expr)?;
+
+    if compiler.code_overflow || compiler.code.len() > i32::MAX as usize {
+        return Err(too_complex("the expression is too long"));
+    }
 
     Ok(Rc::new(compiler.finish(None, None)))
 }
@@ -1368,11 +1429,17 @@ fn compile_function(
     // Assignment expressions evaluated directly in the call frame create frame-level variables
     // that may or may not exist at any given point.
     let mut assigned = Vec::new();
-    collect_assignment_exprs(body, &mut assigned);
+    if !collect_assignment_exprs(body, &mut assigned, 0) {
+        return Err(too_complex("expression is nested too deeply"));
+    }
     compiler.declare_maybe_vars(&mut scope, &assigned)?;
 
     compiler.scopes.push(scope);
     compiler.expr_return(body)?;
+
+    if compiler.code_overflow || compiler.code.len() > i32::MAX as usize {
+        return Err(too_complex("the expression is too long"));
+    }
 
     // Self calls address the start of the code with a 16-bit offset.
     if self_target.is_some() && compiler.code.len() > u16::MAX as usize {
@@ -1450,6 +1517,12 @@ struct FnCompiler {
     /// The accumulators of the inlined `reduce` loops around the current point that are
     /// kept in registers part by part (see [`accumulator_shape`]).
     parts: Vec<Parts>,
+
+    /// Current expression recursion depth.
+    depth: usize,
+
+    /// Set when a jump offset does not fit in a 32-bit signed operand.
+    code_overflow: bool,
 }
 
 /// An accumulator of an inlined `reduce` that is kept in registers part by part.
@@ -1560,6 +1633,8 @@ impl FnCompiler {
             shared_search: SHARED_SEARCH_NODES,
             apart: Vec::new(),
             parts: Vec::new(),
+            depth: 0,
+            code_overflow: false,
         }
     }
 
@@ -1668,7 +1743,7 @@ impl FnCompiler {
                 self.spans.len() - 1
             }
         };
-        self.span_index[index] = span_id as u32;
+        self.span_index[index] = u32::try_from(span_id).unwrap_or(u32::MAX);
     }
 
     fn here(&self) -> usize {
@@ -1683,8 +1758,16 @@ impl FnCompiler {
     /// Point the jump at code word `jump` to `target`. Offsets are relative to the word that
     /// follows the jump instruction.
     fn patch_jump(&mut self, jump: usize, target: usize) {
-        let offset = target as i64 - (jump as i64 + 1);
-        let bits = offset as i32 as u32;
+        let offset = jump.checked_add(1).and_then(|from| {
+            let target = i64::try_from(target).ok()?;
+            let from = i64::try_from(from).ok()?;
+            i32::try_from(target.checked_sub(from)?).ok()
+        });
+        let Some(offset) = offset else {
+            self.code_overflow = true;
+            return;
+        };
+        let bits = offset as u32;
 
         let mut instr = Instr::decode(self.code[jump]);
         instr.b = bits as u16;
@@ -1704,7 +1787,7 @@ impl FnCompiler {
         Ok(reg)
     }
 
-    fn constant(&mut self, value: Value) -> u32 {
+    fn constant(&mut self, value: Value) -> CResult<u32> {
         let same = |a: &Value, b: &Value| match (a, b) {
             (Value::Number(x), Value::Number(y)) => x.to_bits() == y.to_bits(),
             _ => a == b,
@@ -1715,47 +1798,61 @@ impl FnCompiler {
             .iter()
             .position(|existing| same(existing, &value))
         {
-            return index as u32;
+            return Ok(index as u32);
         }
 
+        let index =
+            u32::try_from(self.consts.len()).map_err(|_| too_complex("too many constants"))?;
         self.consts.push(value);
-        (self.consts.len() - 1) as u32
+
+        Ok(index)
     }
 
-    fn string(&mut self, text: &str) -> u32 {
-        self.strings.index_of(text)
+    fn string(&mut self, text: &str) -> CResult<u32> {
+        self.strings
+            .index_of(text)
+            .ok_or_else(|| too_complex("too many strings"))
     }
 
-    fn name(&mut self, name: Symbol) -> u32 {
-        self.names.index_of(&name)
+    fn name(&mut self, name: Symbol) -> CResult<u32> {
+        self.names
+            .index_of(&name)
+            .ok_or_else(|| too_complex("too many names"))
     }
 
     /// The table index of a parameter or capture slot reference.
-    fn slot_ref(&mut self, index: u16, name: Symbol) -> u32 {
+    fn slot_ref(&mut self, index: u16, name: Symbol) -> CResult<u32> {
         let slot = (index, name);
         if let Some(position) = self.slot_refs.iter().position(|existing| *existing == slot) {
-            return position as u32;
+            return Ok(position as u32);
         }
 
+        let position = u32::try_from(self.slot_refs.len())
+            .map_err(|_| too_complex("too many slot references"))?;
         self.slot_refs.push(slot);
-        (self.slot_refs.len() - 1) as u32
+
+        Ok(position)
     }
 
-    fn load_const(&mut self, dst: u16, value: Value) {
+    fn load_const(&mut self, dst: u16, value: Value) -> CResult<()> {
         if let Value::Number(number) = value {
             self.emit(Instr::abc(Op::LoadNum, dst, 0, 0));
             self.emit_number(number);
 
-            return;
+            return Ok(());
         }
 
-        let index = self.constant(value);
+        let index = self.constant(value)?;
         self.emit(Instr::abx(Op::LoadK, dst, index));
+
+        Ok(())
     }
 
-    fn raise(&mut self, message: String, span: Span) {
-        let index = self.string(&message);
+    fn raise(&mut self, message: String, span: Span) -> CResult<()> {
+        let index = self.string(&message)?;
         self.emit_spanned(Instr::abx(Op::Raise, 0, index), span);
+
+        Ok(())
     }
 
     // ---------------------------------------------------------------------------------------
@@ -1942,18 +2039,20 @@ impl FnCompiler {
 
     /// Make sure the cache register of a late-bound name is loaded, raising the usual
     /// "unknown identifier" error at this point of the program otherwise.
-    fn ensure_global(&mut self, name: Symbol, reg: u16, span: Span) {
+    fn ensure_global(&mut self, name: Symbol, reg: u16, span: Span) -> CResult<()> {
         if self.ensured.contains(&name) {
-            return;
+            return Ok(());
         }
 
-        let index = self.name(name);
+        let index = self.name(name)?;
         let op = match self.is_chunk {
             true => Op::EnsureGlobal,
             false => Op::EnsureName,
         };
         self.emit_spanned(Instr::abx(op, reg, index), span);
         self.ensured.push(name);
+
+        Ok(())
     }
 
     /// Where a variable reference finds its value, when that is known at this point of the
@@ -1987,20 +2086,20 @@ impl FnCompiler {
 
     /// If `expr` is a variable reference whose value already sits in a register, return that
     /// register (emitting at most a cache check).
-    fn direct_reg(&mut self, expr: &SpannedExpr) -> Option<u16> {
+    fn direct_reg(&mut self, expr: &SpannedExpr) -> CResult<Option<u16>> {
         match self.place(expr) {
-            Resolved::Register(reg) => Some(reg),
+            Resolved::Register(reg) => Ok(Some(reg)),
             Resolved::Global(name, reg) => {
-                self.ensure_global(name, reg, expr.span);
-                Some(reg)
+                self.ensure_global(name, reg, expr.span)?;
+                Ok(Some(reg))
             }
-            Resolved::Dynamic => None,
+            Resolved::Dynamic => Ok(None),
         }
     }
 
     /// Compile a variable reference into `dst`.
     fn name_into(&mut self, expr: &SpannedExpr, dst: u16) -> CResult<()> {
-        if let Some(reg) = self.direct_reg(expr) {
+        if let Some(reg) = self.direct_reg(expr)? {
             if reg != dst {
                 self.emit(Instr::abc(Op::Move, dst, reg, 0));
             }
@@ -2010,25 +2109,25 @@ impl FnCompiler {
 
         match &expr.node {
             Expr::Identifier(name) => match name.as_str() {
-                "infinity" | "inf" => self.load_const(dst, Value::Number(f64::INFINITY)),
-                "constants" => self.load_const(dst, Value::Record(RecordPointer::new(0))),
-                _ => self.get_name(*name, dst, expr.span),
+                "infinity" | "inf" => self.load_const(dst, Value::Number(f64::INFINITY))?,
+                "constants" => self.load_const(dst, Value::Record(RecordPointer::new(0)))?,
+                _ => self.get_name(*name, dst, expr.span)?,
             },
             Expr::ParamSlot { name, index } => match self.owner() {
                 Owner::Chunk => {
-                    let slot = self.slot_ref(*index, *name);
+                    let slot = self.slot_ref(*index, *name)?;
                     self.emit_spanned(Instr::abx(Op::GetEnvParam, dst, slot), expr.span);
                 }
-                Owner::Function | Owner::Callback(_) => self.get_name(*name, dst, expr.span),
+                Owner::Function | Owner::Callback(_) => self.get_name(*name, dst, expr.span)?,
             },
             Expr::CaptureSlot { name, index } => match self.owner() {
                 Owner::Chunk => {
-                    let slot = self.slot_ref(*index, *name);
+                    let slot = self.slot_ref(*index, *name)?;
                     self.emit_spanned(Instr::abx(Op::GetEnvCapture, dst, slot), expr.span);
                 }
                 Owner::Function => {
                     let shadowable = self.shadows_self_binding(*name);
-                    let reference = self.slot_ref(*index, *name);
+                    let reference = self.slot_ref(*index, *name)?;
                     let mut instr = match u16::try_from(reference) {
                         Ok(reference) => Instr::abc(Op::GetCapture, dst, *index, reference),
                         Err(_) => Instr::abx(Op::GetCaptureRef, dst, reference),
@@ -2036,7 +2135,7 @@ impl FnCompiler {
                     instr.x = shadowable as u8;
                     self.emit_spanned(instr, expr.span);
                 }
-                Owner::Callback(_) => self.get_name(*name, dst, expr.span),
+                Owner::Callback(_) => self.get_name(*name, dst, expr.span)?,
             },
             _ => unreachable!("name_into called on a non-name expression"),
         }
@@ -2044,9 +2143,11 @@ impl FnCompiler {
         Ok(())
     }
 
-    fn get_name(&mut self, name: Symbol, dst: u16, span: Span) {
-        let index = self.name(name);
+    fn get_name(&mut self, name: Symbol, dst: u16, span: Span) -> CResult<()> {
+        let index = self.name(name)?;
         self.emit_spanned(Instr::abx(Op::GetName, dst, index), span);
+
+        Ok(())
     }
 
     // ---------------------------------------------------------------------------------------
@@ -2057,7 +2158,7 @@ impl FnCompiler {
     /// plain variable references, a fresh temporary otherwise. The caller releases temporaries
     /// by restoring `free_reg`.
     fn expr_any(&mut self, expr: &SpannedExpr) -> CResult<u16> {
-        if let Some(reg) = self.direct_reg(expr) {
+        if let Some(reg) = self.direct_reg(expr)? {
             return Ok(reg);
         }
 
@@ -2097,6 +2198,18 @@ impl FnCompiler {
 
     /// Compile `expr` in tail position of the function or chunk.
     fn expr_return(&mut self, expr: &SpannedExpr) -> CResult<()> {
+        self.depth += 1;
+        let result = if self.depth > MAX_COMPILE_DEPTH {
+            Err(too_complex("expression is nested too deeply"))
+        } else {
+            self.expr_return_inner(expr)
+        };
+        self.depth -= 1;
+
+        result
+    }
+
+    fn expr_return_inner(&mut self, expr: &SpannedExpr) -> CResult<()> {
         match &expr.node {
             Expr::Conditional {
                 condition,
@@ -2131,6 +2244,18 @@ impl FnCompiler {
     /// Compile `expr` so that its value ends up in `dst`. `dst` is only ever written by the
     /// final instruction of the expression, so it may alias a variable the expression reads.
     fn expr_into(&mut self, expr: &SpannedExpr, dst: u16) -> CResult<()> {
+        self.depth += 1;
+        let result = if self.depth > MAX_COMPILE_DEPTH {
+            Err(too_complex("expression is nested too deeply"))
+        } else {
+            self.expr_into_inner(expr, dst)
+        };
+        self.depth -= 1;
+
+        result
+    }
+
+    fn expr_into_inner(&mut self, expr: &SpannedExpr, dst: u16) -> CResult<()> {
         if let Some(reg) = self.hoisted_reg(expr) {
             self.emit(Instr::abc(Op::Move, dst, reg, 0));
 
@@ -2164,19 +2289,19 @@ impl FnCompiler {
         }
 
         match &expr.node {
-            Expr::Number(n) => self.load_const(dst, Value::Number(*n)),
-            Expr::Bool(b) => self.load_const(dst, Value::Bool(*b)),
-            Expr::Null => self.load_const(dst, Value::Null),
-            Expr::BuiltIn(built_in) => self.load_const(dst, Value::BuiltIn(*built_in)),
+            Expr::Number(n) => self.load_const(dst, Value::Number(*n))?,
+            Expr::Bool(b) => self.load_const(dst, Value::Bool(*b))?,
+            Expr::Null => self.load_const(dst, Value::Null)?,
+            Expr::BuiltIn(built_in) => self.load_const(dst, Value::BuiltIn(*built_in))?,
             Expr::String(text) => {
-                let index = self.string(text);
+                let index = self.string(text)?;
                 self.emit(Instr::abx(Op::LoadStr, dst, index));
             }
             Expr::Identifier(_) | Expr::ParamSlot { .. } | Expr::CaptureSlot { .. } => {
                 self.name_into(expr, dst)?;
             }
             Expr::InputReference(field) => {
-                let index = self.string(field);
+                let index = self.string(field)?;
                 self.emit_spanned(Instr::abx(Op::GetInput, dst, index), expr.span);
             }
             Expr::List(items) => self.list(items, dst)?,
@@ -2352,7 +2477,7 @@ impl FnCompiler {
     /// expression, and one that does nothing but come to a value (see [`Self::is_plain`]).
     fn repeats(&self, left: &SpannedExpr, right: &SpannedExpr) -> bool {
         if plain_operands(left).is_none()
-            || !same_shape(left, right)
+            || !same_shape(left, right, 0)
             || !self.is_plain(left, u16::MAX, &mut MAX_INVARIANT_NODES.clone())
         {
             return false;
@@ -2361,9 +2486,9 @@ impl FnCompiler {
         // The two name the same variables wherever a name means in one what it means in the
         // other.
         let mut variables = Vec::new();
-        self.variable_regs(left, &mut variables);
+        self.variable_regs(left, &mut variables, 0);
 
-        self.same_value(left, &mut variables.iter(), right)
+        self.same_value(left, &mut variables.iter(), right, 0)
     }
 
     /// Compile a condition and emit the jumps (returned for patching) that are taken when the
@@ -2496,7 +2621,7 @@ impl FnCompiler {
         &mut self,
         condition: &SpannedExpr,
     ) -> CResult<Option<(Vec<usize>, Vec<usize>)>> {
-        let Some(logic) = self.logic(condition) else {
+        let Some(logic) = self.logic(condition, 0) else {
             return Ok(None);
         };
         if !logic.has_junction() || logic.comparisons() > MAX_LOGIC_COMPARISONS {
@@ -2521,7 +2646,10 @@ impl FnCompiler {
     /// `expr` as a [`Logic`] condition, when it is one, and none of its parts is computed
     /// ahead of a loop or kept for the branches of a condition: comparisons that are not
     /// evaluated would leave a kept value uncomputed.
-    fn logic(&self, expr: &SpannedExpr) -> Option<Logic> {
+    fn logic(&self, expr: &SpannedExpr, depth: usize) -> Option<Logic> {
+        if depth > MAX_COMPILE_DEPTH {
+            return None;
+        }
         if self.awaited_shared(expr).is_some() || self.hoisted_reg(expr).is_some() {
             return None;
         }
@@ -2529,27 +2657,28 @@ impl FnCompiler {
             return None;
         }
 
+        let next = depth + 1;
         match &expr.node {
             Expr::BinaryOp {
                 op: BinaryOp::And | BinaryOp::NaturalAnd,
                 left,
                 right,
             } => Some(Logic::Both(
-                Box::new(self.logic(left)?),
-                Box::new(self.logic(right)?),
+                Box::new(self.logic(left, next)?),
+                Box::new(self.logic(right, next)?),
             )),
             Expr::BinaryOp {
                 op: BinaryOp::Or | BinaryOp::NaturalOr,
                 left,
                 right,
             } => Some(Logic::Either(
-                Box::new(self.logic(left)?),
-                Box::new(self.logic(right)?),
+                Box::new(self.logic(left, next)?),
+                Box::new(self.logic(right, next)?),
             )),
             Expr::UnaryOp {
                 op: UnaryOp::Not | UnaryOp::Invert,
                 expr: operand,
-            } => Some(Logic::Not(Box::new(self.logic(operand)?))),
+            } => Some(Logic::Not(Box::new(self.logic(operand, next)?))),
             Expr::BinaryOp { op, left, right } if compare_jump_opcodes(*op).is_some() => {
                 Some(Logic::Compare(*op, self.term(left)?, self.term(right)?))
             }
@@ -2690,6 +2819,18 @@ impl FnCompiler {
     /// registers part by part (the innermost of [`Self::parts`]), into code that leaves the
     /// next accumulator in those registers (see [`updates_parts`]).
     fn update_parts(&mut self, body: &SpannedExpr, name: Symbol) -> CResult<()> {
+        self.depth += 1;
+        let result = if self.depth > MAX_COMPILE_DEPTH {
+            Err(too_complex("expression is nested too deeply"))
+        } else {
+            self.update_parts_inner(body, name)
+        };
+        self.depth -= 1;
+
+        result
+    }
+
+    fn update_parts_inner(&mut self, body: &SpannedExpr, name: Symbol) -> CResult<()> {
         if variable_name(body) == Some(name) {
             return Ok(());
         }
@@ -2750,12 +2891,17 @@ impl FnCompiler {
             .enumerate()
             .map(|(index, (position, _))| {
                 values[index + 1..].iter().any(|(_, later)| {
-                    !reads_only_parts(later, name, &|part: &SpannedExpr| {
-                        parts
-                            .shape
-                            .part(part, name)
-                            .is_some_and(|read| read != *position)
-                    })
+                    !reads_only_parts(
+                        later,
+                        name,
+                        &|part: &SpannedExpr| {
+                            parts
+                                .shape
+                                .part(part, name)
+                                .is_some_and(|read| read != *position)
+                        },
+                        0,
+                    )
                 })
             })
             .collect();
@@ -2782,7 +2928,7 @@ impl FnCompiler {
     }
 
     /// Make the accumulator that `parts` holds, into `dst`.
-    fn make_accumulator(&mut self, parts: &Parts, dst: u16) {
+    fn make_accumulator(&mut self, parts: &Parts, dst: u16) -> CResult<()> {
         let len = parts.shape.len() as u16;
 
         match (&parts.shape, parts.origin) {
@@ -2790,7 +2936,8 @@ impl FnCompiler {
                 self.emit(Instr::abc(Op::NewList, dst, parts.first, len));
             }
             (Shape::Record(keys), Origin::Value { spread, written }) => {
-                let layout = self.layouts.len() as u16;
+                let layout = u16::try_from(self.layouts.len())
+                    .map_err(|_| too_complex("too many record layouts"))?;
                 self.layouts.push(RecordLayout {
                     distinct: true,
                     keys: Keys::interned(keys[..written].iter().map(String::as_str)),
@@ -2800,7 +2947,8 @@ impl FnCompiler {
                 self.emit(Instr::abc(Op::UpdateRecord, dst, spread, layout));
             }
             (Shape::Record(keys), Origin::Literal) => {
-                let layout = self.layouts.len() as u16;
+                let layout = u16::try_from(self.layouts.len())
+                    .map_err(|_| too_complex("too many record layouts"))?;
                 self.layouts.push(RecordLayout {
                     distinct: true,
                     keys: Keys::interned(keys.iter().map(String::as_str)),
@@ -2809,6 +2957,8 @@ impl FnCompiler {
                 self.emit(Instr::abc(Op::NewRecord, dst, parts.first, layout));
             }
         }
+
+        Ok(())
     }
 
     /// A register that holds the value of `term`, which is no number.
@@ -2897,10 +3047,10 @@ impl FnCompiler {
             // A comparison that decides a branch is compiled together with the branch: it
             // has no value to keep, but its operands do.
             Expr::BinaryOp { op, left, right } if compare_jump_opcodes(*op).is_some() => {
-                self.share_from(left, branches, first)?;
-                self.share_from(right, branches, first)
+                self.share_from(left, branches, first, 0)?;
+                self.share_from(right, branches, first, 0)
             }
-            _ => self.share_from(condition, branches, first),
+            _ => self.share_from(condition, branches, first, 0),
         }
     }
 
@@ -2911,7 +3061,12 @@ impl FnCompiler {
         expr: &SpannedExpr,
         branches: [&SpannedExpr; 2],
         first: usize,
+        depth: usize,
     ) -> CResult<()> {
+        if depth > MAX_COMPILE_DEPTH {
+            return Ok(());
+        }
+
         let Some(operands) = plain_operands(expr) else {
             return Ok(());
         };
@@ -2924,7 +3079,7 @@ impl FnCompiler {
             // The value may be on hand already, or about to be.
             let awaited = self.shared[first..]
                 .iter()
-                .any(|shared| !shared.computed && same_shape(&shared.expr, expr));
+                .any(|shared| !shared.computed && same_shape(&shared.expr, expr, 0));
             if awaited || self.shared_reg(expr).is_some() {
                 return Ok(());
             }
@@ -2935,12 +3090,12 @@ impl FnCompiler {
             let kept = &self.shared[first..];
             let repeated = branches
                 .iter()
-                .any(|branch| occurs(expr, branch, kept, &mut search));
+                .any(|branch| occurs(expr, branch, kept, &mut search, 0));
             self.shared_search = search;
 
             if repeated {
                 let mut variables = Vec::new();
-                self.variable_regs(expr, &mut variables);
+                self.variable_regs(expr, &mut variables, 0);
 
                 // A value that was computed ahead of a loop is where it will stay.
                 let (reg, computed) = match self.hoisted_reg(expr) {
@@ -2958,7 +3113,7 @@ impl FnCompiler {
         }
 
         for operand in operands.into_iter().flatten() {
-            self.share_from(operand, branches, first)?;
+            self.share_from(operand, branches, first, depth + 1)?;
         }
 
         Ok(())
@@ -2966,10 +3121,14 @@ impl FnCompiler {
 
     /// The registers of the variables that `expr` reads, in the order it names them. `expr`
     /// is an expression that [`Self::is_plain`] holds for.
-    fn variable_regs(&self, expr: &SpannedExpr, out: &mut Vec<u16>) {
+    fn variable_regs(&self, expr: &SpannedExpr, out: &mut Vec<u16>, depth: usize) {
+        if depth > MAX_COMPILE_DEPTH {
+            return;
+        }
+
         if let Some(operands) = plain_operands(expr) {
             for operand in operands.into_iter().flatten() {
-                self.variable_regs(operand, out);
+                self.variable_regs(operand, out, depth + 1);
             }
         } else if let Resolved::Register(reg) | Resolved::Global(_, reg) = self.place(expr) {
             out.push(reg);
@@ -2991,7 +3150,8 @@ impl FnCompiler {
         self.shared
             .iter()
             .find(|shared| {
-                shared.computed && self.same_value(&shared.expr, &mut shared.variables.iter(), expr)
+                shared.computed
+                    && self.same_value(&shared.expr, &mut shared.variables.iter(), expr, 0)
             })
             .map(|shared| shared.reg)
     }
@@ -3005,7 +3165,13 @@ impl FnCompiler {
         kept: &SpannedExpr,
         variables: &mut std::slice::Iter<u16>,
         expr: &SpannedExpr,
+        depth: usize,
     ) -> bool {
+        if depth > MAX_COMPILE_DEPTH {
+            return false;
+        }
+
+        let next = depth + 1;
         match (&kept.node, &expr.node) {
             (Expr::Number(x), Expr::Number(y)) => x.to_bits() == y.to_bits(),
             (Expr::Bool(x), Expr::Bool(y)) => x == y,
@@ -3020,8 +3186,8 @@ impl FnCompiler {
                 },
             ) => {
                 op == other_op
-                    && self.same_value(left, variables, other_left)
-                    && self.same_value(right, variables, other_right)
+                    && self.same_value(left, variables, other_left, next)
+                    && self.same_value(right, variables, other_right, next)
             }
             (
                 Expr::Access {
@@ -3033,8 +3199,8 @@ impl FnCompiler {
                     index: other_index,
                 },
             ) => {
-                self.same_value(object, variables, other)
-                    && self.same_value(index, variables, other_index)
+                self.same_value(object, variables, other, next)
+                    && self.same_value(index, variables, other_index, next)
             }
             (
                 Expr::DotAccess {
@@ -3045,21 +3211,21 @@ impl FnCompiler {
                     expr: other,
                     field: other_field,
                 },
-            ) => field == other_field && self.same_value(operand, variables, other),
+            ) => field == other_field && self.same_value(operand, variables, other, next),
             (
                 Expr::UnaryOp { op, expr: operand },
                 Expr::UnaryOp {
                     op: other_op,
                     expr: other,
                 },
-            ) => op == other_op && self.same_value(operand, variables, other),
+            ) => op == other_op && self.same_value(operand, variables, other, next),
             (
                 Expr::PostfixOp { op, expr: operand },
                 Expr::PostfixOp {
                     op: other_op,
                     expr: other,
                 },
-            ) => op == other_op && self.same_value(operand, variables, other),
+            ) => op == other_op && self.same_value(operand, variables, other, next),
             (Expr::Identifier(name), _) if is_constant_name(*name) => {
                 matches!(&expr.node, Expr::Identifier(other) if other == name)
             }
@@ -3088,7 +3254,9 @@ impl FnCompiler {
         };
 
         let mut assigned = Vec::new();
-        collect_block_assignment_exprs(statements, return_expr, &mut assigned);
+        if !collect_block_assignment_exprs(statements, return_expr, &mut assigned) {
+            return Err(too_complex("expression is nested too deeply"));
+        }
         self.declare_maybe_vars(&mut scope, &assigned)?;
         self.scopes.push(scope);
 
@@ -3124,7 +3292,7 @@ impl FnCompiler {
         };
 
         if let Some(message) = Self::block_keyword_error(*ident) {
-            self.raise(message, statement.span);
+            self.raise(message, statement.span)?;
             return Ok(());
         }
 
@@ -3140,7 +3308,7 @@ impl FnCompiler {
             // The value may read the variable it rebinds, so it is computed elsewhere first.
             let temp = self.alloc()?;
             self.expr_into(value, temp)?;
-            self.name_lambda(value, temp, *ident);
+            self.name_lambda(value, temp, *ident)?;
             self.emit(Instr::abc(Op::Move, reg, temp, 0));
             self.free_reg = mark;
 
@@ -3151,7 +3319,7 @@ impl FnCompiler {
         // once its value has been computed.
         let reg = self.alloc()?;
         self.expr_into(value, reg)?;
-        self.name_lambda(value, reg, *ident);
+        self.name_lambda(value, reg, *ident)?;
         self.declare(*ident, reg, false);
 
         Ok(())
@@ -3166,7 +3334,7 @@ impl FnCompiler {
         };
 
         if let Some(message) = Self::block_keyword_error(*ident) {
-            self.raise(message, return_expr.span);
+            self.raise(message, return_expr.span)?;
             return Ok(());
         }
 
@@ -3175,13 +3343,13 @@ impl FnCompiler {
         match target {
             Target::Register(dst) => {
                 self.expr_into(value, dst)?;
-                self.name_lambda(value, dst, *ident);
+                self.name_lambda(value, dst, *ident)?;
             }
             Target::Return => {
                 let mark = self.free_reg;
                 let reg = self.alloc()?;
                 self.expr_into(value, reg)?;
-                self.name_lambda(value, reg, *ident);
+                self.name_lambda(value, reg, *ident)?;
                 self.emit(Instr::abc(Op::Return, reg, 0, 0));
                 self.free_reg = mark;
             }
@@ -3190,15 +3358,17 @@ impl FnCompiler {
         Ok(())
     }
 
-    fn name_lambda(&mut self, value: &SpannedExpr, reg: u16, ident: Symbol) {
+    fn name_lambda(&mut self, value: &SpannedExpr, reg: u16, ident: Symbol) -> CResult<()> {
         if !may_be_lambda(value) {
-            return;
+            return Ok(());
         }
 
-        let index = self.name(ident);
+        let index = self.name(ident)?;
         let mut instr = Instr::abx(Op::NameLambda, reg, index);
         instr.x = matches!(value.node, Expr::Lambda { .. }) as u8;
         self.emit(instr);
+
+        Ok(())
     }
 
     /// Compile an assignment used as an expression (or as a top-level statement): the name
@@ -3218,7 +3388,7 @@ impl FnCompiler {
                     ident
                 ),
                 span,
-            );
+            )?;
             return Ok(());
         }
 
@@ -3238,15 +3408,15 @@ impl FnCompiler {
             self.raise(
                 format!("{} is a keyword, and cannot be reassigned", ident),
                 span,
-            );
+            )?;
             return Ok(());
         }
 
-        let name = self.name(ident);
+        let name = self.name(ident)?;
         self.emit_spanned(Instr::abx(Op::CheckUnbound, 0, name), span);
 
         self.expr_into(value, dst)?;
-        self.name_lambda(value, dst, ident);
+        self.name_lambda(value, dst, ident)?;
 
         let scope = self.scopes.last().expect("assignment outside of any scope");
         match scope.kind {
@@ -3407,7 +3577,8 @@ impl FnCompiler {
             .iter()
             .filter(|entry| !matches!(entry.node.key, RecordKey::Spread(_)))
             .count();
-        self.emit(Instr::abx(Op::RecordBegin, 0, spelled_out as u32));
+        let spelled_out = u32::try_from(spelled_out).unwrap_or(u32::MAX);
+        self.emit(Instr::abx(Op::RecordBegin, 0, spelled_out));
 
         for entry in entries {
             let entry = &entry.node;
@@ -3415,7 +3586,7 @@ impl FnCompiler {
             match &entry.key {
                 RecordKey::Static(key) => {
                     let value = self.expr_any(&entry.value)?;
-                    let key = self.string(key);
+                    let key = self.string(key)?;
                     self.emit(Instr::abx(Op::RecordSet, value, key));
                 }
                 RecordKey::Dynamic(key_expr) => {
@@ -3433,14 +3604,14 @@ impl FnCompiler {
                         Resolved::Global(_, reg) if self.ensured.contains(&name) => reg,
                         Resolved::Global(..) | Resolved::Dynamic => {
                             let reg = self.alloc()?;
-                            let index = self.name(name);
+                            let index = self.name(name)?;
                             let mut instr = Instr::abx(Op::GetName, reg, index);
                             instr.x = 1;
                             self.emit(instr);
                             reg
                         }
                     };
-                    let key = self.string(ident);
+                    let key = self.string(ident)?;
                     self.emit(Instr::abx(Op::RecordSet, value, key));
                 }
                 RecordKey::Spread(spread_expr) => {
@@ -3475,7 +3646,8 @@ impl FnCompiler {
             })
             .collect();
 
-        let index = self.lambdas.len() as u32;
+        let index =
+            u32::try_from(self.lambdas.len()).map_err(|_| too_complex("too many functions"))?;
         self.lambdas.push(LambdaTemplate {
             args: Rc::new(args.to_vec()),
             body: Rc::clone(body),
@@ -3612,7 +3784,7 @@ impl FnCompiler {
             };
             self.emit_spanned(Instr::abc(op, dst, first, second), span);
         } else {
-            let function = self.constant(Value::BuiltIn(built_in));
+            let function = self.constant(Value::BuiltIn(built_in))?;
             let Ok(function) = u16::try_from(function) else {
                 return Ok(false);
             };
@@ -3678,7 +3850,7 @@ impl FnCompiler {
                 waiting.start = index;
             }
 
-            observed |= self.observed_params(arg);
+            observed |= self.observed_params(arg, 0);
         }
 
         for (index, arg) in args.iter().enumerate() {
@@ -3718,7 +3890,12 @@ impl FnCompiler {
     /// variable of the function is visible, so a name that is looked up when the code runs is
     /// not that of a parameter. An expression that may run code from outside of the function
     /// sees every parameter, as that code can look each of them up by name.
-    fn observed_params(&self, expr: &SpannedExpr) -> u64 {
+    fn observed_params(&self, expr: &SpannedExpr, depth: usize) -> u64 {
+        if depth > MAX_COMPILE_DEPTH {
+            return u64::MAX;
+        }
+
+        let next = depth + 1;
         match &expr.node {
             Expr::Number(_) | Expr::Bool(_) | Expr::Null | Expr::String(_) | Expr::BuiltIn(_) => 0,
             Expr::Identifier(_) | Expr::ParamSlot { .. } => match self.frame_reg(expr) {
@@ -3729,32 +3906,32 @@ impl FnCompiler {
             Expr::UnaryOp { expr: operand, .. }
             | Expr::PostfixOp { expr: operand, .. }
             | Expr::DotAccess { expr: operand, .. }
-            | Expr::Spread(operand) => self.observed_params(operand),
+            | Expr::Spread(operand) => self.observed_params(operand, next),
             Expr::BinaryOp { op, left, right }
                 if !matches!(op, BinaryOp::Via | BinaryOp::Into | BinaryOp::Where) =>
             {
-                self.observed_params(left) | self.observed_params(right)
+                self.observed_params(left, next) | self.observed_params(right, next)
             }
             Expr::Access {
                 expr: object,
                 index,
-            } => self.observed_params(object) | self.observed_params(index),
+            } => self.observed_params(object, next) | self.observed_params(index, next),
             Expr::Conditional {
                 condition,
                 then_expr,
                 else_expr,
             } => {
-                self.observed_params(condition)
-                    | self.observed_params(then_expr)
-                    | self.observed_params(else_expr)
+                self.observed_params(condition, next)
+                    | self.observed_params(then_expr, next)
+                    | self.observed_params(else_expr, next)
             }
-            Expr::List(items) => items
-                .iter()
-                .fold(0, |seen, item| seen | self.observed_params(&item.node)),
+            Expr::List(items) => items.iter().fold(0, |seen, item| {
+                seen | self.observed_params(&item.node, next)
+            }),
             Expr::Call { func, args } => match &func.node {
                 Expr::BuiltIn(built_in) if !built_in.takes_callback() => args
                     .iter()
-                    .fold(0, |seen, arg| seen | self.observed_params(arg)),
+                    .fold(0, |seen, arg| seen | self.observed_params(arg, next)),
                 _ => u64::MAX,
             },
             _ => u64::MAX,
@@ -3863,7 +4040,17 @@ impl FnCompiler {
     ///
     /// Returns whether that still holds after `expr`: whether everything it evaluates was
     /// moved or cannot fail.
-    fn hoist(&mut self, expr: &SpannedExpr, state: u16, room: &mut usize) -> CResult<bool> {
+    fn hoist(
+        &mut self,
+        expr: &SpannedExpr,
+        state: u16,
+        room: &mut usize,
+        depth: usize,
+    ) -> CResult<bool> {
+        if depth > MAX_COMPILE_DEPTH {
+            return Ok(false);
+        }
+
         match &expr.node {
             Expr::Number(_) | Expr::Bool(_) | Expr::Null | Expr::String(_) | Expr::BuiltIn(_) => {
                 return Ok(true);
@@ -3871,7 +4058,7 @@ impl FnCompiler {
             Expr::Identifier(name) if is_constant_name(*name) => return Ok(true),
             Expr::Identifier(_) | Expr::ParamSlot { .. } | Expr::CaptureSlot { .. } => {
                 // A name of the chunk that is first read here has its cache checked here.
-                return Ok(self.direct_reg(expr).is_some());
+                return Ok(self.direct_reg(expr)?.is_some());
             }
             _ => {}
         }
@@ -3891,31 +4078,35 @@ impl FnCompiler {
 
         // What is left evaluates its operands in this order and then does something that may
         // fail, or that differs from one pass to the next.
+        let next = depth + 1;
         match &expr.node {
             Expr::BinaryOp { left, right, .. } => {
-                let _ = self.hoist(left, state, room)? && self.hoist(right, state, room)?;
+                let _ =
+                    self.hoist(left, state, room, next)? && self.hoist(right, state, room, next)?;
             }
             Expr::Access {
                 expr: object,
                 index,
             } => {
-                let _ = self.hoist(object, state, room)? && self.hoist(index, state, room)?;
+                let _ = self.hoist(object, state, room, next)?
+                    && self.hoist(index, state, room, next)?;
             }
             Expr::DotAccess { expr: operand, .. }
             | Expr::UnaryOp { expr: operand, .. }
             | Expr::PostfixOp { expr: operand, .. } => {
-                self.hoist(operand, state, room)?;
+                self.hoist(operand, state, room, next)?;
             }
             Expr::Conditional { condition, .. } => match &condition.node {
                 // A comparison that decides a branch is compiled together with the branch.
                 Expr::BinaryOp { op, left, right } if compare_jump_opcodes(*op).is_some() => {
-                    let _ = self.hoist(left, state, room)? && self.hoist(right, state, room)?;
+                    let _ = self.hoist(left, state, room, next)?
+                        && self.hoist(right, state, room, next)?;
                 }
                 _ => {
-                    self.hoist(condition, state, room)?;
+                    self.hoist(condition, state, room, next)?;
                 }
             },
-            Expr::Call { func, args } => self.hoist_call(func, args, state, room)?,
+            Expr::Call { func, args } => self.hoist_call(func, args, state, room, next)?,
             _ => {}
         }
 
@@ -3929,7 +4120,9 @@ impl FnCompiler {
         args: &[SpannedExpr],
         state: u16,
         room: &mut usize,
+        depth: usize,
     ) -> CResult<()> {
+        let next = depth + 1;
         if self.inline
             && let Some(inline) = inline_call(func, args)
         {
@@ -3937,14 +4130,14 @@ impl FnCompiler {
             // a list is followed by the initial value before anything is checked.
             if let Some(range_args) = range_call(inline.list) {
                 for arg in range_args {
-                    if !self.hoist(arg, state, room)? {
+                    if !self.hoist(arg, state, room, next)? {
                         break;
                     }
                 }
-            } else if self.hoist(inline.list, state, room)?
+            } else if self.hoist(inline.list, state, room, next)?
                 && let Some(init) = inline.init
             {
-                self.hoist(init, state, room)?;
+                self.hoist(init, state, room, next)?;
             }
 
             return Ok(());
@@ -3955,12 +4148,12 @@ impl FnCompiler {
         // callback never makes one: see `self_call_candidate`.)
         let gathered = args.len() > MAX_DIRECT_ARGS
             || args.iter().any(|arg| matches!(arg.node, Expr::Spread(_)));
-        if gathered || !self.hoist(func, state, room)? {
+        if gathered || !self.hoist(func, state, room, next)? {
             return Ok(());
         }
 
         for arg in args {
-            if !self.hoist(arg, state, room)? {
+            if !self.hoist(arg, state, room, next)? {
                 break;
             }
         }
@@ -3988,7 +4181,7 @@ impl FnCompiler {
         }
 
         let mut names = Vec::new();
-        collect_late_names(call.body, true, &mut names);
+        collect_late_names(call.body, true, &mut names, 0);
         names.retain(|name| {
             matches!(self.resolve(*name), Resolved::Dynamic) && !self.has_maybe_var(*name)
         });
@@ -4195,7 +4388,7 @@ impl FnCompiler {
         // loop goes on with its parts. Another copy of the loop goes on with anything else.
         let to_operator = match parts {
             Some(parts) if matches!(parts.origin, Origin::Value { .. }) => {
-                let to_other = self.take_apart(&parts);
+                let to_other = self.take_apart(&parts)?;
                 let ensured = self.ensured.len();
 
                 self.loop_passes(&setup, Some(parts), dst)?;
@@ -4333,7 +4526,7 @@ impl FnCompiler {
         // would compute the same way, and the passes after it start behind that.
         let body_start = self.here();
         let hoisted = self.hoisted.len();
-        self.hoist(call.body, state, &mut MAX_HOISTED.clone())?;
+        self.hoist(call.body, state, &mut MAX_HOISTED.clone(), 0)?;
 
         let loop_start = self.here();
         let body_mark = self.free_reg;
@@ -4426,7 +4619,7 @@ impl FnCompiler {
                 self.patch_jump(to_exit, self.here());
                 let acc = acc_reg.expect("reduce accumulator");
                 match parts {
-                    Some(parts) => self.make_accumulator(&parts, dst),
+                    Some(parts) => self.make_accumulator(&parts, dst)?,
                     None if acc != dst => {
                         self.emit(Instr::abc(Op::Move, dst, acc, 0));
                     }
@@ -4439,14 +4632,14 @@ impl FnCompiler {
                 let exhausted = call.builtin == BuiltInFunction::Every;
 
                 self.patch_jump(to_exit, self.here());
-                self.load_const(dst, Value::Bool(exhausted));
+                self.load_const(dst, Value::Bool(exhausted))?;
                 let to_end = self.emit_jump(Op::Jmp, 0);
 
                 for jump in early_exit {
                     self.patch_jump(jump, self.here());
                 }
                 self.emit(Instr::abx(Op::AddDepth, 0, (-body_depth) as u32));
-                self.load_const(dst, Value::Bool(!exhausted));
+                self.load_const(dst, Value::Bool(!exhausted))?;
 
                 self.patch_jump(to_end, self.here());
             }
@@ -4475,11 +4668,12 @@ impl FnCompiler {
     /// Emit the instruction that takes the initial value of an accumulator apart into its
     /// parts where it has their shape (see `Op::JmpNotApart`), and return it, for its jump to
     /// be patched: the jump is taken where the value has another shape.
-    fn take_apart(&mut self, parts: &Parts) -> usize {
+    fn take_apart(&mut self, parts: &Parts) -> CResult<usize> {
         let (kind, size, required) = match (&parts.shape, parts.origin) {
             (Shape::List(len), _) => (APART_LIST, *len as u32, 0),
             (Shape::Record(keys), Origin::Value { written, .. }) => {
-                let layout = self.layouts.len() as u32;
+                let layout = u32::try_from(self.layouts.len())
+                    .map_err(|_| too_complex("too many record layouts"))?;
                 self.layouts.push(RecordLayout {
                     distinct: true,
                     keys: Keys::interned(keys.iter().map(String::as_str)),
@@ -4505,7 +4699,7 @@ impl FnCompiler {
             .encode(),
         );
 
-        jump
+        Ok(jump)
     }
 }
 
