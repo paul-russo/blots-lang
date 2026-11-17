@@ -17,9 +17,10 @@ use blots_core::functions::{
 };
 use blots_core::heap::Heap;
 use blots_core::intern::Symbol;
+use blots_core::json::{self, Inputs};
 use blots_core::parser::{Rule, get_pairs};
 use blots_core::stats::ProfilingSummary;
-use blots_core::values::{SerializableValue, Value};
+use blots_core::values::Value;
 use clap::CommandFactory;
 use clap_complete::{Shell, generate, shells::*};
 use cli::Args;
@@ -29,7 +30,7 @@ use indexmap::IndexMap;
 use rustyline::Editor;
 use std::cell::RefCell;
 use std::fs;
-use std::io::{self, IsTerminal, Read, Write};
+use std::io::{self, BufWriter, IsTerminal, Read, Write};
 use std::rc::Rc;
 use std::sync::LazyLock;
 
@@ -46,62 +47,75 @@ fn parse_json_inputs(
     source: &str,
     unnamed_counter: &mut usize,
 ) -> Result<IndexMap<String, Value>, String> {
-    match serde_json::from_str::<serde_json::Value>(json_str) {
-        Ok(json_value) => {
-            let mut inputs_map: IndexMap<String, Value> = IndexMap::new();
+    let inputs = json::read_inputs(json_str, &mut heap.borrow_mut())
+        .map_err(|e| format!("[input error] Failed to parse JSON from {}: {}", source, e))?;
 
-            if let serde_json::Value::Object(obj) = json_value {
-                for (k, v) in obj.iter() {
-                    let serializable = SerializableValue::from_json(v);
-                    if let Ok(val) = serializable.to_value(&mut heap.borrow_mut()) {
-                        inputs_map.insert(k.clone(), val);
-                    }
-                }
-            } else {
-                // If not an object, wrap in a record with a unique key
-                let serializable = SerializableValue::from_json(&json_value);
-                if let Ok(val) = serializable.to_value(&mut heap.borrow_mut()) {
-                    let key = format!("value_{}", *unnamed_counter + 1);
-                    *unnamed_counter += 1;
-                    inputs_map.insert(key, val);
-                }
-            }
+    let mut inputs_map: IndexMap<String, Value> = IndexMap::new();
 
-            Ok(inputs_map)
+    match inputs {
+        Inputs::Named(entries) => inputs_map.extend(entries),
+        // If not an object, wrap in a record with a unique key
+        Inputs::Unnamed(Some(value)) => {
+            let key = format!("value_{}", *unnamed_counter + 1);
+            *unnamed_counter += 1;
+            inputs_map.insert(key, value);
         }
-        Err(e) => Err(format!(
-            "[input error] Failed to parse JSON from {}: {}",
-            source, e
-        )),
+        Inputs::Unnamed(None) => {}
     }
+
+    Ok(inputs_map)
+}
+
+/// The outputs of a program: the JSON text of each value, under its name, in the order the
+/// names were first recorded in.
+type Outputs = IndexMap<String, String>;
+
+/// Write `outputs` to `writer` as one JSON object.
+fn write_outputs_to(writer: &mut impl Write, outputs: &Outputs) -> io::Result<()> {
+    writer.write_all(b"{")?;
+
+    for (position, (name, json)) in outputs.iter().enumerate() {
+        if position > 0 {
+            writer.write_all(b",")?;
+        }
+
+        serde_json::to_writer(&mut *writer, name)?;
+        writer.write_all(b":")?;
+        writer.write_all(json.as_bytes())?;
+    }
+
+    writer.write_all(b"}")
 }
 
 /// Write outputs to file or stdout
-fn write_outputs(outputs: &IndexMap<String, SerializableValue>, output_path: Option<&String>) {
-    let json_outputs: IndexMap<String, serde_json::Value> = outputs
-        .iter()
-        .map(|(k, v)| (k.clone(), v.to_json()))
-        .collect();
+fn write_outputs(outputs: &Outputs, output_path: Option<&String>) {
+    if let Some(path) = output_path {
+        // Write to file
+        match fs::File::create(path) {
+            Ok(file) => {
+                let mut writer = BufWriter::new(file);
+                let written = write_outputs_to(&mut writer, outputs).and_then(|()| writer.flush());
 
-    if let Ok(json) = serde_json::to_string(&json_outputs) {
-        if let Some(path) = output_path {
-            // Write to file
-            match fs::File::create(path) {
-                Ok(mut file) => {
-                    if let Err(e) = file.write_all(json.as_bytes()) {
-                        eprintln!("[output error] Failed to write to file {}: {}", path, e);
-                        std::process::exit(1);
-                    }
-                    eprintln!("Output saved to {}", path);
-                }
-                Err(e) => {
-                    eprintln!("[output error] Failed to create file {}: {}", path, e);
+                if let Err(e) = written {
+                    eprintln!("[output error] Failed to write to file {}: {}", path, e);
                     std::process::exit(1);
                 }
+                eprintln!("Output saved to {}", path);
             }
-        } else {
-            // Write to stdout
-            println!("{}", json);
+            Err(e) => {
+                eprintln!("[output error] Failed to create file {}: {}", path, e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        // Write to stdout
+        let mut writer = BufWriter::new(io::stdout().lock());
+        let written = write_outputs_to(&mut writer, outputs)
+            .and_then(|()| writer.write_all(b"\n"))
+            .and_then(|()| writer.flush());
+
+        if let Err(e) = written {
+            panic!("failed printing to stdout: {}", e);
         }
     }
 }
@@ -112,15 +126,15 @@ fn record_output(
     value: &Value,
     heap: &Rc<RefCell<Heap>>,
     bindings: &Rc<Environment>,
-    outputs: &mut IndexMap<String, SerializableValue>,
+    outputs: &mut Outputs,
 ) {
     if let Err(e) = validate_portable_value(value, &heap.borrow(), bindings) {
         eprintln!("[output error] {}", e);
         std::process::exit(1);
     }
 
-    if let Ok(serializable) = value.to_serializable_value(&heap.borrow()) {
-        outputs.insert(name.to_string(), serializable);
+    if let Ok(text) = json::to_text(value, &heap.borrow()) {
+        outputs.insert(name.to_string(), text);
     }
 }
 
@@ -130,7 +144,7 @@ fn evaluate_statements(
     source: &str,
     heap: &Rc<RefCell<Heap>>,
     bindings: &Rc<Environment>,
-    outputs: &mut IndexMap<String, SerializableValue>,
+    outputs: &mut Outputs,
 ) {
     let source: Rc<str> = source.into();
 
@@ -190,7 +204,7 @@ fn evaluate_source(
     source: &str,
     heap: &Rc<RefCell<Heap>>,
     bindings: &Rc<Environment>,
-    outputs: &mut IndexMap<String, SerializableValue>,
+    outputs: &mut Outputs,
 ) -> Result<(), String> {
     if let Some(statements) = parse_program(source) {
         evaluate_statements(statements, source, heap, bindings, outputs);
@@ -241,10 +255,10 @@ fn evaluate_source(
                                         ) {
                                             eprintln!("[output error] {}", e);
                                             std::process::exit(1);
-                                        } else if let Ok(serializable) =
-                                            value.to_serializable_value(&heap.borrow())
+                                        } else if let Ok(text) =
+                                            json::to_text(&value, &heap.borrow())
                                         {
-                                            outputs.insert(identifier.to_string(), serializable);
+                                            outputs.insert(identifier.to_string(), text);
                                         }
                                     }
                                     break;
@@ -260,11 +274,10 @@ fn evaluate_source(
                                             ) {
                                                 eprintln!("[output error] {}", e);
                                                 std::process::exit(1);
-                                            } else if let Ok(serializable) =
-                                                value.to_serializable_value(&heap.borrow())
+                                            } else if let Ok(text) =
+                                                json::to_text(value, &heap.borrow())
                                             {
-                                                outputs
-                                                    .insert(identifier.to_string(), serializable);
+                                                outputs.insert(identifier.to_string(), text);
                                             }
                                         }
                                     }
@@ -419,7 +432,7 @@ fn main() -> ! {
     // Set up our memory
     let heap = Rc::new(RefCell::new(Heap::new()));
     let bindings = Rc::new(Environment::new());
-    let mut outputs: IndexMap<String, SerializableValue> = IndexMap::new();
+    let mut outputs = Outputs::new();
 
     // Turn on per-call stats recording (off by default for performance) and start clean
     #[cfg(not(target_arch = "wasm32"))]
@@ -433,9 +446,10 @@ fn main() -> ! {
     let mut inputs_map: IndexMap<String, Value> = IndexMap::new();
     let mut unnamed_counter: usize = 0;
 
-    // First, read from stdin if available (piped inputs)
-    let mut stdin_content = String::new();
+    // First, read from stdin if available (piped inputs). The text is only needed until the
+    // inputs are values of the heap, and is given back then: it can be as large as they are.
     if should_parse_piped_inputs {
+        let mut stdin_content = String::new();
         let _ = io::stdin().read_to_string(&mut stdin_content);
         stdin_consumed = true;
 
@@ -750,11 +764,10 @@ fn main() -> ! {
                                                 &bindings,
                                             ) {
                                                 eprintln!("[output error] {}", e);
-                                            } else if let Ok(serializable) =
-                                                value.to_serializable_value(&heap.borrow())
+                                            } else if let Ok(text) =
+                                                json::to_text(&value, &heap.borrow())
                                             {
-                                                outputs
-                                                    .insert(identifier.to_string(), serializable);
+                                                outputs.insert(identifier.to_string(), text);
                                                 println!("[output '{}' recorded]", identifier);
                                             }
                                         }
@@ -772,13 +785,10 @@ fn main() -> ! {
                                                     &bindings,
                                                 ) {
                                                     eprintln!("[output error] {}", e);
-                                                } else if let Ok(serializable) =
-                                                    value.to_serializable_value(&heap.borrow())
+                                                } else if let Ok(text) =
+                                                    json::to_text(value, &heap.borrow())
                                                 {
-                                                    outputs.insert(
-                                                        identifier.to_string(),
-                                                        serializable,
-                                                    );
+                                                    outputs.insert(identifier.to_string(), text);
                                                     // Show value and confirmation in REPL
                                                     let value_str =
                                                         value.stringify_external(&heap.borrow());
