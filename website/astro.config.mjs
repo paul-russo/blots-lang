@@ -8,13 +8,11 @@ export default defineConfig({
     plugins: [tailwindcss()],
   },
 
-  experimental: {
-    fonts: [
-      {
-        provider: fontProviders.google(),
-        name: "Neuton",
-        cssVariable: "--font-neuton",
-      },
-    ],
-  },
+  fonts: [
+    {
+      provider: fontProviders.google(),
+      name: "Neuton",
+      cssVariable: "--font-neuton",
+    },
+  ],
 });

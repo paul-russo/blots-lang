@@ -10,15 +10,15 @@
     "deploy": "astro build && wrangler deploy"
   },
   "dependencies": {
-    "@tailwindcss/vite": "^4.1.13",
-    "astro": "^5.13.7",
-    "date-fns": "^4.1.0",
-    "tailwindcss": "^4.1.13"
+    "@tailwindcss/vite": "^4.3.5",
+    "astro": "^7.4.12",
+    "date-fns": "^4.4.0",
+    "tailwindcss": "^4.3.5"
   },
   "devDependencies": {
-    "prettier": "^3.6.2",
-    "prettier-plugin-astro": "^0.14.1",
-    "prettier-plugin-tailwindcss": "^0.6.14",
-    "wrangler": "^4.37.0"
+    "prettier": "^3.10.1",
+    "prettier-plugin-astro": "^1.1.2",
+    "prettier-plugin-tailwindcss": "^0.8.1",
+    "wrangler": "^4.164.0"
   }
 }
