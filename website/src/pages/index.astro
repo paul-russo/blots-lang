@@ -42,18 +42,16 @@ const releaseDateFormatted = format(parseISO(releaseDate), "MMMM d, yyyy");
           If you're on macOS, the recommended way to install the latest version
           of Blots is with <Link href="https://brew.sh/" external>Homebrew</Link
           >:
-
-          <CopyBox code="brew install paul-russo/tap/blots" />
         </p>
+        <CopyBox code="brew install paul-russo/tap/blots" />
         <p>
           You can also install <span class="font-bold text-purple-700 dark:text-purple-400"
             >Blots {version}</span
           > for both Linux and macOS by running the following command:
-
-          <CopyBox
-            code={`curl --proto '=https' --tlsv1.2 -LsSf https://github.com/paul-russo/blots-lang/releases/download/v${version}/blots-installer.sh | sh`}
-          />
         </p>
+        <CopyBox
+          code={`curl --proto '=https' --tlsv1.2 -LsSf https://github.com/paul-russo/blots-lang/releases/download/v${version}/blots-installer.sh | sh`}
+        />
       </div>
     </section>
 
